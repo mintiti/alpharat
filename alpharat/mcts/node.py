@@ -28,6 +28,8 @@ class MCTSNode:
         prior_policy_p2: Neural network policy prior for player 2
         children: Dictionary mapping action pairs to child nodes
         parent: Parent node in the search tree
+        move_undo: MoveUndo object to reach this node from parent (None for root)
+        depth: Depth of this node in the tree (0 for root)
         p1_mud_turns_remaining: Turns player 1 is stuck in mud
         p2_mud_turns_remaining: Turns player 2 is stuck in mud
     """
@@ -41,6 +43,7 @@ class MCTSNode:
         parent: MCTSNode | None = None,
         p1_mud_turns_remaining: int = 0,
         p2_mud_turns_remaining: int = 0,
+        move_undo: Any = None,
     ) -> None:
         """Initialize MCTS node.
 
@@ -52,10 +55,15 @@ class MCTSNode:
             parent: Parent node (None for root)
             p1_mud_turns_remaining: Turns P1 is stuck in mud
             p2_mud_turns_remaining: Turns P2 is stuck in mud
+            move_undo: MoveUndo object to reach this node from parent (None for root)
         """
         self.game_state = game_state
         self.is_terminal = False  # Will be set based on game_state
         self.parent = parent
+        self.move_undo = move_undo
+
+        # Calculate depth from parent
+        self.depth: int = 0 if parent is None else parent.depth + 1
 
         # Mud state
         self.p1_mud_turns_remaining = p1_mud_turns_remaining
