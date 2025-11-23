@@ -8,6 +8,135 @@ from alpharat.mcts.node import MCTSNode
 from alpharat.mcts.tree import MCTSTree
 
 
+class FakeCoreState:
+    """Minimal core-like state to expose mud counters."""
+
+    def __init__(self) -> None:
+        self.player1_mud_turns = 0
+        self.player2_mud_turns = 0
+
+
+class FakeRustMoveUndo:
+    """Mimics the internal _rust.PyMoveUndo object."""
+
+    def __init__(
+        self,
+        p1_pos: tuple[int, int],
+        p2_pos: tuple[int, int],
+        p1_score: float,
+        p2_score: float,
+        turn: int,
+        p1_mud: int = 0,
+        p2_mud: int = 0,
+    ) -> None:
+        self.p1_pos = p1_pos
+        self.p2_pos = p2_pos
+        self.p1_score = p1_score
+        self.p2_score = p2_score
+        self.turn = turn
+        self.p1_mud = p1_mud
+        self.p2_mud = p2_mud
+
+
+class FakeMoveUndo:
+    """Undo token storing prior positions/scores/turn for FakeGame."""
+
+    def __init__(
+        self,
+        p1_pos: tuple[int, int],
+        p2_pos: tuple[int, int],
+        p1_score: float,
+        p2_score: float,
+        turn: int,
+        token: int,
+        p1_mud: int = 0,
+        p2_mud: int = 0,
+    ) -> None:
+        self.p1_pos = p1_pos
+        self.p2_pos = p2_pos
+        self.p1_score = p1_score
+        self.p2_score = p2_score
+        self.turn = turn
+        self.token = token
+        # Mimic real MoveUndo structure with _undo attribute
+        self._undo = FakeRustMoveUndo(p1_pos, p2_pos, p1_score, p2_score, turn, p1_mud, p2_mud)
+
+
+class FakeGame:
+    """Deterministic game stub to test tree navigation/state sync."""
+
+    _DELTAS = {
+        0: (0, -1),  # UP
+        1: (1, 0),  # RIGHT
+        2: (0, 1),  # DOWN
+        3: (-1, 0),  # LEFT
+        4: (0, 0),  # STAY
+    }
+
+    def __init__(self) -> None:
+        self._game = FakeCoreState()
+        self.player1_pos = (5, 5)
+        self.player2_pos = (5, 5)
+        self._p1_score = 0.0
+        self._p2_score = 0.0
+        self.turn = 0
+        self._token_counter = 0
+
+    @property
+    def scores(self) -> tuple[float, float]:
+        return (self._p1_score, self._p2_score)
+
+    def _apply(self, pos: tuple[int, int], action: int) -> tuple[int, int]:
+        dx, dy = self._DELTAS[action]
+        return pos[0] + dx, pos[1] + dy
+
+    def make_move(self, p1_move: int, p2_move: int) -> FakeMoveUndo:
+        undo = FakeMoveUndo(
+            p1_pos=self.player1_pos,
+            p2_pos=self.player2_pos,
+            p1_score=self._p1_score,
+            p2_score=self._p2_score,
+            turn=self.turn,
+            token=self._token_counter,
+            p1_mud=self._game.player1_mud_turns,
+            p2_mud=self._game.player2_mud_turns,
+        )
+        self._token_counter += 1
+        self.player1_pos = self._apply(self.player1_pos, p1_move)
+        self.player2_pos = self._apply(self.player2_pos, p2_move)
+        self.turn += 1
+        return undo
+
+    def unmake_move(self, undo: FakeMoveUndo) -> None:
+        self.player1_pos = undo.p1_pos
+        self.player2_pos = undo.p2_pos
+        self._p1_score = undo.p1_score
+        self._p2_score = undo.p2_score
+        self.turn = undo.turn
+
+
+@pytest.fixture
+def fake_game() -> FakeGame:
+    """Provide a deterministic game stub for navigation tests."""
+    return FakeGame()
+
+
+@pytest.fixture
+def fake_tree(fake_game: FakeGame) -> MCTSTree:
+    """Tree backed by FakeGame."""
+    prior_p1 = np.ones(5) / 5
+    prior_p2 = np.ones(5) / 5
+    nn_payout = np.zeros((5, 5))
+    root = MCTSNode(
+        game_state=None,
+        prior_policy_p1=prior_p1,
+        prior_policy_p2=prior_p2,
+        nn_payout_prediction=nn_payout,
+        parent=None,
+    )
+    return MCTSTree(game=fake_game, root=root, gamma=1.0)
+
+
 @pytest.fixture
 def game() -> PyRat:
     """Create a small PyRat game for testing."""
@@ -188,6 +317,61 @@ class TestNavigation:
         # Should be at b1
         assert tree.simulator_node == b1
         assert tree._sim_path == [tree.root, b, b1]
+
+
+class TestNavigationStateSync:
+    """Navigation should keep simulator aligned with the tree."""
+
+    def test_replays_actions_when_switching_branches(self, fake_tree: MCTSTree) -> None:
+        """After moving to a sibling branch, simulator should match replayed actions."""
+        game = fake_tree.game
+
+        # Path: root -> a (RIGHT, RIGHT) -> a1 (DOWN, LEFT)
+        a, _ = fake_tree.make_move_from(fake_tree.root, 1, 1)
+        fake_tree.make_move_from(a, 2, 3)
+
+        # Now jump to sibling root -> b (UP, DOWN), which requires navigation
+        b, _ = fake_tree.make_move_from(fake_tree.root, 0, 2)
+
+        # Expected positions if we start from root and only apply (UP, DOWN)
+        assert game.player1_pos == (5, 4)
+        assert game.player2_pos == (5, 6)
+        assert game.turn == 1  # navigation unwinds to root then applies one move
+        assert fake_tree.simulator_node == b
+
+    def test_refreshes_move_undo_on_reuse(self, fake_tree: MCTSTree) -> None:
+        """Reusing an existing child should refresh its undo token."""
+        child, _ = fake_tree.make_move_from(fake_tree.root, 0, 0)
+        first_token = child.move_undo.token
+
+        # Move somewhere else to force navigation back
+        fake_tree.make_move_from(fake_tree.root, 1, 1)
+
+        # Revisit the same child; its undo should be refreshed
+        fake_tree.make_move_from(fake_tree.root, 0, 0)
+        assert child.move_undo.token != first_token
+
+    def test_parent_action_required_for_navigation(self, fake_tree: MCTSTree) -> None:
+        """Missing parent_action should raise when navigating."""
+        child, _ = fake_tree.make_move_from(fake_tree.root, 0, 0)
+        # Navigate away to a sibling
+        sibling, _ = fake_tree.make_move_from(fake_tree.root, 1, 1)
+        # Now remove parent_action from first child
+        child.parent_action = None
+
+        # Try to navigate back to the first child - should fail
+        with pytest.raises(RuntimeError):
+            fake_tree._navigate_to(child)
+
+    def test_mud_counters_propagated(self, fake_tree: MCTSTree) -> None:
+        """Child nodes should capture mud counters from the engine."""
+        fake_tree.game._game.player1_mud_turns = 2
+        fake_tree.game._game.player2_mud_turns = 1
+
+        child, _ = fake_tree.make_move_from(fake_tree.root, 4, 4)  # STAY/STAY
+
+        assert child.p1_mud_turns_remaining == 2
+        assert child.p2_mud_turns_remaining == 1
 
 
 class TestBackup:

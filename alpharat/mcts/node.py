@@ -44,6 +44,7 @@ class MCTSNode:
         p1_mud_turns_remaining: int = 0,
         p2_mud_turns_remaining: int = 0,
         move_undo: Any = None,
+        parent_action: tuple[int, int] | None = None,
     ) -> None:
         """Initialize MCTS node.
 
@@ -61,6 +62,8 @@ class MCTSNode:
         self.is_terminal = False  # Will be set based on game_state
         self.parent = parent
         self.move_undo = move_undo
+        # Action pair taken from parent to reach this node (None for root)
+        self.parent_action = parent_action
 
         # Calculate depth from parent
         self.depth: int = 0 if parent is None else parent.depth + 1
