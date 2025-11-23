@@ -8,7 +8,11 @@ license = {text = "MIT"}
 authors = [
     {name = "Minh Tri Truong", email = "minhtri3007@hotmail.com"}
 ]
-dependencies = []
+dependencies = [
+    "numpy>=1.24.0",
+    "nashpy>=0.0.35",
+    "pyrat-engine @ git+https://github.com/mintiti/pyrat-rust.git@main#subdirectory=engine",
+]
 
 [project.optional-dependencies]
 dev = [
@@ -22,6 +26,9 @@ dev = [
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
+
+[tool.hatch.metadata]
+allow-direct-references = true
 
 [tool.ruff]
 line-length = 100
