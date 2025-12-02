@@ -4,7 +4,7 @@ This module provides utilities for computing Nash equilibria from payout matrice
 which is essential for action selection in MCTS for simultaneous-move games.
 """
 
-import nashpy as nash
+import nashpy as nash  # type: ignore[import-untyped]
 import numpy as np
 
 

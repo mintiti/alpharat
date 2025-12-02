@@ -463,7 +463,7 @@ wheels = [
 [[package]]
 name = "pyrat-engine"
 version = "0.1.0"
-source = { git = "https://github.com/mintiti/pyrat-rust.git?subdirectory=engine&rev=main#b606c8ad5653c473c372896dc0716f7b515262c9" }
+source = { git = "https://github.com/mintiti/pyrat-rust.git?subdirectory=engine&rev=main#d02c63842d57f38089319b958ae8d318fc08c99e" }
 dependencies = [
     { name = "gymnasium" },
     { name = "numpy" },

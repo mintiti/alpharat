@@ -9,12 +9,14 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any
 
 import numpy as np
-from pyrat_engine import Direction, PyRat
+from pyrat_engine.core.types import Direction
 
 from alpharat.mcts.node import MCTSNode
 
 if TYPE_CHECKING:
     from collections.abc import Callable
+
+    from pyrat_engine.core.game import PyRat
 
 
 class MCTSTree:
@@ -85,13 +87,13 @@ class MCTSTree:
             self._navigate_to(node)
 
         # Record scores before move
-        p1_score_before, p2_score_before = self.game.scores
+        p1_score_before, p2_score_before = self.game.player1_score, self.game.player2_score
 
         # Make the move and get mud information from MoveUndo
         action_pair = (action_p1, action_p2)
         move_undo = self.game.make_move(Direction(action_p1), Direction(action_p2))
-        p1_mud = move_undo._undo.p1_mud
-        p2_mud = move_undo._undo.p2_mud
+        p1_mud = move_undo.p1_mud
+        p2_mud = move_undo.p2_mud
 
         # Check if child already exists
         if action_pair in node.children:
@@ -112,7 +114,7 @@ class MCTSTree:
             node.children[action_pair] = child
 
         # Calculate reward (zero-sum: p1_delta - p2_delta)
-        p1_score_after, p2_score_after = self.game.scores
+        p1_score_after, p2_score_after = self.game.player1_score, self.game.player2_score
         reward = (p1_score_after - p1_score_before) - (p2_score_after - p2_score_before)
 
         # Update simulator path
@@ -244,8 +246,4 @@ class MCTSTree:
         Tries to use the underlying core state's get_observation if available;
         otherwise returns the game object itself for custom predictors.
         """
-        core_state = getattr(self.game, "_game", None)
-        if core_state is not None and hasattr(core_state, "get_observation"):
-            return core_state.get_observation(is_player_one=True)
-
-        return self.game
+        return self.game.get_observation(is_player_one=True)

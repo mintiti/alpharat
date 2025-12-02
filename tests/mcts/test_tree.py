@@ -2,44 +2,17 @@
 
 import numpy as np
 import pytest
-from pyrat_engine.game import PyRat
+from pyrat_engine.core.game import PyRat
 
 from alpharat.mcts.node import MCTSNode
 from alpharat.mcts.tree import MCTSTree
 
 
-class FakeCoreState:
-    """Minimal core-like state to expose mud counters."""
-
-    def __init__(self) -> None:
-        self.player1_mud_turns = 0
-        self.player2_mud_turns = 0
-
-
-class FakeRustMoveUndo:
-    """Mimics the internal _rust.PyMoveUndo object."""
-
-    def __init__(
-        self,
-        p1_pos: tuple[int, int],
-        p2_pos: tuple[int, int],
-        p1_score: float,
-        p2_score: float,
-        turn: int,
-        p1_mud: int = 0,
-        p2_mud: int = 0,
-    ) -> None:
-        self.p1_pos = p1_pos
-        self.p2_pos = p2_pos
-        self.p1_score = p1_score
-        self.p2_score = p2_score
-        self.turn = turn
-        self.p1_mud = p1_mud
-        self.p2_mud = p2_mud
-
-
 class FakeMoveUndo:
-    """Undo token storing prior positions/scores/turn for FakeGame."""
+    """Undo token storing prior positions/scores/turn for FakeGame.
+
+    Matches the public API of pyrat_engine.core.game.MoveUndo.
+    """
 
     def __init__(
         self,
@@ -58,12 +31,15 @@ class FakeMoveUndo:
         self.p2_score = p2_score
         self.turn = turn
         self.token = token
-        # Mimic real MoveUndo structure with _undo attribute
-        self._undo = FakeRustMoveUndo(p1_pos, p2_pos, p1_score, p2_score, turn, p1_mud, p2_mud)
+        self.p1_mud = p1_mud
+        self.p2_mud = p2_mud
 
 
 class FakeGame:
-    """Deterministic game stub to test tree navigation/state sync."""
+    """Deterministic game stub to test tree navigation/state sync.
+
+    Matches the public API of pyrat_engine.core.game.PyRat.
+    """
 
     _DELTAS = {
         0: (0, -1),  # UP
@@ -74,17 +50,14 @@ class FakeGame:
     }
 
     def __init__(self) -> None:
-        self._game = FakeCoreState()
-        self.player1_pos = (5, 5)
-        self.player2_pos = (5, 5)
-        self._p1_score = 0.0
-        self._p2_score = 0.0
+        self.player1_position = (5, 5)
+        self.player2_position = (5, 5)
+        self.player1_score = 0.0
+        self.player2_score = 0.0
+        self.player1_mud_turns = 0
+        self.player2_mud_turns = 0
         self.turn = 0
         self._token_counter = 0
-
-    @property
-    def scores(self) -> tuple[float, float]:
-        return (self._p1_score, self._p2_score)
 
     def _apply(self, pos: tuple[int, int], action: int) -> tuple[int, int]:
         dx, dy = self._DELTAS[action]
@@ -92,26 +65,26 @@ class FakeGame:
 
     def make_move(self, p1_move: int, p2_move: int) -> FakeMoveUndo:
         undo = FakeMoveUndo(
-            p1_pos=self.player1_pos,
-            p2_pos=self.player2_pos,
-            p1_score=self._p1_score,
-            p2_score=self._p2_score,
+            p1_pos=self.player1_position,
+            p2_pos=self.player2_position,
+            p1_score=self.player1_score,
+            p2_score=self.player2_score,
             turn=self.turn,
             token=self._token_counter,
-            p1_mud=self._game.player1_mud_turns,
-            p2_mud=self._game.player2_mud_turns,
+            p1_mud=self.player1_mud_turns,
+            p2_mud=self.player2_mud_turns,
         )
         self._token_counter += 1
-        self.player1_pos = self._apply(self.player1_pos, p1_move)
-        self.player2_pos = self._apply(self.player2_pos, p2_move)
+        self.player1_position = self._apply(self.player1_position, p1_move)
+        self.player2_position = self._apply(self.player2_position, p2_move)
         self.turn += 1
         return undo
 
     def unmake_move(self, undo: FakeMoveUndo) -> None:
-        self.player1_pos = undo.p1_pos
-        self.player2_pos = undo.p2_pos
-        self._p1_score = undo.p1_score
-        self._p2_score = undo.p2_score
+        self.player1_position = undo.p1_pos
+        self.player2_position = undo.p2_pos
+        self.player1_score = undo.p1_score
+        self.player2_score = undo.p2_score
         self.turn = undo.turn
 
 
@@ -189,8 +162,8 @@ class TestMakeMoveFrom:
     def test_make_move_from_root(self, tree: MCTSTree) -> None:
         """Make a move from root should create child and advance simulator."""
         # Record initial game state
-        initial_p1_pos = tree.game.player1_pos
-        initial_p2_pos = tree.game.player2_pos
+        initial_p1_pos = tree.game.player1_position
+        initial_p2_pos = tree.game.player2_position
 
         # Make move from root
         child, reward = tree.make_move_from(tree.root, action_p1=1, action_p2=1)
@@ -211,8 +184,8 @@ class TestMakeMoveFrom:
 
         # Game state should have changed
         assert (
-            tree.game.player1_pos != initial_p1_pos
-            or tree.game.player2_pos != initial_p2_pos
+            tree.game.player1_position != initial_p1_pos
+            or tree.game.player2_position != initial_p2_pos
             or tree.game.turn == 1
         )
 
@@ -334,8 +307,8 @@ class TestNavigationStateSync:
         b, _ = fake_tree.make_move_from(fake_tree.root, 0, 2)
 
         # Expected positions if we start from root and only apply (UP, DOWN)
-        assert game.player1_pos == (5, 4)
-        assert game.player2_pos == (5, 6)
+        assert game.player1_position == (5, 4)
+        assert game.player2_position == (5, 6)
         assert game.turn == 1  # navigation unwinds to root then applies one move
         assert fake_tree.simulator_node == b
 
@@ -365,8 +338,8 @@ class TestNavigationStateSync:
 
     def test_mud_counters_propagated(self, fake_tree: MCTSTree) -> None:
         """Child nodes should capture mud counters from the engine."""
-        fake_tree.game._game.player1_mud_turns = 2
-        fake_tree.game._game.player2_mud_turns = 1
+        fake_tree.game.player1_mud_turns = 2
+        fake_tree.game.player2_mud_turns = 1
 
         child, _ = fake_tree.make_move_from(fake_tree.root, 4, 4)  # STAY/STAY
 
