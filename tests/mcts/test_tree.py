@@ -107,7 +107,7 @@ def fake_tree(fake_game: FakeGame) -> MCTSTree:
         nn_payout_prediction=nn_payout,
         parent=None,
     )
-    return MCTSTree(game=fake_game, root=root, gamma=1.0)
+    return MCTSTree(game=fake_game, root=root, gamma=1.0)  # type: ignore[arg-type]
 
 
 @pytest.fixture
@@ -338,8 +338,8 @@ class TestNavigationStateSync:
 
     def test_mud_counters_propagated(self, fake_tree: MCTSTree) -> None:
         """Child nodes should capture mud counters from the engine."""
-        fake_tree.game.player1_mud_turns = 2
-        fake_tree.game.player2_mud_turns = 1
+        fake_tree.game.player1_mud_turns = 2  # type: ignore[misc]
+        fake_tree.game.player2_mud_turns = 1  # type: ignore[misc]
 
         child, _ = fake_tree.make_move_from(fake_tree.root, 4, 4)  # STAY/STAY
 
