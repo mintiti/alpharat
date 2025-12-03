@@ -121,9 +121,10 @@ Uses `nashpy` library for computing Nash equilibria of zero-sum games:
 
 - **pyrat-engine**: The PyRat game simulator (`git+https://github.com/mintiti/pyrat-rust.git@main#subdirectory=engine`)
   - Rust-backed Python module
-  - Provides `PyRat` game class with `make_move/unmake_move`
-  - `Direction` enum for actions
-  - Access game state via `game.scores`, `game.state`, etc.
+  - Imports: `from pyrat_engine.core.game import PyRat, MoveUndo` and `from pyrat_engine.core.types import Direction`
+  - `PyRat` game class with `make_move(p1: int, p2: int) -> MoveUndo` and `unmake_move(undo: MoveUndo)`
+  - Properties: `player1_position`, `player2_position`, `player1_score`, `player2_score`, `player1_mud_turns`, `player2_mud_turns`, `turn`
+  - `MoveUndo` has flat attributes: `p1_mud`, `p2_mud`, `p1_pos`, `p2_pos`, etc.
 - **nashpy**: Nash equilibrium computation
 - **numpy**: Matrix operations for payout matrices
 
@@ -202,3 +203,4 @@ Not yet implemented:
 3. **When working with PyRat**: Remember it uses `make_move/unmake_move` - don't copy game state unnecessarily
 4. **When implementing selection**: The current plan is prior-based sampling (see `.mt/design-exploration.md` for alternatives)
 5. **All code must pass**: `uv run ruff check`, `uv run ruff format`, `uv run mypy`, and `uv run pytest` before committing (enforced by pre-commit hooks)
+6. **Never skip pre-commit hooks**: Do not use `--no-verify` when committing. If pre-commit fails due to pip/network issues, set `PIP_INDEX_URL=https://pypi.org/simple/ PIP_EXTRA_INDEX_URL=""` before the git command
