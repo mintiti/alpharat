@@ -87,12 +87,28 @@ The MCTS implementation is adapted for simultaneous-move games and lives in `alp
 - **Payout matrix**: Shape `[num_p1_actions, num_p2_actions]` - tracks expected values for each action pair
 - **Action visits**: Shape `[num_p1_actions, num_p2_actions]` - visit counts per action pair
 - **Neural network priors**: Separate policy priors for each player (`prior_policy_p1`, `prior_policy_p2`)
-- **Mud state handling**: When players are stuck in mud, updates vectorized regions:
-  - P1 stuck: Updates entire column (all P1 actions → same outcome)
-  - P2 stuck: Updates entire row (all P2 actions → same outcome)
-  - Both stuck: Updates entire matrix
+- **Action equivalence**: Multiple actions can map to the same outcome (walls, edges, mud). See below.
 
 The `backup()` method uses incremental mean update: `Q_new = Q_old + (G - Q_old) / (n + 1)`
+
+#### Action Equivalence (`alpharat/mcts/equivalence.py`)
+
+Multiple actions can lead to the same game state due to walls, edges, or mud. The implementation handles this through **effective action mappings**:
+
+- **Effective mapping**: Each action maps to its effective representative. Blocked actions (hitting walls/edges) map to STAY (action 4). Mud forces all actions to STAY.
+- **Detection**: Uses `game.get_valid_moves(position)` at node creation to determine which directions are valid
+- **Node attributes**: `p1_effective` and `p2_effective` lists map action indices to their effective action
+
+**Why this matters:**
+1. **Statistics consistency**: Equivalent action pairs share identical payout matrix and visit count entries. The `backup()` method updates rectangular regions covering all equivalent pairs.
+2. **Child sharing**: `make_move_from()` effectiveizes action pairs before child lookup, so equivalent moves share the same child node.
+3. **Nash computation**: Uses reduced action space (effective actions only) for unique equilibrium. Blocked actions get probability 0 in the resulting strategy.
+4. **NN training signal**: Training with 0 probability for blocked actions creates an implicit auxiliary task—the NN must learn maze topology to predict valid moves.
+
+**Equivalence utilities**:
+- `reduce_matrix()`: Extract submatrix of effective actions only
+- `expand_strategy()`: Map reduced strategy back to full action space (0 for non-effective)
+- `reduce_and_expand_nash()`: Wrapper for Nash computation with equivalence handling
 
 #### Tree Management (`alpharat/mcts/tree.py`)
 
@@ -111,7 +127,7 @@ The `backup()` method uses incremental mean update: `Q_new = Q_old + (G - Q_old)
 
 Uses `nashpy` library for computing Nash equilibria of zero-sum games:
 
-- `compute_nash_equilibrium()`: Takes payout matrix, returns mixed strategies for both players
+- `compute_nash_equilibrium()`: Takes payout matrix and optional effective mappings, returns mixed strategies for both players. With effective mappings, computes on reduced matrix and expands back (blocked actions get 0).
 - `compute_nash_value()`: Computes expected value of a strategy profile
 - `select_action_from_strategy()`: Samples actions from mixed strategy with temperature control
 
@@ -123,6 +139,7 @@ Uses `nashpy` library for computing Nash equilibria of zero-sum games:
   - Rust-backed Python module
   - Imports: `from pyrat_engine.core.game import PyRat, MoveUndo` and `from pyrat_engine.core.types import Direction`
   - `PyRat` game class with `make_move(p1: int, p2: int) -> MoveUndo` and `unmake_move(undo: MoveUndo)`
+  - `get_valid_moves(position)`: Returns list of valid movement directions from a position (used for equivalence detection)
   - Properties: `player1_position`, `player2_position`, `player1_score`, `player2_score`, `player1_mud_turns`, `player2_mud_turns`, `turn`
   - `MoveUndo` has flat attributes: `p1_mud`, `p2_mud`, `p1_pos`, `p2_pos`, etc.
 - **nashpy**: Nash equilibrium computation
@@ -183,9 +200,10 @@ The `.mt/` folder contains personal design documentation:
 ## Current Implementation Status
 
 Implemented:
-- ✓ MCTSNode with payout matrices and mud handling
-- ✓ MCTSTree with efficient game state navigation
-- ✓ Nash equilibrium computation utilities
+- ✓ MCTSNode with payout matrices and action equivalence handling
+- ✓ MCTSTree with efficient game state navigation and child sharing for equivalent actions
+- ✓ Nash equilibrium computation with optional equivalence reduction
+- ✓ Action equivalence utilities (reduce/expand for matrices and strategies)
 - ✓ Comprehensive unit tests for core components
 
 Not yet implemented:
@@ -198,7 +216,7 @@ Not yet implemented:
 
 ## Development Tips
 
-1. **When modifying MCTS logic**: Consider mud state edge cases - they affect backup, selection, and potentially Nash computation
+1. **When modifying MCTS logic**: Consider action equivalence—equivalent actions must have identical statistics. Mud is a special case where all actions become equivalent to STAY.
 2. **When adding new node statistics**: Ensure they're properly shaped `[num_actions_p1, num_actions_p2]`
 3. **When working with PyRat**: Remember it uses `make_move/unmake_move` - don't copy game state unnecessarily
 4. **When implementing selection**: The current plan is prior-based sampling (see `.mt/design-exploration.md` for alternatives)

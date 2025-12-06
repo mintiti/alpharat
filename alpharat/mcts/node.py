@@ -32,6 +32,8 @@ class MCTSNode:
         depth: Depth of this node in the tree (0 for root)
         p1_mud_turns_remaining: Turns player 1 is stuck in mud
         p2_mud_turns_remaining: Turns player 2 is stuck in mud
+        p1_effective: Maps each P1 action index to its effective action
+        p2_effective: Maps each P2 action index to its effective action
     """
 
     def __init__(
@@ -45,6 +47,8 @@ class MCTSNode:
         p2_mud_turns_remaining: int = 0,
         move_undo: Any = None,
         parent_action: tuple[int, int] | None = None,
+        p1_effective: list[int] | None = None,
+        p2_effective: list[int] | None = None,
     ) -> None:
         """Initialize MCTS node.
 
@@ -57,6 +61,9 @@ class MCTSNode:
             p1_mud_turns_remaining: Turns P1 is stuck in mud
             p2_mud_turns_remaining: Turns P2 is stuck in mud
             move_undo: MoveUndo object to reach this node from parent (None for root)
+            parent_action: Action pair taken from parent to reach this node
+            p1_effective: Maps each P1 action to its effective action (blocked -> STAY)
+            p2_effective: Maps each P2 action to its effective action (blocked -> STAY)
         """
         self.game_state = game_state
         self.is_terminal = False  # Will be set based on game_state
@@ -71,6 +78,25 @@ class MCTSNode:
         # Mud state
         self.p1_mud_turns_remaining = p1_mud_turns_remaining
         self.p2_mud_turns_remaining = p2_mud_turns_remaining
+
+        # Action equivalence: maps each action to what actually happens
+        # Mud overrides any provided effective mapping - all actions become STAY
+        num_actions = len(prior_policy_p1)
+        stay_action = num_actions - 1  # STAY is always the last action
+
+        if p1_mud_turns_remaining > 0:
+            self.p1_effective = [stay_action] * num_actions
+        elif p1_effective is not None:
+            self.p1_effective = p1_effective
+        else:
+            self.p1_effective = list(range(num_actions))
+
+        if p2_mud_turns_remaining > 0:
+            self.p2_effective = [stay_action] * num_actions
+        elif p2_effective is not None:
+            self.p2_effective = p2_effective
+        else:
+            self.p2_effective = list(range(num_actions))
 
         # Neural network priors
         self.prior_policy_p1 = prior_policy_p1
@@ -101,58 +127,68 @@ class MCTSNode:
 
         Uses incremental mean update formula: Q_new = Q_old + (G - Q_old) / (n + 1)
 
-        Handles mud states by updating appropriate regions of the matrix:
-        - No mud: Update single entry [action_p1, action_p2]
-        - P1 in mud: Update entire column [:, action_p2]
-        - P2 in mud: Update entire row [action_p1, :]
-        - Both in mud: Update entire matrix
+        Updates all equivalent action pairs: actions that map to the same effective
+        action (due to walls, edges, or mud) share statistics.
 
         Args:
             action_p1: Player 1's action that led to child
             action_p2: Player 2's action that led to child
             value: Return value from child (from P1's perspective, zero-sum)
         """
-        # Determine which entries to update based on mud state
-        if self.p1_mud_turns_remaining > 0 and self.p2_mud_turns_remaining > 0:
-            # Both players stuck: all actions lead to same outcome
-            # Update entire matrix
-            self._update_region(slice(None), slice(None), value)
+        # Find all actions equivalent to the given actions
+        p1_equiv = self._get_equivalent_actions(action_p1, player=1)
+        p2_equiv = self._get_equivalent_actions(action_p2, player=2)
 
-        elif self.p1_mud_turns_remaining > 0:
-            # P1 stuck: P1's action doesn't matter, update entire column for P2's action
-            self._update_region(slice(None), action_p2, value)
+        # Update the rectangular region of equivalent action pairs
+        self._update_region(p1_equiv, p2_equiv, value)
 
-        elif self.p2_mud_turns_remaining > 0:
-            # P2 stuck: P2's action doesn't matter, update entire row for P1's action
-            self._update_region(action_p1, slice(None), value)
+    def _get_equivalent_actions(self, action: int, player: int) -> list[int]:
+        """Get all actions equivalent to the given action for a player.
 
-        else:
-            # No mud: update single action pair
-            self._update_region(action_p1, action_p2, value)
+        Args:
+            action: The action index
+            player: 1 for player 1, 2 for player 2
+
+        Returns:
+            List of action indices that share the same effective action
+        """
+        effective_map = self.p1_effective if player == 1 else self.p2_effective
+        target_effective = effective_map[action]
+        return [a for a, e in enumerate(effective_map) if e == target_effective]
 
     def _update_region(
         self,
-        row_idx: int | slice,
-        col_idx: int | slice,
+        row_idx: int | slice | list[int],
+        col_idx: int | slice | list[int],
         value: float,
     ) -> None:
         """Update a region of the payout matrix using incremental mean formula.
 
         Args:
-            row_idx: Row index or slice to update
-            col_idx: Column index or slice to update
+            row_idx: Row index, slice, or list of indices to update
+            col_idx: Column index, slice, or list of indices to update
             value: New value to incorporate
         """
+        # Build the index for numpy array access
+        if isinstance(row_idx, list) and isinstance(col_idx, list):
+            # Both are lists - use np.ix_ for outer product indexing
+            idx: tuple[np.ndarray, ...] | tuple[int | slice | list[int], ...] = np.ix_(
+                row_idx, col_idx
+            )
+        else:
+            # At least one is int or slice - use tuple directly
+            idx = (row_idx, col_idx)
+
         # Get current Q-values and visit counts for the region
-        current_q = self.payout_matrix[row_idx, col_idx]
-        current_n = self.action_visits[row_idx, col_idx]
+        current_q = self.payout_matrix[idx]
+        current_n = self.action_visits[idx]
 
         # Incremental mean update: Q_new = Q_old + (G - Q_old) / (n + 1)
         new_q = current_q + (value - current_q) / (current_n + 1)
 
         # Update the payout matrix and increment visit counts
-        self.payout_matrix[row_idx, col_idx] = new_q
-        self.action_visits[row_idx, col_idx] = current_n + 1
+        self.payout_matrix[idx] = new_q
+        self.action_visits[idx] = current_n + 1
 
     def __repr__(self) -> str:
         """String representation for debugging."""

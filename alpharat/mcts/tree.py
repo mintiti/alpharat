@@ -56,6 +56,10 @@ class MCTSTree:
         # Track where simulator currently is
         self._sim_path: list[MCTSNode] = [root]
 
+        # Compute effective action mappings for root node
+        # (root may have been created without game context)
+        self._init_root_effective()
+
     @property
     def simulator_node(self) -> MCTSNode:
         """Get current simulator position in the tree."""
@@ -90,28 +94,33 @@ class MCTSTree:
         p1_score_before, p2_score_before = self.game.player1_score, self.game.player2_score
 
         # Make the move and get mud information from MoveUndo
-        action_pair = (action_p1, action_p2)
         move_undo = self.game.make_move(Direction(action_p1), Direction(action_p2))
         p1_mud = move_undo.p1_mud
         p2_mud = move_undo.p2_mud
 
-        # Check if child already exists
-        if action_pair in node.children:
+        # Use effective action pair for child lookup (equivalent actions share children)
+        effective_a1 = node.p1_effective[action_p1]
+        effective_a2 = node.p2_effective[action_p2]
+        effective_pair = (effective_a1, effective_a2)
+
+        # Check if child already exists for this effective action pair
+        if effective_pair in node.children:
             # Child exists, just navigate to it and refresh metadata
-            child = node.children[action_pair]
+            child = node.children[effective_pair]
             child.move_undo = move_undo
-            child.parent_action = action_pair
+            # Keep the effective action as parent_action for navigation consistency
+            child.parent_action = effective_pair
         else:
             # Create new child (expansion)
             child = self._create_child(
                 parent=node,
                 move_undo=move_undo,
-                action_p1=action_p1,
-                action_p2=action_p2,
+                action_p1=effective_a1,
+                action_p2=effective_a2,
                 p1_mud=p1_mud,
                 p2_mud=p2_mud,
             )
-            node.children[action_pair] = child
+            node.children[effective_pair] = child
 
         # Calculate reward (zero-sum: p1_delta - p2_delta)
         p1_score_after, p2_score_after = self.game.player1_score, self.game.player2_score
@@ -208,11 +217,20 @@ class MCTSTree:
         Args:
             parent: Parent node
             move_undo: MoveUndo object from the move
+            action_p1: Player 1's action that led here
+            action_p2: Player 2's action that led here
+            p1_mud: Player 1's mud turns remaining
+            p2_mud: Player 2's mud turns remaining
 
         Returns:
-            New child node
+            New child node with effective action mappings computed
         """
         prior_p1, prior_p2, nn_payout = self._predict()
+
+        # Compute effective action mappings from current game state
+        # (simulator is at the child's state after make_move)
+        p1_effective = self._compute_effective_actions(self.game.player1_position)
+        p2_effective = self._compute_effective_actions(self.game.player2_position)
 
         child = MCTSNode(
             game_state=None,  # Don't store game state
@@ -224,6 +242,8 @@ class MCTSTree:
             p2_mud_turns_remaining=p2_mud,
             move_undo=move_undo,
             parent_action=(action_p1, action_p2),
+            p1_effective=p1_effective,
+            p2_effective=p2_effective,
         )
 
         return child
@@ -247,3 +267,46 @@ class MCTSTree:
         otherwise returns the game object itself for custom predictors.
         """
         return self.game.get_observation(is_player_one=True)
+
+    def _init_root_effective(self) -> None:
+        """Initialize effective action mappings for the root node.
+
+        Called during tree initialization to ensure root has proper
+        effective mappings based on the game's initial state.
+        """
+        # Only update if root has default identity mapping (no walls detected)
+        # This preserves any mud-based mapping already applied
+        if self.root.p1_mud_turns_remaining == 0:
+            self.root.p1_effective = self._compute_effective_actions(self.game.player1_position)
+        if self.root.p2_mud_turns_remaining == 0:
+            self.root.p2_effective = self._compute_effective_actions(self.game.player2_position)
+
+    def _compute_effective_actions(self, position: Any) -> list[int]:
+        """Compute effective action mapping for a player at given position.
+
+        Uses get_valid_moves to determine which actions result in actual movement.
+        Actions blocked by walls/edges map to STAY (action 4).
+
+        Args:
+            position: The player's current position (Coordinates type from pyrat)
+
+        Returns:
+            List of 5 ints mapping each action to its effective action.
+            Valid moves map to themselves, blocked moves map to STAY.
+        """
+        stay_action = 4
+        valid_moves = set(self.game.get_valid_moves(position))  # type: ignore[attr-defined]
+
+        effective = []
+        for action in range(5):
+            if action == stay_action:
+                # STAY always maps to itself
+                effective.append(stay_action)
+            elif action in valid_moves:
+                # Valid movement maps to itself
+                effective.append(action)
+            else:
+                # Blocked movement is equivalent to STAY
+                effective.append(stay_action)
+
+        return effective

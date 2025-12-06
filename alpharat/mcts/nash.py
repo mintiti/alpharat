@@ -2,14 +2,26 @@
 
 This module provides utilities for computing Nash equilibria from payout matrices,
 which is essential for action selection in MCTS for simultaneous-move games.
+
+Supports action equivalence: when some actions are equivalent (due to walls, edges,
+or mud), the computation reduces to effective actions only. This ensures:
+- Unique equilibrium (no arbitrary probability splits between equivalent actions)
+- Blocked actions get probability 0
+- Effective action gets the full probability mass for its equivalence class
 """
+
+from __future__ import annotations
 
 import nashpy as nash  # type: ignore[import-untyped]
 import numpy as np
 
+from alpharat.mcts.equivalence import reduce_and_expand_nash
+
 
 def compute_nash_equilibrium(
     payout_matrix: np.ndarray,
+    p1_effective: list[int] | None = None,
+    p2_effective: list[int] | None = None,
 ) -> tuple[np.ndarray, np.ndarray]:
     """Compute Nash equilibrium mixed strategies for a zero-sum game.
 
@@ -21,15 +33,35 @@ def compute_nash_equilibrium(
     Args:
         payout_matrix: Payout matrix from P1 perspective, shape [p1_actions, p2_actions]
                       Entry [i,j] is P1's payoff when P1 plays action i and P2 plays j
+        p1_effective: Optional effective action mapping for P1's actions. If provided,
+                     computation reduces to effective actions only.
+        p2_effective: Optional effective action mapping for P2's actions.
 
     Returns:
         Tuple of (p1_strategy, p2_strategy) where each is a probability distribution
-        over actions (sums to 1.0)
+        over actions (sums to 1.0). If effective mappings provided, non-effective
+        actions will have probability 0.
 
     Note:
         - For games with multiple Nash equilibria, returns one (implementation dependent)
         - Uses support enumeration from nashpy library
         - Strategies are returned as numpy arrays of shape [num_actions]
+        - With equivalence, computation is on reduced matrix for efficiency/uniqueness
+    """
+    # If effective mappings provided, use equivalence reduction
+    if p1_effective is not None and p2_effective is not None:
+        return reduce_and_expand_nash(_compute_nash_raw, payout_matrix, p1_effective, p2_effective)
+
+    # No equivalence handling - compute on full matrix
+    return _compute_nash_raw(payout_matrix)
+
+
+def _compute_nash_raw(
+    payout_matrix: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Compute Nash equilibrium on raw matrix without equivalence handling.
+
+    Internal function used by compute_nash_equilibrium.
     """
     # Create zero-sum game
     # P1 wants to maximize payout_matrix
