@@ -1,6 +1,7 @@
 """Tests for Nash equilibrium computation."""
 
 import numpy as np
+import pytest
 
 from alpharat.mcts.nash import (
     compute_nash_equilibrium,
@@ -159,3 +160,183 @@ class TestActionSelection:
         assert abs(p2_strategy.sum() - 1.0) < 1e-6
         assert np.all(p1_strategy >= 0)
         assert np.all(p2_strategy >= 0)
+
+
+class TestNashWithEquivalence:
+    """Tests for Nash equilibrium with action equivalence."""
+
+    def test_blocked_actions_get_zero_probability(self) -> None:
+        """Blocked actions should have probability 0 in Nash strategy."""
+        # 5x5 matching pennies variant
+        # Row 0 = Row 4 (both blocked for P1)
+        # Col 1 = Col 4 (both blocked for P2)
+        payout = np.array(
+            [
+                [1.0, 2.0, -1.0, 0.0, 2.0],
+                [0.0, 1.0, 2.0, -1.0, 1.0],
+                [-1.0, 0.0, 1.0, 2.0, 0.0],
+                [2.0, -1.0, 0.0, 1.0, -1.0],
+                [1.0, 2.0, -1.0, 0.0, 2.0],  # Same as row 0
+            ]
+        )
+
+        p1_effective = [4, 1, 2, 3, 4]  # Action 0 -> 4
+        p2_effective = [0, 4, 2, 3, 4]  # Action 1 -> 4
+
+        p1_strategy, p2_strategy = compute_nash_equilibrium(payout, p1_effective, p2_effective)
+
+        # Blocked actions must have 0 probability
+        assert p1_strategy[0] == 0.0, "P1's blocked action 0 should have 0 probability"
+        assert p2_strategy[1] == 0.0, "P2's blocked action 1 should have 0 probability"
+
+        # Strategies should still be valid distributions
+        assert abs(p1_strategy.sum() - 1.0) < 1e-6
+        assert abs(p2_strategy.sum() - 1.0) < 1e-6
+        assert np.all(p1_strategy >= 0)
+        assert np.all(p2_strategy >= 0)
+
+    def test_equivalence_preserves_nash_value(self) -> None:
+        """Nash value should be same with or without equivalence reduction."""
+        # Create a matrix where equivalent rows/cols are identical
+        payout = np.array(
+            [
+                [1.0, -1.0, 0.0, 0.5, -1.0],  # Row 0 = Row 4
+                [0.0, 1.0, -1.0, 0.0, 1.0],
+                [-1.0, 0.0, 1.0, -0.5, 0.0],
+                [0.5, 0.0, -0.5, 0.0, 0.0],
+                [1.0, -1.0, 0.0, 0.5, -1.0],  # Row 4 = Row 0
+            ]
+        )
+        # Make col 1 = col 4
+        payout[:, 1] = payout[:, 4]
+
+        p1_effective = [4, 1, 2, 3, 4]
+        p2_effective = [0, 4, 2, 3, 4]
+
+        # Compute with equivalence
+        p1_eq, p2_eq = compute_nash_equilibrium(payout, p1_effective, p2_effective)
+        value_eq = compute_nash_value(payout, p1_eq, p2_eq)
+
+        # Compute without equivalence
+        p1_raw, p2_raw = compute_nash_equilibrium(payout)
+        value_raw = compute_nash_value(payout, p1_raw, p2_raw)
+
+        # Values should be approximately equal (Nash value is unique in zero-sum games)
+        assert abs(value_eq - value_raw) < 1e-6
+
+    def test_all_actions_equivalent_gives_deterministic(self) -> None:
+        """When all actions are equivalent, all probability goes to effective."""
+        payout = np.ones((5, 5))  # Trivial game, all payoffs equal
+
+        p1_effective = [4, 4, 4, 4, 4]  # All -> 4
+        p2_effective = [4, 4, 4, 4, 4]  # All -> 4
+
+        p1_strategy, p2_strategy = compute_nash_equilibrium(payout, p1_effective, p2_effective)
+
+        # All probability should be on action 4
+        expected = np.array([0.0, 0.0, 0.0, 0.0, 1.0])
+        np.testing.assert_array_almost_equal(p1_strategy, expected)
+        np.testing.assert_array_almost_equal(p2_strategy, expected)
+
+    def test_without_effective_maps_uses_full_matrix(self) -> None:
+        """Without effective maps, computes on full matrix (backwards compatible)."""
+        payout = np.array([[1.0, -1.0], [-1.0, 1.0]])
+
+        # Without effective maps
+        p1, p2 = compute_nash_equilibrium(payout)
+
+        # Should still work (matching pennies)
+        np.testing.assert_array_almost_equal(p1, [0.5, 0.5])
+        np.testing.assert_array_almost_equal(p2, [0.5, 0.5])
+
+    def test_equilibrium_property_with_equivalence(self) -> None:
+        """Verify output is actually a Nash equilibrium: no player can improve by deviating.
+
+        For a Nash equilibrium over the EFFECTIVE action space:
+        - P1's strategy is a best response to P2's strategy (among effective actions)
+        - P2's strategy is a best response to P1's strategy (among effective actions)
+
+        Deviating to a blocked action = deviating to STAY, so we only check effective actions.
+        """
+        # Use rock-paper-scissors with one blocked action each
+        # Effective 2x2 game embedded in 3x3
+        # RPS payoffs: win=1, lose=-1, tie=0
+        payout = np.array(
+            [
+                [0.0, -1.0, 1.0],  # Rock: ties rock, loses to paper, beats scissors
+                [1.0, 0.0, -1.0],  # Paper: beats rock, ties paper, loses to scissors
+                [0.0, -1.0, 1.0],  # Blocked -> same as Rock (action 0)
+            ]
+        )
+
+        # Action 2 is blocked for P1 (maps to action 0)
+        # All actions valid for P2
+        p1_effective = [0, 1, 0]  # Action 2 -> 0
+        p2_effective = [0, 1, 2]  # No blocking
+
+        # Get the unique effective actions for each player
+        p1_effective_actions = sorted(set(p1_effective))  # [0, 1]
+        p2_effective_actions = sorted(set(p2_effective))  # [0, 1, 2]
+
+        p1_strategy, p2_strategy = compute_nash_equilibrium(payout, p1_effective, p2_effective)
+
+        # Blocked action must have 0 probability
+        assert p1_strategy[2] == 0.0
+
+        # Compute expected value at equilibrium
+        equilibrium_value = compute_nash_value(payout, p1_strategy, p2_strategy)
+
+        # Check P1 cannot improve by deviating to any EFFECTIVE action
+        for i in p1_effective_actions:
+            pure_p1 = np.zeros(3)
+            pure_p1[i] = 1.0
+            deviation_value = compute_nash_value(payout, pure_p1, p2_strategy)
+            assert deviation_value <= equilibrium_value + 1e-6, (
+                f"P1 can improve by playing effective action {i}: "
+                f"{deviation_value} > {equilibrium_value}"
+            )
+
+        # Check P2 cannot improve by deviating to any EFFECTIVE action
+        for j in p2_effective_actions:
+            pure_p2 = np.zeros(3)
+            pure_p2[j] = 1.0
+            deviation_value = compute_nash_value(payout, p1_strategy, pure_p2)
+            assert deviation_value >= equilibrium_value - 1e-6, (
+                f"P2 can improve by playing effective action {j}: "
+                f"{deviation_value} < {equilibrium_value}"
+            )
+
+    def test_equilibrium_only_on_effective_actions(self) -> None:
+        """Verify equilibrium uses only effective actions, not blocked ones.
+
+        Even if a blocked action would be "better", Nash should not use it
+        because blocked actions are equivalent to STAY.
+        """
+        # Construct a game where action 0 looks attractive but is blocked
+        # Row 0 has high payoffs, but it's equivalent to row 4
+        payout = np.array(
+            [
+                [100.0, 100.0, 100.0, 100.0, 100.0],  # Looks great for P1
+                [0.0, 1.0, -1.0, 0.0, 1.0],
+                [-1.0, 0.0, 1.0, -1.0, 0.0],
+                [1.0, -1.0, 0.0, 1.0, -1.0],
+                [100.0, 100.0, 100.0, 100.0, 100.0],  # Same as row 0 (equivalence)
+            ]
+        )
+
+        p1_effective = [4, 1, 2, 3, 4]  # Action 0 -> 4 (blocked)
+        p2_effective = [0, 1, 2, 3, 4]  # No blocking for P2
+
+        p1_strategy, p2_strategy = compute_nash_equilibrium(payout, p1_effective, p2_effective)
+
+        # P1's blocked action 0 must have 0 probability
+        assert p1_strategy[0] == 0.0
+
+        # The equilibrium value should reflect the ACTUAL game (where action 0 = action 4)
+        # not the "fantasy" where P1 could independently play action 0
+        equilibrium_value = compute_nash_value(payout, p1_strategy, p2_strategy)
+
+        # Since rows 0 and 4 are identical (equivalence invariant), and action 0 is blocked,
+        # all P1's probability on row 0 goes to row 4 in the effective game.
+        # The value should be 100.0 (P1 effectively plays row 4 which has payoff 100 everywhere)
+        assert equilibrium_value == pytest.approx(100.0)
