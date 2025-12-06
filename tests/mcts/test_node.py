@@ -482,9 +482,9 @@ class TestEquivalenceInvariants:
                         assert node.payout_matrix[eq_a1, eq_a2] == pytest.approx(
                             reference_payout
                         ), f"Payout mismatch: ({a1},{a2}) vs ({eq_a1},{eq_a2})"
-                        assert (
-                            node.action_visits[eq_a1, eq_a2] == reference_visits
-                        ), f"Visit mismatch: ({a1},{a2}) vs ({eq_a1},{eq_a2})"
+                        assert node.action_visits[eq_a1, eq_a2] == reference_visits, (
+                            f"Visit mismatch: ({a1},{a2}) vs ({eq_a1},{eq_a2})"
+                        )
 
     def test_invariant_after_single_backup(self, complex_equivalence_node: MCTSNode) -> None:
         """Single backup should maintain equivalence invariant."""
