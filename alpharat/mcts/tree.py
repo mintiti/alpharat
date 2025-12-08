@@ -56,8 +56,9 @@ class MCTSTree:
         # Track where simulator currently is
         self._sim_path: list[MCTSNode] = [root]
 
-        # Compute effective action mappings for root node
+        # Initialize root node with NN predictions and effective mappings
         # (root may have been created without game context)
+        self._init_root_priors()
         self._init_root_effective()
 
     @property
@@ -147,6 +148,36 @@ class MCTSTree:
 
             # Update node statistics
             node.backup(action_p1, action_p2, value)
+
+    def advance_root(self, action_p1: int, action_p2: int) -> None:
+        """Advance the tree's root to the child reached by the given actions.
+
+        Used for tree reuse between turns: after a real game move is made,
+        advance the root so accumulated statistics are preserved.
+
+        Args:
+            action_p1: Player 1's action (0-4)
+            action_p2: Player 2's action (0-4)
+        """
+        # Map to effective actions for child lookup
+        effective_a1 = self.root.p1_effective[action_p1]
+        effective_a2 = self.root.p2_effective[action_p2]
+        effective_pair = (effective_a1, effective_a2)
+
+        # Get or create child
+        if effective_pair in self.root.children:
+            new_root = self.root.children[effective_pair]
+            # If simulator is at current root, advance game state to stay in sync
+            if self.simulator_node == self.root:
+                move_undo = self.game.make_move(Direction(action_p1), Direction(action_p2))
+                new_root.move_undo = move_undo
+        else:
+            # Child doesn't exist - create via make_move_from (handles game advancement)
+            new_root, _ = self.make_move_from(self.root, action_p1, action_p2)
+
+        # Update tree state (keep parent refs intact)
+        self.root = new_root
+        self._sim_path = [new_root]
 
     def _navigate_to(self, target: MCTSNode) -> None:
         """Navigate simulator from current position to target node.
@@ -267,6 +298,18 @@ class MCTSTree:
         otherwise returns the game object itself for custom predictors.
         """
         return self.game.get_observation(is_player_one=True)
+
+    def _init_root_priors(self) -> None:
+        """Initialize root node with NN predictions.
+
+        Called during tree initialization to ensure root has proper
+        policy priors and payout predictions from the neural network,
+        consistent with how child nodes are created.
+        """
+        prior_p1, prior_p2, nn_payout = self._predict()
+        self.root.prior_policy_p1 = prior_p1
+        self.root.prior_policy_p2 = prior_p2
+        self.root.payout_matrix = nn_payout.copy()
 
     def _init_root_effective(self) -> None:
         """Initialize effective action mappings for the root node.
