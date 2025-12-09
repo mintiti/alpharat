@@ -57,7 +57,9 @@ class FakeGame:
         self.player1_mud_turns = 0
         self.player2_mud_turns = 0
         self.turn = 0
+        self.max_turns = 300
         self._token_counter = 0
+        self._cheese: list[tuple[int, int]] = [(3, 3), (7, 7), (5, 3)]
 
     def _apply(self, pos: tuple[int, int], action: int) -> tuple[int, int]:
         dx, dy = self._DELTAS[action]
@@ -91,6 +93,10 @@ class FakeGame:
         """Return all movement directions (no walls in FakeGame)."""
         # UP=0, RIGHT=1, DOWN=2, LEFT=3 are all valid (no walls)
         return [0, 1, 2, 3]
+
+    def cheese_positions(self) -> list[tuple[int, int]]:
+        """Return remaining cheese positions."""
+        return self._cheese.copy()
 
 
 @pytest.fixture
@@ -453,3 +459,85 @@ class TestMultipleExpansions:
 
         # Verify simulator is at a1
         assert tree.simulator_node == a1
+
+
+class TestAdvanceRoot:
+    """Tests for advance_root method."""
+
+    def test_advance_root_existing_child(self, fake_tree: MCTSTree) -> None:
+        """Advance to a pre-existing child node."""
+        old_root = fake_tree.root
+
+        # Create a child first
+        child, _ = fake_tree.make_move_from(fake_tree.root, 1, 2)
+
+        # Navigate back to root for the advance
+        fake_tree._sim_path = [old_root]
+
+        # Advance root to that child
+        fake_tree.advance_root(1, 2)
+
+        # New root should be the child we created
+        assert fake_tree.root == child
+        assert fake_tree._sim_path == [child]
+
+    def test_advance_root_creates_child(self, fake_tree: MCTSTree) -> None:
+        """Advance to a child that doesn't exist yet (creates it)."""
+        old_root = fake_tree.root
+
+        # No children exist yet
+        assert len(old_root.children) == 0
+
+        # Advance to non-existent child - should create it
+        fake_tree.advance_root(0, 1)
+
+        # Child should now exist and be the new root
+        assert fake_tree.root != old_root
+        assert fake_tree.root.parent == old_root
+        assert len(old_root.children) == 1
+
+    def test_advance_root_keeps_parent_refs(self, fake_tree: MCTSTree) -> None:
+        """Verify new root keeps its parent reference (history preserved)."""
+        old_root = fake_tree.root
+
+        # Advance root
+        fake_tree.advance_root(2, 3)
+
+        # New root should still have parent reference
+        assert fake_tree.root.parent == old_root
+        assert fake_tree.root.parent_action is not None
+
+    def test_advance_root_resets_sim_path(self, fake_tree: MCTSTree) -> None:
+        """Verify simulator path is reset to start at new root."""
+        # Create some tree structure
+        child1, _ = fake_tree.make_move_from(fake_tree.root, 0, 0)
+        grandchild, _ = fake_tree.make_move_from(child1, 1, 1)
+
+        # Simulator is at grandchild
+        assert fake_tree.simulator_node == grandchild
+        assert len(fake_tree._sim_path) == 3
+
+        # Navigate back and advance root to child1
+        fake_tree._navigate_to(fake_tree.root)
+        fake_tree.advance_root(0, 0)
+
+        # Simulator path should now start at new root
+        assert fake_tree._sim_path == [child1]
+        assert fake_tree.simulator_node == child1
+
+    def test_advance_root_advances_game_when_at_root(
+        self, fake_game: FakeGame, fake_tree: MCTSTree
+    ) -> None:
+        """When simulator is at root, advancing root should advance game state."""
+        # Create a child first
+        child, _ = fake_tree.make_move_from(fake_tree.root, 1, 0)
+
+        # Navigate back to root
+        fake_tree._navigate_to(fake_tree.root)
+        initial_pos = fake_game.player1_position
+
+        # Advance root - should also advance game since simulator is at root
+        fake_tree.advance_root(1, 0)
+
+        # Game should have advanced (player moved RIGHT)
+        assert fake_game.player1_position != initial_pos
