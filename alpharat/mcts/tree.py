@@ -56,10 +56,10 @@ class MCTSTree:
         # Track where simulator currently is
         self._sim_path: list[MCTSNode] = [root]
 
-        # Initialize root node with NN predictions and effective mappings
-        # (root may have been created without game context)
-        self._init_root_priors()
+        # Initialize root node with effective mappings first (needed for smart priors),
+        # then NN predictions (root may have been created without game context)
         self._init_root_effective()
+        self._init_root_priors()
 
     @property
     def simulator_node(self) -> MCTSNode:
@@ -258,12 +258,13 @@ class MCTSTree:
         Returns:
             New child node with effective action mappings computed
         """
-        prior_p1, prior_p2, nn_payout = self._predict()
-
         # Compute effective action mappings from current game state
         # (simulator is at the child's state after make_move)
         p1_effective = self._compute_effective_actions(self.game.player1_position)
         p2_effective = self._compute_effective_actions(self.game.player2_position)
+
+        # Get priors (smart uniform uses effective mappings)
+        prior_p1, prior_p2, nn_payout = self._predict(p1_effective, p2_effective)
 
         child = MCTSNode(
             game_state=None,  # Don't store game state
@@ -284,17 +285,54 @@ class MCTSTree:
 
         return child
 
-    def _predict(self) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-        """Run policy/value network to obtain priors and payout prediction."""
+    def _predict(
+        self,
+        p1_effective: list[int] | None = None,
+        p2_effective: list[int] | None = None,
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+        """Run policy/value network to obtain priors and payout prediction.
+
+        Args:
+            p1_effective: Effective action mapping for P1 (used for smart uniform priors).
+            p2_effective: Effective action mapping for P2 (used for smart uniform priors).
+        """
         if self._predict_fn is None:
-            # Fallback to uniform priors and zero payout for testing/sanity
-            prior_p1 = np.ones(5) / 5
-            prior_p2 = np.ones(5) / 5
+            # Smart uniform: only spread probability over actions that do different things
+            prior_p1 = self._smart_uniform_prior(p1_effective)
+            prior_p2 = self._smart_uniform_prior(p2_effective)
             payout = np.zeros((5, 5))
             return prior_p1, prior_p2, payout
 
         observation = self._get_observation()
         return self._predict_fn(observation)
+
+    def _smart_uniform_prior(self, effective: list[int] | None) -> np.ndarray:
+        """Create uniform prior over unique effective actions only.
+
+        Instead of spreading probability over all 5 actions (where blocked moves
+        waste probability on STAY duplicates), only give probability to the
+        canonical effective actions themselves.
+
+        Args:
+            effective: Mapping from action -> effective action. If None, returns
+                      standard uniform over all 5 actions.
+
+        Returns:
+            Prior distribution with uniform weight on unique effective actions.
+        """
+        if effective is None:
+            return np.ones(5) / 5
+
+        # Put probability only on the effective actions themselves
+        # e.g., if effective=[0,4,4,4,4], only actions 0 and 4 get probability
+        unique_effective = set(effective)
+        prior = np.zeros(5)
+        for eff_action in unique_effective:
+            prior[eff_action] = 1.0
+
+        # Normalize
+        prior /= prior.sum()
+        return prior
 
     def _get_observation(self) -> Any:
         """Obtain observation to feed the predictor.
@@ -310,8 +348,13 @@ class MCTSTree:
         Called during tree initialization to ensure root has proper
         policy priors and payout predictions from the neural network,
         consistent with how child nodes are created.
+
+        Note: Must be called after _init_root_effective so smart uniform
+        priors can use the effective action mappings.
         """
-        prior_p1, prior_p2, nn_payout = self._predict()
+        prior_p1, prior_p2, nn_payout = self._predict(
+            self.root.p1_effective, self.root.p2_effective
+        )
         self.root.prior_policy_p1 = prior_p1
         self.root.prior_policy_p2 = prior_p2
         self.root.payout_matrix = nn_payout.copy()
