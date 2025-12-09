@@ -57,7 +57,9 @@ class FakeGame:
         self.player1_mud_turns = 0
         self.player2_mud_turns = 0
         self.turn = 0
+        self.max_turns = 300
         self._token_counter = 0
+        self._cheese: list[tuple[int, int]] = [(3, 3), (7, 7), (5, 3)]
 
     def _apply(self, pos: tuple[int, int], action: int) -> tuple[int, int]:
         dx, dy = self._DELTAS[action]
@@ -91,6 +93,10 @@ class FakeGame:
         """Return all movement directions (no walls in FakeGame)."""
         # UP=0, RIGHT=1, DOWN=2, LEFT=3 are all valid (no walls)
         return [0, 1, 2, 3]
+
+    def cheese_positions(self) -> list[tuple[int, int]]:
+        """Return remaining cheese positions."""
+        return self._cheese.copy()
 
 
 @pytest.fixture

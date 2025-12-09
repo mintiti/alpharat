@@ -132,14 +132,16 @@ class MCTSTree:
 
         return child, reward
 
-    def backup(self, path: list[tuple[MCTSNode, int, int, float]]) -> None:
+    def backup(self, path: list[tuple[MCTSNode, int, int, float]], g: float = 0.0) -> None:
         """Backup values through the tree with discounting.
 
         Args:
             path: List of (node, action_p1, action_p2, reward) tuples
                  from the search path, in forward order (root to leaf)
+            g: Leaf value (NN's value estimate for the expanded node).
+               Defaults to 0.0 for terminal states.
         """
-        value = 0.0  # Terminal value
+        value = g
 
         # Backup in reverse (from leaf to root)
         for node, action_p1, action_p2, reward in reversed(path):
@@ -277,6 +279,9 @@ class MCTSTree:
             p2_effective=p2_effective,
         )
 
+        # Check if this child represents a terminal state
+        child.is_terminal = self._check_terminal()
+
         return child
 
     def _predict(self) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
@@ -353,3 +358,27 @@ class MCTSTree:
                 effective.append(stay_action)
 
         return effective
+
+    def _check_terminal(self) -> bool:
+        """Check if current game state is terminal.
+
+        Terminal conditions:
+        - Turn limit reached (turn >= max_turns)
+        - All cheese collected
+        - One player has majority of cheese (> total/2)
+
+        Returns:
+            True if game is over, False otherwise.
+        """
+        # Turn limit reached
+        if self.game.turn >= self.game.max_turns:
+            return True
+
+        # All cheese collected
+        remaining = len(self.game.cheese_positions())
+        if remaining == 0:
+            return True
+
+        # Majority win check
+        total = self.game.player1_score + self.game.player2_score + remaining
+        return self.game.player1_score > total / 2 or self.game.player2_score > total / 2
