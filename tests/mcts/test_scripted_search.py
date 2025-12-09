@@ -14,7 +14,10 @@ from alpharat.mcts.search import MCTSSearch
 from alpharat.mcts.tree import MCTSTree
 
 # High simulation count - PyRat is fast (Rust backend)
+# With 10k sims on tiny mazes and gamma=1, we converge to exact values.
 N_SIMS = 10_000
+GAMMA = 1.0
+VALUE_TOL = 0.01
 
 
 def create_uniform_root(game: PyRat) -> MCTSNode:
@@ -52,19 +55,19 @@ class TestClearWinner:
         np.random.seed(42)
 
         root = create_uniform_root(game)
-        tree = MCTSTree(game=game, root=root, gamma=0.99)
+        tree = MCTSTree(game=game, root=root, gamma=GAMMA)
         search = MCTSSearch(tree, n_sims=N_SIMS)
         result = search.search()
 
-        # P1 should go UP with high probability (UP increases y in PyRat)
-        assert result.policy_p1[Direction.UP] > 0.9, (
-            f"Expected policy_p1[UP] > 0.9, got {result.policy_p1[Direction.UP]:.3f}\n"
+        # P1 should go UP (pure strategy)
+        assert result.policy_p1[Direction.UP] == 1.0, (
+            f"Expected policy_p1[UP] == 1.0, got {result.policy_p1[Direction.UP]:.6f}\n"
             f"Full policy: {result.policy_p1}"
         )
 
-        # Value should favor P1 (clear advantage)
+        # Value should be exactly 1 (P1 gets the only cheese)
         value = result.policy_p1 @ result.payout_matrix @ result.policy_p2
-        assert value > 0.5, f"Expected value > 0.5, got {value:.3f}"
+        assert value == pytest.approx(1.0, abs=VALUE_TOL), f"Expected value ≈ 1.0, got {value:.6f}"
 
 
 class TestNonCompetingCheeses:
@@ -87,25 +90,25 @@ class TestNonCompetingCheeses:
         np.random.seed(42)
 
         root = create_uniform_root(game)
-        tree = MCTSTree(game=game, root=root, gamma=0.99)
+        tree = MCTSTree(game=game, root=root, gamma=GAMMA)
         search = MCTSSearch(tree, n_sims=N_SIMS)
         result = search.search()
 
         # P1 should go RIGHT toward (1,0)
-        assert result.policy_p1[Direction.RIGHT] > 0.9, (
-            f"Expected policy_p1[RIGHT] > 0.9, got {result.policy_p1[Direction.RIGHT]:.3f}\n"
+        assert result.policy_p1[Direction.RIGHT] == 1.0, (
+            f"Expected policy_p1[RIGHT] == 1.0, got {result.policy_p1[Direction.RIGHT]:.6f}\n"
             f"Full policy: {result.policy_p1}"
         )
 
         # P2 should go LEFT toward (3,4)
-        assert result.policy_p2[Direction.LEFT] > 0.9, (
-            f"Expected policy_p2[LEFT] > 0.9, got {result.policy_p2[Direction.LEFT]:.3f}\n"
+        assert result.policy_p2[Direction.LEFT] == 1.0, (
+            f"Expected policy_p2[LEFT] == 1.0, got {result.policy_p2[Direction.LEFT]:.6f}\n"
             f"Full policy: {result.policy_p2}"
         )
 
-        # Value should be near 0 (each gets 1 cheese)
+        # Value should be exactly 0 (each gets 1 cheese)
         value = result.policy_p1 @ result.payout_matrix @ result.policy_p2
-        assert abs(value) < 0.1, f"Expected |value| < 0.1, got {value:.3f}"
+        assert value == pytest.approx(0.0, abs=VALUE_TOL), f"Expected value ≈ 0.0, got {value:.6f}"
 
 
 class TestMirrorSymmetric:
@@ -136,25 +139,25 @@ class TestMirrorSymmetric:
         np.random.seed(42)
 
         root = create_uniform_root(game)
-        tree = MCTSTree(game=game, root=root, gamma=0.99)
+        tree = MCTSTree(game=game, root=root, gamma=GAMMA)
         search = MCTSSearch(tree, n_sims=N_SIMS)
         result = search.search()
 
         # P1 should go LEFT toward (0, 2)
-        assert result.policy_p1[Direction.LEFT] > 0.9, (
-            f"Expected P1 to go LEFT, got {result.policy_p1[Direction.LEFT]:.3f}\n"
+        assert result.policy_p1[Direction.LEFT] == 1.0, (
+            f"Expected policy_p1[LEFT] == 1.0, got {result.policy_p1[Direction.LEFT]:.6f}\n"
             f"Full policy: {result.policy_p1}"
         )
 
         # P2 should go RIGHT toward (4, 2)
-        assert result.policy_p2[Direction.RIGHT] > 0.9, (
-            f"Expected P2 to go RIGHT, got {result.policy_p2[Direction.RIGHT]:.3f}\n"
+        assert result.policy_p2[Direction.RIGHT] == 1.0, (
+            f"Expected policy_p2[RIGHT] == 1.0, got {result.policy_p2[Direction.RIGHT]:.6f}\n"
             f"Full policy: {result.policy_p2}"
         )
 
-        # Value should be 0 (symmetric game, each gets one cheese)
+        # Value should be exactly 0 (symmetric game, each gets one cheese)
         value = result.policy_p1 @ result.payout_matrix @ result.policy_p2
-        assert abs(value) < 0.1, f"Expected |value| < 0.1, got {value:.3f}"
+        assert value == pytest.approx(0.0, abs=VALUE_TOL), f"Expected value ≈ 0.0, got {value:.6f}"
 
 
 class TestBlockedDirections:
@@ -181,7 +184,7 @@ class TestBlockedDirections:
         np.random.seed(42)
 
         root = create_uniform_root(game)
-        tree = MCTSTree(game=game, root=root, gamma=0.99)
+        tree = MCTSTree(game=game, root=root, gamma=GAMMA)
         search = MCTSSearch(tree, n_sims=N_SIMS)
         result = search.search()
 
@@ -194,8 +197,8 @@ class TestBlockedDirections:
         )
 
         # P1 should go RIGHT toward cheese
-        assert result.policy_p1[Direction.RIGHT] > 0.9, (
-            f"Expected policy_p1[RIGHT] > 0.9, got {result.policy_p1[Direction.RIGHT]:.3f}\n"
+        assert result.policy_p1[Direction.RIGHT] == 1.0, (
+            f"Expected policy_p1[RIGHT] == 1.0, got {result.policy_p1[Direction.RIGHT]:.6f}\n"
             f"Full policy: {result.policy_p1}"
         )
 
@@ -273,18 +276,20 @@ class TestSymmetricGameValue:
         np.random.seed(42)
 
         root = create_uniform_root(game)
-        tree = MCTSTree(game=game, root=root, gamma=0.99)
+        tree = MCTSTree(game=game, root=root, gamma=GAMMA)
         search = MCTSSearch(tree, n_sims=N_SIMS)
         result = search.search()
 
         # Value should be 0 (symmetric game)
         value = result.policy_p1 @ result.payout_matrix @ result.policy_p2
-        assert abs(value) < 0.1, f"Expected |value| < 0.1 for symmetric game, got {value:.3f}"
+        assert value == pytest.approx(0.0, abs=VALUE_TOL), (
+            f"Expected value ≈ 0.0 for symmetric game, got {value:.6f}"
+        )
 
         # Players should go toward cheese (UP or RIGHT for P1, DOWN or LEFT for P2)
         p1_toward_cheese = result.policy_p1[Direction.UP] + result.policy_p1[Direction.RIGHT]
-        assert p1_toward_cheese > 0.9, (
-            f"Expected P1 to go toward cheese, got UP+RIGHT={p1_toward_cheese:.3f}"
+        assert p1_toward_cheese == 1.0, (
+            f"Expected P1 to go toward cheese, got UP+RIGHT={p1_toward_cheese:.6f}"
         )
 
 
@@ -321,22 +326,22 @@ class TestRaceToSameCheese:
         np.random.seed(42)
 
         root = create_uniform_root(game)
-        tree = MCTSTree(game=game, root=root, gamma=0.99)
+        tree = MCTSTree(game=game, root=root, gamma=GAMMA)
         search = MCTSSearch(tree, n_sims=N_SIMS)
         result = search.search()
 
         # P1 should go RIGHT (dominant strategy)
-        assert result.policy_p1[Direction.RIGHT] > 0.9, (
-            f"Expected policy_p1[RIGHT] > 0.9, got {result.policy_p1[Direction.RIGHT]:.3f}\n"
+        assert result.policy_p1[Direction.RIGHT] == 1.0, (
+            f"Expected policy_p1[RIGHT] == 1.0, got {result.policy_p1[Direction.RIGHT]:.6f}\n"
             f"Full policy: {result.policy_p1}"
         )
 
         # P2 should go LEFT (best response to P1's RIGHT)
-        assert result.policy_p2[Direction.LEFT] > 0.9, (
-            f"Expected policy_p2[LEFT] > 0.9, got {result.policy_p2[Direction.LEFT]:.3f}\n"
+        assert result.policy_p2[Direction.LEFT] == 1.0, (
+            f"Expected policy_p2[LEFT] == 1.0, got {result.policy_p2[Direction.LEFT]:.6f}\n"
             f"Full policy: {result.policy_p2}"
         )
 
-        # Value should be 0 (both get half the cheese)
+        # Value should be exactly 0 (both get half the cheese)
         value = result.policy_p1 @ result.payout_matrix @ result.policy_p2
-        assert abs(value) < 0.1, f"Expected |value| < 0.1, got {value:.3f}"
+        assert value == pytest.approx(0.0, abs=VALUE_TOL), f"Expected value ≈ 0.0, got {value:.6f}"
