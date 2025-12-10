@@ -1,0 +1,20 @@
+# Quick test config - 5 games
+mcts:
+  variant: prior_sampling
+  simulations: 50
+  gamma: 1.0
+
+game:
+  width: 7
+  height: 7
+  max_turns: 50
+  cheese_count: 5
+
+sampling:
+  num_games: 5
+  workers: 2
+  temperature: 1.0
+  temp_threshold_turn: 10
+
+output_dir: batches/
+checkpoint: null
