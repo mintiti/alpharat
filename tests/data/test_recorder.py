@@ -8,6 +8,7 @@ import numpy as np
 import pytest
 from pyrat_engine.core.types import Coordinates, Direction, Mud, Wall
 
+from alpharat.data.loader import load_game_data
 from alpharat.data.maze import _coords_to_direction, _opposite_direction, build_maze_array
 from alpharat.data.recorder import GameRecorder
 from alpharat.mcts.search import SearchResult
@@ -493,3 +494,253 @@ class TestSavedArrays:
             assert data["prior_p2"].dtype == np.float32
             assert data["policy_p1"].dtype == np.float32
             assert data["policy_p2"].dtype == np.float32
+
+
+# =============================================================================
+# Roundtrip / Idempotence tests
+# =============================================================================
+
+
+class TestRoundtrip:
+    """Tests for save/load roundtrip idempotence."""
+
+    def test_roundtrip_game_level_data(self) -> None:
+        """Game-level data should survive roundtrip."""
+        walls = [((1, 1), (2, 1))]
+        muds = [((2, 2), (2, 3), 3)]
+        game = FakeGame(width=5, height=4, walls=walls, muds=muds, cheese=[(0, 0), (4, 3)])
+        game.player1_score = 7.0
+        game.player2_score = 3.0
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            with GameRecorder(game, tmpdir, width=5, height=4) as recorder:
+                result = make_mock_search_result()
+                recorder.record_position(
+                    game=game,
+                    search_result=result,
+                    prior_p1=np.ones(5) / 5,
+                    prior_p2=np.ones(5) / 5,
+                    visit_counts=np.zeros((5, 5), dtype=np.int32),
+                )
+
+            assert recorder.saved_path is not None
+            loaded = load_game_data(recorder.saved_path)
+
+        assert loaded.width == 5
+        assert loaded.height == 4
+        assert loaded.max_turns == 100
+        assert loaded.result == 1  # P1 wins
+        assert loaded.final_p1_score == 7.0
+        assert loaded.final_p2_score == 3.0
+        assert loaded.maze.shape == (4, 5, 4)
+        assert loaded.initial_cheese.shape == (4, 5)
+        # Check cheese positions
+        assert loaded.initial_cheese[0, 0] is np.True_
+        assert loaded.initial_cheese[3, 4] is np.True_
+
+    def test_roundtrip_maze_walls_and_mud(self) -> None:
+        """Maze walls and mud should survive roundtrip."""
+        walls = [((1, 1), (2, 1))]
+        muds = [((2, 2), (2, 3), 5)]
+        game = FakeGame(width=5, height=5, walls=walls, muds=muds)
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            with GameRecorder(game, tmpdir, width=5, height=5) as recorder:
+                result = make_mock_search_result()
+                recorder.record_position(
+                    game=game,
+                    search_result=result,
+                    prior_p1=np.ones(5) / 5,
+                    prior_p2=np.ones(5) / 5,
+                    visit_counts=np.zeros((5, 5), dtype=np.int32),
+                )
+
+            assert recorder.saved_path is not None
+            loaded = load_game_data(recorder.saved_path)
+
+        # Wall at (1,1) -> (2,1): RIGHT from (1,1) blocked, LEFT from (2,1) blocked
+        assert loaded.maze[1, 1, Direction.RIGHT] == -1
+        assert loaded.maze[1, 2, Direction.LEFT] == -1
+
+        # Mud at (2,2) -> (2,3): DOWN from (2,2) costs 5, UP from (2,3) costs 5
+        assert loaded.maze[2, 2, Direction.DOWN] == 5
+        assert loaded.maze[3, 2, Direction.UP] == 5
+
+    def test_roundtrip_position_game_state(self) -> None:
+        """Position game state should survive roundtrip."""
+        game = FakeGame(width=5, height=5, cheese=[(1, 1), (3, 3)])
+        game.player1_position = Coordinates(2, 3)
+        game.player2_position = Coordinates(4, 1)
+        game.player1_score = 2.5
+        game.player2_score = 1.0
+        game.player1_mud_turns = 2
+        game.player2_mud_turns = 0
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            with GameRecorder(game, tmpdir, width=5, height=5) as recorder:
+                result = make_mock_search_result()
+                recorder.record_position(
+                    game=game,
+                    search_result=result,
+                    prior_p1=np.ones(5) / 5,
+                    prior_p2=np.ones(5) / 5,
+                    visit_counts=np.zeros((5, 5), dtype=np.int32),
+                )
+
+            assert recorder.saved_path is not None
+            loaded = load_game_data(recorder.saved_path)
+
+        assert len(loaded.positions) == 1
+        pos = loaded.positions[0]
+        assert pos.p1_pos == (2, 3)
+        assert pos.p2_pos == (4, 1)
+        assert pos.p1_score == 2.5
+        assert pos.p2_score == 1.0
+        assert pos.p1_mud == 2
+        assert pos.p2_mud == 0
+        assert pos.turn == 0
+        assert set(pos.cheese_positions) == {(1, 1), (3, 3)}
+
+    def test_roundtrip_mcts_outputs(self) -> None:
+        """MCTS outputs should survive roundtrip with correct values."""
+        game = FakeGame(width=5, height=5)
+
+        # Create non-trivial MCTS data
+        payout = np.array(
+            [
+                [0.1, 0.2, 0.3, 0.4, 0.5],
+                [-0.1, -0.2, -0.3, -0.4, -0.5],
+                [1.0, 0.0, -1.0, 0.5, -0.5],
+                [0.0, 0.0, 0.0, 0.0, 0.0],
+                [0.9, 0.8, 0.7, 0.6, 0.55],
+            ],
+            dtype=np.float64,
+        )
+        policy_p1 = np.array([0.5, 0.2, 0.1, 0.1, 0.1], dtype=np.float64)
+        policy_p2 = np.array([0.1, 0.1, 0.1, 0.2, 0.5], dtype=np.float64)
+        prior_p1 = np.array([0.2, 0.2, 0.2, 0.2, 0.2], dtype=np.float64)
+        prior_p2 = np.array([0.25, 0.25, 0.25, 0.25, 0.0], dtype=np.float64)
+        visits = np.array(
+            [
+                [10, 5, 3, 2, 1],
+                [8, 12, 4, 1, 0],
+                [6, 7, 15, 3, 2],
+                [4, 3, 2, 20, 5],
+                [2, 1, 1, 4, 25],
+            ],
+            dtype=np.int32,
+        )
+
+        search_result = SearchResult(
+            payout_matrix=payout,
+            policy_p1=policy_p1,
+            policy_p2=policy_p2,
+        )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            with GameRecorder(game, tmpdir, width=5, height=5) as recorder:
+                recorder.record_position(
+                    game=game,
+                    search_result=search_result,
+                    prior_p1=prior_p1,
+                    prior_p2=prior_p2,
+                    visit_counts=visits,
+                )
+
+            assert recorder.saved_path is not None
+            loaded = load_game_data(recorder.saved_path)
+
+        pos = loaded.positions[0]
+
+        # Check values match (with float32 precision)
+        np.testing.assert_allclose(pos.payout_matrix, payout, rtol=1e-6)
+        np.testing.assert_allclose(pos.policy_p1, policy_p1, rtol=1e-6)
+        np.testing.assert_allclose(pos.policy_p2, policy_p2, rtol=1e-6)
+        np.testing.assert_allclose(pos.prior_p1, prior_p1, rtol=1e-6)
+        np.testing.assert_allclose(pos.prior_p2, prior_p2, rtol=1e-6)
+        np.testing.assert_array_equal(pos.visit_counts, visits)
+
+    def test_roundtrip_multiple_positions(self) -> None:
+        """Multiple positions should survive roundtrip in order."""
+        game = FakeGame(width=5, height=5, cheese=[(2, 2)])
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            with GameRecorder(game, tmpdir, width=5, height=5) as recorder:
+                # Position 0
+                game.turn = 0
+                game.player1_position = Coordinates(0, 0)
+                result = make_mock_search_result()
+                recorder.record_position(
+                    game=game,
+                    search_result=result,
+                    prior_p1=np.ones(5) / 5,
+                    prior_p2=np.ones(5) / 5,
+                    visit_counts=np.ones((5, 5), dtype=np.int32),
+                )
+
+                # Position 1
+                game.turn = 1
+                game.player1_position = Coordinates(1, 0)
+                game._cheese = []  # Cheese collected
+                recorder.record_position(
+                    game=game,
+                    search_result=result,
+                    prior_p1=np.ones(5) / 5,
+                    prior_p2=np.ones(5) / 5,
+                    visit_counts=np.ones((5, 5), dtype=np.int32) * 2,
+                )
+
+                # Position 2
+                game.turn = 2
+                game.player1_position = Coordinates(2, 0)
+                recorder.record_position(
+                    game=game,
+                    search_result=result,
+                    prior_p1=np.ones(5) / 5,
+                    prior_p2=np.ones(5) / 5,
+                    visit_counts=np.ones((5, 5), dtype=np.int32) * 3,
+                )
+
+            assert recorder.saved_path is not None
+            loaded = load_game_data(recorder.saved_path)
+
+        assert len(loaded.positions) == 3
+        assert loaded.positions[0].turn == 0
+        assert loaded.positions[0].p1_pos == (0, 0)
+        assert (2, 2) in loaded.positions[0].cheese_positions
+
+        assert loaded.positions[1].turn == 1
+        assert loaded.positions[1].p1_pos == (1, 0)
+        assert len(loaded.positions[1].cheese_positions) == 0
+
+        assert loaded.positions[2].turn == 2
+        assert loaded.positions[2].p1_pos == (2, 0)
+
+        # Verify visit counts are distinct per position
+        assert loaded.positions[0].visit_counts[0, 0] == 1
+        assert loaded.positions[1].visit_counts[0, 0] == 2
+        assert loaded.positions[2].visit_counts[0, 0] == 3
+
+    def test_roundtrip_p2_wins(self) -> None:
+        """P2 win result should survive roundtrip."""
+        game = FakeGame()
+        game.player1_score = 2.0
+        game.player2_score = 8.0
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            with GameRecorder(game, tmpdir, width=5, height=5) as recorder:
+                result = make_mock_search_result()
+                recorder.record_position(
+                    game=game,
+                    search_result=result,
+                    prior_p1=np.ones(5) / 5,
+                    prior_p2=np.ones(5) / 5,
+                    visit_counts=np.zeros((5, 5), dtype=np.int32),
+                )
+
+            assert recorder.saved_path is not None
+            loaded = load_game_data(recorder.saved_path)
+
+        assert loaded.result == 2  # P2 wins
+        assert loaded.final_p1_score == 2.0
+        assert loaded.final_p2_score == 8.0
