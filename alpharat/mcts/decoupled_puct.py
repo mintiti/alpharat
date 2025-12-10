@@ -24,7 +24,7 @@ class DecoupledPUCTConfig(BaseModel):
 
     variant: Literal["decoupled_puct"] = "decoupled_puct"
     simulations: int
-    gamma: float = 0.99
+    gamma: float = 1.0
     c_puct: float = 1.5
 
     def build(self, tree: MCTSTree) -> DecoupledPUCTSearch:

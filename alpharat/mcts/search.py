@@ -24,7 +24,7 @@ class PriorSamplingConfig(BaseModel):
 
     variant: Literal["prior_sampling"] = "prior_sampling"
     simulations: int
-    gamma: float = 0.99
+    gamma: float = 1.0
 
     def build(self, tree: MCTSTree) -> MCTSSearch:
         """Construct a PriorSamplingSearch from this config."""

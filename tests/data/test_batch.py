@@ -35,7 +35,7 @@ class TestMCTSConfig:
         """PriorSamplingConfig uses default gamma."""
         config = PriorSamplingConfig(simulations=100)
 
-        assert config.gamma == 0.99
+        assert config.gamma == 1.0
 
     def test_decoupled_puct_from_dict(self) -> None:
         """DecoupledPUCTConfig parses from dict."""
@@ -56,7 +56,7 @@ class TestMCTSConfig:
         """DecoupledPUCTConfig uses default gamma and c_puct."""
         config = DecoupledPUCTConfig(simulations=100)
 
-        assert config.gamma == 0.99
+        assert config.gamma == 1.0
         assert config.c_puct == 1.5
 
     def test_discriminated_union_prior_sampling(self) -> None:
