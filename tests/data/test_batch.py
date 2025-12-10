@@ -16,7 +16,7 @@ from alpharat.data.batch import (
     load_batch_metadata,
     save_batch_metadata,
 )
-from alpharat.mcts.config import DecoupledPUCTConfig, PriorSamplingConfig
+from alpharat.mcts import DecoupledPUCTConfig, PriorSamplingConfig
 
 
 class TestMCTSConfig:

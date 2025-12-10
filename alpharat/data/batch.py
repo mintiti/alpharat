@@ -10,7 +10,7 @@ from pathlib import Path
 import numpy as np
 from pydantic import BaseModel, Field
 
-from alpharat.mcts.config import MCTSConfig  # noqa: TC001
+from alpharat.mcts import MCTSConfig  # noqa: TC001
 
 # --- Game Parameters ---
 
