@@ -11,6 +11,7 @@ authors = [
 dependencies = [
     "numpy>=1.24.0",
     "nashpy>=0.0.35",
+    "pydantic>=2.0",
     "pyrat-engine @ git+https://github.com/mintiti/pyrat-rust.git@main#subdirectory=engine",
 ]
 
