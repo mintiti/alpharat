@@ -1,0 +1,20 @@
+# Self-play sampling configuration
+# Usage: uv run python scripts/sample.py configs/sample.yaml
+
+mcts:
+  variant: prior_sampling
+  simulations: 100
+  gamma: 1.0
+
+game:
+  width: 7
+  height: 7
+  max_turns: 100
+  cheese_count: 10
+
+sampling:
+  num_games: 500
+  workers: 4
+
+output_dir: batches/
+checkpoint: null             # Path to model checkpoint, or null for uniform prior

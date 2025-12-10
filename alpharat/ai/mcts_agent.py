@@ -8,9 +8,9 @@ from typing import TYPE_CHECKING
 import numpy as np
 
 from alpharat.ai.base import Agent
+from alpharat.mcts import MCTSConfig  # noqa: TC001
 from alpharat.mcts.nash import select_action_from_strategy
 from alpharat.mcts.node import MCTSNode
-from alpharat.mcts.search import MCTSSearch
 from alpharat.mcts.tree import MCTSTree
 
 if TYPE_CHECKING:
@@ -24,19 +24,16 @@ class MCTSAgent(Agent):
     Uses uniform priors (no neural network).
 
     Attributes:
-        n_sims: Number of MCTS simulations per move.
-        gamma: Discount factor for value backup.
+        config: MCTS configuration (variant, simulations, gamma, etc.).
     """
 
-    def __init__(self, n_sims: int = 50, gamma: float = 1.0) -> None:
+    def __init__(self, config: MCTSConfig) -> None:
         """Initialize MCTS agent.
 
         Args:
-            n_sims: Number of simulations per move decision.
-            gamma: Discount factor (1.0 = no discounting).
+            config: MCTS configuration specifying search variant and parameters.
         """
-        self.n_sims = n_sims
-        self.gamma = gamma
+        self.config = config
 
     def get_move(self, game: PyRat, player: int) -> int:
         """Select action using MCTS search.
@@ -55,12 +52,12 @@ class MCTSAgent(Agent):
         p1_mud = simulator.player1_mud_turns
         p2_mud = simulator.player2_mud_turns
 
-        # Create root with uniform priors
-        uniform = np.ones(5) / 5
+        # Dummy priors - tree will overwrite with smart uniform via _init_root_priors()
+        dummy = np.ones(5) / 5
         root = MCTSNode(
             game_state=None,
-            prior_policy_p1=uniform,
-            prior_policy_p2=uniform,
+            prior_policy_p1=dummy,
+            prior_policy_p2=dummy,
             nn_payout_prediction=np.zeros((5, 5)),
             parent=None,
             p1_mud_turns_remaining=p1_mud,
@@ -71,10 +68,10 @@ class MCTSAgent(Agent):
         tree = MCTSTree(
             game=simulator,
             root=root,
-            gamma=self.gamma,
+            gamma=self.config.gamma,
             predict_fn=None,
         )
-        search = MCTSSearch(tree, n_sims=self.n_sims)
+        search = self.config.build(tree)
         result = search.search()
 
         # Sample from Nash strategy for our player
@@ -84,4 +81,7 @@ class MCTSAgent(Agent):
 
     @property
     def name(self) -> str:
-        return f"MCTS({self.n_sims})"
+        if self.config.variant == "prior_sampling":
+            return f"PS({self.config.simulations})"
+        else:
+            return f"PUCT({self.config.simulations},c={self.config.c_puct})"

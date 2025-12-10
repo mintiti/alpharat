@@ -12,6 +12,7 @@ dependencies = [
     "numpy>=1.24.0",
     "nashpy>=0.0.35",
     "pydantic>=2.0",
+    "pyyaml>=6.0",
     "pyrat-engine @ git+https://github.com/mintiti/pyrat-rust.git@main#subdirectory=engine",
 ]
 
@@ -22,6 +23,7 @@ dev = [
     "mypy>=1.8.0",
     "ruff>=0.8.0",
     "pre-commit>=3.6.0",
+    "types-pyyaml>=6.0",
 ]
 
 [build-system]

@@ -16,7 +16,7 @@ from alpharat.data.batch import (
     load_batch_metadata,
     save_batch_metadata,
 )
-from alpharat.mcts.config import DecoupledPUCTConfig, PriorSamplingConfig
+from alpharat.mcts import DecoupledPUCTConfig, PriorSamplingConfig
 
 
 class TestMCTSConfig:
@@ -35,7 +35,7 @@ class TestMCTSConfig:
         """PriorSamplingConfig uses default gamma."""
         config = PriorSamplingConfig(simulations=100)
 
-        assert config.gamma == 0.99
+        assert config.gamma == 1.0
 
     def test_decoupled_puct_from_dict(self) -> None:
         """DecoupledPUCTConfig parses from dict."""
@@ -56,7 +56,7 @@ class TestMCTSConfig:
         """DecoupledPUCTConfig uses default gamma and c_puct."""
         config = DecoupledPUCTConfig(simulations=100)
 
-        assert config.gamma == 0.99
+        assert config.gamma == 1.0
         assert config.c_puct == 1.5
 
     def test_discriminated_union_prior_sampling(self) -> None:
@@ -66,7 +66,7 @@ class TestMCTSConfig:
             "created_at": "2024-01-01T00:00:00Z",
             "checkpoint_path": None,
             "mcts_config": {"variant": "prior_sampling", "simulations": 800},
-            "game_params": {"width": 10, "height": 10, "max_turns": 200},
+            "game_params": {"width": 10, "height": 10, "max_turns": 200, "cheese_count": 21},
         }
         metadata = BatchMetadata.model_validate(data)
 
@@ -80,7 +80,7 @@ class TestMCTSConfig:
             "created_at": "2024-01-01T00:00:00Z",
             "checkpoint_path": "/path/to/model.pt",
             "mcts_config": {"variant": "decoupled_puct", "simulations": 400, "c_puct": 2.5},
-            "game_params": {"width": 10, "height": 10, "max_turns": 200},
+            "game_params": {"width": 10, "height": 10, "max_turns": 200, "cheese_count": 21},
         }
         metadata = BatchMetadata.model_validate(data)
 
@@ -98,7 +98,7 @@ class TestBatchMetadata:
             created_at=datetime.now(UTC),
             checkpoint_path=None,
             mcts_config=PriorSamplingConfig(simulations=100),
-            game_params=GameParams(width=10, height=10, max_turns=200),
+            game_params=GameParams(width=10, height=10, max_turns=200, cheese_count=21),
         )
 
         assert metadata.checkpoint_path is None
@@ -110,7 +110,7 @@ class TestBatchMetadata:
             created_at=datetime.now(UTC),
             checkpoint_path="/models/checkpoint_100.pt",
             mcts_config=PriorSamplingConfig(simulations=100),
-            game_params=GameParams(width=10, height=10, max_turns=200),
+            game_params=GameParams(width=10, height=10, max_turns=200, cheese_count=21),
         )
 
         assert metadata.checkpoint_path == "/models/checkpoint_100.pt"
@@ -126,7 +126,7 @@ class TestCreateBatch:
                 parent_dir=tmpdir,
                 checkpoint_path=None,
                 mcts_config=PriorSamplingConfig(simulations=100),
-                game_params=GameParams(width=10, height=10, max_turns=200),
+                game_params=GameParams(width=10, height=10, max_turns=200, cheese_count=21),
             )
 
             assert batch_dir.exists()
@@ -140,7 +140,7 @@ class TestCreateBatch:
                 parent_dir=tmpdir,
                 checkpoint_path="/test/checkpoint.pt",
                 mcts_config=DecoupledPUCTConfig(simulations=400, c_puct=2.0),
-                game_params=GameParams(width=15, height=12, max_turns=300),
+                game_params=GameParams(width=15, height=12, max_turns=300, cheese_count=21),
             )
 
             metadata = load_batch_metadata(batch_dir)
@@ -160,7 +160,7 @@ class TestCreateBatch:
                 parent_dir=tmpdir,
                 checkpoint_path=None,
                 mcts_config=PriorSamplingConfig(simulations=100),
-                game_params=GameParams(width=10, height=10, max_turns=200),
+                game_params=GameParams(width=10, height=10, max_turns=200, cheese_count=21),
             )
 
             metadata = load_batch_metadata(batch_dir)
@@ -181,7 +181,7 @@ class TestCreateBatch:
                 parent_dir=tmpdir,
                 checkpoint_path=None,
                 mcts_config=PriorSamplingConfig(simulations=100),
-                game_params=GameParams(width=10, height=10, max_turns=200),
+                game_params=GameParams(width=10, height=10, max_turns=200, cheese_count=21),
             )
 
             assert batch_dir.parent == Path(tmpdir)
@@ -203,7 +203,7 @@ class TestSaveLoadRoundtrip:
                 created_at=datetime(2024, 6, 15, 12, 30, 0, tzinfo=UTC),
                 checkpoint_path=None,
                 mcts_config=PriorSamplingConfig(simulations=800, gamma=0.95),
-                game_params=GameParams(width=20, height=15, max_turns=400),
+                game_params=GameParams(width=20, height=15, max_turns=400, cheese_count=21),
             )
 
             save_batch_metadata(batch_dir, original)
@@ -228,7 +228,7 @@ class TestSaveLoadRoundtrip:
                 created_at=datetime(2024, 6, 15, 12, 30, 0, tzinfo=UTC),
                 checkpoint_path="/models/best.pt",
                 mcts_config=DecoupledPUCTConfig(simulations=400, gamma=0.98, c_puct=2.5),
-                game_params=GameParams(width=10, height=10, max_turns=200),
+                game_params=GameParams(width=10, height=10, max_turns=200, cheese_count=21),
             )
 
             save_batch_metadata(batch_dir, original)

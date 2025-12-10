@@ -10,7 +10,7 @@ from pathlib import Path
 import numpy as np
 from pydantic import BaseModel, Field
 
-from alpharat.mcts.config import MCTSConfig  # noqa: TC001
+from alpharat.mcts import MCTSConfig  # noqa: TC001
 
 # --- Game Parameters ---
 
@@ -21,6 +21,7 @@ class GameParams(BaseModel):
     width: int
     height: int
     max_turns: int
+    cheese_count: int
 
 
 # --- Batch Metadata ---

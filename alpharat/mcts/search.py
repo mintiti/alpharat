@@ -7,15 +7,28 @@ node expansion, and value backup for Monte Carlo Tree Search.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Literal
 
 import numpy as np
+from pydantic import BaseModel
 
 from alpharat.mcts.nash import compute_nash_equilibrium
 
 if TYPE_CHECKING:
     from alpharat.mcts.node import MCTSNode
     from alpharat.mcts.tree import MCTSTree
+
+
+class PriorSamplingConfig(BaseModel):
+    """Config for prior sampling MCTS search."""
+
+    variant: Literal["prior_sampling"] = "prior_sampling"
+    simulations: int
+    gamma: float = 1.0
+
+    def build(self, tree: MCTSTree) -> MCTSSearch:
+        """Construct a PriorSamplingSearch from this config."""
+        return MCTSSearch(tree, self.simulations)
 
 
 @dataclass
