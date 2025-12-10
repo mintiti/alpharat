@@ -52,12 +52,12 @@ class MCTSAgent(Agent):
         p1_mud = simulator.player1_mud_turns
         p2_mud = simulator.player2_mud_turns
 
-        # Create root with uniform priors
-        uniform = np.ones(5) / 5
+        # Dummy priors - tree will overwrite with smart uniform via _init_root_priors()
+        dummy = np.ones(5) / 5
         root = MCTSNode(
             game_state=None,
-            prior_policy_p1=uniform,
-            prior_policy_p2=uniform,
+            prior_policy_p1=dummy,
+            prior_policy_p2=dummy,
             nn_payout_prediction=np.zeros((5, 5)),
             parent=None,
             p1_mud_turns_remaining=p1_mud,

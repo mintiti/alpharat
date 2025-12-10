@@ -13,8 +13,6 @@ game:
 sampling:
   num_games: 5
   workers: 2
-  temperature: 1.0
-  temp_threshold_turn: 10
 
 output_dir: batches/
 checkpoint: null

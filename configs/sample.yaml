@@ -15,8 +15,6 @@ game:
 sampling:
   num_games: 500
   workers: 4
-  temperature: 1.0           # Action selection temperature (exploration)
-  temp_threshold_turn: 20    # After this turn, use greedy selection (temp=0)
 
 output_dir: batches/
 checkpoint: null             # Path to model checkpoint, or null for uniform prior

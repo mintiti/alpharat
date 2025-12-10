@@ -31,8 +31,6 @@ class SamplingParams(BaseModel):
 
     num_games: int
     workers: int = 4
-    temperature: float = 1.0
-    temp_threshold_turn: int = 20
 
 
 class SamplingConfig(BaseModel):
@@ -49,7 +47,10 @@ class SamplingConfig(BaseModel):
 
 
 def build_tree(game: PyRat, gamma: float) -> MCTSTree:
-    """Build fresh MCTS tree with uniform priors.
+    """Build fresh MCTS tree for search.
+
+    The tree will initialize the root with smart uniform priors that only
+    assign probability to distinct effective actions (blocked moves get 0).
 
     Args:
         game: Current game state (will be deep-copied for simulation).
@@ -59,12 +60,14 @@ def build_tree(game: PyRat, gamma: float) -> MCTSTree:
         MCTSTree ready for search.
     """
     simulator = copy.deepcopy(game)
-    uniform = np.ones(5) / 5
+
+    # Dummy priors - tree will overwrite with smart uniform via _init_root_priors()
+    dummy = np.ones(5) / 5
 
     root = MCTSNode(
         game_state=None,
-        prior_policy_p1=uniform,
-        prior_policy_p2=uniform,
+        prior_policy_p1=dummy,
+        prior_policy_p2=dummy,
         nn_payout_prediction=np.zeros((5, 5)),
         parent=None,
         p1_mud_turns_remaining=simulator.player1_mud_turns,
@@ -131,14 +134,9 @@ def play_and_record_game(
                 visit_counts=tree.root.action_visits,
             )
 
-            # Select actions with temperature schedule
-            if game.turn < config.sampling.temp_threshold_turn:
-                temp = config.sampling.temperature
-            else:
-                temp = 0.0
-
-            a1 = select_action_from_strategy(result.policy_p1, temperature=temp)
-            a2 = select_action_from_strategy(result.policy_p2, temperature=temp)
+            # Sample actions from Nash equilibrium policies
+            a1 = select_action_from_strategy(result.policy_p1)
+            a2 = select_action_from_strategy(result.policy_p2)
 
             game.make_move(a1, a2)
 
