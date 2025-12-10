@@ -21,6 +21,7 @@ class GameParams(BaseModel):
     width: int
     height: int
     max_turns: int
+    cheese_count: int
 
 
 # --- Batch Metadata ---
