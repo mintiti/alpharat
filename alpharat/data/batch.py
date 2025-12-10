@@ -6,33 +6,11 @@ import json
 import uuid
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Literal
 
 import numpy as np
 from pydantic import BaseModel, Field
 
-# --- MCTS Config Variants ---
-
-
-class PriorSamplingConfig(BaseModel):
-    """MCTS config using prior policy sampling for action selection."""
-
-    variant: Literal["prior_sampling"] = "prior_sampling"
-    simulations: int
-    gamma: float = 0.99
-
-
-class DecoupledPUCTConfig(BaseModel):
-    """MCTS config using decoupled PUCT for action selection."""
-
-    variant: Literal["decoupled_puct"] = "decoupled_puct"
-    simulations: int
-    gamma: float = 0.99
-    c_puct: float = 1.5
-
-
-MCTSConfig = PriorSamplingConfig | DecoupledPUCTConfig
-
+from alpharat.mcts.config import MCTSConfig  # noqa: TC001
 
 # --- Game Parameters ---
 

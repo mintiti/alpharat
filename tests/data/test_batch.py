@@ -10,14 +10,13 @@ import numpy as np
 
 from alpharat.data.batch import (
     BatchMetadata,
-    DecoupledPUCTConfig,
     GameParams,
-    PriorSamplingConfig,
     create_batch,
     get_batch_stats,
     load_batch_metadata,
     save_batch_metadata,
 )
+from alpharat.mcts.config import DecoupledPUCTConfig, PriorSamplingConfig
 
 
 class TestMCTSConfig:

@@ -3,10 +3,7 @@
 from alpharat.data.batch import (
     BatchMetadata,
     BatchStats,
-    DecoupledPUCTConfig,
     GameParams,
-    MCTSConfig,
-    PriorSamplingConfig,
     create_batch,
     get_batch_stats,
     load_batch_metadata,
@@ -19,11 +16,8 @@ from alpharat.data.recorder import GameRecorder
 __all__ = [
     "BatchMetadata",
     "BatchStats",
-    "DecoupledPUCTConfig",
     "GameParams",
     "GameRecorder",
-    "MCTSConfig",
-    "PriorSamplingConfig",
     "build_maze_array",
     "create_batch",
     "get_batch_stats",
