@@ -77,7 +77,13 @@ def play_game(
     # Create game if not provided
     if game is None:
         if seed is not None:
-            game = PyRat(width=width, height=height, cheese_count=cheese_count, seed=seed)
+            game = PyRat(
+                width=width,
+                height=height,
+                cheese_count=cheese_count,
+                max_turns=max_turns,
+                seed=seed,
+            )
         else:
             import random
 
@@ -85,6 +91,7 @@ def play_game(
                 width=width,
                 height=height,
                 cheese_count=cheese_count,
+                max_turns=max_turns,
                 seed=random.randint(0, 2**31),
             )
 
