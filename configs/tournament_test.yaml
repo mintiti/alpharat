@@ -20,9 +20,9 @@ agents:
 games_per_matchup: 10
 
 game:
-  width: 7
-  height: 7
+  width: 15
+  height: 11
   max_turns: 200
-  cheese_count: 15
+  cheese_count: 21
 
 workers: 2
