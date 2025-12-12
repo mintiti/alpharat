@@ -22,6 +22,8 @@ class GameParams(BaseModel):
     height: int
     max_turns: int
     cheese_count: int
+    wall_density: float | None = None  # None = use pyrat default (0.7)
+    mud_density: float | None = None  # None = use pyrat default (0.1)
 
 
 # --- Batch Metadata ---
