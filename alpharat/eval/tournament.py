@@ -9,7 +9,7 @@ from typing import TYPE_CHECKING
 
 from pydantic import BaseModel
 
-from alpharat.ai import MCTSAgent, RandomAgent
+from alpharat.ai import GreedyAgent, MCTSAgent, RandomAgent
 from alpharat.data.batch import GameParams  # noqa: TC001
 from alpharat.eval.game import play_game
 from alpharat.mcts import MCTSConfig  # noqa: TC001
@@ -249,8 +249,8 @@ def run_tournament(config: TournamentConfig, *, verbose: bool = True) -> Tournam
     Returns:
         TournamentResult with all matchup results.
     """
-    # Build agent dict: config.agents + Random
-    agents: dict[str, Agent] = {"Random": RandomAgent()}
+    # Build agent dict: config.agents + Random + Greedy
+    agents: dict[str, Agent] = {"Random": RandomAgent(), "Greedy": GreedyAgent()}
     for name, mcts_config in config.agents.items():
         agents[name] = MCTSAgent(mcts_config)
 
