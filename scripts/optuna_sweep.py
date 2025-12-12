@@ -5,6 +5,7 @@ Usage:
     uv run python scripts/optuna_sweep.py
     uv run python scripts/optuna_sweep.py --n-jobs 4
     uv run python scripts/optuna_sweep.py --study-name my_sweep
+    uv run python scripts/optuna_sweep.py --seed-from results/puct_vs_greedy_5x5.csv --seed-top 20
 """
 
 from __future__ import annotations
@@ -13,20 +14,17 @@ import argparse
 from pathlib import Path
 
 import optuna
+import pandas as pd
 
 from alpharat.ai import GreedyAgent, MCTSAgent
 from alpharat.eval.game import play_game
 from alpharat.mcts import DecoupledPUCTConfig
 
-# Grid values (GridSampler uses these)
-N_SIMS_GRID = [10, 20, 50, 100, 200, 500, 1000, 2000]
-C_PUCT_GRID = [0.5, 1.0, 2.0, 4.0, 8.0, 16.0]
-
 # Game parameters - 5x5 open maze
 WIDTH, HEIGHT = 5, 5
 CHEESE_COUNT, MAX_TURNS = 5, 30
 WALL_DENSITY, MUD_DENSITY = 0.0, 0.0
-GAMES_PER_CONFIG = 20
+GAMES_PER_CONFIG = 100
 
 
 def objective(trial: optuna.Trial) -> float:
@@ -67,27 +65,51 @@ def objective(trial: optuna.Trial) -> float:
     return wins / GAMES_PER_CONFIG
 
 
+def enqueue_seed_trials(study: optuna.Study, csv_path: str, top_n: int) -> None:
+    """Enqueue top N configs from a previous sweep as starting points.
+
+    Sorts by: best score first, then fewest simulations (lexicographic).
+    """
+    df = pd.read_csv(csv_path)
+    df = df[df["State"] == "COMPLETE"]
+    df = df.sort_values(["Value", "Param n_sims"], ascending=[False, True]).head(top_n)
+
+    for _, row in df.iterrows():
+        study.enqueue_trial(
+            {"n_sims": int(row["Param n_sims"]), "c_puct": float(row["Param c_puct"])}
+        )
+    print(f"Enqueued {len(df)} seed trials from {csv_path}")
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="PUCT parameter sweep with Optuna")
     parser.add_argument("--n-jobs", type=int, default=1, help="Parallel workers")
     parser.add_argument("--study-name", default="puct_vs_greedy_5x5", help="Study name")
+    parser.add_argument("--seed-from", type=str, help="CSV file to seed trials from")
+    parser.add_argument("--seed-top", type=int, default=20, help="Number of top configs to seed")
     args = parser.parse_args()
 
     # Ensure results directory exists
     Path("results").mkdir(exist_ok=True)
 
     storage = "sqlite:///results/puct_vs_greedy_5x5.db"
-    # sampler = optuna.samplers.GridSampler({"n_sims": N_SIMS_GRID, "c_puct": C_PUCT_GRID})
-    pruner = optuna.pruners.MedianPruner(n_warmup_steps=5)
+    pruner = optuna.pruners.HyperbandPruner(
+        min_resource=40,
+        max_resource=GAMES_PER_CONFIG,
+        reduction_factor=2,
+    )
 
     study = optuna.create_study(
         study_name=args.study_name,
         storage=storage,
-        # sampler=sampler,
         pruner=pruner,
         direction="maximize",
         load_if_exists=True,
     )
+
+    # Seed with good configs from previous sweep
+    if args.seed_from:
+        enqueue_seed_trials(study, args.seed_from, args.seed_top)
 
     n_trials = 20000  # TPE sampler explores the space
     study.optimize(objective, n_trials=n_trials, n_jobs=args.n_jobs)

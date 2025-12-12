@@ -4,7 +4,7 @@
 agents:
   puct_200:
     variant: decoupled_puct
-    simulations: 700
+    simulations: 200
     c_puct: 4.73057493635652
 
 games_per_matchup: 200
