@@ -2,13 +2,10 @@
 # Goal: Sanity check that MCTS beats random on 5x5 with 99% confidence
 
 agents:
-  prior_sampling_10:
-    variant: prior_sampling
-    simulations: 10
-  puct_10:
+  puct_200:
     variant: decoupled_puct
-    simulations: 10
-    c_puct: 1.5
+    simulations: 700
+    c_puct: 4.73057493635652
 
 games_per_matchup: 200
 
@@ -17,5 +14,7 @@ game:
   height: 5
   max_turns: 30
   cheese_count: 5
+  wall_density: 0.0
+  mud_density: 0.0
 
 workers: 4

@@ -54,6 +54,8 @@ def play_game(
     cheese_count: int = 21,
     max_turns: int = 300,
     seed: int | None = None,
+    wall_density: float | None = None,
+    mud_density: float | None = None,
 ) -> GameResult:
     """Play a single game between two agents.
 
@@ -66,6 +68,8 @@ def play_game(
         cheese_count: Number of cheese pieces (ignored if game provided).
         max_turns: Maximum turns before game ends (ignored if game provided).
         seed: Random seed for maze generation (ignored if game provided).
+        wall_density: Wall density 0.0-1.0, None for pyrat default (ignored if game provided).
+        mud_density: Mud density 0.0-1.0, None for pyrat default (ignored if game provided).
 
     Returns:
         GameResult with scores and winner.
@@ -76,24 +80,24 @@ def play_game(
 
     # Create game if not provided
     if game is None:
-        if seed is not None:
-            game = PyRat(
-                width=width,
-                height=height,
-                cheese_count=cheese_count,
-                max_turns=max_turns,
-                seed=seed,
-            )
-        else:
-            import random
+        import random
 
-            game = PyRat(
-                width=width,
-                height=height,
-                cheese_count=cheese_count,
-                max_turns=max_turns,
-                seed=random.randint(0, 2**31),
-            )
+        actual_seed = seed if seed is not None else random.randint(0, 2**31)
+
+        # Build kwargs, only including density params if explicitly set
+        kwargs: dict[str, int | float] = {
+            "width": width,
+            "height": height,
+            "cheese_count": cheese_count,
+            "max_turns": max_turns,
+            "seed": actual_seed,
+        }
+        if wall_density is not None:
+            kwargs["wall_density"] = wall_density
+        if mud_density is not None:
+            kwargs["mud_density"] = mud_density
+
+        game = PyRat(**kwargs)  # type: ignore[arg-type]
 
     # Game loop
     while not is_terminal(game):

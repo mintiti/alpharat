@@ -14,33 +14,34 @@ from pathlib import Path
 
 import optuna
 
-from alpharat.ai import MCTSAgent, RandomAgent
+from alpharat.ai import GreedyAgent, MCTSAgent
 from alpharat.eval.game import play_game
 from alpharat.mcts import DecoupledPUCTConfig
 
 # Grid values (GridSampler uses these)
-N_SIMS_GRID = [300, 600, 900, 1200, 1500, 1800, 2100]
+N_SIMS_GRID = [10, 20, 50, 100, 200, 500, 1000, 2000]
 C_PUCT_GRID = [0.5, 1.0, 2.0, 4.0, 8.0, 16.0]
 
-# Game parameters (hardcoded)
-WIDTH, HEIGHT = 15, 11
-CHEESE_COUNT, MAX_TURNS = 21, 100
-GAMES_PER_CONFIG = 10
+# Game parameters - 5x5 open maze
+WIDTH, HEIGHT = 5, 5
+CHEESE_COUNT, MAX_TURNS = 5, 30
+WALL_DENSITY, MUD_DENSITY = 0.0, 0.0
+GAMES_PER_CONFIG = 20
 
 
 def objective(trial: optuna.Trial) -> float:
-    """Run 10 games, return mean cheese collected."""
+    """Run games vs Greedy, return win rate."""
     # Continuous ranges for TPE compatibility (GridSampler ignores these)
-    n_sims = trial.suggest_int("n_sims", 300, 2100, step=50)
+    n_sims = trial.suggest_int("n_sims", 10, 2000, log=True)
     c_puct = trial.suggest_float("c_puct", 0.5, 16.0, log=True)
 
     config = DecoupledPUCTConfig(simulations=n_sims, c_puct=c_puct)
 
-    scores = []
+    wins = 0.0
     for game_idx in range(GAMES_PER_CONFIG):
-        seed = game_idx  # Same 10 mazes for all configs
+        seed = game_idx  # Same mazes for all configs
         agent = MCTSAgent(config)
-        opponent = RandomAgent()
+        opponent = GreedyAgent()
 
         result = play_game(
             agent,
@@ -50,27 +51,32 @@ def objective(trial: optuna.Trial) -> float:
             height=HEIGHT,
             cheese_count=CHEESE_COUNT,
             max_turns=MAX_TURNS,
+            wall_density=WALL_DENSITY,
+            mud_density=MUD_DENSITY,
         )
-        scores.append(result.p1_score)
+        if result.winner == 1:
+            wins += 1
+        elif result.winner == 0:
+            wins += 0.5  # Draw counts as half win
 
         # Report intermediate result for pruning
-        trial.report(sum(scores) / len(scores), step=game_idx)
+        trial.report(wins / (game_idx + 1), step=game_idx)
         if trial.should_prune():
             raise optuna.TrialPruned()
 
-    return sum(scores) / len(scores)
+    return wins / GAMES_PER_CONFIG
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="PUCT parameter sweep with Optuna")
     parser.add_argument("--n-jobs", type=int, default=1, help="Parallel workers")
-    parser.add_argument("--study-name", default="puct_sweep", help="Study name")
+    parser.add_argument("--study-name", default="puct_vs_greedy_5x5", help="Study name")
     args = parser.parse_args()
 
     # Ensure results directory exists
     Path("results").mkdir(exist_ok=True)
 
-    storage = "sqlite:///results/puct_sweep_2.db"
+    storage = "sqlite:///results/puct_vs_greedy_5x5.db"
     # sampler = optuna.samplers.GridSampler({"n_sims": N_SIMS_GRID, "c_puct": C_PUCT_GRID})
     pruner = optuna.pruners.MedianPruner(n_warmup_steps=5)
 
@@ -83,7 +89,7 @@ def main() -> None:
         load_if_exists=True,
     )
 
-    n_trials = len(N_SIMS_GRID) * len(C_PUCT_GRID)  # 42
+    n_trials = 20000  # TPE sampler explores the space
     study.optimize(objective, n_trials=n_trials, n_jobs=args.n_jobs)
 
     # Visualizations

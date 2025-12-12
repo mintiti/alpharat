@@ -212,6 +212,8 @@ def _run_single_game(
         height=game_params.height,
         cheese_count=game_params.cheese_count,
         max_turns=game_params.max_turns,
+        wall_density=game_params.wall_density,
+        mud_density=game_params.mud_density,
     )
 
     # Convert to agent_a/agent_b perspective
