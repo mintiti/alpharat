@@ -13,7 +13,9 @@ from alpharat.data.loader import load_game_data
 from alpharat.data.maze import build_maze_array
 from alpharat.data.recorder import GameRecorder
 from alpharat.data.sampling import (
+    GameStats,
     SamplingConfig,
+    SamplingMetrics,
     SamplingParams,
     run_sampling,
 )
@@ -23,7 +25,9 @@ __all__ = [
     "BatchStats",
     "GameParams",
     "GameRecorder",
+    "GameStats",
     "SamplingConfig",
+    "SamplingMetrics",
     "SamplingParams",
     "build_maze_array",
     "create_batch",
