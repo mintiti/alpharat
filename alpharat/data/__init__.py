@@ -19,6 +19,11 @@ from alpharat.data.sampling import (
     SamplingParams,
     run_sampling,
 )
+from alpharat.data.sharding import (
+    TrainingSetManifest,
+    load_training_set_manifest,
+    prepare_training_set,
+)
 
 __all__ = [
     "BatchMetadata",
@@ -29,11 +34,14 @@ __all__ = [
     "SamplingConfig",
     "SamplingMetrics",
     "SamplingParams",
+    "TrainingSetManifest",
     "build_maze_array",
     "create_batch",
     "get_batch_stats",
     "load_batch_metadata",
     "load_game_data",
+    "load_training_set_manifest",
+    "prepare_training_set",
     "run_sampling",
     "save_batch_metadata",
 ]
