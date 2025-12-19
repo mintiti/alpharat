@@ -37,7 +37,7 @@ class FakeGame:
         self.max_turns = max_turns
         self.player1_mud_turns = p1_mud
         self.player2_mud_turns = p2_mud
-        self._cheese = cheese or [(2, 2), (4, 1)]
+        self._cheese = cheese if cheese is not None else [(2, 2), (4, 1)]
 
     def cheese_positions(self) -> list[Coordinates]:
         return [Coordinates(x, y) for x, y in self._cheese]
@@ -344,3 +344,265 @@ class TestCheesePositionsToMask:
         mask = _cheese_positions_to_mask([(0, 0)], height=2, width=2)
 
         assert mask.dtype == bool
+
+
+# =============================================================================
+# Train/inference consistency tests
+# =============================================================================
+
+
+class TestTrainInferenceConsistency:
+    """Tests that both extraction paths produce identical ObservationInput.
+
+    This is critical: the training path (from_game_arrays) and inference path
+    (from_pyrat_game) must produce identical observations for the same game state.
+    Any mismatch means the model sees different inputs at train vs inference time.
+
+    Uses real PyRat games to test against the actual interface, not mocks.
+    """
+
+    def test_both_paths_produce_identical_observation_input(self) -> None:
+        """from_game_arrays and from_pyrat_game should produce identical results."""
+        from pyrat_engine.core import GameConfigBuilder
+
+        from alpharat.data.maze import build_maze_array
+
+        # Create a real game
+        width, height = 5, 5
+        max_turns = 100
+        game = (
+            GameConfigBuilder(width, height)
+            .with_max_turns(max_turns)
+            .with_player1_pos(Coordinates(1, 1))
+            .with_player2_pos(Coordinates(3, 3))
+            .with_cheese([Coordinates(2, 2), Coordinates(4, 4)])
+            .build()
+        )
+
+        # Build maze from real game
+        maze = build_maze_array(game, width, height)
+
+        # Training path: simulate what would be stored in GameData/PositionData
+        game_data = GameData(
+            maze=maze,
+            initial_cheese=np.zeros((height, width), dtype=bool),
+            max_turns=max_turns,
+            width=width,
+            height=height,
+            positions=[],
+            result=0,
+            final_p1_score=0.0,
+            final_p2_score=0.0,
+        )
+        position_data = PositionData(
+            p1_pos=(game.player1_position.x, game.player1_position.y),
+            p2_pos=(game.player2_position.x, game.player2_position.y),
+            p1_score=float(game.player1_score),
+            p2_score=float(game.player2_score),
+            p1_mud=int(game.player1_mud_turns),
+            p2_mud=int(game.player2_mud_turns),
+            cheese_positions=[(c.x, c.y) for c in game.cheese_positions()],
+            turn=int(game.turn),
+            payout_matrix=np.zeros((5, 5), dtype=np.float32),
+            visit_counts=np.zeros((5, 5), dtype=np.int32),
+            prior_p1=np.ones(5, dtype=np.float32) / 5,
+            prior_p2=np.ones(5, dtype=np.float32) / 5,
+            policy_p1=np.ones(5, dtype=np.float32) / 5,
+            policy_p2=np.ones(5, dtype=np.float32) / 5,
+        )
+
+        # Extract via both paths
+        obs_training = from_game_arrays(game_data, position_data)
+        obs_inference = from_pyrat_game(game, maze, max_turns)
+
+        # All fields must match exactly
+        np.testing.assert_array_equal(obs_training.maze, obs_inference.maze)
+        assert obs_training.p1_pos == obs_inference.p1_pos
+        assert obs_training.p2_pos == obs_inference.p2_pos
+        np.testing.assert_array_equal(obs_training.cheese_mask, obs_inference.cheese_mask)
+        assert obs_training.p1_score == obs_inference.p1_score
+        assert obs_training.p2_score == obs_inference.p2_score
+        assert obs_training.turn == obs_inference.turn
+        assert obs_training.max_turns == obs_inference.max_turns
+        assert obs_training.p1_mud == obs_inference.p1_mud
+        assert obs_training.p2_mud == obs_inference.p2_mud
+        assert obs_training.width == obs_inference.width
+        assert obs_training.height == obs_inference.height
+
+    def test_consistency_after_moves(self) -> None:
+        """Both paths should produce identical results after game state changes."""
+        from pyrat_engine.core import GameConfigBuilder
+
+        from alpharat.data.maze import build_maze_array
+
+        width, height = 5, 5
+        max_turns = 100
+        game = (
+            GameConfigBuilder(width, height)
+            .with_max_turns(max_turns)
+            .with_player1_pos(Coordinates(0, 0))
+            .with_player2_pos(Coordinates(4, 4))
+            .with_cheese([Coordinates(1, 0), Coordinates(3, 4)])
+            .build()
+        )
+
+        maze = build_maze_array(game, width, height)
+
+        # Make some moves - P1 moves right to collect cheese, P2 moves left
+        game.make_move(1, 3)  # P1: RIGHT, P2: LEFT
+
+        # Build training data from current state
+        game_data = GameData(
+            maze=maze,
+            initial_cheese=np.zeros((height, width), dtype=bool),
+            max_turns=max_turns,
+            width=width,
+            height=height,
+            positions=[],
+            result=0,
+            final_p1_score=0.0,
+            final_p2_score=0.0,
+        )
+        position_data = PositionData(
+            p1_pos=(game.player1_position.x, game.player1_position.y),
+            p2_pos=(game.player2_position.x, game.player2_position.y),
+            p1_score=float(game.player1_score),
+            p2_score=float(game.player2_score),
+            p1_mud=int(game.player1_mud_turns),
+            p2_mud=int(game.player2_mud_turns),
+            cheese_positions=[(c.x, c.y) for c in game.cheese_positions()],
+            turn=int(game.turn),
+            payout_matrix=np.zeros((5, 5), dtype=np.float32),
+            visit_counts=np.zeros((5, 5), dtype=np.int32),
+            prior_p1=np.ones(5, dtype=np.float32) / 5,
+            prior_p2=np.ones(5, dtype=np.float32) / 5,
+            policy_p1=np.ones(5, dtype=np.float32) / 5,
+            policy_p2=np.ones(5, dtype=np.float32) / 5,
+        )
+
+        obs_training = from_game_arrays(game_data, position_data)
+        obs_inference = from_pyrat_game(game, maze, max_turns)
+
+        # State should reflect the move
+        assert obs_training.turn == obs_inference.turn == 1
+        assert obs_training.p1_pos == obs_inference.p1_pos
+        assert obs_training.p2_pos == obs_inference.p2_pos
+        np.testing.assert_array_equal(obs_training.cheese_mask, obs_inference.cheese_mask)
+        assert obs_training.p1_score == obs_inference.p1_score
+        assert obs_training.p2_score == obs_inference.p2_score
+
+    def test_consistency_with_corner_positions(self) -> None:
+        """Both paths should handle corner positions identically."""
+        from pyrat_engine.core import GameConfigBuilder
+
+        from alpharat.data.maze import build_maze_array
+
+        width, height = 5, 5
+        game = (
+            GameConfigBuilder(width, height)
+            .with_max_turns(50)
+            .with_player1_pos(Coordinates(0, 0))
+            .with_player2_pos(Coordinates(4, 4))
+            .with_cheese([Coordinates(0, 4), Coordinates(4, 0)])
+            .build()
+        )
+
+        maze = build_maze_array(game, width, height)
+
+        game_data = GameData(
+            maze=maze,
+            initial_cheese=np.zeros((height, width), dtype=bool),
+            max_turns=50,
+            width=width,
+            height=height,
+            positions=[],
+            result=0,
+            final_p1_score=0.0,
+            final_p2_score=0.0,
+        )
+        position_data = PositionData(
+            p1_pos=(game.player1_position.x, game.player1_position.y),
+            p2_pos=(game.player2_position.x, game.player2_position.y),
+            p1_score=float(game.player1_score),
+            p2_score=float(game.player2_score),
+            p1_mud=int(game.player1_mud_turns),
+            p2_mud=int(game.player2_mud_turns),
+            cheese_positions=[(c.x, c.y) for c in game.cheese_positions()],
+            turn=int(game.turn),
+            payout_matrix=np.zeros((5, 5), dtype=np.float32),
+            visit_counts=np.zeros((5, 5), dtype=np.int32),
+            prior_p1=np.ones(5, dtype=np.float32) / 5,
+            prior_p2=np.ones(5, dtype=np.float32) / 5,
+            policy_p1=np.ones(5, dtype=np.float32) / 5,
+            policy_p2=np.ones(5, dtype=np.float32) / 5,
+        )
+
+        obs_training = from_game_arrays(game_data, position_data)
+        obs_inference = from_pyrat_game(game, maze, max_turns=50)
+
+        # Verify positions in correct corners
+        assert obs_training.p1_pos == obs_inference.p1_pos == (0, 0)
+        assert obs_training.p2_pos == obs_inference.p2_pos == (4, 4)
+        np.testing.assert_array_equal(obs_training.cheese_mask, obs_inference.cheese_mask)
+
+    def test_consistency_after_cheese_collected(self) -> None:
+        """Both paths should handle state after all cheese collected identically."""
+        from pyrat_engine.core import GameConfigBuilder
+
+        from alpharat.data.maze import build_maze_array
+
+        width, height = 5, 5
+        # Place cheese where P1 will collect it on first move
+        game = (
+            GameConfigBuilder(width, height)
+            .with_max_turns(50)
+            .with_player1_pos(Coordinates(1, 1))
+            .with_player2_pos(Coordinates(3, 3))
+            .with_cheese([Coordinates(2, 1)])  # P1 can reach by moving RIGHT
+            .build()
+        )
+
+        maze = build_maze_array(game, width, height)
+
+        # P1 moves right to collect cheese, P2 stays
+        game.make_move(1, 4)  # P1: RIGHT, P2: STAY
+
+        # Now cheese list should be empty
+        assert len(game.cheese_positions()) == 0
+
+        game_data = GameData(
+            maze=maze,
+            initial_cheese=np.zeros((height, width), dtype=bool),
+            max_turns=50,
+            width=width,
+            height=height,
+            positions=[],
+            result=0,
+            final_p1_score=0.0,
+            final_p2_score=0.0,
+        )
+        position_data = PositionData(
+            p1_pos=(game.player1_position.x, game.player1_position.y),
+            p2_pos=(game.player2_position.x, game.player2_position.y),
+            p1_score=float(game.player1_score),
+            p2_score=float(game.player2_score),
+            p1_mud=int(game.player1_mud_turns),
+            p2_mud=int(game.player2_mud_turns),
+            cheese_positions=[(c.x, c.y) for c in game.cheese_positions()],
+            turn=int(game.turn),
+            payout_matrix=np.zeros((5, 5), dtype=np.float32),
+            visit_counts=np.zeros((5, 5), dtype=np.int32),
+            prior_p1=np.ones(5, dtype=np.float32) / 5,
+            prior_p2=np.ones(5, dtype=np.float32) / 5,
+            policy_p1=np.ones(5, dtype=np.float32) / 5,
+            policy_p2=np.ones(5, dtype=np.float32) / 5,
+        )
+
+        obs_training = from_game_arrays(game_data, position_data)
+        obs_inference = from_pyrat_game(game, maze, max_turns=50)
+
+        np.testing.assert_array_equal(obs_training.cheese_mask, obs_inference.cheese_mask)
+        assert obs_training.cheese_mask.sum() == 0
+        assert obs_inference.cheese_mask.sum() == 0
+        # Verify P1 collected the cheese
+        assert obs_training.p1_score == obs_inference.p1_score == 1.0
