@@ -51,7 +51,9 @@ class TargetBundle:
     Attributes:
         policy_p1: Nash policy for player 1, shape (5,). Sums to 1.
         policy_p2: Nash policy for player 2, shape (5,). Sums to 1.
-        value: Score differential target (final_p1_score - final_p2_score).
+        value: Remaining score differential from this position to game end.
+            Computed as (final_diff - current_diff). Positive means P1
+            will gain more cheese than P2 from this position onwards.
     """
 
     policy_p1: np.ndarray  # float32 (5,)
