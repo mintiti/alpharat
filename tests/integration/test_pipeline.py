@@ -9,6 +9,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 import numpy as np
+import pytest
 from pyrat_engine.core.types import Direction
 
 from alpharat.data.batch import GameParams
@@ -132,8 +133,14 @@ def _verify_targets(
     """Verify targets match source data."""
     np.testing.assert_allclose(targets.policy_p1, pos.policy_p1, err_msg="Policy P1 mismatch")
     np.testing.assert_allclose(targets.policy_p2, pos.policy_p2, err_msg="Policy P2 mismatch")
-    expected_value = game_data.final_p1_score - game_data.final_p2_score
-    assert targets.value == expected_value, f"Value mismatch: {targets.value} != {expected_value}"
+
+    # Value is remaining differential: final_diff - current_diff
+    final_diff = game_data.final_p1_score - game_data.final_p2_score
+    current_diff = pos.p1_score - pos.p2_score
+    expected_value = final_diff - current_diff
+    assert targets.value == pytest.approx(expected_value), (
+        f"Value mismatch: {targets.value} != {expected_value}"
+    )
 
 
 def _verify_training_shards(
@@ -163,9 +170,15 @@ def _verify_training_shards(
     all_policies_p2 = np.concatenate(all_policies_p2)
     all_values = np.concatenate(all_values)
 
-    # All values should be the same (same game outcome)
-    expected_value = game_data.final_p1_score - game_data.final_p2_score
-    np.testing.assert_allclose(all_values, expected_value, err_msg="Shard values mismatch")
+    # Compute expected values for each position (remaining differential)
+    final_diff = game_data.final_p1_score - game_data.final_p2_score
+    expected_values = [final_diff - (pos.p1_score - pos.p2_score) for pos in game_data.positions]
+
+    # Values in shards are shuffled, so check the set of values matches
+    # (can't check order since prepare_training_set shuffles)
+    np.testing.assert_allclose(
+        sorted(all_values), sorted(expected_values), err_msg="Shard values mismatch"
+    )
 
     # Policies should be valid distributions
     assert np.all(all_policies_p1 >= 0), "P1 policies should be non-negative"
