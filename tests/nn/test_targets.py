@@ -1,0 +1,158 @@
+"""Tests for training target extraction."""
+
+from __future__ import annotations
+
+import numpy as np
+import pytest
+
+from alpharat.data.types import GameData, PositionData
+from alpharat.nn.targets import build_targets
+from alpharat.nn.types import TargetBundle
+
+
+def _make_game_data(
+    *,
+    final_p1_score: float = 3.0,
+    final_p2_score: float = 2.0,
+) -> GameData:
+    """Create GameData with defaults for testing."""
+    maze = np.ones((5, 5, 4), dtype=np.int8)
+    initial_cheese = np.zeros((5, 5), dtype=bool)
+
+    return GameData(
+        maze=maze,
+        initial_cheese=initial_cheese,
+        max_turns=100,
+        width=5,
+        height=5,
+        positions=[],
+        result=1,
+        final_p1_score=final_p1_score,
+        final_p2_score=final_p2_score,
+    )
+
+
+def _make_position_data(
+    *,
+    policy_p1: np.ndarray | None = None,
+    policy_p2: np.ndarray | None = None,
+) -> PositionData:
+    """Create PositionData with defaults for testing."""
+    if policy_p1 is None:
+        policy_p1 = np.array([0.5, 0.2, 0.1, 0.1, 0.1], dtype=np.float32)
+    if policy_p2 is None:
+        policy_p2 = np.array([0.3, 0.3, 0.2, 0.1, 0.1], dtype=np.float32)
+
+    return PositionData(
+        p1_pos=(1, 1),
+        p2_pos=(3, 3),
+        p1_score=1.0,
+        p2_score=0.5,
+        p1_mud=0,
+        p2_mud=0,
+        cheese_positions=[(2, 2)],
+        turn=10,
+        payout_matrix=np.zeros((5, 5), dtype=np.float32),
+        visit_counts=np.zeros((5, 5), dtype=np.int32),
+        prior_p1=np.ones(5, dtype=np.float32) / 5,
+        prior_p2=np.ones(5, dtype=np.float32) / 5,
+        policy_p1=policy_p1,
+        policy_p2=policy_p2,
+    )
+
+
+class TestBuildTargets:
+    """Tests for build_targets()."""
+
+    def test_policy_targets_from_position(self) -> None:
+        """Policy targets should come from Nash equilibrium in position."""
+        policy_p1 = np.array([0.6, 0.1, 0.1, 0.1, 0.1], dtype=np.float32)
+        policy_p2 = np.array([0.2, 0.4, 0.2, 0.1, 0.1], dtype=np.float32)
+
+        game = _make_game_data()
+        position = _make_position_data(policy_p1=policy_p1, policy_p2=policy_p2)
+
+        result = build_targets(game, position)
+
+        np.testing.assert_array_almost_equal(result.policy_p1, policy_p1)
+        np.testing.assert_array_almost_equal(result.policy_p2, policy_p2)
+
+    def test_policy_targets_are_float32(self) -> None:
+        """Policy targets should be float32."""
+        # Use float64 input to verify conversion
+        policy_p1 = np.array([0.5, 0.2, 0.1, 0.1, 0.1], dtype=np.float64)
+        policy_p2 = np.array([0.3, 0.3, 0.2, 0.1, 0.1], dtype=np.float64)
+
+        game = _make_game_data()
+        position = _make_position_data(policy_p1=policy_p1, policy_p2=policy_p2)
+
+        result = build_targets(game, position)
+
+        assert result.policy_p1.dtype == np.float32
+        assert result.policy_p2.dtype == np.float32
+
+    def test_value_target_from_game(self) -> None:
+        """Value should be final score differential."""
+        game = _make_game_data(final_p1_score=5.0, final_p2_score=2.0)
+        position = _make_position_data()
+
+        result = build_targets(game, position)
+
+        assert result.value == pytest.approx(3.0)
+
+    def test_value_p1_wins(self) -> None:
+        """Positive value when P1 wins."""
+        game = _make_game_data(final_p1_score=10.0, final_p2_score=3.0)
+        position = _make_position_data()
+
+        result = build_targets(game, position)
+
+        assert result.value > 0
+        assert result.value == pytest.approx(7.0)
+
+    def test_value_p2_wins(self) -> None:
+        """Negative value when P2 wins."""
+        game = _make_game_data(final_p1_score=2.0, final_p2_score=8.0)
+        position = _make_position_data()
+
+        result = build_targets(game, position)
+
+        assert result.value < 0
+        assert result.value == pytest.approx(-6.0)
+
+    def test_value_draw(self) -> None:
+        """Zero value on draw."""
+        game = _make_game_data(final_p1_score=5.0, final_p2_score=5.0)
+        position = _make_position_data()
+
+        result = build_targets(game, position)
+
+        assert result.value == pytest.approx(0.0)
+
+    def test_value_half_point_scores(self) -> None:
+        """Should handle 0.5 point scores (simultaneous cheese collection)."""
+        game = _make_game_data(final_p1_score=3.5, final_p2_score=2.5)
+        position = _make_position_data()
+
+        result = build_targets(game, position)
+
+        assert result.value == pytest.approx(1.0)
+
+    def test_returns_target_bundle(self) -> None:
+        """Should return TargetBundle dataclass."""
+        game = _make_game_data()
+        position = _make_position_data()
+
+        result = build_targets(game, position)
+
+        assert isinstance(result, TargetBundle)
+
+    def test_policy_shape(self) -> None:
+        """Policy targets should have shape (5,)."""
+        game = _make_game_data()
+        position = _make_position_data()
+
+        result = build_targets(game, position)
+
+        assert result.policy_p1.shape == (5,)
+        assert result.policy_p2.shape == (5,)
