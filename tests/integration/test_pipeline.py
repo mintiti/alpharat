@@ -211,7 +211,7 @@ class TestPipelineIntegrity:
         )
 
         # === Stage 1: Play and record ===
-        batch_dir = run_sampling(config, verbose=False)
+        batch_dir, _ = run_sampling(config, verbose=False)
         game_files = list((batch_dir / "games").glob("*.npz"))
         assert len(game_files) == 1, f"Expected 1 game file, got {len(game_files)}"
 
@@ -275,7 +275,7 @@ class TestPipelineIntegrity:
             output_dir=str(tmp_path / "batches"),
         )
 
-        batch_dir = run_sampling(config, verbose=False)
+        batch_dir, _ = run_sampling(config, verbose=False)
         game_files = list((batch_dir / "games").glob("*.npz"))
         game_data = load_game_data(game_files[0])
 
@@ -321,7 +321,7 @@ class TestPipelineIntegrity:
             output_dir=str(tmp_path / "batches"),
         )
 
-        batch_dir = run_sampling(config, verbose=False)
+        batch_dir, _ = run_sampling(config, verbose=False)
         game_files = list((batch_dir / "games").glob("*.npz"))
         game_data = load_game_data(game_files[0])
 
