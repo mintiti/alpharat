@@ -31,7 +31,7 @@ def build_targets(game: GameData, position: PositionData) -> TargetBundle:
         position: Position-level data containing Nash policies and current scores.
 
     Returns:
-        TargetBundle with policy, value, payout_matrix, and action targets.
+        TargetBundle with policy and value targets.
     """
     final_diff = game.final_p1_score - game.final_p2_score
     current_diff = position.p1_score - position.p2_score
@@ -41,7 +41,4 @@ def build_targets(game: GameData, position: PositionData) -> TargetBundle:
         policy_p1=position.policy_p1.astype(np.float32),
         policy_p2=position.policy_p2.astype(np.float32),
         value=remaining_diff,
-        payout_matrix=position.payout_matrix.astype(np.float32),
-        action_p1=position.action_p1,
-        action_p2=position.action_p2,
     )

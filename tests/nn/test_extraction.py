@@ -85,8 +85,6 @@ def _make_position_data(
     p2_mud: int = 2,
     cheese_positions: list[tuple[int, int]] | None = None,
     turn: int = 10,
-    action_p1: int = 0,
-    action_p2: int = 0,
 ) -> PositionData:
     """Create PositionData with defaults for testing."""
     if cheese_positions is None:
@@ -107,8 +105,6 @@ def _make_position_data(
         prior_p2=np.ones(5, dtype=np.float32) / 5,
         policy_p1=np.ones(5, dtype=np.float32) / 5,
         policy_p2=np.ones(5, dtype=np.float32) / 5,
-        action_p1=action_p1,
-        action_p2=action_p2,
     )
 
 
@@ -413,8 +409,6 @@ class TestTrainInferenceConsistency:
             prior_p2=np.ones(5, dtype=np.float32) / 5,
             policy_p1=np.ones(5, dtype=np.float32) / 5,
             policy_p2=np.ones(5, dtype=np.float32) / 5,
-            action_p1=0,
-            action_p2=0,
         )
 
         # Extract via both paths
@@ -484,8 +478,6 @@ class TestTrainInferenceConsistency:
             prior_p2=np.ones(5, dtype=np.float32) / 5,
             policy_p1=np.ones(5, dtype=np.float32) / 5,
             policy_p2=np.ones(5, dtype=np.float32) / 5,
-            action_p1=0,
-            action_p2=0,
         )
 
         obs_training = from_game_arrays(game_data, position_data)
@@ -543,8 +535,6 @@ class TestTrainInferenceConsistency:
             prior_p2=np.ones(5, dtype=np.float32) / 5,
             policy_p1=np.ones(5, dtype=np.float32) / 5,
             policy_p2=np.ones(5, dtype=np.float32) / 5,
-            action_p1=0,
-            action_p2=0,
         )
 
         obs_training = from_game_arrays(game_data, position_data)
@@ -606,8 +596,6 @@ class TestTrainInferenceConsistency:
             prior_p2=np.ones(5, dtype=np.float32) / 5,
             policy_p1=np.ones(5, dtype=np.float32) / 5,
             policy_p2=np.ones(5, dtype=np.float32) / 5,
-            action_p1=0,
-            action_p2=0,
         )
 
         obs_training = from_game_arrays(game_data, position_data)

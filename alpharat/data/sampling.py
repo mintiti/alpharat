@@ -192,10 +192,6 @@ def play_and_record_game(
             positions += 1
             total_simulations += config.mcts.simulations
 
-            # Sample actions from Nash equilibrium policies
-            a1 = select_action_from_strategy(result.policy_p1)
-            a2 = select_action_from_strategy(result.policy_p2)
-
             # Record position before making move
             recorder.record_position(
                 game=game,
@@ -203,9 +199,11 @@ def play_and_record_game(
                 prior_p1=tree.root.prior_policy_p1,
                 prior_p2=tree.root.prior_policy_p2,
                 visit_counts=tree.root.action_visits,
-                action_p1=a1,
-                action_p2=a2,
             )
+
+            # Sample actions from Nash equilibrium policies
+            a1 = select_action_from_strategy(result.policy_p1)
+            a2 = select_action_from_strategy(result.policy_p2)
 
             game.make_move(a1, a2)
 

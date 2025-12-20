@@ -182,9 +182,6 @@ class FlatDataset:
         policy_p1_list: list[np.ndarray] = []
         policy_p2_list: list[np.ndarray] = []
         value_list: list[np.ndarray] = []
-        payout_matrix_list: list[np.ndarray] = []
-        action_p1_list: list[np.ndarray] = []
-        action_p2_list: list[np.ndarray] = []
 
         for i in range(self._manifest.shard_count):
             shard_path = training_set_dir / f"shard_{i:04d}.npz"
@@ -193,17 +190,11 @@ class FlatDataset:
                 policy_p1_list.append(data["policy_p1"])
                 policy_p2_list.append(data["policy_p2"])
                 value_list.append(data["value"])
-                payout_matrix_list.append(data["payout_matrix"])
-                action_p1_list.append(data["action_p1"])
-                action_p2_list.append(data["action_p2"])
 
         self._observations = np.concatenate(observations_list)
         self._policy_p1 = np.concatenate(policy_p1_list)
         self._policy_p2 = np.concatenate(policy_p2_list)
         self._value = np.concatenate(value_list)
-        self._payout_matrix = np.concatenate(payout_matrix_list)
-        self._action_p1 = np.concatenate(action_p1_list)
-        self._action_p2 = np.concatenate(action_p2_list)
 
         # Build observation builder for shape info
         self._builder = FlatObservationBuilder(
@@ -225,19 +216,13 @@ class FlatDataset:
                 - "observation": float32 (obs_dim,)
                 - "policy_p1": float32 (5,)
                 - "policy_p2": float32 (5,)
-                - "value": float32 (1,)
-                - "payout_matrix": float32 (5, 5)
-                - "action_p1": int8 (1,)
-                - "action_p2": int8 (1,)
+                - "value": float32 scalar array
         """
         return {
             "observation": self._observations[idx],
             "policy_p1": self._policy_p1[idx],
             "policy_p2": self._policy_p2[idx],
             "value": self._value[idx : idx + 1],  # Keep as 1D for consistency
-            "payout_matrix": self._payout_matrix[idx],
-            "action_p1": self._action_p1[idx : idx + 1],
-            "action_p2": self._action_p2[idx : idx + 1],
         }
 
     @property

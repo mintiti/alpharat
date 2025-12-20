@@ -61,8 +61,6 @@ def _create_game_npz(
     prior_p2 = np.ones((n, 5), dtype=np.float32) / 5
     policy_p1 = np.ones((n, 5), dtype=np.float32) / 5
     policy_p2 = np.ones((n, 5), dtype=np.float32) / 5
-    action_p1 = np.zeros(n, dtype=np.int8)
-    action_p2 = np.zeros(n, dtype=np.int8)
 
     np.savez_compressed(
         path,
@@ -87,8 +85,6 @@ def _create_game_npz(
         prior_p2=prior_p2,
         policy_p1=policy_p1,
         policy_p2=policy_p2,
-        action_p1=action_p1,
-        action_p2=action_p2,
     )
 
 

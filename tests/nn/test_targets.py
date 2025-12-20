@@ -39,8 +39,6 @@ def _make_position_data(
     p1_score: float = 0.0,
     p2_score: float = 0.0,
     turn: int = 0,
-    action_p1: int = 0,
-    action_p2: int = 0,
 ) -> PositionData:
     """Create PositionData with defaults for testing."""
     if policy_p1 is None:
@@ -63,8 +61,6 @@ def _make_position_data(
         prior_p2=np.ones(5, dtype=np.float32) / 5,
         policy_p1=policy_p1,
         policy_p2=policy_p2,
-        action_p1=action_p1,
-        action_p2=action_p2,
     )
 
 

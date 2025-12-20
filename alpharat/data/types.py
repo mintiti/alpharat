@@ -31,8 +31,6 @@ class PositionData:
     prior_p2: np.ndarray  # (5,)
     policy_p1: np.ndarray  # (5,)
     policy_p2: np.ndarray  # (5,)
-    action_p1: int  # action taken by player 1 (0-4)
-    action_p2: int  # action taken by player 2 (0-4)
 
 
 @dataclass

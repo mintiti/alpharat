@@ -236,8 +236,6 @@ class TestGameRecorder:
                     prior_p1=np.ones(5) / 5,
                     prior_p2=np.ones(5) / 5,
                     visit_counts=np.zeros((5, 5), dtype=np.int32),
-                    action_p1=0,
-                    action_p2=0,
                 )
 
     def test_record_position_accumulates(self) -> None:
@@ -255,8 +253,6 @@ class TestGameRecorder:
                 prior_p1=np.ones(5) / 5,
                 prior_p2=np.ones(5) / 5,
                 visit_counts=np.zeros((5, 5), dtype=np.int32),
-                action_p1=0,
-                action_p2=0,
             )
 
             assert recorder.data is not None
@@ -270,8 +266,6 @@ class TestGameRecorder:
                 prior_p1=np.ones(5) / 5,
                 prior_p2=np.ones(5) / 5,
                 visit_counts=np.zeros((5, 5), dtype=np.int32),
-                action_p1=0,
-                action_p2=0,
             )
 
             assert len(recorder.data.positions) == 2
@@ -289,8 +283,6 @@ class TestGameRecorder:
                     prior_p1=np.ones(5) / 5,
                     prior_p2=np.ones(5) / 5,
                     visit_counts=np.zeros((5, 5), dtype=np.int32),
-                    action_p1=0,
-                    action_p2=0,
                 )
 
             assert recorder.saved_path is not None
@@ -310,8 +302,6 @@ class TestGameRecorder:
                     prior_p1=np.ones(5) / 5,
                     prior_p2=np.ones(5) / 5,
                     visit_counts=np.zeros((5, 5), dtype=np.int32),
-                    action_p1=0,
-                    action_p2=0,
                 )
                 game.player1_score = 10.0
                 game.player2_score = 5.0
@@ -334,8 +324,6 @@ class TestGameRecorder:
                     prior_p1=np.ones(5) / 5,
                     prior_p2=np.ones(5) / 5,
                     visit_counts=np.zeros((5, 5), dtype=np.int32),
-                    action_p1=0,
-                    action_p2=0,
                 )
                 game.player1_score = 5.0
                 game.player2_score = 5.0
@@ -367,8 +355,6 @@ class TestGameRecorder:
                         prior_p1=np.ones(5) / 5,
                         prior_p2=np.ones(5) / 5,
                         visit_counts=np.zeros((5, 5), dtype=np.int32),
-                        action_p1=0,
-                        action_p2=0,
                     )
                     raise ValueError("Simulated error")
             except ValueError:
@@ -393,8 +379,6 @@ class TestSavedArrays:
                     prior_p1=np.ones(5) / 5,
                     prior_p2=np.ones(5) / 5,
                     visit_counts=np.zeros((5, 5), dtype=np.int32),
-                    action_p1=0,
-                    action_p2=0,
                 )
 
             assert recorder.saved_path is not None
@@ -422,8 +406,6 @@ class TestSavedArrays:
                 "prior_p2",
                 "policy_p1",
                 "policy_p2",
-                "action_p1",
-                "action_p2",
             }
 
             assert set(data.keys()) == expected_keys
@@ -445,8 +427,6 @@ class TestSavedArrays:
                         prior_p1=np.ones(5) / 5,
                         prior_p2=np.ones(5) / 5,
                         visit_counts=np.zeros((5, 5), dtype=np.int32),
-                        action_p1=0,
-                        action_p2=0,
                     )
 
             assert recorder.saved_path is not None
@@ -486,8 +466,6 @@ class TestSavedArrays:
                     prior_p1=np.ones(5) / 5,
                     prior_p2=np.ones(5) / 5,
                     visit_counts=np.zeros((5, 5), dtype=np.int32),
-                    action_p1=0,
-                    action_p2=0,
                 )
 
             assert recorder.saved_path is not None
@@ -543,8 +521,6 @@ class TestRoundtrip:
                     prior_p1=np.ones(5) / 5,
                     prior_p2=np.ones(5) / 5,
                     visit_counts=np.zeros((5, 5), dtype=np.int32),
-                    action_p1=0,
-                    action_p2=0,
                 )
 
             assert recorder.saved_path is not None
@@ -577,8 +553,6 @@ class TestRoundtrip:
                     prior_p1=np.ones(5) / 5,
                     prior_p2=np.ones(5) / 5,
                     visit_counts=np.zeros((5, 5), dtype=np.int32),
-                    action_p1=0,
-                    action_p2=0,
                 )
 
             assert recorder.saved_path is not None
@@ -611,8 +585,6 @@ class TestRoundtrip:
                     prior_p1=np.ones(5) / 5,
                     prior_p2=np.ones(5) / 5,
                     visit_counts=np.zeros((5, 5), dtype=np.int32),
-                    action_p1=0,
-                    action_p2=0,
                 )
 
             assert recorder.saved_path is not None
@@ -673,8 +645,6 @@ class TestRoundtrip:
                     prior_p1=prior_p1,
                     prior_p2=prior_p2,
                     visit_counts=visits,
-                    action_p1=0,
-                    action_p2=0,
                 )
 
             assert recorder.saved_path is not None
@@ -706,8 +676,6 @@ class TestRoundtrip:
                     prior_p1=np.ones(5) / 5,
                     prior_p2=np.ones(5) / 5,
                     visit_counts=np.ones((5, 5), dtype=np.int32),
-                    action_p1=0,
-                    action_p2=0,
                 )
 
                 # Position 1
@@ -720,8 +688,6 @@ class TestRoundtrip:
                     prior_p1=np.ones(5) / 5,
                     prior_p2=np.ones(5) / 5,
                     visit_counts=np.ones((5, 5), dtype=np.int32) * 2,
-                    action_p1=0,
-                    action_p2=0,
                 )
 
                 # Position 2
@@ -733,8 +699,6 @@ class TestRoundtrip:
                     prior_p1=np.ones(5) / 5,
                     prior_p2=np.ones(5) / 5,
                     visit_counts=np.ones((5, 5), dtype=np.int32) * 3,
-                    action_p1=0,
-                    action_p2=0,
                 )
 
             assert recorder.saved_path is not None
@@ -772,8 +736,6 @@ class TestRoundtrip:
                     prior_p1=np.ones(5) / 5,
                     prior_p2=np.ones(5) / 5,
                     visit_counts=np.zeros((5, 5), dtype=np.int32),
-                    action_p1=0,
-                    action_p2=0,
                 )
 
             assert recorder.saved_path is not None

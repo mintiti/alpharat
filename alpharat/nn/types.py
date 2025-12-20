@@ -54,14 +54,8 @@ class TargetBundle:
         value: Remaining score differential from this position to game end.
             Computed as (final_diff - current_diff). Positive means P1
             will gain more cheese than P2 from this position onwards.
-        payout_matrix: MCTS refined payout matrix, shape (5, 5).
-        action_p1: Action taken by player 1 (0-4).
-        action_p2: Action taken by player 2 (0-4).
     """
 
     policy_p1: np.ndarray  # float32 (5,)
     policy_p2: np.ndarray  # float32 (5,)
     value: float
-    payout_matrix: np.ndarray  # float32 (5, 5)
-    action_p1: int
-    action_p2: int
