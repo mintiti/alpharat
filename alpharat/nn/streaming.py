@@ -98,6 +98,9 @@ class StreamingDataset(IterableDataset[dict[str, torch.Tensor]]):
                         "policy_p1": torch.from_numpy(shard_data["policy_p1"][j]),
                         "policy_p2": torch.from_numpy(shard_data["policy_p2"][j]),
                         "value": torch.from_numpy(shard_data["value"][j : j + 1]),
+                        "payout_matrix": torch.from_numpy(shard_data["payout_matrix"][j]),
+                        "action_p1": torch.from_numpy(shard_data["action_p1"][j : j + 1]),
+                        "action_p2": torch.from_numpy(shard_data["action_p2"][j : j + 1]),
                     }
 
     def __len__(self) -> int:
@@ -117,7 +120,7 @@ def _load_shard(path: Path) -> dict[str, np.ndarray]:
         path: Path to shard npz file.
 
     Returns:
-        Dict with observations, policy_p1, policy_p2, value arrays.
+        Dict with observations, policy_p1, policy_p2, value, payout_matrix, action arrays.
     """
     with np.load(path) as data:
         return {
@@ -125,4 +128,7 @@ def _load_shard(path: Path) -> dict[str, np.ndarray]:
             "policy_p1": np.array(data["policy_p1"]),
             "policy_p2": np.array(data["policy_p2"]),
             "value": np.array(data["value"]),
+            "payout_matrix": np.array(data["payout_matrix"]),
+            "action_p1": np.array(data["action_p1"]),
+            "action_p2": np.array(data["action_p2"]),
         }

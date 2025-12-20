@@ -57,6 +57,8 @@ def load_game_data(path: Path | str) -> GameData:
             prior_p2=data["prior_p2"][i].copy(),
             policy_p1=data["policy_p1"][i].copy(),
             policy_p2=data["policy_p2"][i].copy(),
+            action_p1=int(data["action_p1"][i]),
+            action_p2=int(data["action_p2"][i]),
         )
         positions.append(position)
 

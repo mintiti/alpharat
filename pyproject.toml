@@ -33,6 +33,7 @@ dev = [
 ]
 train = [
     "torch>=2.0",
+    "tensorboard>=2.15",
 ]
 
 [build-system]
@@ -59,7 +60,9 @@ select = [
     "SIM",    # flake8-simplify
     "TCH",    # flake8-type-checking
 ]
-ignore = []
+ignore = [
+    "N812",   # Allow `import as F` for torch.nn.functional (PyTorch convention)
+]
 
 [tool.ruff.format]
 quote-style = "double"

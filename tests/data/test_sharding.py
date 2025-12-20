@@ -14,6 +14,7 @@ from alpharat.data.sharding import (
     _write_shards,
     load_training_set_manifest,
     prepare_training_set,
+    prepare_training_set_with_split,
 )
 from alpharat.nn.builders.flat import FlatObservationBuilder
 
@@ -69,6 +70,10 @@ def _create_game_npz(
     policy_p1 = np.ones((n, 5), dtype=np.float32) / 5
     policy_p2 = np.ones((n, 5), dtype=np.float32) / 5
 
+    # Actions (all STAY for simplicity)
+    action_p1 = np.zeros(n, dtype=np.int8)
+    action_p2 = np.zeros(n, dtype=np.int8)
+
     np.savez_compressed(
         path,
         maze=maze,
@@ -92,6 +97,8 @@ def _create_game_npz(
         prior_p2=prior_p2,
         policy_p1=policy_p1,
         policy_p2=policy_p2,
+        action_p1=action_p1,
+        action_p2=action_p2,
     )
 
 
@@ -198,7 +205,7 @@ class TestPrepareTrainingSet:
             assert manifest.height == 5
 
     def test_shards_have_correct_keys(self) -> None:
-        """Each shard should have observations, policies, values."""
+        """Each shard should have all required fields."""
         with tempfile.TemporaryDirectory() as tmpdir:
             tmp_path = Path(tmpdir)
             batch_dir = _create_batch(tmp_path, "batch1", num_games=1)
@@ -216,10 +223,16 @@ class TestPrepareTrainingSet:
 
             shard_path = list(result_dir.glob("shard_*.npz"))[0]
             with np.load(shard_path) as data:
-                assert "observations" in data.files
-                assert "policy_p1" in data.files
-                assert "policy_p2" in data.files
-                assert "value" in data.files
+                expected_keys = {
+                    "observations",
+                    "policy_p1",
+                    "policy_p2",
+                    "value",
+                    "payout_matrix",
+                    "action_p1",
+                    "action_p2",
+                }
+                assert set(data.files) == expected_keys
 
     def test_shard_shapes(self) -> None:
         """Shard arrays should have correct shapes."""
@@ -245,6 +258,36 @@ class TestPrepareTrainingSet:
                 assert data["policy_p1"].shape == (n, 5)
                 assert data["policy_p2"].shape == (n, 5)
                 assert data["value"].shape == (n,)
+                assert data["payout_matrix"].shape == (n, 5, 5)
+                assert data["action_p1"].shape == (n,)
+                assert data["action_p2"].shape == (n,)
+
+    def test_shard_dtypes(self) -> None:
+        """Shard arrays should have correct dtypes."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp_path = Path(tmpdir)
+            batch_dir = _create_batch(tmp_path, "batch1", num_games=1)
+            output_dir = tmp_path / "training_sets"
+            output_dir.mkdir()
+
+            builder = FlatObservationBuilder(width=5, height=5)
+            result_dir = prepare_training_set(
+                batch_dirs=[batch_dir],
+                output_dir=output_dir,
+                builder=builder,
+                positions_per_shard=100,
+                seed=42,
+            )
+
+            shard_path = list(result_dir.glob("shard_*.npz"))[0]
+            with np.load(shard_path) as data:
+                assert data["observations"].dtype == np.float32
+                assert data["policy_p1"].dtype == np.float32
+                assert data["policy_p2"].dtype == np.float32
+                assert data["value"].dtype == np.float32
+                assert data["payout_matrix"].dtype == np.float32
+                assert data["action_p1"].dtype == np.int8
+                assert data["action_p2"].dtype == np.int8
 
     def test_respects_positions_per_shard(self) -> None:
         """Shards should not exceed configured size."""
@@ -423,12 +466,15 @@ class TestLoadAllPositions:
             batch_dir = _create_batch(tmp_path, "batch1", num_games=2)
 
             builder = FlatObservationBuilder(width=5, height=5)
-            obs, p1, p2, values, w, h = _load_all_positions([batch_dir], builder)
+            obs, p1, p2, values, payout, a1, a2, w, h = _load_all_positions([batch_dir], builder)
 
             assert len(values) == 6  # 2 games × 3 positions
             assert obs.shape[0] == 6
             assert p1.shape == (6, 5)
             assert p2.shape == (6, 5)
+            assert payout.shape == (6, 5, 5)
+            assert a1.shape == (6,)
+            assert a2.shape == (6,)
             assert w == 5
             assert h == 5
 
@@ -445,8 +491,13 @@ class TestWriteShards:
             p1 = np.zeros((10, 5), dtype=np.float32)
             p2 = np.zeros((10, 5), dtype=np.float32)
             values = np.zeros(10, dtype=np.float32)
+            payout = np.zeros((10, 5, 5), dtype=np.float32)
+            a1 = np.zeros(10, dtype=np.int8)
+            a2 = np.zeros(10, dtype=np.int8)
 
-            shard_count = _write_shards(tmp_path, obs, p1, p2, values, positions_per_shard=3)
+            shard_count = _write_shards(
+                tmp_path, obs, p1, p2, values, payout, a1, a2, positions_per_shard=3
+            )
 
             assert shard_count == 4  # 10 positions / 3 per shard = 4 shards (ceil)
             assert len(list(tmp_path.glob("shard_*.npz"))) == 4
@@ -460,8 +511,11 @@ class TestWriteShards:
             p1 = np.zeros((5, 5), dtype=np.float32)
             p2 = np.zeros((5, 5), dtype=np.float32)
             values = np.zeros(5, dtype=np.float32)
+            payout = np.zeros((5, 5, 5), dtype=np.float32)
+            a1 = np.zeros(5, dtype=np.int8)
+            a2 = np.zeros(5, dtype=np.int8)
 
-            _write_shards(tmp_path, obs, p1, p2, values, positions_per_shard=2)
+            _write_shards(tmp_path, obs, p1, p2, values, payout, a1, a2, positions_per_shard=2)
 
             assert (tmp_path / "shard_0000.npz").exists()
             assert (tmp_path / "shard_0001.npz").exists()
@@ -499,3 +553,170 @@ class TestLoadTrainingSetManifest:
             pytest.raises(FileNotFoundError),
         ):
             load_training_set_manifest(Path(tmpdir))
+
+
+# =============================================================================
+# prepare_training_set_with_split tests
+# =============================================================================
+
+
+class TestPrepareTrainingSetWithSplit:
+    """Tests for prepare_training_set_with_split()."""
+
+    def test_creates_train_and_val_directories(self) -> None:
+        """Should create train/ and val/ subdirectories with manifests and shards."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp_path = Path(tmpdir)
+            batch_dir = _create_batch(tmp_path, "batch1", num_games=10)
+            output_dir = tmp_path / "training_sets"
+            output_dir.mkdir()
+
+            builder = FlatObservationBuilder(width=5, height=5)
+            result_dir = prepare_training_set_with_split(
+                batch_dirs=[batch_dir],
+                output_dir=output_dir,
+                builder=builder,
+                val_ratio=0.2,
+                positions_per_shard=100,
+                seed=42,
+            )
+
+            assert result_dir.exists()
+            assert (result_dir / "train").exists()
+            assert (result_dir / "train" / "manifest.json").exists()
+            assert len(list((result_dir / "train").glob("shard_*.npz"))) >= 1
+
+            assert (result_dir / "val").exists()
+            assert (result_dir / "val" / "manifest.json").exists()
+            assert len(list((result_dir / "val").glob("shard_*.npz"))) >= 1
+
+    def test_respects_val_ratio(self) -> None:
+        """Position counts should be proportional to val_ratio, nothing lost."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp_path = Path(tmpdir)
+            # 10 games × 3 positions = 30 total positions
+            batch_dir = _create_batch(tmp_path, "batch1", num_games=10)
+            output_dir = tmp_path / "training_sets"
+            output_dir.mkdir()
+
+            builder = FlatObservationBuilder(width=5, height=5)
+            result_dir = prepare_training_set_with_split(
+                batch_dirs=[batch_dir],
+                output_dir=output_dir,
+                builder=builder,
+                val_ratio=0.2,  # ~2 games to val, ~8 to train
+                positions_per_shard=100,
+                seed=42,
+            )
+
+            train_manifest = load_training_set_manifest(result_dir / "train")
+            val_manifest = load_training_set_manifest(result_dir / "val")
+
+            # Total positions should be preserved
+            total = train_manifest.total_positions + val_manifest.total_positions
+            assert total == 30  # 10 games × 3 positions
+
+            # Val should have roughly 20% (2 games = 6 positions)
+            assert val_manifest.total_positions == 6
+
+    def test_deterministic_with_seed(self) -> None:
+        """Same seed should produce same split."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp_path = Path(tmpdir)
+            batch_dir = _create_batch(tmp_path, "batch1", num_games=10)
+
+            builder = FlatObservationBuilder(width=5, height=5)
+
+            output_dir1 = tmp_path / "training_sets1"
+            output_dir1.mkdir()
+            result_dir1 = prepare_training_set_with_split(
+                batch_dirs=[batch_dir],
+                output_dir=output_dir1,
+                builder=builder,
+                val_ratio=0.2,
+                seed=42,
+            )
+
+            output_dir2 = tmp_path / "training_sets2"
+            output_dir2.mkdir()
+            result_dir2 = prepare_training_set_with_split(
+                batch_dirs=[batch_dir],
+                output_dir=output_dir2,
+                builder=builder,
+                val_ratio=0.2,
+                seed=42,
+            )
+
+            # Both should have same position counts
+            train1 = load_training_set_manifest(result_dir1 / "train")
+            train2 = load_training_set_manifest(result_dir2 / "train")
+            assert train1.total_positions == train2.total_positions
+
+            val1 = load_training_set_manifest(result_dir1 / "val")
+            val2 = load_training_set_manifest(result_dir2 / "val")
+            assert val1.total_positions == val2.total_positions
+
+    def test_val_ratio_zero_creates_only_train(self) -> None:
+        """val_ratio=0.0 should create only train/, no val/."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp_path = Path(tmpdir)
+            batch_dir = _create_batch(tmp_path, "batch1", num_games=5)
+            output_dir = tmp_path / "training_sets"
+            output_dir.mkdir()
+
+            builder = FlatObservationBuilder(width=5, height=5)
+            result_dir = prepare_training_set_with_split(
+                batch_dirs=[batch_dir],
+                output_dir=output_dir,
+                builder=builder,
+                val_ratio=0.0,
+                positions_per_shard=100,
+                seed=42,
+            )
+
+            assert (result_dir / "train").exists()
+            assert not (result_dir / "val").exists()
+
+            train_manifest = load_training_set_manifest(result_dir / "train")
+            assert train_manifest.total_positions == 15  # 5 games × 3 positions
+
+    def test_invalid_val_ratio_raises(self) -> None:
+        """val_ratio >= 1.0 should raise ValueError."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp_path = Path(tmpdir)
+            batch_dir = _create_batch(tmp_path, "batch1", num_games=5)
+            output_dir = tmp_path / "training_sets"
+            output_dir.mkdir()
+
+            builder = FlatObservationBuilder(width=5, height=5)
+
+            with pytest.raises(ValueError, match="val_ratio must be in"):
+                prepare_training_set_with_split(
+                    batch_dirs=[batch_dir],
+                    output_dir=output_dir,
+                    builder=builder,
+                    val_ratio=1.0,
+                )
+
+            with pytest.raises(ValueError, match="val_ratio must be in"):
+                prepare_training_set_with_split(
+                    batch_dirs=[batch_dir],
+                    output_dir=output_dir,
+                    builder=builder,
+                    val_ratio=1.5,
+                )
+
+    def test_empty_batch_dirs_raises(self) -> None:
+        """Empty batch_dirs should raise ValueError."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            output_dir = Path(tmpdir) / "training_sets"
+            output_dir.mkdir()
+
+            builder = FlatObservationBuilder(width=5, height=5)
+
+            with pytest.raises(ValueError, match="cannot be empty"):
+                prepare_training_set_with_split(
+                    batch_dirs=[],
+                    output_dir=output_dir,
+                    builder=builder,
+                )
