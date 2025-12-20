@@ -117,6 +117,8 @@ class GameRecorder:
         prior_p1: np.ndarray,
         prior_p2: np.ndarray,
         visit_counts: np.ndarray,
+        action_p1: int,
+        action_p2: int,
     ) -> None:
         """Record data for the current position.
 
@@ -129,6 +131,8 @@ class GameRecorder:
             prior_p1: Neural network's policy prior for player 1.
             prior_p2: Neural network's policy prior for player 2.
             visit_counts: MCTS visit counts for action pairs.
+            action_p1: Action taken by player 1 (0-4).
+            action_p2: Action taken by player 2 (0-4).
 
         Raises:
             RuntimeError: If not inside context manager.
@@ -151,6 +155,8 @@ class GameRecorder:
             prior_p2=prior_p2.copy(),
             policy_p1=search_result.policy_p1.copy(),
             policy_p2=search_result.policy_p2.copy(),
+            action_p1=action_p1,
+            action_p2=action_p2,
         )
         self.data.positions.append(position)
 
@@ -216,6 +222,10 @@ class GameRecorder:
                 raise ValueError(f"Position {i}: invalid policy_p1 shape {pos.policy_p1.shape}")
             if pos.policy_p2.shape != (5,):
                 raise ValueError(f"Position {i}: invalid policy_p2 shape {pos.policy_p2.shape}")
+            if not (0 <= pos.action_p1 <= 4):
+                raise ValueError(f"Position {i}: invalid action_p1 {pos.action_p1}")
+            if not (0 <= pos.action_p2 <= 4):
+                raise ValueError(f"Position {i}: invalid action_p2 {pos.action_p2}")
 
     def _build_arrays(self) -> dict[str, np.ndarray]:
         """Convert accumulated data to numpy arrays for saving.
@@ -242,6 +252,8 @@ class GameRecorder:
         prior_p2 = np.zeros((n, 5), dtype=np.float32)
         policy_p1 = np.zeros((n, 5), dtype=np.float32)
         policy_p2 = np.zeros((n, 5), dtype=np.float32)
+        action_p1 = np.zeros(n, dtype=np.int8)
+        action_p2 = np.zeros(n, dtype=np.int8)
 
         for i, pos in enumerate(self.data.positions):
             p1_pos[i] = pos.p1_pos
@@ -258,6 +270,8 @@ class GameRecorder:
             prior_p2[i] = pos.prior_p2.astype(np.float32)
             policy_p1[i] = pos.policy_p1.astype(np.float32)
             policy_p2[i] = pos.policy_p2.astype(np.float32)
+            action_p1[i] = pos.action_p1
+            action_p2[i] = pos.action_p2
 
         return {
             # Game-level
@@ -283,6 +297,8 @@ class GameRecorder:
             "prior_p2": prior_p2,
             "policy_p1": policy_p1,
             "policy_p2": policy_p2,
+            "action_p1": action_p1,
+            "action_p2": action_p2,
         }
 
     def _cheese_to_mask(self, cheese_positions: list[tuple[int, int]]) -> np.ndarray:
