@@ -12,6 +12,7 @@ from alpharat.data.sharding import prepare_training_set
 from alpharat.nn.builders.flat import (
     MAX_MUD_COST,
     MAX_MUD_TURNS,
+    MAX_SCORE,
     FlatDataset,
     FlatObservationBuilder,
 )
@@ -24,26 +25,26 @@ class TestFlatObservationBuilder:
     def test_obs_shape_5x5(self) -> None:
         """Test observation shape for 5x5 maze."""
         builder = FlatObservationBuilder(width=5, height=5)
-        # 5*5*4 (maze) + 5*5*3 (positions + cheese) + 4 (scalars)
-        # = 100 + 75 + 4 = 179
-        assert builder.obs_shape == (179,)
+        # 5*5*4 (maze) + 5*5*3 (positions + cheese) + 6 (scalars)
+        # = 100 + 75 + 6 = 181
+        assert builder.obs_shape == (181,)
 
     def test_obs_shape_3x3(self) -> None:
         """Test observation shape for 3x3 maze."""
         builder = FlatObservationBuilder(width=3, height=3)
-        # 3*3*4 + 3*3*3 + 4 = 36 + 27 + 4 = 67
-        assert builder.obs_shape == (67,)
+        # 3*3*4 + 3*3*3 + 6 = 36 + 27 + 6 = 69
+        assert builder.obs_shape == (69,)
 
     def test_obs_shape_rectangular(self) -> None:
         """Test observation shape for non-square maze."""
         builder = FlatObservationBuilder(width=7, height=4)
-        # 7*4*4 + 7*4*3 + 4 = 112 + 84 + 4 = 200
-        assert builder.obs_shape == (200,)
+        # 7*4*4 + 7*4*3 + 6 = 112 + 84 + 6 = 202
+        assert builder.obs_shape == (202,)
 
     def test_version(self) -> None:
         """Test version string."""
         builder = FlatObservationBuilder(width=5, height=5)
-        assert builder.version == "flat_v1"
+        assert builder.version == "flat_v2"
 
     def test_build_output_shape(self) -> None:
         """Test that build() returns correct shape."""
@@ -52,7 +53,7 @@ class TestFlatObservationBuilder:
 
         obs = builder.build(input_data)
 
-        assert obs.shape == (179,)
+        assert obs.shape == (181,)
         assert obs.dtype == np.float32
 
     def test_build_maze_walls_encoded_as_minus_one(self) -> None:
@@ -159,6 +160,18 @@ class TestFlatObservationBuilder:
         assert obs[65] == pytest.approx(5.0 / MAX_MUD_TURNS)
         assert obs[66] == pytest.approx(3.0 / MAX_MUD_TURNS)
 
+    def test_build_scores_normalized(self) -> None:
+        """Test player scores are normalized."""
+        builder = FlatObservationBuilder(width=3, height=3)
+
+        input_data = _make_observation_input(width=3, height=3, p1_score=7.0, p2_score=3.0)
+        obs = builder.build(input_data)
+
+        # P1 score is fifth scalar (index 67)
+        # P2 score is sixth scalar (index 68)
+        assert obs[67] == pytest.approx(7.0 / MAX_SCORE)
+        assert obs[68] == pytest.approx(3.0 / MAX_SCORE)
+
 
 class TestFlatObservationBuilderSerialization:
     """Tests for save/load functionality."""
@@ -167,13 +180,13 @@ class TestFlatObservationBuilderSerialization:
         """Test saving observations to arrays."""
         builder = FlatObservationBuilder(width=3, height=3)
 
-        obs1 = np.ones(67, dtype=np.float32)
-        obs2 = np.ones(67, dtype=np.float32) * 2
+        obs1 = np.ones(69, dtype=np.float32)
+        obs2 = np.ones(69, dtype=np.float32) * 2
 
         arrays = builder.save_to_arrays([obs1, obs2])
 
         assert "observations" in arrays
-        assert arrays["observations"].shape == (2, 67)
+        assert arrays["observations"].shape == (2, 69)
         assert arrays["observations"][0, 0] == 1.0
         assert arrays["observations"][1, 0] == 2.0
 
@@ -181,13 +194,13 @@ class TestFlatObservationBuilderSerialization:
         """Test loading observation from arrays."""
         builder = FlatObservationBuilder(width=3, height=3)
 
-        obs1 = np.ones(67, dtype=np.float32)
-        obs2 = np.ones(67, dtype=np.float32) * 2
+        obs1 = np.ones(69, dtype=np.float32)
+        obs2 = np.ones(69, dtype=np.float32) * 2
         arrays = builder.save_to_arrays([obs1, obs2])
 
         loaded = builder.load_from_arrays(arrays, idx=1)
 
-        assert loaded.shape == (67,)
+        assert loaded.shape == (69,)
         assert loaded[0] == 2.0
 
     def test_roundtrip(self) -> None:
@@ -379,7 +392,7 @@ class TestFlatDataset:
 
             item = dataset[0]
 
-            assert item["observation"].shape == (179,)  # 5×5 flat obs
+            assert item["observation"].shape == (181,)  # 5×5 flat obs
 
     def test_getitem_policy_shapes(self) -> None:
         """Policies should have shape (5,)."""
@@ -421,7 +434,7 @@ class TestFlatDataset:
             training_set_dir = _create_training_set(Path(tmpdir))
             dataset = FlatDataset(training_set_dir)
 
-            assert dataset.obs_shape == (179,)
+            assert dataset.obs_shape == (181,)
 
     def test_manifest_property(self) -> None:
         """manifest should return TrainingSetManifest."""
@@ -467,4 +480,4 @@ class TestFlatDataset:
             # Should be able to access all indices
             for i in range(9):
                 item = dataset[i]
-                assert item["observation"].shape == (179,)
+                assert item["observation"].shape == (181,)
