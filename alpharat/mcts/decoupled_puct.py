@@ -141,7 +141,54 @@ class DecoupledPUCTSearch:
         puct1 = self._compute_puct_scores(q1, node.prior_policy_p1, n1, n_total)
         puct2 = self._compute_puct_scores(q2, node.prior_policy_p2, n2, n_total)
 
-        return int(np.argmax(puct1)), int(np.argmax(puct2))
+        a1 = self._select_with_tiebreak(puct1, node.p1_effective, node.prior_policy_p1)
+        a2 = self._select_with_tiebreak(puct2, node.p2_effective, node.prior_policy_p2)
+        return a1, a2
+
+    def _select_with_tiebreak(
+        self, puct_scores: np.ndarray, effective: list[int], prior: np.ndarray
+    ) -> int:
+        """Select action with random tie-breaking among effective actions.
+
+        When PUCT scores are tied (common on first simulation when all are 0),
+        samples from the prior distribution over effective actions to ensure
+        symmetric exploration.
+
+        Args:
+            puct_scores: PUCT scores for each action [5].
+            effective: Effective action mapping (blocked actions map to STAY).
+            prior: Prior policy for this player [5].
+
+        Returns:
+            Selected action index.
+        """
+        # Effective actions are those that map to themselves
+        effective_actions = [a for a in range(5) if effective[a] == a]
+
+        if not effective_actions:
+            # Shouldn't happen, but fallback to STAY
+            return 4
+
+        # Get PUCT scores for effective actions
+        effective_puct = [puct_scores[a] for a in effective_actions]
+        max_puct = max(effective_puct)
+
+        # Find all actions tied at max
+        best_actions = [
+            a for a, p in zip(effective_actions, effective_puct, strict=True) if p == max_puct
+        ]
+
+        if len(best_actions) == 1:
+            return best_actions[0]
+
+        # Multiple tied — sample from prior restricted to tied actions
+        tied_prior = np.array([prior[a] for a in best_actions])
+        if tied_prior.sum() > 0:
+            tied_prior /= tied_prior.sum()
+            return int(np.random.choice(best_actions, p=tied_prior))
+
+        # Fallback: uniform random among tied
+        return int(np.random.choice(best_actions))
 
     def _compute_puct_scores(
         self,
