@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import json
+import logging
 import uuid
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
 import numpy as np
 from pydantic import BaseModel
+from tqdm import tqdm
 
 from alpharat.data.loader import load_game_data
 from alpharat.nn.extraction import from_game_arrays
@@ -18,6 +20,8 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     from alpharat.nn.builders import ObservationBuilder
+
+logger = logging.getLogger(__name__)
 
 
 class TrainingSetManifest(BaseModel):
@@ -218,6 +222,7 @@ def prepare_training_set_with_split(
     training_set_dir.mkdir(parents=True, exist_ok=False)
 
     # Process train split
+    logger.info(f"Processing train split: {len(train_files)} games")
     train_dir = training_set_dir / "train"
     train_dir.mkdir()
     _process_game_files_to_shards(
@@ -232,6 +237,7 @@ def prepare_training_set_with_split(
 
     # Process val split (if any validation games)
     if val_files:
+        logger.info(f"Processing val split: {len(val_files)} games")
         val_dir = training_set_dir / "val"
         val_dir.mkdir()
         # Use different seed for val shuffle
@@ -379,7 +385,7 @@ def _load_positions_from_files(
     width: int | None = None
     height: int | None = None
 
-    for game_file in game_files:
+    for game_file in tqdm(game_files, desc="Loading games", unit="game"):
         game_data = load_game_data(game_file)
 
         # Validate dimensions
@@ -481,9 +487,15 @@ def _write_shards(
         Number of shards written.
     """
     n_positions = len(values)
+    n_shards = (n_positions + positions_per_shard - 1) // positions_per_shard
     shard_count = 0
 
-    for start_idx in range(0, n_positions, positions_per_shard):
+    for start_idx in tqdm(
+        range(0, n_positions, positions_per_shard),
+        desc="Writing shards",
+        unit="shard",
+        total=n_shards,
+    ):
         end_idx = min(start_idx + positions_per_shard, n_positions)
 
         shard_path = training_set_dir / f"shard_{shard_count:04d}.npz"

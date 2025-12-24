@@ -130,7 +130,7 @@ class TestTrainingSetManifest:
         manifest = TrainingSetManifest(
             training_set_id="test-id",
             created_at=datetime.now(UTC),
-            builder_version="flat_v1",
+            builder_version="flat_v2",
             source_batches=["batch1", "batch2"],
             total_positions=100,
             shard_count=2,
@@ -198,7 +198,7 @@ class TestPrepareTrainingSet:
 
             manifest = load_training_set_manifest(result_dir)
 
-            assert manifest.builder_version == "flat_v1"
+            assert manifest.builder_version == "flat_v2"
             assert manifest.source_batches == ["batch1"]
             assert manifest.total_positions == 3  # 1 game × 3 positions
             assert manifest.width == 5
@@ -254,7 +254,7 @@ class TestPrepareTrainingSet:
             shard_path = list(result_dir.glob("shard_*.npz"))[0]
             with np.load(shard_path) as data:
                 n = 3  # 1 game × 3 positions
-                assert data["observations"].shape == (n, 179)  # 5×5 flat obs
+                assert data["observations"].shape == (n, 181)  # 5×5 flat obs
                 assert data["policy_p1"].shape == (n, 5)
                 assert data["policy_p2"].shape == (n, 5)
                 assert data["value"].shape == (n,)
@@ -487,7 +487,7 @@ class TestWriteShards:
         with tempfile.TemporaryDirectory() as tmpdir:
             tmp_path = Path(tmpdir)
 
-            obs = np.zeros((10, 179), dtype=np.float32)
+            obs = np.zeros((10, 181), dtype=np.float32)
             p1 = np.zeros((10, 5), dtype=np.float32)
             p2 = np.zeros((10, 5), dtype=np.float32)
             values = np.zeros(10, dtype=np.float32)
@@ -507,7 +507,7 @@ class TestWriteShards:
         with tempfile.TemporaryDirectory() as tmpdir:
             tmp_path = Path(tmpdir)
 
-            obs = np.zeros((5, 179), dtype=np.float32)
+            obs = np.zeros((5, 181), dtype=np.float32)
             p1 = np.zeros((5, 5), dtype=np.float32)
             p2 = np.zeros((5, 5), dtype=np.float32)
             values = np.zeros(5, dtype=np.float32)
