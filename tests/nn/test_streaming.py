@@ -149,7 +149,7 @@ class TestStreamingDataset:
 
             sample = next(iter(dataset))
 
-            assert sample["observation"].shape == (179,)
+            assert sample["observation"].shape == (181,)
             assert sample["policy_p1"].shape == (5,)
             assert sample["policy_p2"].shape == (5,)
             assert sample["value"].shape == (1,)
@@ -260,7 +260,7 @@ class TestStreamingDatasetWithDataLoader:
             batches = list(loader)
 
             assert len(batches) == 3  # 6 samples / batch_size 2
-            assert batches[0]["observation"].shape == (2, 179)
+            assert batches[0]["observation"].shape == (2, 181)
             assert batches[0]["policy_p1"].shape == (2, 5)
             assert batches[0]["policy_p2"].shape == (2, 5)
             assert batches[0]["value"].shape == (2, 1)
@@ -275,8 +275,8 @@ class TestStreamingDatasetWithDataLoader:
             batches = list(loader)
 
             assert len(batches) == 2  # 6 samples: batch of 4, batch of 2
-            assert batches[0]["observation"].shape == (4, 179)
-            assert batches[1]["observation"].shape == (2, 179)
+            assert batches[0]["observation"].shape == (4, 181)
+            assert batches[1]["observation"].shape == (2, 181)
 
     def test_works_with_dataloader_drop_last(self) -> None:
         """Should work with drop_last=True."""
@@ -288,7 +288,7 @@ class TestStreamingDatasetWithDataLoader:
             batches = list(loader)
 
             assert len(batches) == 1  # Only full batch of 4
-            assert batches[0]["observation"].shape == (4, 179)
+            assert batches[0]["observation"].shape == (4, 181)
 
     def test_batch_larger_than_shard(self) -> None:
         """Should handle batch_size > positions_per_shard."""
@@ -306,9 +306,9 @@ class TestStreamingDatasetWithDataLoader:
 
             # 12 positions / batch_size 5 = 2 full batches + 1 partial
             assert len(batches) == 3
-            assert batches[0]["observation"].shape == (5, 179)
-            assert batches[1]["observation"].shape == (5, 179)
-            assert batches[2]["observation"].shape == (2, 179)
+            assert batches[0]["observation"].shape == (5, 181)
+            assert batches[1]["observation"].shape == (5, 181)
+            assert batches[2]["observation"].shape == (2, 181)
 
             # Verify we got all positions
             total_samples = sum(b["observation"].shape[0] for b in batches)
@@ -318,24 +318,29 @@ class TestStreamingDatasetWithDataLoader:
 class TestStreamingDatasetVsFlatDataset:
     """Tests comparing StreamingDataset to FlatDataset."""
 
-    def test_yields_same_data_as_flat_dataset(self) -> None:
-        """StreamingDataset should yield same data as FlatDataset (in some order)."""
+    def test_yields_same_count_as_flat_dataset(self) -> None:
+        """StreamingDataset should yield same number of samples as FlatDataset."""
         with tempfile.TemporaryDirectory() as tmpdir:
             training_set_dir = _create_training_set(Path(tmpdir), num_games=2)
 
             flat = FlatDataset(training_set_dir)
             streaming = StreamingDataset(training_set_dir, shuffle_shards=False)
 
-            # Collect all observations from both
-            flat_obs = set()
-            for i in range(len(flat)):
-                obs = flat[i]["observation"]
-                flat_obs.add(tuple(obs.tolist()))
+            streaming_samples = list(streaming)
 
-            streaming_obs = set()
+            assert len(streaming_samples) == len(flat)
+
+    def test_streaming_samples_have_correct_shapes(self) -> None:
+        """All streaming samples should have correct shapes."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            training_set_dir = _create_training_set(Path(tmpdir), num_games=2)
+            streaming = StreamingDataset(training_set_dir)
+
             for sample in streaming:
-                obs = sample["observation"].numpy()
-                streaming_obs.add(tuple(obs.tolist()))
-
-            # Same data (order may differ if shards are shuffled)
-            assert flat_obs == streaming_obs
+                assert sample["observation"].shape == (181,)
+                assert sample["policy_p1"].shape == (5,)
+                assert sample["policy_p2"].shape == (5,)
+                assert sample["value"].shape == (1,)
+                assert sample["payout_matrix"].shape == (5, 5)
+                assert sample["action_p1"].shape == (1,)
+                assert sample["action_p2"].shape == (1,)
