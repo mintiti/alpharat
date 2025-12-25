@@ -11,9 +11,18 @@ if TYPE_CHECKING:
     from alpharat.data.sharding import TrainingSetManifest
     from alpharat.nn.types import ObservationInput
 
-# Normalization constants
+# Normalization constants (exported for tests)
 MAX_MUD_COST = 10
 MAX_MUD_TURNS = 10
+MAX_SCORE = 10
+
+__all__ = [
+    "MAX_MUD_COST",
+    "MAX_MUD_TURNS",
+    "MAX_SCORE",
+    "FlatObservationBuilder",
+    "FlatDataset",
+]
 
 
 class FlatObservationBuilder:
@@ -28,7 +37,9 @@ class FlatObservationBuilder:
     - Progress: 1 (turn/max_turns)
     - P1 mud: 1 (normalized)
     - P2 mud: 1 (normalized)
-    Total: 179 floats for 5x5
+    - P1 score: 1 (normalized)
+    - P2 score: 1 (normalized)
+    Total: 181 floats for 5x5
     """
 
     def __init__(self, width: int, height: int) -> None:
@@ -41,13 +52,13 @@ class FlatObservationBuilder:
         self._width = width
         self._height = height
         self._spatial_size = width * height
-        # maze(H*W*4) + p1_pos(H*W) + p2_pos(H*W) + cheese(H*W) + 4 scalars
-        self._obs_dim = self._spatial_size * 7 + 4
+        # maze(H*W*4) + p1_pos(H*W) + p2_pos(H*W) + cheese(H*W) + 6 scalars
+        self._obs_dim = self._spatial_size * 7 + 6
 
     @property
     def version(self) -> str:
         """Builder version identifier."""
-        return "flat_v1"
+        return "flat_v2"
 
     @property
     def obs_shape(self) -> tuple[int, ...]:
@@ -104,6 +115,8 @@ class FlatObservationBuilder:
             progress = np.float32(0)
         p1_mud = np.float32(input.p1_mud / MAX_MUD_TURNS)
         p2_mud = np.float32(input.p2_mud / MAX_MUD_TURNS)
+        p1_score = np.float32(input.p1_score / MAX_SCORE)
+        p2_score = np.float32(input.p2_score / MAX_SCORE)
 
         # Concatenate all features
         return np.concatenate(
@@ -112,7 +125,10 @@ class FlatObservationBuilder:
                 p1_flat,
                 p2_flat,
                 cheese_flat,
-                np.array([score_diff, progress, p1_mud, p2_mud], dtype=np.float32),
+                np.array(
+                    [score_diff, progress, p1_mud, p2_mud, p1_score, p2_score],
+                    dtype=np.float32,
+                ),
             ]
         )
 

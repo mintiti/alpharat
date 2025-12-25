@@ -30,10 +30,12 @@ dev = [
     "ruff>=0.8.0",
     "pre-commit>=3.6.0",
     "types-pyyaml>=6.0",
+    "types-tqdm>=4.66",
 ]
 train = [
     "torch>=2.0",
     "tensorboard>=2.15",
+    "tqdm>=4.66",
 ]
 
 [build-system]

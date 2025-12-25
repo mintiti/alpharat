@@ -51,56 +51,81 @@ class GameStats:
 
     positions: int
     simulations: int
-
-
-@dataclass
-class WorkerStats:
-    """Aggregated statistics from a worker process."""
-
-    games_completed: int = 0
-    total_positions: int = 0
-    total_simulations: int = 0
-
-    def add_game(self, game_stats: GameStats) -> None:
-        """Add stats from a completed game."""
-        self.games_completed += 1
-        self.total_positions += game_stats.positions
-        self.total_simulations += game_stats.simulations
+    winner: int  # 0=draw, 1=p1, 2=p2
+    score_p1: float
+    score_p2: float
+    turns: int
+    cheese_available: int
 
 
 @dataclass
 class SamplingMetrics:
-    """Throughput metrics from a sampling run."""
+    """Metrics from a sampling run."""
 
+    # Throughput
     total_games: int
     total_positions: int
     total_simulations: int
     elapsed_seconds: float
     workers: int
 
+    # Game outcomes (from P1 perspective)
+    p1_wins: int
+    p2_wins: int
+    draws: int
+
+    # Cheese stats
+    total_cheese_collected: float
+    total_cheese_available: int
+
+    # Game length
+    total_turns: int
+    min_turns: int
+    max_turns: int
+
     @property
     def games_per_second(self) -> float:
-        """Games completed per second."""
         return self.total_games / self.elapsed_seconds if self.elapsed_seconds > 0 else 0.0
 
     @property
     def positions_per_second(self) -> float:
-        """Positions (steps) processed per second."""
         return self.total_positions / self.elapsed_seconds if self.elapsed_seconds > 0 else 0.0
 
     @property
     def simulations_per_second(self) -> float:
-        """MCTS simulations per second."""
         return self.total_simulations / self.elapsed_seconds if self.elapsed_seconds > 0 else 0.0
+
+    @property
+    def avg_turns(self) -> float:
+        return self.total_turns / self.total_games if self.total_games > 0 else 0.0
+
+    @property
+    def cheese_utilization(self) -> float:
+        """Fraction of available cheese that was collected."""
+        if self.total_cheese_available == 0:
+            return 0.0
+        return self.total_cheese_collected / self.total_cheese_available
+
+    @property
+    def draw_rate(self) -> float:
+        return self.draws / self.total_games if self.total_games > 0 else 0.0
 
     def __str__(self) -> str:
         return (
             f"SamplingMetrics(\n"
-            f"  workers={self.workers},\n"
-            f"  elapsed={self.elapsed_seconds:.2f}s,\n"
-            f"  games={self.total_games} ({self.games_per_second:.2f}/s),\n"
-            f"  positions={self.total_positions} ({self.positions_per_second:.2f}/s),\n"
-            f"  simulations={self.total_simulations} ({self.simulations_per_second:.2f}/s)\n"
+            f"  Throughput:\n"
+            f"    workers={self.workers}, elapsed={self.elapsed_seconds:.2f}s\n"
+            f"    games={self.total_games} ({self.games_per_second:.2f}/s)\n"
+            f"    positions={self.total_positions} ({self.positions_per_second:.2f}/s)\n"
+            f"    simulations={self.total_simulations} ({self.simulations_per_second:.2f}/s)\n"
+            f"  Outcomes (P1 perspective):\n"
+            f"    W/D/L = {self.p1_wins}/{self.draws}/{self.p2_wins}\n"
+            f"    draw_rate = {self.draw_rate:.1%}\n"
+            f"  Cheese:\n"
+            f"    collected = {int(self.total_cheese_collected)}/{self.total_cheese_available} "
+            f"({self.cheese_utilization:.1%})\n"
+            f"  Game length:\n"
+            f"    avg={self.avg_turns:.1f}, min={self.min_turns}, max={self.max_turns}\n"
             f")"
         )
 
@@ -151,13 +176,19 @@ def create_game(params: GameParams, seed: int) -> PyRat:
     """
     from pyrat_engine.core.game import PyRat
 
-    return PyRat(
-        width=params.width,
-        height=params.height,
-        cheese_count=params.cheese_count,
-        max_turns=params.max_turns,
-        seed=seed,
-    )
+    kwargs: dict[str, int | float] = {
+        "width": params.width,
+        "height": params.height,
+        "cheese_count": params.cheese_count,
+        "max_turns": params.max_turns,
+        "seed": seed,
+    }
+    if params.wall_density is not None:
+        kwargs["wall_density"] = params.wall_density
+    if params.mud_density is not None:
+        kwargs["mud_density"] = params.mud_density
+
+    return PyRat(**kwargs)  # type: ignore[arg-type]
 
 
 # --- Core Sampling ---
@@ -176,9 +207,10 @@ def play_and_record_game(
         seed: Random seed for game generation.
 
     Returns:
-        GameStats with position and simulation counts.
+        GameStats with position, simulation, and outcome data.
     """
     game = create_game(config.game, seed)
+    cheese_available = config.game.cheese_count
     positions = 0
     total_simulations = 0
 
@@ -209,7 +241,24 @@ def play_and_record_game(
 
             game.make_move(a1, a2)
 
-    return GameStats(positions=positions, simulations=total_simulations)
+    # Determine winner
+    score_p1, score_p2 = game.player1_score, game.player2_score
+    if score_p1 > score_p2:
+        winner = 1
+    elif score_p2 > score_p1:
+        winner = 2
+    else:
+        winner = 0
+
+    return GameStats(
+        positions=positions,
+        simulations=total_simulations,
+        winner=winner,
+        score_p1=score_p1,
+        score_p2=score_p2,
+        turns=game.turn,
+        cheese_available=cheese_available,
+    )
 
 
 def _worker_loop(
@@ -269,24 +318,26 @@ def run_sampling(config: SamplingConfig, *, verbose: bool = True) -> tuple[Path,
         print(f"  Output: {batch_dir}")
         print()
 
-    total_positions = 0
-    total_simulations = 0
     num_workers = config.sampling.workers
     num_games = config.sampling.num_games
+
+    # Aggregation accumulators
+    total_positions = 0
+    total_simulations = 0
+    p1_wins = 0
+    p2_wins = 0
+    draws = 0
+    total_cheese_collected = 0.0
+    total_cheese_available = 0
+    total_turns = 0
+    min_turns: int | float = float("inf")
+    max_turns = 0
 
     # Create queues for work distribution and results collection
     work_queue: Queue[int | None] = Queue()
     results_queue: Queue[GameStats] = Queue()
 
-    # Pre-fill work queue with all seeds
-    for seed in range(num_games):
-        work_queue.put(seed)
-
-    # Add sentinel values to stop workers (one per worker)
-    for _ in range(num_workers):
-        work_queue.put(None)
-
-    # Start worker processes
+    # Start worker processes BEFORE filling queue (queue blocks when full)
     workers = [
         Process(target=_worker_loop, args=(config, games_dir, work_queue, results_queue))
         for _ in range(num_workers)
@@ -297,16 +348,56 @@ def run_sampling(config: SamplingConfig, *, verbose: bool = True) -> tuple[Path,
     for worker in workers:
         worker.start()
 
+    # Fill work queue with seeds (workers consume as we add)
+    for seed in range(num_games):
+        work_queue.put(seed)
+
+    # Add sentinel values to stop workers (one per worker)
+    for _ in range(num_workers):
+        work_queue.put(None)
+
     # Collect results as they come in
     for completed in range(1, num_games + 1):
         game_stats = results_queue.get()
+
+        # Throughput stats
         total_positions += game_stats.positions
         total_simulations += game_stats.simulations
 
-        if verbose and completed % 10 == 0:
+        # Outcome stats
+        if game_stats.winner == 1:
+            p1_wins += 1
+        elif game_stats.winner == 2:
+            p2_wins += 1
+        else:
+            draws += 1
+
+        # Cheese stats
+        total_cheese_collected += game_stats.score_p1 + game_stats.score_p2
+        total_cheese_available += game_stats.cheese_available
+
+        # Game length stats
+        total_turns += game_stats.turns
+        min_turns = min(min_turns, game_stats.turns)
+        max_turns = max(max_turns, game_stats.turns)
+
+        if verbose and completed % 100 == 0:
             elapsed = time.perf_counter() - start_time
             rate = completed / elapsed
-            print(f"Completed {completed}/{num_games} games ({rate:.2f} games/s)")
+            cheese_util = (
+                total_cheese_collected / total_cheese_available
+                if total_cheese_available > 0
+                else 0.0
+            )
+            draw_rate = draws / completed
+            avg_turns = total_turns / completed
+            print(
+                f"[{completed}/{num_games}] "
+                f"{rate:.1f} games/s | "
+                f"W/D/L {p1_wins}/{draws}/{p2_wins} ({draw_rate:.0%} draws) | "
+                f"cheese {cheese_util:.0%} | "
+                f"avg turns {avg_turns:.1f}"
+            )
 
     # Wait for all workers to finish
     for worker in workers:
@@ -315,11 +406,19 @@ def run_sampling(config: SamplingConfig, *, verbose: bool = True) -> tuple[Path,
     elapsed_seconds = time.perf_counter() - start_time
 
     metrics = SamplingMetrics(
-        total_games=config.sampling.num_games,
+        total_games=num_games,
         total_positions=total_positions,
         total_simulations=total_simulations,
         elapsed_seconds=elapsed_seconds,
-        workers=config.sampling.workers,
+        workers=num_workers,
+        p1_wins=p1_wins,
+        p2_wins=p2_wins,
+        draws=draws,
+        total_cheese_collected=total_cheese_collected,
+        total_cheese_available=total_cheese_available,
+        total_turns=total_turns,
+        min_turns=int(min_turns) if min_turns != float("inf") else 0,
+        max_turns=max_turns,
     )
 
     if verbose:

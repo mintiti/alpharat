@@ -209,3 +209,13 @@ __marimo__/
 
 # Personal documents folder
 .mt/
+
+# macOS
+.DS_Store
+
+# Project data/output directories
+batches/
+checkpoints/
+data/
+results/
+*.prof

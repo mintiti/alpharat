@@ -66,13 +66,16 @@ class StreamingDataset(IterableDataset[dict[str, torch.Tensor]]):
         ]
 
     def __iter__(self) -> Iterator[dict[str, torch.Tensor]]:
-        """Yield samples one at a time with shard prefetching."""
+        """Yield samples one at a time with shard prefetching.
+
+        Note: Augmentation should be applied after batching using BatchAugmentation.
+        """
         # Determine shard order for this epoch
         shard_indices = list(range(len(self._shard_paths)))
+        epoch_seed = (self._seed or 0) + self._epoch
+        rng = np.random.default_rng(epoch_seed)
+
         if self._shuffle_shards:
-            # Use seed + epoch for reproducible but varying order per epoch
-            epoch_seed = (self._seed or 0) + self._epoch
-            rng = np.random.default_rng(epoch_seed)
             rng.shuffle(shard_indices)
 
         self._epoch += 1
@@ -94,13 +97,13 @@ class StreamingDataset(IterableDataset[dict[str, torch.Tensor]]):
                 n_samples = len(shard_data["value"])
                 for j in range(n_samples):
                     yield {
-                        "observation": torch.from_numpy(shard_data["observations"][j]),
-                        "policy_p1": torch.from_numpy(shard_data["policy_p1"][j]),
-                        "policy_p2": torch.from_numpy(shard_data["policy_p2"][j]),
-                        "value": torch.from_numpy(shard_data["value"][j : j + 1]),
-                        "payout_matrix": torch.from_numpy(shard_data["payout_matrix"][j]),
-                        "action_p1": torch.from_numpy(shard_data["action_p1"][j : j + 1]),
-                        "action_p2": torch.from_numpy(shard_data["action_p2"][j : j + 1]),
+                        "observation": torch.from_numpy(shard_data["observations"][j].copy()),
+                        "policy_p1": torch.from_numpy(shard_data["policy_p1"][j].copy()),
+                        "policy_p2": torch.from_numpy(shard_data["policy_p2"][j].copy()),
+                        "value": torch.from_numpy(shard_data["value"][j : j + 1].copy()),
+                        "payout_matrix": torch.from_numpy(shard_data["payout_matrix"][j].copy()),
+                        "action_p1": torch.from_numpy(shard_data["action_p1"][j : j + 1].copy()),
+                        "action_p2": torch.from_numpy(shard_data["action_p2"][j : j + 1].copy()),
                     }
 
     def __len__(self) -> int:
