@@ -1,0 +1,19 @@
+# Training configuration
+# Usage: uv run python scripts/train.py configs/train.yaml
+
+model:
+  hidden_dim: 256
+  dropout: 0.0
+
+optim:
+  lr: 1e-3
+  policy_weight: 1.0
+  value_weight: 1.0
+  loss_variant: dqn  # "mcts" (full matrix) or "dqn" (sparse)
+  p_augment: 0.5      # probability of player swap augmentation per sample
+
+data:
+  train_dir: data/9575392c-e2e8-4393-ae54-80248c36080d/train
+  val_dir: data/9575392c-e2e8-4393-ae54-80248c36080d/val
+
+seed: 42
