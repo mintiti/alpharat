@@ -3,10 +3,27 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from enum import IntEnum
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     import numpy as np
+
+
+class CheeseOutcome(IntEnum):
+    """Per-cheese outcome from P1's perspective.
+
+    Each cheese in the game has exactly one outcome:
+    - P1_WIN: P1 collected it alone
+    - SIMULTANEOUS: Both players collected it at the same time (0.5 points each)
+    - UNCOLLECTED: Game ended before anyone collected it
+    - P2_WIN: P2 collected it alone (loss for P1)
+    """
+
+    P1_WIN = 0
+    SIMULTANEOUS = 1
+    UNCOLLECTED = 2
+    P2_WIN = 3
 
 
 @dataclass
@@ -53,3 +70,4 @@ class GameData:
     result: int = 0  # 1=P1 win, 2=P2 win, 0=draw
     final_p1_score: float = 0.0
     final_p2_score: float = 0.0
+    cheese_outcomes: np.ndarray | None = None  # int8[H, W], CheeseOutcome values

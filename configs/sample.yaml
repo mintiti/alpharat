@@ -15,7 +15,7 @@ game:
   mud_density: 0.0
 
 sampling:
-  num_games: 10000
+  num_games: 50000
   workers: 4
 
 output_dir: batches/

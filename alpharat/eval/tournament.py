@@ -1,4 +1,4 @@
-"""Round-robin tournament for comparing MCTS agents."""
+"""Round-robin tournament for comparing agents."""
 
 from __future__ import annotations
 
@@ -9,22 +9,46 @@ from typing import TYPE_CHECKING
 
 from pydantic import BaseModel
 
-from alpharat.ai import GreedyAgent, MCTSAgent, RandomAgent
+from alpharat.ai.config import AgentConfig  # noqa: TC001
 from alpharat.data.batch import GameParams  # noqa: TC001
 from alpharat.eval.game import play_game
-from alpharat.mcts import MCTSConfig  # noqa: TC001
 
 if TYPE_CHECKING:
     from alpharat.ai.base import Agent
 
 
 class TournamentConfig(BaseModel):
-    """Round-robin tournament configuration."""
+    """Round-robin tournament configuration.
 
-    agents: dict[str, MCTSConfig]
+    Example YAML:
+        agents:
+          random:
+            variant: random
+          greedy:
+            variant: greedy
+          mcts_baseline:
+            variant: mcts
+            simulations: 200
+          mcts_with_nn:
+            variant: mcts
+            simulations: 200
+            checkpoint: checkpoints/best_model.pt
+
+        games_per_matchup: 50
+        game:
+          width: 5
+          height: 5
+          max_turns: 30
+          cheese_count: 5
+        workers: 4
+        device: mps
+    """
+
+    agents: dict[str, AgentConfig]
     games_per_matchup: int
     game: GameParams
     workers: int = 4
+    device: str = "cpu"
 
 
 @dataclass
@@ -251,10 +275,10 @@ def run_tournament(config: TournamentConfig, *, verbose: bool = True) -> Tournam
     Returns:
         TournamentResult with all matchup results.
     """
-    # Build agent dict: config.agents + Random + Greedy
-    agents: dict[str, Agent] = {"Random": RandomAgent(), "Greedy": GreedyAgent()}
-    for name, mcts_config in config.agents.items():
-        agents[name] = MCTSAgent(mcts_config)
+    # Build agents from config
+    agents: dict[str, Agent] = {}
+    for name, agent_config in config.agents.items():
+        agents[name] = agent_config.build(device=config.device)
 
     agent_names = list(agents.keys())
 

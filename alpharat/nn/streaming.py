@@ -104,6 +104,10 @@ class StreamingDataset(IterableDataset[dict[str, torch.Tensor]]):
                         "payout_matrix": torch.from_numpy(shard_data["payout_matrix"][j].copy()),
                         "action_p1": torch.from_numpy(shard_data["action_p1"][j : j + 1].copy()),
                         "action_p2": torch.from_numpy(shard_data["action_p2"][j : j + 1].copy()),
+                        # cheese_outcomes: int8 with -1=inactive, 0-3=outcome class
+                        "cheese_outcomes": torch.from_numpy(
+                            shard_data["cheese_outcomes"][j].copy()
+                        ),
                     }
 
     def __len__(self) -> int:
@@ -123,7 +127,8 @@ def _load_shard(path: Path) -> dict[str, np.ndarray]:
         path: Path to shard npz file.
 
     Returns:
-        Dict with observations, policy_p1, policy_p2, value, payout_matrix, action arrays.
+        Dict with observations, policies, value, payout_matrix, actions, cheese_outcomes.
+        cheese_outcomes uses -1 sentinel for inactive cells, 0-3 for outcome classes.
     """
     with np.load(path) as data:
         return {
@@ -134,4 +139,5 @@ def _load_shard(path: Path) -> dict[str, np.ndarray]:
             "payout_matrix": np.array(data["payout_matrix"]),
             "action_p1": np.array(data["action_p1"]),
             "action_p2": np.array(data["action_p2"]),
+            "cheese_outcomes": np.array(data["cheese_outcomes"]),
         }

@@ -18,7 +18,6 @@ import pandas as pd
 
 from alpharat.ai import GreedyAgent, MCTSAgent
 from alpharat.eval.game import play_game
-from alpharat.mcts import DecoupledPUCTConfig
 
 # Game parameters - 5x5 open maze
 WIDTH, HEIGHT = 5, 5
@@ -33,12 +32,10 @@ def objective(trial: optuna.Trial) -> float:
     n_sims = trial.suggest_int("n_sims", 10, 2000, log=True)
     c_puct = trial.suggest_float("c_puct", 0.5, 16.0, log=True)
 
-    config = DecoupledPUCTConfig(simulations=n_sims, c_puct=c_puct)
-
     wins = 0.0
     for game_idx in range(GAMES_PER_CONFIG):
         seed = game_idx  # Same mazes for all configs
-        agent = MCTSAgent(config)
+        agent = MCTSAgent(simulations=n_sims, c_puct=c_puct)
         opponent = GreedyAgent()
 
         result = play_game(

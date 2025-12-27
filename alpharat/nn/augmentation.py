@@ -102,11 +102,19 @@ def swap_player_perspective_batch(
     """Swap P1/P2 perspective for masked samples in a batch.
 
     Uses torch.where to avoid masked indexing, reducing GPU kernel launches.
-    Compiled with torch.compile for kernel fusion.
+    Compiled with torch.compile for kernel fusion (may have issues on MPS).
+
+    Transforms applied:
+        - observation: swap p1_pos/p2_pos, negate score_diff, swap mud/scores
+        - policy_p1/p2: swap
+        - action_p1/p2: swap
+        - value: negate
+        - payout_matrix: M' = -M^T
+        - cheese_outcomes: swap P1_WIN(0) <-> P2_WIN(3), keep others unchanged
 
     Args:
         batch: Dict with keys observation, policy_p1, policy_p2, value,
-            payout_matrix, action_p1, action_p2. Shapes are (N, ...).
+            payout_matrix, action_p1, action_p2, cheese_outcomes. Shapes are (N, ...).
         mask: Boolean tensor of shape (N,) indicating which samples to augment.
         width: Maze width.
         height: Maze height.
@@ -119,7 +127,7 @@ def swap_player_perspective_batch(
 
     # Expand mask for broadcasting with different tensor shapes
     # mask: (N,) -> mask_2d: (N, 1) -> broadcasts with (N, D) tensors
-    # mask: (N,) -> mask_3d: (N, 1, 1) -> broadcasts with (N, 5, 5) tensors
+    # mask: (N,) -> mask_3d: (N, 1, 1) -> broadcasts with (N, 5, 5) or (N, H, W) tensors
     mask_2d = mask.unsqueeze(-1)
     mask_3d = mask_2d.unsqueeze(-1)
 
@@ -178,6 +186,21 @@ def swap_player_perspective_batch(
     payout = batch["payout_matrix"]
     swapped_payout = -payout.transpose(-1, -2)
     batch["payout_matrix"] = torch.where(mask_3d, swapped_payout, payout)
+
+    # === Cheese outcomes ===
+    # Swap P1_WIN (0) <-> P2_WIN (3), keep SIMULTANEOUS (1), UNCOLLECTED (2), and -1 unchanged
+    # This is an involution: swap(swap(x)) = x
+    if "cheese_outcomes" in batch:
+        outcomes = batch["cheese_outcomes"]  # (N, H, W), int8 with values -1, 0, 1, 2, 3
+        # Build swapped version: 0->3, 3->0, others unchanged
+        swapped_outcomes = outcomes.clone()
+        swapped_outcomes = torch.where(
+            outcomes == 0, torch.tensor(3, device=outcomes.device), swapped_outcomes
+        )
+        swapped_outcomes = torch.where(
+            outcomes == 3, torch.tensor(0, device=outcomes.device), swapped_outcomes
+        )
+        batch["cheese_outcomes"] = torch.where(mask_3d, swapped_outcomes, outcomes)
 
     return batch
 

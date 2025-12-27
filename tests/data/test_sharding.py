@@ -16,6 +16,7 @@ from alpharat.data.sharding import (
     prepare_training_set,
     prepare_training_set_with_split,
 )
+from alpharat.data.types import CheeseOutcome
 from alpharat.nn.builders.flat import FlatObservationBuilder
 
 
@@ -40,6 +41,10 @@ def _create_game_npz(
 
     initial_cheese = np.zeros((height, width), dtype=bool)
     initial_cheese[2, 2] = True
+
+    # Cheese outcomes: P1 wins the cheese at (2, 2)
+    cheese_outcomes = np.full((height, width), CheeseOutcome.UNCOLLECTED, dtype=np.int8)
+    cheese_outcomes[2, 2] = CheeseOutcome.P1_WIN
 
     # Position-level arrays
     p1_pos = np.zeros((n, 2), dtype=np.int8)
@@ -78,6 +83,7 @@ def _create_game_npz(
         path,
         maze=maze,
         initial_cheese=initial_cheese,
+        cheese_outcomes=cheese_outcomes,
         max_turns=np.array(100, dtype=np.int16),
         result=np.array(1 if final_p1_score > final_p2_score else 0, dtype=np.int8),
         final_p1_score=np.array(final_p1_score, dtype=np.float32),
@@ -231,6 +237,7 @@ class TestPrepareTrainingSet:
                     "payout_matrix",
                     "action_p1",
                     "action_p2",
+                    "cheese_outcomes",
                 }
                 assert set(data.files) == expected_keys
 
@@ -261,6 +268,7 @@ class TestPrepareTrainingSet:
                 assert data["payout_matrix"].shape == (n, 5, 5)
                 assert data["action_p1"].shape == (n,)
                 assert data["action_p2"].shape == (n,)
+                assert data["cheese_outcomes"].shape == (n, 5, 5)  # (N, H, W)
 
     def test_shard_dtypes(self) -> None:
         """Shard arrays should have correct dtypes."""
@@ -288,6 +296,7 @@ class TestPrepareTrainingSet:
                 assert data["payout_matrix"].dtype == np.float32
                 assert data["action_p1"].dtype == np.int8
                 assert data["action_p2"].dtype == np.int8
+                assert data["cheese_outcomes"].dtype == np.int8
 
     def test_respects_positions_per_shard(self) -> None:
         """Shards should not exceed configured size."""
@@ -466,7 +475,9 @@ class TestLoadAllPositions:
             batch_dir = _create_batch(tmp_path, "batch1", num_games=2)
 
             builder = FlatObservationBuilder(width=5, height=5)
-            obs, p1, p2, values, payout, a1, a2, w, h = _load_all_positions([batch_dir], builder)
+            obs, p1, p2, values, payout, a1, a2, cheese, w, h = _load_all_positions(
+                [batch_dir], builder
+            )
 
             assert len(values) == 6  # 2 games × 3 positions
             assert obs.shape[0] == 6
@@ -475,6 +486,7 @@ class TestLoadAllPositions:
             assert payout.shape == (6, 5, 5)
             assert a1.shape == (6,)
             assert a2.shape == (6,)
+            assert cheese.shape == (6, 5, 5)
             assert w == 5
             assert h == 5
 
@@ -494,9 +506,10 @@ class TestWriteShards:
             payout = np.zeros((10, 5, 5), dtype=np.float32)
             a1 = np.zeros(10, dtype=np.int8)
             a2 = np.zeros(10, dtype=np.int8)
+            cheese = np.zeros((10, 5, 5), dtype=np.int8)
 
             shard_count = _write_shards(
-                tmp_path, obs, p1, p2, values, payout, a1, a2, positions_per_shard=3
+                tmp_path, obs, p1, p2, values, payout, a1, a2, cheese, positions_per_shard=3
             )
 
             assert shard_count == 4  # 10 positions / 3 per shard = 4 shards (ceil)
@@ -514,8 +527,11 @@ class TestWriteShards:
             payout = np.zeros((5, 5, 5), dtype=np.float32)
             a1 = np.zeros(5, dtype=np.int8)
             a2 = np.zeros(5, dtype=np.int8)
+            cheese = np.zeros((5, 5, 5), dtype=np.int8)
 
-            _write_shards(tmp_path, obs, p1, p2, values, payout, a1, a2, positions_per_shard=2)
+            _write_shards(
+                tmp_path, obs, p1, p2, values, payout, a1, a2, cheese, positions_per_shard=2
+            )
 
             assert (tmp_path / "shard_0000.npz").exists()
             assert (tmp_path / "shard_0001.npz").exists()

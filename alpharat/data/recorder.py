@@ -14,7 +14,7 @@ if TYPE_CHECKING:
 import numpy as np
 
 from alpharat.data.maze import build_maze_array
-from alpharat.data.types import GameData, PositionData
+from alpharat.data.types import CheeseOutcome, GameData, PositionData
 
 
 class GameRecorder:
@@ -177,6 +177,57 @@ class GameRecorder:
         self.data.result = result
         self.data.final_p1_score = p1_score
         self.data.final_p2_score = p2_score
+        self.data.cheese_outcomes = self._compute_cheese_outcomes()
+
+    def _compute_cheese_outcomes(self) -> np.ndarray:
+        """Compute per-cheese outcomes from position history.
+
+        Tracks when each cheese disappears and determines who collected it
+        by checking player positions after the move.
+
+        Returns:
+            int8[H, W] array with CheeseOutcome values.
+        """
+        assert self.data is not None
+        outcomes = np.full((self.height, self.width), CheeseOutcome.UNCOLLECTED, dtype=np.int8)
+
+        positions = self.data.positions
+        n = len(positions)
+
+        for i in range(n):
+            current_cheese = set(positions[i].cheese_positions)
+
+            if i + 1 < n:
+                next_cheese = set(positions[i + 1].cheese_positions)
+                next_p1_pos = positions[i + 1].p1_pos
+                next_p2_pos = positions[i + 1].p2_pos
+            else:
+                # Last recorded position - use final game state
+                final_cheese = {(c.x, c.y) for c in self._game.cheese_positions()}
+                next_cheese = final_cheese
+                next_p1_pos = (
+                    self._game.player1_position.x,
+                    self._game.player1_position.y,
+                )
+                next_p2_pos = (
+                    self._game.player2_position.x,
+                    self._game.player2_position.y,
+                )
+
+            collected = current_cheese - next_cheese
+
+            for x, y in collected:
+                p1_there = next_p1_pos == (x, y)
+                p2_there = next_p2_pos == (x, y)
+
+                if p1_there and p2_there:
+                    outcomes[y, x] = CheeseOutcome.SIMULTANEOUS
+                elif p1_there:
+                    outcomes[y, x] = CheeseOutcome.P1_WIN
+                elif p2_there:
+                    outcomes[y, x] = CheeseOutcome.P2_WIN
+
+        return outcomes
 
     def _save(self) -> Path:
         """Save recorded game to disk."""
@@ -234,6 +285,7 @@ class GameRecorder:
             Dictionary of arrays matching the data format spec.
         """
         assert self.data is not None
+        assert self.data.cheese_outcomes is not None
         n = len(self.data.positions)
         h, w = self.height, self.width
 
@@ -277,6 +329,7 @@ class GameRecorder:
             # Game-level
             "maze": self.data.maze,
             "initial_cheese": self.data.initial_cheese,
+            "cheese_outcomes": self.data.cheese_outcomes,
             "max_turns": np.array(self.data.max_turns, dtype=np.int16),
             "result": np.array(self.data.result, dtype=np.int8),
             "final_p1_score": np.array(self.data.final_p1_score, dtype=np.float32),

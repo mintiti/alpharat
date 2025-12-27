@@ -46,8 +46,8 @@ def main() -> None:
     parser.add_argument(
         "--positions-per-shard",
         type=int,
-        default=10000,
-        help="Max positions per shard file (default: 10000)",
+        default=3_000_000,
+        help="Max positions per shard file (default: 3M, ~1-2GB compressed)",
     )
     parser.add_argument(
         "--seed",

@@ -5,7 +5,7 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from alpharat.data.types import GameData, PositionData
+from alpharat.data.types import CheeseOutcome, GameData, PositionData
 from alpharat.nn.targets import build_targets
 from alpharat.nn.types import TargetBundle
 
@@ -18,6 +18,7 @@ def _make_game_data(
     """Create GameData with defaults for testing."""
     maze = np.ones((5, 5, 4), dtype=np.int8)
     initial_cheese = np.zeros((5, 5), dtype=bool)
+    cheese_outcomes = np.full((5, 5), CheeseOutcome.UNCOLLECTED, dtype=np.int8)
 
     return GameData(
         maze=maze,
@@ -29,6 +30,7 @@ def _make_game_data(
         result=1,
         final_p1_score=final_p1_score,
         final_p2_score=final_p2_score,
+        cheese_outcomes=cheese_outcomes,
     )
 
 

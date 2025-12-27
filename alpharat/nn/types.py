@@ -57,6 +57,19 @@ class TargetBundle:
         payout_matrix: MCTS refined payout matrix, shape (5, 5).
         action_p1: Action taken by player 1 (0-4).
         action_p2: Action taken by player 2 (0-4).
+        cheese_outcomes: Per-cell ownership outcomes, shape (H, W).
+            Position-level targets for the local value head.
+
+            Values:
+                -1 = No active cheese (cell never had cheese, or cheese
+                     was already collected before this position). Skip
+                     in loss computation.
+                 0 = P1_WIN: P1 will collect this cheese alone
+                 1 = SIMULTANEOUS: Both players collect at same time
+                 2 = UNCOLLECTED: Nobody collects before game end
+                 3 = P2_WIN: P2 will collect this cheese alone
+
+            At training time, derive the loss mask as: cheese_outcomes >= 0
     """
 
     policy_p1: np.ndarray  # float32 (5,)
@@ -65,3 +78,4 @@ class TargetBundle:
     payout_matrix: np.ndarray  # float32 (5, 5)
     action_p1: int
     action_p2: int
+    cheese_outcomes: np.ndarray  # int8 (H, W), -1 sentinel for inactive cells

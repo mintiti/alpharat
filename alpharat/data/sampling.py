@@ -334,10 +334,12 @@ def run_sampling(config: SamplingConfig, *, verbose: bool = True) -> tuple[Path,
     max_turns = 0
 
     # Create queues for work distribution and results collection
-    work_queue: Queue[int | None] = Queue()
+    # Bounded queue prevents blocking when adding many items
+    queue_size = num_workers * 2
+    work_queue: Queue[int | None] = Queue(maxsize=queue_size)
     results_queue: Queue[GameStats] = Queue()
 
-    # Start worker processes BEFORE filling queue (queue blocks when full)
+    # Start worker processes
     workers = [
         Process(target=_worker_loop, args=(config, games_dir, work_queue, results_queue))
         for _ in range(num_workers)
@@ -348,17 +350,24 @@ def run_sampling(config: SamplingConfig, *, verbose: bool = True) -> tuple[Path,
     for worker in workers:
         worker.start()
 
-    # Fill work queue with seeds (workers consume as we add)
-    for seed in range(num_games):
-        work_queue.put(seed)
+    # Track how many seeds we've submitted and results collected
+    next_seed = 0
+    completed = 0
 
-    # Add sentinel values to stop workers (one per worker)
-    for _ in range(num_workers):
-        work_queue.put(None)
+    # Initially fill the queue (non-blocking since queue_size > 0)
+    while next_seed < num_games and next_seed < queue_size:
+        work_queue.put(next_seed)
+        next_seed += 1
 
-    # Collect results as they come in
-    for completed in range(1, num_games + 1):
+    # Collect results and submit more work as slots free up
+    while completed < num_games:
         game_stats = results_queue.get()
+        completed += 1
+
+        # Submit next seed if any remain
+        if next_seed < num_games:
+            work_queue.put(next_seed)
+            next_seed += 1
 
         # Throughput stats
         total_positions += game_stats.positions
@@ -398,6 +407,10 @@ def run_sampling(config: SamplingConfig, *, verbose: bool = True) -> tuple[Path,
                 f"cheese {cheese_util:.0%} | "
                 f"avg turns {avg_turns:.1f}"
             )
+
+    # Send sentinel values to stop workers
+    for _ in range(num_workers):
+        work_queue.put(None)
 
     # Wait for all workers to finish
     for worker in workers:

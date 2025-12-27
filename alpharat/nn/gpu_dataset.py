@@ -63,6 +63,7 @@ class GPUDataset:
             "payout_matrix": [],
             "action_p1": [],
             "action_p2": [],
+            "cheese_outcomes": [],
         }
 
         for path in shard_paths:
@@ -74,6 +75,8 @@ class GPUDataset:
                 arrays["payout_matrix"].append(np.array(data["payout_matrix"]))
                 arrays["action_p1"].append(np.array(data["action_p1"]))
                 arrays["action_p2"].append(np.array(data["action_p2"]))
+                # cheese_outcomes: int8 with -1=inactive, 0-3=outcome class
+                arrays["cheese_outcomes"].append(np.array(data["cheese_outcomes"]))
 
         # Concatenate and move to GPU
         self._data: dict[str, torch.Tensor] = {}
@@ -161,4 +164,5 @@ class GPUDataset:
                 "payout_matrix": self._data["payout_matrix"][batch_indices],
                 "action_p1": self._data["action_p1"][batch_indices],
                 "action_p2": self._data["action_p2"][batch_indices],
+                "cheese_outcomes": self._data["cheese_outcomes"][batch_indices],
             }

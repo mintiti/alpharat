@@ -74,11 +74,16 @@ class MCTSSearch:
     def search(self) -> SearchResult:
         """Run MCTS search and return result.
 
+        If simulations=0, returns raw NN priors (pure NN mode).
         If root is terminal, returns current state without simulations.
 
         Returns:
-            SearchResult with updated payout matrix and Nash strategies.
+            SearchResult with updated payout matrix and Nash/NN strategies.
         """
+        # Pure NN mode: return raw priors, skip MCTS
+        if self.n_sims == 0:
+            return self._make_nn_result()
+
         # If root is terminal, return current state
         if self.tree.root.is_terminal:
             return self._make_result()
@@ -150,4 +155,20 @@ class MCTSSearch:
             payout_matrix=root.payout_matrix.copy(),
             policy_p1=p1_strat,
             policy_p2=p2_strat,
+        )
+
+    def _make_nn_result(self) -> SearchResult:
+        """Create SearchResult using raw NN priors (pure NN mode).
+
+        Used when simulations=0 to skip MCTS and return the NN policy directly.
+        At this point, payout_matrix still equals the initial NN prediction.
+
+        Returns:
+            SearchResult with NN payout prediction and prior policies.
+        """
+        root = self.tree.root
+        return SearchResult(
+            payout_matrix=root.payout_matrix.copy(),
+            policy_p1=root.prior_policy_p1.copy(),
+            policy_p2=root.prior_policy_p2.copy(),
         )
