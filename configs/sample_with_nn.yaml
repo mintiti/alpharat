@@ -17,6 +17,7 @@ game:
 sampling:
   num_games: 50000
   workers: 4
+  device: mps  # Use "cpu", "cuda", or "mps"
 
 output_dir: batches/
 checkpoint: checkpoints/train_20251227_231834/best_model.pt
