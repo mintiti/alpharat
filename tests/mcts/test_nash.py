@@ -340,3 +340,36 @@ class TestNashWithEquivalence:
         # all P1's probability on row 0 goes to row 4 in the effective game.
         # The value should be 100.0 (P1 effectively plays row 4 which has payoff 100 everywhere)
         assert equilibrium_value == pytest.approx(100.0)
+
+    def test_degenerate_zero_matrix_gives_uniform(self) -> None:
+        """All-zero payout matrix should return uniform, not arbitrary first equilibrium.
+
+        This tests the fix for P1 win rate bias: when the payout matrix is all zeros
+        (common with few simulations), we return uniform instead of letting nashpy
+        pick an arbitrary equilibrium that systematically favors P1.
+        """
+        payout = np.zeros((5, 5))
+        p1_strategy, p2_strategy = compute_nash_equilibrium(payout)
+
+        expected = np.ones(5) / 5
+        np.testing.assert_array_almost_equal(p1_strategy, expected)
+        np.testing.assert_array_almost_equal(p2_strategy, expected)
+
+    def test_degenerate_zero_matrix_with_equivalence(self) -> None:
+        """Zero matrix with equivalence reduction should give uniform over effective actions.
+
+        When action 0 is blocked (maps to 4), the uniform distribution should only
+        cover the 4 effective actions [1,2,3,4], with action 0 getting probability 0.
+        """
+        payout = np.zeros((5, 5))
+        p1_effective = [4, 1, 2, 3, 4]  # Action 0 blocked (maps to STAY=4)
+        p2_effective = [0, 1, 2, 3, 4]  # All actions effective for P2
+
+        p1_strategy, p2_strategy = compute_nash_equilibrium(payout, p1_effective, p2_effective)
+
+        # P1: action 0 should be 0 (blocked), others uniform (1/4 each)
+        assert p1_strategy[0] == 0.0
+        np.testing.assert_array_almost_equal(p1_strategy[1:], 0.25)
+
+        # P2: uniform over all 5 actions
+        np.testing.assert_array_almost_equal(p2_strategy, 0.2)

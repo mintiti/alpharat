@@ -12,10 +12,15 @@ or mud), the computation reduces to effective actions only. This ensures:
 
 from __future__ import annotations
 
+import logging
+import warnings
+
 import nashpy as nash  # type: ignore[import-untyped]
 import numpy as np
 
 from alpharat.mcts.equivalence import reduce_and_expand_nash
+
+logger = logging.getLogger(__name__)
 
 
 def compute_nash_equilibrium(
@@ -63,28 +68,52 @@ def _compute_nash_raw(
 
     Internal function used by compute_nash_equilibrium.
     """
+    num_p1, num_p2 = payout_matrix.shape
+
+    # Degenerate matrix check: if all entries are nearly equal (constant matrix),
+    # any strategy is a Nash equilibrium. Return uniform to avoid arbitrary
+    # tie-breaking that systematically biases P1.
+    # This catches: all zeros, all ones, any constant value.
+    if np.allclose(payout_matrix, payout_matrix.flat[0]):
+        logger.debug("Constant payout matrix detected, returning uniform strategies")
+        return np.ones(num_p1) / num_p1, np.ones(num_p2) / num_p2
+
+    # Sparse matrix check: if any row or column is all zeros, the game is under-explored.
+    # This commonly occurs with few MCTS simulations and leads to multiple equilibria
+    # with arbitrary first-equilibrium selection that biases P1.
+    has_zero_row = np.any(np.all(np.isclose(payout_matrix, 0), axis=1))
+    has_zero_col = np.any(np.all(np.isclose(payout_matrix, 0), axis=0))
+    if has_zero_row or has_zero_col:
+        logger.debug("Sparse payout matrix (zero row/col) detected, returning uniform")
+        return np.ones(num_p1) / num_p1, np.ones(num_p2) / num_p2
+
     # Create zero-sum game
     # P1 wants to maximize payout_matrix
     # P2 wants to minimize payout_matrix (maximize -payout_matrix)
-    p1_payoff = payout_matrix
-    p2_payoff = -payout_matrix
-
-    # Create nashpy game object
-    game = nash.Game(p1_payoff, p2_payoff)
+    game = nash.Game(payout_matrix, -payout_matrix)
 
     # Compute Nash equilibrium using support enumeration
-    # This returns a generator of equilibria; we take the first one
-    equilibria = game.support_enumeration()
+    # Catch warnings about degenerate games for observability
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        equilibria = list(game.support_enumeration())
 
-    try:
-        p1_strategy, p2_strategy = next(equilibria)
-    except StopIteration:
+        if caught:
+            logger.debug(
+                "Degenerate Nash equilibrium: %d equilibria found for matrix:\n%s",
+                len(equilibria),
+                payout_matrix,
+            )
+
+    if len(equilibria) == 0:
         # No equilibrium found (shouldn't happen for valid zero-sum games)
-        # Fall back to uniform random
-        num_p1_actions, num_p2_actions = payout_matrix.shape
-        p1_strategy = np.ones(num_p1_actions) / num_p1_actions
-        p2_strategy = np.ones(num_p2_actions) / num_p2_actions
+        logger.warning("No Nash equilibrium found, falling back to uniform")
+        return np.ones(num_p1) / num_p1, np.ones(num_p2) / num_p2
 
+    # Take first equilibrium. For unique games this is the only one.
+    # For degenerate games (multiple equilibria), this may be arbitrary,
+    # but the constant-matrix check above catches the worst cases.
+    p1_strategy, p2_strategy = equilibria[0]
     return p1_strategy, p2_strategy
 
 
