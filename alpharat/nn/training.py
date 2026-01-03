@@ -66,11 +66,18 @@ class DataConfig(BaseModel):
 
 
 class TrainConfig(BaseModel):
-    """Full training configuration."""
+    """Full training configuration.
 
-    model: ModelConfig = ModelConfig()
+    Either `model` or `resume_from` must be provided:
+    - model only: fresh start with specified architecture
+    - resume_from only: architecture loaded from checkpoint
+    - both: validate they match, then resume
+    """
+
+    model: ModelConfig | None = None
     optim: OptimConfig = OptimConfig()
     data: DataConfig
+    resume_from: str | None = None
     seed: int = 42
 
 
@@ -155,6 +162,46 @@ def compute_detailed_metrics(
 # --- Main Training Function ---
 
 
+def _resolve_model_config(
+    config: TrainConfig,
+    torch_device: torch.device,
+) -> tuple[ModelConfig, dict | None]:
+    """Resolve model config from config.model or checkpoint.
+
+    Returns:
+        Tuple of (effective model config, checkpoint dict or None).
+
+    Raises:
+        ValueError: If neither model nor resume_from is provided, or if they conflict.
+    """
+    checkpoint = None
+
+    if config.resume_from is not None:
+        checkpoint = torch.load(config.resume_from, map_location=torch_device, weights_only=False)
+        checkpoint_model = ModelConfig(**checkpoint["config"]["model"])
+
+        if config.model is not None:
+            # Both provided: validate they match
+            if config.model != checkpoint_model:
+                raise ValueError(
+                    f"Model config mismatch.\n"
+                    f"  Config: {config.model}\n"
+                    f"  Checkpoint: {checkpoint_model}"
+                )
+            model_config = config.model
+        else:
+            # Only resume_from: use checkpoint's config
+            model_config = checkpoint_model
+            logger.info(f"Using model config from checkpoint: {model_config}")
+    elif config.model is not None:
+        # Only model: fresh start
+        model_config = config.model
+    else:
+        raise ValueError("Either 'model' or 'resume_from' must be provided in config")
+
+    return model_config, checkpoint
+
+
 def run_training(
     config: TrainConfig,
     *,
@@ -164,19 +211,18 @@ def run_training(
     device: str = "auto",
     output_dir: Path = Path("checkpoints"),
     run_name: str | None = None,
-    resume: Path | None = None,
 ) -> Path:
     """Run mini-batch training loop.
 
     Args:
         config: Training configuration (model, optimizer, data).
+            Must have either `model` (fresh start) or `resume_from` (continue training).
         epochs: Number of epochs to train.
         checkpoint_every: Save checkpoint every N epochs.
         metrics_every: Compute detailed metrics every N epochs (losses always computed).
         device: Device to use ("auto", "cpu", "cuda", "mps").
         output_dir: Directory for checkpoints and logs.
         run_name: Name for this run (for tensorboard). Auto-generated if None.
-        resume: Path to checkpoint to resume from.
 
     Returns:
         Path to best model checkpoint.
@@ -200,6 +246,9 @@ def run_training(
     else:
         torch_device = torch.device(device)
     logger.info(f"Using device: {torch_device}")
+
+    # Resolve model config (from config.model or checkpoint)
+    model_config, checkpoint = _resolve_model_config(config, torch_device)
 
     # Create output directory for this run
     run_dir = output_dir / run_name
@@ -227,21 +276,20 @@ def run_training(
     # Create model
     model = PyRatMLP(
         obs_dim=obs_dim,
-        hidden_dim=config.model.hidden_dim,
-        dropout=config.model.dropout,
+        hidden_dim=model_config.hidden_dim,
+        dropout=model_config.dropout,
     ).to(torch_device)
     logger.info(f"Model parameters: {sum(p.numel() for p in model.parameters()):,}")
 
     # Optimizer
     optimizer = AdamW(model.parameters(), lr=config.optim.lr)
 
-    # Resume from checkpoint
+    # Resume from checkpoint if provided
     start_epoch = 1
     best_val_loss = float("inf")
 
-    if resume is not None:
-        logger.info(f"Resuming from {resume}")
-        checkpoint = torch.load(resume, map_location=torch_device, weights_only=False)
+    if checkpoint is not None:
+        logger.info(f"Resuming from {config.resume_from}")
         model.load_state_dict(checkpoint["model_state_dict"])
         optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
         start_epoch = checkpoint["epoch"] + 1
@@ -393,6 +441,10 @@ def run_training(
             f"Val: {val_metrics['loss_total']:.4f}"
         )
 
+        # Build effective config for saving (always include resolved model config)
+        effective_config = config.model_dump()
+        effective_config["model"] = model_config.model_dump()
+
         # Save best model
         if val_metrics["loss_total"] < best_val_loss:
             best_val_loss = val_metrics["loss_total"]
@@ -403,7 +455,7 @@ def run_training(
                     "optimizer_state_dict": optimizer.state_dict(),
                     "val_loss": best_val_loss,
                     "best_val_loss": best_val_loss,
-                    "config": config.model_dump(),
+                    "config": effective_config,
                     "width": width,
                     "height": height,
                 },
@@ -420,7 +472,7 @@ def run_training(
                     "optimizer_state_dict": optimizer.state_dict(),
                     "val_loss": val_metrics["loss_total"],
                     "best_val_loss": best_val_loss,
-                    "config": config.model_dump(),
+                    "config": effective_config,
                     "width": width,
                     "height": height,
                 },

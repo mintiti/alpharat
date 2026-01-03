@@ -110,11 +110,10 @@ def _compute_nash_raw(
         logger.warning("No Nash equilibrium found, falling back to uniform")
         return np.ones(num_p1) / num_p1, np.ones(num_p2) / num_p2
 
-    # Take first equilibrium. For unique games this is the only one.
-    # For degenerate games (multiple equilibria), this may be arbitrary,
-    # but the constant-matrix check above catches the worst cases.
-    p1_strategy, p2_strategy = equilibria[0]
-    return p1_strategy, p2_strategy
+    # Return centroid of equilibria (handles single equilibrium too — mean of one is itself)
+    p1_strategies = np.array([eq[0] for eq in equilibria])
+    p2_strategies = np.array([eq[1] for eq in equilibria])
+    return p1_strategies.mean(axis=0), p2_strategies.mean(axis=0)
 
 
 def compute_nash_value(

@@ -12,6 +12,7 @@ import numpy as np
 from pydantic import BaseModel
 
 from alpharat.mcts.nash import compute_nash_equilibrium
+from alpharat.mcts.selection import compute_forced_threshold
 
 if TYPE_CHECKING:
     from alpharat.mcts.node import MCTSNode
@@ -26,6 +27,7 @@ class DecoupledPUCTConfig(BaseModel):
     simulations: int
     gamma: float = 1.0
     c_puct: float = 1.5
+    force_k: float = 0.0  # Forced playout scaling (0 disables, 2.0 is KataGo default)
 
     def build(self, tree: MCTSTree) -> DecoupledPUCTSearch:
         """Construct a DecoupledPUCTSearch from this config."""
@@ -49,11 +51,12 @@ class DecoupledPUCTSearch:
 
         Args:
             tree: MCTS tree with root node and game state.
-            config: Configuration including simulations, gamma, c_puct.
+            config: Configuration including simulations, gamma, c_puct, force_k.
         """
         self.tree = tree
         self._n_sims = config.simulations
         self._c_puct = config.c_puct
+        self._force_k = config.force_k
 
     def search(self) -> SearchResult:
         """Run MCTS search and return result.
@@ -146,6 +149,13 @@ class DecoupledPUCTSearch:
         puct1 = self._compute_puct_scores(q1, node.prior_policy_p1, n1, n_total)
         puct2 = self._compute_puct_scores(q2, node.prior_policy_p2, n2, n_total)
 
+        # Forced playouts: set PUCT=inf for undervisited actions (root only)
+        if node == self.tree.root and self._force_k > 0:
+            thresh1 = compute_forced_threshold(node.prior_policy_p1, n_total, self._force_k)
+            thresh2 = compute_forced_threshold(node.prior_policy_p2, n_total, self._force_k)
+            puct1[n1 < thresh1] = np.inf
+            puct2[n2 < thresh2] = np.inf
+
         a1 = self._select_with_tiebreak(puct1, node.p1_effective, node.prior_policy_p1)
         a2 = self._select_with_tiebreak(puct2, node.p2_effective, node.prior_policy_p2)
         return a1, a2
@@ -188,12 +198,8 @@ class DecoupledPUCTSearch:
 
         # Multiple tied — sample from prior restricted to tied actions
         tied_prior = np.array([prior[a] for a in best_actions])
-        if tied_prior.sum() > 0:
-            tied_prior /= tied_prior.sum()
-            return int(np.random.choice(best_actions, p=tied_prior))
-
-        # Fallback: uniform random among tied
-        return int(np.random.choice(best_actions))
+        tied_prior /= tied_prior.sum()
+        return int(np.random.choice(best_actions, p=tied_prior))
 
     def _compute_puct_scores(
         self,

@@ -44,6 +44,7 @@ class BenchmarkSettings:
     workers: int
     device: str
     mcts_simulations: int
+    baseline_checkpoint: Path | None = None
 
 
 def get_game_params_from_checkpoint(checkpoint_path: Path) -> GameParams:
@@ -90,6 +91,14 @@ def build_benchmark_config(
         ),
     }
 
+    if settings.baseline_checkpoint:
+        baseline_str = str(settings.baseline_checkpoint)
+        agents["nn-prev"] = NNAgentConfig(checkpoint=baseline_str, temperature=1.0)
+        agents["mcts+nn-prev"] = MCTSAgentConfig(
+            simulations=settings.mcts_simulations,
+            checkpoint=baseline_str,
+        )
+
     return TournamentConfig(
         agents=agents,  # type: ignore[arg-type]
         games_per_matchup=settings.games_per_matchup,
@@ -127,6 +136,10 @@ def main() -> None:
 
     args = parser.parse_args()
 
+    # Parse config (needed for resume_from even when skipping training)
+    config_data = yaml.safe_load(args.config.read_text())
+    config = LocalValueTrainConfig.model_validate(config_data)
+
     # Phase 1: Training
     if args.skip_training:
         if args.checkpoint is None:
@@ -137,9 +150,6 @@ def main() -> None:
         logger.info("=" * 60)
         logger.info("Phase 1: Training (LocalValueMLP)")
         logger.info("=" * 60)
-
-        config_data = yaml.safe_load(args.config.read_text())
-        config = LocalValueTrainConfig.model_validate(config_data)
 
         checkpoint_path = run_local_value_training(
             config,
@@ -160,6 +170,11 @@ def main() -> None:
     logger.info("")
     logger.info("Checkpoint: %s", checkpoint_path)
     logger.info("  → Used by: nn, mcts+nn")
+
+    baseline = Path(config.resume_from) if config.resume_from else None
+    if baseline:
+        logger.info("Baseline: %s", baseline)
+        logger.info("  → Used by: nn-prev, mcts+nn-prev")
     logger.info("")
 
     settings = BenchmarkSettings(
@@ -167,6 +182,7 @@ def main() -> None:
         workers=args.workers,
         device=args.device,
         mcts_simulations=args.mcts_sims,
+        baseline_checkpoint=baseline,
     )
 
     tournament_config = build_benchmark_config(checkpoint_path, settings)

@@ -112,6 +112,7 @@ class MCTSAgentConfig(AgentConfigBase):
     search_variant: Literal["prior_sampling", "decoupled_puct"] = "decoupled_puct"
     checkpoint: str | None = None
     temperature: float = 1.0  # For action sampling (Nash uses 1.0)
+    force_k: float = 2.0  # Forced playout scaling (KataGo default, 0 disables)
 
     def build(self, device: str = "cpu") -> Agent:
         """Build an MCTSAgent."""
@@ -124,6 +125,7 @@ class MCTSAgentConfig(AgentConfigBase):
             search_variant=self.search_variant,
             checkpoint=self.checkpoint,
             temperature=self.temperature,
+            force_k=self.force_k,
             device=device,
         )
 

@@ -44,6 +44,7 @@ class MCTSAgent(Agent):
         search_variant: Literal["prior_sampling", "decoupled_puct"] = "decoupled_puct",
         checkpoint: str | None = None,
         temperature: float = 1.0,
+        force_k: float = 2.0,
         device: str = "cpu",
     ) -> None:
         """Initialize MCTS agent.
@@ -55,6 +56,7 @@ class MCTSAgent(Agent):
             search_variant: Which search algorithm to use.
             checkpoint: Path to NN checkpoint, or None for uniform priors.
             temperature: Sampling temperature. 0 = argmax, 1.0 = proportional.
+            force_k: Forced playout scaling (0 disables, 2.0 is KataGo default).
             device: Device for NN inference ("cpu", "cuda", "mps").
         """
         self.simulations = simulations
@@ -63,6 +65,7 @@ class MCTSAgent(Agent):
         self.search_variant = search_variant
         self.checkpoint = checkpoint
         self.temperature = temperature
+        self.force_k = force_k
         self._device = device
 
         # NN components (lazily loaded)
@@ -189,6 +192,7 @@ class MCTSAgent(Agent):
                 simulations=self.simulations,
                 gamma=self.gamma,
                 c_puct=self.c_puct,
+                force_k=self.force_k,
             )
             return DecoupledPUCTSearch(tree, config)
 

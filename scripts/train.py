@@ -4,7 +4,6 @@
 Usage:
     uv run python scripts/train.py configs/train.yaml
     uv run python scripts/train.py configs/train.yaml --epochs 200
-    uv run python scripts/train.py configs/train.yaml --resume checkpoints/best_model.pt
 """
 
 from __future__ import annotations
@@ -29,7 +28,6 @@ def main() -> None:
     parser.add_argument("--device", type=str, default="auto", help="Device (auto/cpu/cuda/mps)")
     parser.add_argument("--output-dir", type=Path, default=Path("checkpoints"), help="Output dir")
     parser.add_argument("--run-name", type=str, default=None, help="Run name for tensorboard")
-    parser.add_argument("--resume", type=Path, default=None, help="Checkpoint to resume from")
     args = parser.parse_args()
 
     # Load config
@@ -45,7 +43,6 @@ def main() -> None:
         device=args.device,
         output_dir=args.output_dir,
         run_name=args.run_name,
-        resume=args.resume,
     )
 
 

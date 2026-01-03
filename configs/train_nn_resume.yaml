@@ -1,0 +1,18 @@
+# PyRatMLP training - resume from NN-sampled checkpoint
+# Data: games sampled using the first trained model
+# Usage: uv run python scripts/train_and_benchmark.py configs/train_nn_resume.yaml --device mps
+
+resume_from: checkpoints/train_20251227_231834/best_model.pt
+
+optim:
+  lr: 1e-3
+  policy_weight: 1.0
+  value_weight: 1.0
+  loss_variant: dqn
+  p_augment: 0.5
+
+data:
+  train_dir: data_nn/7cd10189-3d50-4dc8-8d93-cf1306487a37/train
+  val_dir: data_nn/7cd10189-3d50-4dc8-8d93-cf1306487a37/val
+
+seed: 42

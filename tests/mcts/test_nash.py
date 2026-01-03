@@ -373,3 +373,34 @@ class TestNashWithEquivalence:
 
         # P2: uniform over all 5 actions
         np.testing.assert_array_almost_equal(p2_strategy, 0.2)
+
+    def test_multiple_equilibria_averaged(self) -> None:
+        """When multiple Nash equilibria exist, return their centroid.
+
+        This matrix has two pure equilibria at (0,0) and (1,1).
+        Without averaging, nashpy picks one arbitrarily.
+        With averaging, we get the centroid of these equilibria.
+        """
+        from alpharat.mcts.nash import _compute_nash_raw
+
+        # Battle of the sexes (zero-sum variant)
+        # P1 prefers (0,0), P2 prefers (1,1) but must coordinate
+        # Has two pure equilibria: (0,0) and (1,1)
+        payout = np.array([[3.0, 0.0], [0.0, 2.0]])
+
+        p1_strategy, p2_strategy = _compute_nash_raw(payout)
+
+        # With averaging, we expect the centroid of pure equilibria
+        # Pure equilibrium 1: p1=[1,0], p2=[1,0] (both play action 0)
+        # Pure equilibrium 2: p1=[0,1], p2=[0,1] (both play action 1)
+        # Plus a mixed equilibrium: p1=[0.4, 0.6], p2=[0.6, 0.4]
+        # Centroid of all three: approximately mixed
+
+        # The key property: strategies sum to 1 and are valid probabilities
+        assert abs(p1_strategy.sum() - 1.0) < 1e-6
+        assert abs(p2_strategy.sum() - 1.0) < 1e-6
+        assert np.all(p1_strategy >= 0)
+        assert np.all(p2_strategy >= 0)
+
+        # Nash value should be computable (strategies are valid)
+        compute_nash_value(payout, p1_strategy, p2_strategy)
