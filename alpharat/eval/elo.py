@@ -422,9 +422,9 @@ def _compute_hessian_uncertainty(
                 continue
 
             p_ij = win_expectancy(ratings[i], ratings[j])
-            # Second derivative contribution
-            # The Hessian of log-likelihood for logistic model
-            info = game_matrix[i, j] * p_ij * (1 - p_ij) / (ELO_SCALE * math.log(10) / 400) ** 2
+            # Fisher information contribution: n * p(1-p) * (d log_odds / d Elo)^2
+            # where d log_odds / d Elo = ln(10) / 400
+            info = game_matrix[i, j] * p_ij * (1 - p_ij) * (math.log(10) / ELO_SCALE) ** 2
 
             fisher[i, i] += info
             fisher[j, j] += info

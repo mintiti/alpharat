@@ -217,6 +217,31 @@ class TestComputeElo:
         assert rating_many is not None and rating_many.stderr is not None
         assert rating_few.stderr > rating_many.stderr
 
+    def test_uncertainty_magnitude_is_reasonable(self) -> None:
+        """Standard error should match theoretical Fisher information.
+
+        For 100 games at 50%, stderr ≈ 400 / (ln(10) * sqrt(n * p(1-p)))
+        which is about 34.7 Elo. We allow some tolerance for matrix effects.
+        """
+        import math
+
+        records = [HeadToHead("A", "B", wins_a=50, wins_b=50)]
+        result = compute_elo(
+            records, anchor="B", anchor_elo=1000, compute_uncertainty=True, prior_games=0
+        )
+
+        rating_a = result.get("A")
+        assert rating_a is not None and rating_a.stderr is not None
+
+        # Theoretical stderr for single matchup: 1 / sqrt(n * p(1-p) * (ln10/400)^2)
+        n, p = 100, 0.5
+        theoretical = 1 / math.sqrt(n * p * (1 - p) * (math.log(10) / 400) ** 2)
+
+        # Should be within 50% of theoretical (matrix inversion can differ slightly)
+        assert 0.5 * theoretical < rating_a.stderr < 1.5 * theoretical, (
+            f"stderr {rating_a.stderr:.1f} not close to theoretical {theoretical:.1f}"
+        )
+
     def test_ratings_sorted_descending(self) -> None:
         """Ratings should be sorted by Elo, highest first."""
         records = [
