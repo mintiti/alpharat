@@ -69,6 +69,9 @@ def prepare_training_set(
         - payout_matrix: float32 (N, 5, 5)
         - action_p1: int8 (N,)
         - action_p2: int8 (N,)
+        - cheese_outcomes: int8 (N, H, W) — position-level ownership targets.
+            Values: -1=inactive (no cheese at this position), 0-3=outcome class.
+            Derive loss mask as: cheese_outcomes >= 0
 
     Args:
         batch_dirs: List of batch directories to process.
@@ -95,6 +98,7 @@ def prepare_training_set(
         all_payout_matrices,
         all_action_p1,
         all_action_p2,
+        all_cheese_outcomes,
         width,
         height,
     ) = _load_all_positions(batch_dirs, builder)
@@ -114,6 +118,7 @@ def prepare_training_set(
     all_payout_matrices = all_payout_matrices[indices]
     all_action_p1 = all_action_p1[indices]
     all_action_p2 = all_action_p2[indices]
+    all_cheese_outcomes = all_cheese_outcomes[indices]
 
     # Create training set directory
     training_set_id = str(uuid.uuid4())
@@ -130,6 +135,7 @@ def prepare_training_set(
         all_payout_matrices,
         all_action_p1,
         all_action_p2,
+        all_cheese_outcomes,
         positions_per_shard,
     )
 
@@ -284,6 +290,7 @@ def _process_game_files_to_shards(
         payout_array,
         action_p1_array,
         action_p2_array,
+        cheese_outcomes_array,
         width,
         height,
     ) = _load_positions_from_files(game_files, builder)
@@ -301,6 +308,7 @@ def _process_game_files_to_shards(
     payout_array = payout_array[indices]
     action_p1_array = action_p1_array[indices]
     action_p2_array = action_p2_array[indices]
+    cheese_outcomes_array = cheese_outcomes_array[indices]
 
     # Write shards
     shard_count = _write_shards(
@@ -312,6 +320,7 @@ def _process_game_files_to_shards(
         payout_array,
         action_p1_array,
         action_p2_array,
+        cheese_outcomes_array,
         positions_per_shard,
     )
 
@@ -351,7 +360,16 @@ def _load_positions_from_files(
     game_files: list[Path],
     builder: ObservationBuilder,
 ) -> tuple[
-    np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, int, int
+    np.ndarray,
+    np.ndarray,
+    np.ndarray,
+    np.ndarray,
+    np.ndarray,
+    np.ndarray,
+    np.ndarray,
+    np.ndarray,
+    int,
+    int,
 ]:
     """Load and process positions from game files into stacked arrays.
 
@@ -368,6 +386,8 @@ def _load_positions_from_files(
             - payout_matrices: float32 (N, 5, 5)
             - action_p1: int8 (N,)
             - action_p2: int8 (N,)
+            - cheese_outcomes: int8 (N, H, W) — position-level ownership targets.
+                Values: -1=inactive (no cheese), 0-3=outcome class.
             - width: int
             - height: int
 
@@ -381,6 +401,7 @@ def _load_positions_from_files(
     all_payout_matrices: list[np.ndarray] = []
     all_action_p1: list[int] = []
     all_action_p2: list[int] = []
+    all_cheese_outcomes: list[np.ndarray] = []
 
     width: int | None = None
     height: int | None = None
@@ -411,6 +432,7 @@ def _load_positions_from_files(
             all_payout_matrices.append(targets.payout_matrix)
             all_action_p1.append(targets.action_p1)
             all_action_p2.append(targets.action_p2)
+            all_cheese_outcomes.append(targets.cheese_outcomes)
 
     if width is None or height is None:
         raise ValueError("No positions found in game files")
@@ -423,6 +445,7 @@ def _load_positions_from_files(
         np.stack(all_payout_matrices),
         np.array(all_action_p1, dtype=np.int8),
         np.array(all_action_p2, dtype=np.int8),
+        np.stack(all_cheese_outcomes),
         width,
         height,
     )
@@ -432,7 +455,16 @@ def _load_all_positions(
     batch_dirs: list[Path],
     builder: ObservationBuilder,
 ) -> tuple[
-    np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, int, int
+    np.ndarray,
+    np.ndarray,
+    np.ndarray,
+    np.ndarray,
+    np.ndarray,
+    np.ndarray,
+    np.ndarray,
+    np.ndarray,
+    int,
+    int,
 ]:
     """Load all positions from batches and build observations/targets.
 
@@ -468,6 +500,7 @@ def _write_shards(
     payout_matrices: np.ndarray,
     action_p1: np.ndarray,
     action_p2: np.ndarray,
+    cheese_outcomes: np.ndarray,
     positions_per_shard: int,
 ) -> int:
     """Write shards to training set directory.
@@ -481,6 +514,8 @@ def _write_shards(
         payout_matrices: All payout matrices, shape (N, 5, 5).
         action_p1: All P1 actions, shape (N,).
         action_p2: All P2 actions, shape (N,).
+        cheese_outcomes: Position-level ownership targets, shape (N, H, W).
+            Values: -1=inactive (no cheese), 0-3=outcome class.
         positions_per_shard: Maximum positions per shard.
 
     Returns:
@@ -508,6 +543,7 @@ def _write_shards(
             payout_matrix=payout_matrices[start_idx:end_idx],
             action_p1=action_p1[start_idx:end_idx],
             action_p2=action_p2[start_idx:end_idx],
+            cheese_outcomes=cheese_outcomes[start_idx:end_idx],
         )
         shard_count += 1
 

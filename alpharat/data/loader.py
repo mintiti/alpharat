@@ -33,6 +33,7 @@ def load_game_data(path: Path | str) -> GameData:
     height, width = maze.shape[:2]
 
     initial_cheese = data["initial_cheese"]
+    cheese_outcomes = data["cheese_outcomes"].copy()
     max_turns = int(data["max_turns"])
     result = int(data["result"])
     final_p1_score = float(data["final_p1_score"])
@@ -72,6 +73,7 @@ def load_game_data(path: Path | str) -> GameData:
         result=result,
         final_p1_score=final_p1_score,
         final_p2_score=final_p2_score,
+        cheese_outcomes=cheese_outcomes,
     )
 
 

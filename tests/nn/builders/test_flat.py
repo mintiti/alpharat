@@ -9,6 +9,7 @@ import numpy as np
 import pytest
 
 from alpharat.data.sharding import prepare_training_set
+from alpharat.data.types import CheeseOutcome
 from alpharat.nn.builders.flat import (
     MAX_MUD_COST,
     MAX_MUD_TURNS,
@@ -278,6 +279,9 @@ def _create_game_npz(
     initial_cheese = np.zeros((height, width), dtype=bool)
     initial_cheese[2, 2] = True
 
+    cheese_outcomes = np.full((height, width), CheeseOutcome.UNCOLLECTED, dtype=np.int8)
+    cheese_outcomes[2, 2] = CheeseOutcome.P1_WIN
+
     p1_pos = np.zeros((n, 2), dtype=np.int8)
     p1_pos[:, 0] = 1
     p1_pos[:, 1] = 1
@@ -311,6 +315,7 @@ def _create_game_npz(
         path,
         maze=maze,
         initial_cheese=initial_cheese,
+        cheese_outcomes=cheese_outcomes,
         max_turns=np.array(100, dtype=np.int16),
         result=np.array(1 if final_p1_score > final_p2_score else 0, dtype=np.int8),
         final_p1_score=np.array(final_p1_score, dtype=np.float32),

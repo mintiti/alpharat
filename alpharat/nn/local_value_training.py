@@ -1,14 +1,17 @@
-"""Mini-batch training for PyRat neural network.
+"""Training for LocalValueMLP with ownership loss.
 
-Two loss variants:
-- "mcts": Full payout matrix supervision (MSE on all 25 entries from MCTS estimates)
-- "dqn": Sparse supervision (MSE only on played action pair vs actual outcome)
+Similar to training.py but uses:
+- LocalValueMLP instead of PyRatMLP
+- Ownership loss (masked cross-entropy) instead of payout matrix loss
+- Value derived from ownership predictions, not a separate head
 
-Usage:
-    from alpharat.nn.training import TrainConfig, run_training
+Loss components:
+- policy_loss: cross_entropy(logits, target_policy) for P1 and P2
+- ownership_loss: cross_entropy(ownership_logits, cheese_outcomes) masked to active cheese
 
-    config = TrainConfig.model_validate(yaml.safe_load(config_path.read_text()))
-    run_training(config, epochs=100, output_dir=Path("runs"))
+The ownership loss uses the sentinel-based cheese_outcomes:
+- -1 = inactive (no cheese at this position) -> skip in loss
+- 0-3 = outcome class -> include in loss
 """
 
 from __future__ import annotations
@@ -32,7 +35,7 @@ from alpharat.nn.metrics import (
     compute_policy_metrics,
     compute_value_metrics,
 )
-from alpharat.nn.models import PyRatMLP
+from alpharat.nn.models import LocalValueMLP
 
 logger = logging.getLogger(__name__)
 
@@ -40,37 +43,38 @@ logger = logging.getLogger(__name__)
 # --- Config Models ---
 
 
-class ModelConfig(BaseModel):
-    """Model architecture parameters."""
+class LocalValueModelConfig(BaseModel):
+    """Model architecture parameters for LocalValueMLP."""
 
     hidden_dim: int = 256
     dropout: float = 0.0
 
 
-class OptimConfig(BaseModel):
-    """Optimization parameters."""
+class LocalValueOptimConfig(BaseModel):
+    """Optimization parameters for local value training."""
 
     lr: float = 1e-3
     policy_weight: float = 1.0
     value_weight: float = 1.0
-    loss_variant: Literal["mcts", "dqn"] = "dqn"
+    ownership_weight: float = 1.0
+    loss_variant: Literal["mcts", "dqn"] = "mcts"
     p_augment: float = 0.5
     batch_size: int = 4096
 
 
-class DataConfig(BaseModel):
+class LocalValueDataConfig(BaseModel):
     """Data paths."""
 
     train_dir: str
     val_dir: str
 
 
-class TrainConfig(BaseModel):
-    """Full training configuration."""
+class LocalValueTrainConfig(BaseModel):
+    """Full training configuration for LocalValueMLP."""
 
-    model: ModelConfig = ModelConfig()
-    optim: OptimConfig = OptimConfig()
-    data: DataConfig
+    model: LocalValueModelConfig = LocalValueModelConfig()
+    optim: LocalValueOptimConfig = LocalValueOptimConfig()
+    data: LocalValueDataConfig
     seed: int = 42
 
 
@@ -92,31 +96,89 @@ def sparse_payout_loss(
     return F.mse_loss(pred_value, target_value.squeeze(-1))
 
 
-def compute_losses(
-    model: PyRatMLP,
+def compute_ownership_loss(
+    ownership_logits: torch.Tensor,
+    cheese_outcomes: torch.Tensor,
+) -> torch.Tensor:
+    """Compute masked cross-entropy loss for ownership prediction.
+
+    Only computes loss on cells with active cheese (cheese_outcomes >= 0).
+    Cells with -1 (inactive) are excluded from the loss.
+
+    Args:
+        ownership_logits: Per-cell logits, shape (B, H, W, 4).
+        cheese_outcomes: Target outcomes, shape (B, H, W).
+            Values: -1=inactive (skip), 0-3=outcome class.
+
+    Returns:
+        Scalar loss tensor (mean over active cheese cells in batch).
+    """
+    b, h, w, c = ownership_logits.shape
+
+    # Flatten spatial dimensions
+    logits_flat = ownership_logits.view(b * h * w, c)  # (B*H*W, 4)
+    targets_flat = cheese_outcomes.view(b * h * w).long()  # (B*H*W,)
+
+    # Create mask for active cheese cells (outcomes >= 0)
+    mask_flat = targets_flat >= 0  # (B*H*W,) bool
+
+    if not mask_flat.any():
+        # No active cheese in batch (shouldn't happen in practice)
+        return torch.tensor(0.0, device=ownership_logits.device)
+
+    # Compute per-element cross-entropy
+    # Note: targets with -1 will cause issues with cross_entropy, but we mask them out
+    # To be safe, clamp targets to valid range before computing
+    targets_clamped = targets_flat.clamp(min=0)
+    ce_all = F.cross_entropy(logits_flat, targets_clamped, reduction="none")  # (B*H*W,)
+
+    # Average only over active cheese cells
+    loss = (ce_all * mask_flat.float()).sum() / mask_flat.float().sum()
+
+    return loss
+
+
+def compute_local_value_losses(
+    model: LocalValueMLP,
     data: dict[str, torch.Tensor],
     loss_variant: Literal["mcts", "dqn"],
     policy_weight: float,
     value_weight: float,
-) -> tuple[
-    torch.Tensor,
-    torch.Tensor,
-    torch.Tensor,
-    torch.Tensor,
-    torch.Tensor,
-    torch.Tensor,
-    torch.Tensor,
-]:
-    """Forward pass and loss computation.
+    ownership_weight: float,
+) -> dict[str, torch.Tensor]:
+    """Forward pass and loss computation for LocalValueMLP.
+
+    Args:
+        model: LocalValueMLP model.
+        data: Batch dict with observation, policy_p1, policy_p2, payout_matrix,
+            action_p1, action_p2, value, cheese_outcomes.
+        loss_variant: "mcts" for full matrix MSE, "dqn" for sparse (played action only).
+        policy_weight: Weight for policy loss.
+        value_weight: Weight for value/payout loss.
+        ownership_weight: Weight for ownership loss.
 
     Returns:
-        (loss, loss_p1, loss_p2, loss_value, logits_p1, logits_p2, pred_payout)
+        Dict with all losses and model outputs:
+            - loss: Total weighted loss
+            - loss_p1, loss_p2: Policy losses
+            - loss_value: Payout matrix loss (MSE, full or sparse)
+            - loss_ownership: Ownership loss
+            - logits_p1, logits_p2: Policy logits
+            - pred_payout: Predicted payout matrix
+            - ownership_logits: Ownership logits
     """
-    logits_p1, logits_p2, pred_payout = model(data["observation"])
+    # Derive cheese mask from outcomes for ownership value computation
+    cheese_mask = data["cheese_outcomes"] >= 0  # (B, H, W) bool
 
+    logits_p1, logits_p2, pred_payout, ownership_logits, _ = model(
+        data["observation"], cheese_mask=cheese_mask
+    )
+
+    # Policy losses
     loss_p1 = F.cross_entropy(logits_p1, data["policy_p1"])
     loss_p2 = F.cross_entropy(logits_p2, data["policy_p2"])
 
+    # Value loss (payout matrix)
     if loss_variant == "mcts":
         loss_value = F.mse_loss(pred_payout, data["payout_matrix"])
     else:
@@ -124,30 +186,68 @@ def compute_losses(
             pred_payout, data["action_p1"], data["action_p2"], data["value"]
         )
 
-    loss = policy_weight * (loss_p1 + loss_p2) + value_weight * loss_value
+    # Ownership loss (auxiliary task)
+    loss_ownership = compute_ownership_loss(ownership_logits, data["cheese_outcomes"])
 
-    return loss, loss_p1, loss_p2, loss_value, logits_p1, logits_p2, pred_payout
-
-
-def compute_detailed_metrics(
-    data: dict[str, torch.Tensor],
-    logits_p1: torch.Tensor,
-    logits_p2: torch.Tensor,
-    pred_payout: torch.Tensor,
-) -> dict[str, float]:
-    """Compute diagnostic metrics (expensive on full dataset)."""
-    p1_metrics = compute_policy_metrics(logits_p1.detach(), data["policy_p1"])
-    p2_metrics = compute_policy_metrics(logits_p2.detach(), data["policy_p2"])
-    payout_metrics = compute_payout_metrics(pred_payout.detach(), data["payout_matrix"])
-    value_metrics = compute_value_metrics(
-        pred_payout.detach(), data["action_p1"], data["action_p2"], data["value"]
+    # Total loss
+    loss = (
+        policy_weight * (loss_p1 + loss_p2)
+        + value_weight * loss_value
+        + ownership_weight * loss_ownership
     )
 
-    metrics: dict[str, float] = {}
-    metrics.update({f"p1/{k}": v for k, v in p1_metrics.items()})
-    metrics.update({f"p2/{k}": v for k, v in p2_metrics.items()})
-    metrics.update({f"payout/{k}": v for k, v in payout_metrics.items()})
-    metrics.update({f"value/{k}": v for k, v in value_metrics.items()})
+    return {
+        "loss": loss,
+        "loss_p1": loss_p1,
+        "loss_p2": loss_p2,
+        "loss_value": loss_value,
+        "loss_ownership": loss_ownership,
+        "logits_p1": logits_p1,
+        "logits_p2": logits_p2,
+        "pred_payout": pred_payout,
+        "ownership_logits": ownership_logits,
+    }
+
+
+def compute_ownership_metrics(
+    ownership_logits: torch.Tensor,
+    cheese_outcomes: torch.Tensor,
+) -> dict[str, float]:
+    """Compute diagnostic metrics for ownership prediction.
+
+    Args:
+        ownership_logits: Per-cell logits, shape (B, H, W, 4).
+        cheese_outcomes: Target outcomes, shape (B, H, W).
+
+    Returns:
+        Dict with accuracy, per-class accuracy, etc.
+    """
+    b, h, w, c = ownership_logits.shape
+
+    # Flatten
+    logits_flat = ownership_logits.view(b * h * w, c)
+    targets_flat = cheese_outcomes.view(b * h * w)
+
+    # Mask for active cells
+    mask = targets_flat >= 0
+    if not mask.any():
+        return {"accuracy": 0.0}
+
+    # Predictions
+    preds = logits_flat[mask].argmax(dim=-1)
+    targets = targets_flat[mask]
+
+    # Overall accuracy
+    accuracy = (preds == targets).float().mean().item()
+
+    # Per-class accuracy (if enough samples)
+    metrics: dict[str, float] = {"accuracy": accuracy}
+    class_names = ["p1_win", "simultaneous", "uncollected", "p2_win"]
+    for c, name in enumerate(class_names):
+        class_mask = targets == c
+        if class_mask.any():
+            class_acc = (preds[class_mask] == c).float().mean().item()
+            metrics[f"acc_{name}"] = class_acc
 
     return metrics
 
@@ -155,8 +255,8 @@ def compute_detailed_metrics(
 # --- Main Training Function ---
 
 
-def run_training(
-    config: TrainConfig,
+def run_local_value_training(
+    config: LocalValueTrainConfig,
     *,
     epochs: int = 100,
     checkpoint_every: int = 10,
@@ -166,13 +266,13 @@ def run_training(
     run_name: str | None = None,
     resume: Path | None = None,
 ) -> Path:
-    """Run mini-batch training loop.
+    """Run training loop for LocalValueMLP.
 
     Args:
         config: Training configuration (model, optimizer, data).
         epochs: Number of epochs to train.
         checkpoint_every: Save checkpoint every N epochs.
-        metrics_every: Compute detailed metrics every N epochs (losses always computed).
+        metrics_every: Compute detailed metrics every N epochs.
         device: Device to use ("auto", "cpu", "cuda", "mps").
         output_dir: Directory for checkpoints and logs.
         run_name: Name for this run (for tensorboard). Auto-generated if None.
@@ -184,7 +284,7 @@ def run_training(
     # Generate run name
     if run_name is None:
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        run_name = f"train_{timestamp}"
+        run_name = f"local_value_{timestamp}"
 
     # Set seed
     torch.manual_seed(config.seed)
@@ -225,8 +325,10 @@ def run_training(
     logger.info(f"obs_dim={obs_dim}, train={len(train_dataset)}, val={len(val_dataset)}")
 
     # Create model
-    model = PyRatMLP(
+    model = LocalValueMLP(
         obs_dim=obs_dim,
+        width=width,
+        height=height,
         hidden_dim=config.model.hidden_dim,
         dropout=config.model.dropout,
     ).to(torch_device)
@@ -281,6 +383,7 @@ def run_training(
                 "payout_matrix": train["payout_matrix"][batch_idx],
                 "action_p1": train["action_p1"][batch_idx],
                 "action_p2": train["action_p2"][batch_idx],
+                "cheese_outcomes": train["cheese_outcomes"][batch_idx],
             }
 
             # Per-batch augmentation
@@ -290,24 +393,26 @@ def run_training(
 
             optimizer.zero_grad()
 
-            loss, loss_p1, loss_p2, loss_value, logits_p1, logits_p2, pred_payout = compute_losses(
+            out = compute_local_value_losses(
                 model,
                 batch,
                 optim_cfg.loss_variant,
                 optim_cfg.policy_weight,
                 optim_cfg.value_weight,
+                optim_cfg.ownership_weight,
             )
 
-            loss.backward()
+            out["loss"].backward()
             optimizer.step()
 
             # Accumulate loss metrics
             train_acc.update(
                 {
-                    "loss_total": loss.item(),
-                    "loss_policy_p1": loss_p1.item(),
-                    "loss_policy_p2": loss_p2.item(),
-                    "loss_value": loss_value.item(),
+                    "loss_total": out["loss"].item(),
+                    "loss_policy_p1": out["loss_p1"].item(),
+                    "loss_policy_p2": out["loss_p2"].item(),
+                    "loss_value": out["loss_value"].item(),
+                    "loss_ownership": out["loss_ownership"].item(),
                 },
                 batch_size=curr_batch_size,
             )
@@ -315,10 +420,32 @@ def run_training(
             # Accumulate detailed metrics (expensive, only when needed)
             if compute_detailed:
                 with torch.no_grad():
-                    train_acc.update(
-                        compute_detailed_metrics(batch, logits_p1, logits_p2, pred_payout),
-                        batch_size=curr_batch_size,
+                    p1_metrics = compute_policy_metrics(
+                        out["logits_p1"].detach(), batch["policy_p1"]
                     )
+                    p2_metrics = compute_policy_metrics(
+                        out["logits_p2"].detach(), batch["policy_p2"]
+                    )
+                    payout_mets = compute_payout_metrics(
+                        out["pred_payout"].detach(), batch["payout_matrix"]
+                    )
+                    value_mets = compute_value_metrics(
+                        out["pred_payout"].detach(),
+                        batch["action_p1"],
+                        batch["action_p2"],
+                        batch["value"],
+                    )
+                    own_metrics = compute_ownership_metrics(
+                        out["ownership_logits"].detach(), batch["cheese_outcomes"]
+                    )
+
+                    detailed = {}
+                    detailed.update({f"p1/{k}": v for k, v in p1_metrics.items()})
+                    detailed.update({f"p2/{k}": v for k, v in p2_metrics.items()})
+                    detailed.update({f"payout/{k}": v for k, v in payout_mets.items()})
+                    detailed.update({f"value/{k}": v for k, v in value_mets.items()})
+                    detailed.update({f"ownership/{k}": v for k, v in own_metrics.items()})
+                    train_acc.update(detailed, batch_size=curr_batch_size)
 
         train_metrics = train_acc.compute()
 
@@ -339,41 +466,52 @@ def run_training(
                     "action_p1": val["action_p1"][start_idx:end_idx],
                     "action_p2": val["action_p2"][start_idx:end_idx],
                     "value": val["value"][start_idx:end_idx],
+                    "cheese_outcomes": val["cheese_outcomes"][start_idx:end_idx],
                 }
 
-                (
-                    vl,
-                    vl_p1,
-                    vl_p2,
-                    vl_value,
-                    vl_logits_p1,
-                    vl_logits_p2,
-                    vl_pred_payout,
-                ) = compute_losses(
+                vl_out = compute_local_value_losses(
                     model,
                     val_batch,
                     optim_cfg.loss_variant,
                     optim_cfg.policy_weight,
                     optim_cfg.value_weight,
+                    optim_cfg.ownership_weight,
                 )
 
                 val_acc.update(
                     {
-                        "loss_total": vl.item(),
-                        "loss_policy_p1": vl_p1.item(),
-                        "loss_policy_p2": vl_p2.item(),
-                        "loss_value": vl_value.item(),
+                        "loss_total": vl_out["loss"].item(),
+                        "loss_policy_p1": vl_out["loss_p1"].item(),
+                        "loss_policy_p2": vl_out["loss_p2"].item(),
+                        "loss_value": vl_out["loss_value"].item(),
+                        "loss_ownership": vl_out["loss_ownership"].item(),
                     },
                     batch_size=curr_batch_size,
                 )
 
                 if compute_detailed:
-                    val_acc.update(
-                        compute_detailed_metrics(
-                            val_batch, vl_logits_p1, vl_logits_p2, vl_pred_payout
-                        ),
-                        batch_size=curr_batch_size,
+                    p1_metrics = compute_policy_metrics(vl_out["logits_p1"], val_batch["policy_p1"])
+                    p2_metrics = compute_policy_metrics(vl_out["logits_p2"], val_batch["policy_p2"])
+                    payout_mets = compute_payout_metrics(
+                        vl_out["pred_payout"], val_batch["payout_matrix"]
                     )
+                    value_mets = compute_value_metrics(
+                        vl_out["pred_payout"],
+                        val_batch["action_p1"],
+                        val_batch["action_p2"],
+                        val_batch["value"],
+                    )
+                    own_metrics = compute_ownership_metrics(
+                        vl_out["ownership_logits"], val_batch["cheese_outcomes"]
+                    )
+
+                    detailed = {}
+                    detailed.update({f"p1/{k}": v for k, v in p1_metrics.items()})
+                    detailed.update({f"p2/{k}": v for k, v in p2_metrics.items()})
+                    detailed.update({f"payout/{k}": v for k, v in payout_mets.items()})
+                    detailed.update({f"value/{k}": v for k, v in value_mets.items()})
+                    detailed.update({f"ownership/{k}": v for k, v in own_metrics.items()})
+                    val_acc.update(detailed, batch_size=curr_batch_size)
 
             val_metrics = val_acc.compute()
 
@@ -389,7 +527,8 @@ def run_training(
             f"Train: {train_metrics['loss_total']:.4f} "
             f"(p1={train_metrics['loss_policy_p1']:.4f}, "
             f"p2={train_metrics['loss_policy_p2']:.4f}, "
-            f"val={train_metrics['loss_value']:.4f}) | "
+            f"val={train_metrics['loss_value']:.4f}, "
+            f"own={train_metrics['loss_ownership']:.4f}) | "
             f"Val: {val_metrics['loss_total']:.4f}"
         )
 

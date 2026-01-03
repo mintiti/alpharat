@@ -403,6 +403,7 @@ class TestSavedArrays:
             expected_keys = {
                 "maze",
                 "initial_cheese",
+                "cheese_outcomes",
                 "max_turns",
                 "result",
                 "final_p1_score",

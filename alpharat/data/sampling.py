@@ -6,7 +6,7 @@ import copy
 import time
 from dataclasses import dataclass
 from multiprocessing import Process, Queue
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
 from pydantic import BaseModel, Field
@@ -20,12 +20,30 @@ from alpharat.mcts.node import MCTSNode
 from alpharat.mcts.tree import MCTSTree
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
     from pathlib import Path
 
     from pyrat_engine.core.game import PyRat
 
+    from alpharat.nn.builders.flat import FlatObservationBuilder
+    from alpharat.nn.models import LocalValueMLP, PyRatMLP
+
 
 # --- Config Models ---
+
+
+@dataclass
+class NNContext:
+    """Worker-local NN model context for NN-guided sampling.
+
+    Loaded once per worker process and reused across all games.
+    """
+
+    model: PyRatMLP | LocalValueMLP
+    builder: FlatObservationBuilder
+    width: int
+    height: int
+    device: str
 
 
 class SamplingParams(BaseModel):
@@ -33,6 +51,7 @@ class SamplingParams(BaseModel):
 
     num_games: int
     workers: int = 4
+    device: str = "cpu"
 
 
 class SamplingConfig(BaseModel):
@@ -130,18 +149,135 @@ class SamplingMetrics:
         )
 
 
+# --- NN Loading ---
+
+
+def load_nn_context(checkpoint_path: str, device: str = "cpu") -> NNContext:
+    """Load NN model for use in sampling.
+
+    Called once per worker process at startup.
+
+    Args:
+        checkpoint_path: Path to model checkpoint.
+        device: Device to run inference on.
+
+    Returns:
+        NNContext with loaded model and builder.
+    """
+    import torch
+
+    from alpharat.nn.builders.flat import FlatObservationBuilder
+
+    torch_device = torch.device(device)
+    ckpt = torch.load(checkpoint_path, map_location=torch_device, weights_only=False)
+
+    width = ckpt.get("width", 5)
+    height = ckpt.get("height", 5)
+    builder = FlatObservationBuilder(width=width, height=height)
+
+    config = ckpt.get("config", {})
+    model_config = config.get("model", {})
+    hidden_dim = model_config.get("hidden_dim", 256)
+    dropout = model_config.get("dropout", 0.0)
+
+    obs_dim = width * height * 7 + 6
+
+    optim_config = config.get("optim", {})
+    if "ownership_weight" in optim_config:
+        from alpharat.nn.models import LocalValueMLP
+
+        model: LocalValueMLP | PyRatMLP = LocalValueMLP(
+            obs_dim=obs_dim,
+            width=width,
+            height=height,
+            hidden_dim=hidden_dim,
+            dropout=dropout,
+        )
+    else:
+        from alpharat.nn.models import PyRatMLP
+
+        model = PyRatMLP(
+            obs_dim=obs_dim,
+            hidden_dim=hidden_dim,
+            dropout=dropout,
+        )
+
+    model.load_state_dict(ckpt["model_state_dict"])
+    model.to(torch_device)
+    model.eval()
+
+    return NNContext(
+        model=model,
+        builder=builder,
+        width=width,
+        height=height,
+        device=device,
+    )
+
+
+def make_predict_fn(
+    ctx: NNContext, simulator: PyRat
+) -> Callable[[Any], tuple[np.ndarray, np.ndarray, np.ndarray]]:
+    """Create predict_fn closure for MCTS that reads from simulator.
+
+    The closure captures the simulator reference. The tree mutates the simulator
+    during search, and the predict_fn reads its current state.
+
+    Args:
+        ctx: NN context with loaded model.
+        simulator: Game simulator (will be mutated by tree).
+
+    Returns:
+        Function that returns (policy_p1, policy_p2, payout) predictions.
+    """
+    import torch
+
+    from alpharat.data.maze import build_maze_array
+    from alpharat.nn.extraction import from_pyrat_game
+
+    maze = build_maze_array(simulator, ctx.width, ctx.height)
+    max_turns = simulator.max_turns
+
+    model = ctx.model
+    builder = ctx.builder
+    device = ctx.device
+
+    def predict_fn(_observation: Any) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+        """Run NN inference on current simulator state."""
+        obs_input = from_pyrat_game(simulator, maze, max_turns)
+        obs = builder.build(obs_input)
+
+        obs_tensor = torch.from_numpy(obs).unsqueeze(0).to(device)
+
+        with torch.no_grad():
+            result = model.predict(obs_tensor)
+            policy_p1 = result[0].squeeze(0).cpu().numpy()
+            policy_p2 = result[1].squeeze(0).cpu().numpy()
+            payout = result[2].squeeze(0).cpu().numpy()
+
+        return policy_p1, policy_p2, payout
+
+    return predict_fn
+
+
 # --- Helper Functions ---
 
 
-def build_tree(game: PyRat, gamma: float) -> MCTSTree:
+def build_tree(
+    game: PyRat,
+    gamma: float,
+    predict_fn: Callable[[Any], tuple[np.ndarray, np.ndarray, np.ndarray]] | None = None,
+) -> MCTSTree:
     """Build fresh MCTS tree for search.
 
     The tree will initialize the root with smart uniform priors that only
-    assign probability to distinct effective actions (blocked moves get 0).
+    assign probability to distinct effective actions (blocked moves get 0),
+    or use NN predictions if predict_fn is provided.
 
     Args:
         game: Current game state (will be deep-copied for simulation).
         gamma: Discount factor for value backup.
+        predict_fn: Optional NN prediction function for priors.
 
     Returns:
         MCTSTree ready for search.
@@ -149,6 +285,7 @@ def build_tree(game: PyRat, gamma: float) -> MCTSTree:
     simulator = copy.deepcopy(game)
 
     # Dummy priors - tree will overwrite with smart uniform via _init_root_priors()
+    # or use NN priors if predict_fn is provided
     dummy = np.ones(5) / 5
 
     root = MCTSNode(
@@ -161,7 +298,7 @@ def build_tree(game: PyRat, gamma: float) -> MCTSTree:
         p2_mud_turns_remaining=simulator.player2_mud_turns,
     )
 
-    return MCTSTree(game=simulator, root=root, gamma=gamma, predict_fn=None)
+    return MCTSTree(game=simulator, root=root, gamma=gamma, predict_fn=predict_fn)
 
 
 def create_game(params: GameParams, seed: int) -> PyRat:
@@ -198,6 +335,7 @@ def play_and_record_game(
     config: SamplingConfig,
     games_dir: Path,
     seed: int,
+    nn_ctx: NNContext | None = None,
 ) -> GameStats:
     """Play one game with MCTS and record all positions.
 
@@ -205,6 +343,7 @@ def play_and_record_game(
         config: Sampling configuration.
         games_dir: Directory to save the game file.
         seed: Random seed for game generation.
+        nn_ctx: Optional NN context for guided search.
 
     Returns:
         GameStats with position, simulation, and outcome data.
@@ -216,8 +355,34 @@ def play_and_record_game(
 
     with GameRecorder(game, games_dir, config.game.width, config.game.height) as recorder:
         while not is_terminal(game):
-            # Build tree and run search
-            tree = build_tree(game, config.mcts.gamma)
+            # Create predict_fn if NN context available
+            # Note: build_tree deep-copies the game, so we need to create predict_fn
+            # for the copy, not the original. We pass None here and let build_tree
+            # handle it, or we restructure to pass nn_ctx.
+            # Actually, we need to create predict_fn AFTER build_tree gets the simulator.
+            # Let's restructure build_tree to handle this.
+            predict_fn = None
+            if nn_ctx is not None:
+                # We need the simulator from inside build_tree, so we'll inline
+                # the tree creation here to capture the simulator reference
+                simulator = copy.deepcopy(game)
+                predict_fn = make_predict_fn(nn_ctx, simulator)
+                dummy = np.ones(5) / 5
+                root = MCTSNode(
+                    game_state=None,
+                    prior_policy_p1=dummy,
+                    prior_policy_p2=dummy,
+                    nn_payout_prediction=np.zeros((5, 5)),
+                    parent=None,
+                    p1_mud_turns_remaining=simulator.player1_mud_turns,
+                    p2_mud_turns_remaining=simulator.player2_mud_turns,
+                )
+                tree = MCTSTree(
+                    game=simulator, root=root, gamma=config.mcts.gamma, predict_fn=predict_fn
+                )
+            else:
+                tree = build_tree(game, config.mcts.gamma)
+
             search = config.mcts.build(tree)
             result = search.search()
 
@@ -266,24 +431,32 @@ def _worker_loop(
     games_dir: Path,
     work_queue: Queue[int | None],
     results_queue: Queue[GameStats],
+    device: str = "cpu",
 ) -> None:
     """Worker process that continuously processes games from the queue.
 
-    Runs until it receives None (sentinel) from the work queue.
+    Runs until it receives None (sentinel) from the work queue. If a checkpoint
+    is configured, loads the model once at startup and uses it for all games.
 
     Args:
         config: Sampling configuration.
         games_dir: Directory to save game files.
         work_queue: Queue of seeds to process (None = stop).
         results_queue: Queue to send completed game stats.
+        device: Device for NN inference (if checkpoint configured).
     """
+    # Load NN model once per worker if checkpoint configured
+    nn_ctx: NNContext | None = None
+    if config.checkpoint is not None:
+        nn_ctx = load_nn_context(config.checkpoint, device=device)
+
     while True:
         seed = work_queue.get()
         if seed is None:
             # Sentinel received, exit
             break
 
-        game_stats = play_and_record_game(config, games_dir, seed)
+        game_stats = play_and_record_game(config, games_dir, seed, nn_ctx=nn_ctx)
         results_queue.put(game_stats)
 
 
@@ -315,6 +488,9 @@ def run_sampling(config: SamplingConfig, *, verbose: bool = True) -> tuple[Path,
             f"  Game: {config.game.width}x{config.game.height}, {config.game.cheese_count} cheese"
         )
         print(f"  Workers: {config.sampling.workers}")
+        if config.checkpoint:
+            print(f"  Checkpoint: {config.checkpoint}")
+            print(f"  Device: {config.sampling.device}")
         print(f"  Output: {batch_dir}")
         print()
 
@@ -334,12 +510,15 @@ def run_sampling(config: SamplingConfig, *, verbose: bool = True) -> tuple[Path,
     max_turns = 0
 
     # Create queues for work distribution and results collection
-    work_queue: Queue[int | None] = Queue()
+    # Bounded queue prevents blocking when adding many items
+    queue_size = num_workers * 2
+    work_queue: Queue[int | None] = Queue(maxsize=queue_size)
     results_queue: Queue[GameStats] = Queue()
 
-    # Start worker processes BEFORE filling queue (queue blocks when full)
+    # Start worker processes
+    device = config.sampling.device
     workers = [
-        Process(target=_worker_loop, args=(config, games_dir, work_queue, results_queue))
+        Process(target=_worker_loop, args=(config, games_dir, work_queue, results_queue, device))
         for _ in range(num_workers)
     ]
 
@@ -348,17 +527,24 @@ def run_sampling(config: SamplingConfig, *, verbose: bool = True) -> tuple[Path,
     for worker in workers:
         worker.start()
 
-    # Fill work queue with seeds (workers consume as we add)
-    for seed in range(num_games):
-        work_queue.put(seed)
+    # Track how many seeds we've submitted and results collected
+    next_seed = 0
+    completed = 0
 
-    # Add sentinel values to stop workers (one per worker)
-    for _ in range(num_workers):
-        work_queue.put(None)
+    # Initially fill the queue (non-blocking since queue_size > 0)
+    while next_seed < num_games and next_seed < queue_size:
+        work_queue.put(next_seed)
+        next_seed += 1
 
-    # Collect results as they come in
-    for completed in range(1, num_games + 1):
+    # Collect results and submit more work as slots free up
+    while completed < num_games:
         game_stats = results_queue.get()
+        completed += 1
+
+        # Submit next seed if any remain
+        if next_seed < num_games:
+            work_queue.put(next_seed)
+            next_seed += 1
 
         # Throughput stats
         total_positions += game_stats.positions
@@ -398,6 +584,10 @@ def run_sampling(config: SamplingConfig, *, verbose: bool = True) -> tuple[Path,
                 f"cheese {cheese_util:.0%} | "
                 f"avg turns {avg_turns:.1f}"
             )
+
+    # Send sentinel values to stop workers
+    for _ in range(num_workers):
+        work_queue.put(None)
 
     # Wait for all workers to finish
     for worker in workers:

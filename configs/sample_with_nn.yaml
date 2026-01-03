@@ -1,5 +1,5 @@
-# Self-play sampling configuration
-# Usage: uv run python scripts/sample.py configs/sample.yaml
+# Self-play sampling with NN prior
+# Checkpoint: train_20251227_231834/best_model.pt
 
 mcts:
   variant: decoupled_puct
@@ -17,6 +17,7 @@ game:
 sampling:
   num_games: 50000
   workers: 4
+  device: mps  # Use "cpu", "cuda", or "mps"
 
 output_dir: batches/
-checkpoint: null             # Path to model checkpoint, or null for uniform prior
+checkpoint: checkpoints/train_20251227_231834/best_model.pt
