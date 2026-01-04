@@ -13,7 +13,8 @@ Python 3.11+, strict mypy, `uv` for package management.
 ```bash
 # Setup
 uv sync                              # Install dependencies
-uv sync --extra train                # Include PyTorch for training
+uv sync --extra train                # PyTorch (CUDA on Linux, CPU on macOS)
+uv pip install torch --torch-backend=cpu --reinstall  # Force CPU-only
 uv run pre-commit install            # Install hooks
 
 # Testing
