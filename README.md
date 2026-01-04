@@ -10,7 +10,10 @@ Still figuring out if it actually works.
 
 ```bash
 uv sync
-uv sync --extra train  # for PyTorch
+uv sync --extra train  # PyTorch: CUDA on Linux, CPU on macOS
+
+# CPU-only on Linux (if needed)
+uv pip install torch --torch-backend=cpu --reinstall
 
 # Run tests
 uv run pytest
