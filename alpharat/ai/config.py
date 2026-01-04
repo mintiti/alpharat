@@ -126,6 +126,7 @@ class MCTSAgentConfig(AgentConfigBase):
     mcts: Annotated[MCTSConfig, Field(discriminator="variant")]
     checkpoint: str | None = None
     temperature: float = 1.0  # For action sampling (Nash uses 1.0)
+    reuse_tree: bool = False  # Preserve tree between turns
 
     def build(self, device: str = "cpu") -> Agent:
         """Build an MCTSAgent."""
@@ -136,6 +137,7 @@ class MCTSAgentConfig(AgentConfigBase):
             checkpoint=self.checkpoint,
             temperature=self.temperature,
             device=device,
+            reuse_tree=self.reuse_tree,
         )
 
 

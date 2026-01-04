@@ -52,6 +52,7 @@ class SamplingParams(BaseModel):
     num_games: int
     workers: int = 4
     device: str = "cpu"
+    reuse_tree: bool = False  # If True, preserve tree between turns
 
 
 class SamplingConfig(BaseModel):
@@ -341,6 +342,38 @@ def create_game(params: GameParams, seed: int) -> PyRat:
 # --- Core Sampling ---
 
 
+def _create_tree_for_sampling(
+    game: PyRat,
+    gamma: float,
+    nn_ctx: NNContext | None = None,
+) -> MCTSTree:
+    """Create a fresh MCTS tree for sampling.
+
+    Args:
+        game: Current game state (will be deep-copied).
+        gamma: Discount factor for value backup.
+        nn_ctx: Optional NN context for guided search.
+
+    Returns:
+        MCTSTree ready for search.
+    """
+    simulator = copy.deepcopy(game)
+    predict_fn = make_predict_fn(nn_ctx, simulator) if nn_ctx is not None else None
+
+    dummy = np.ones(5) / 5
+    root = MCTSNode(
+        game_state=None,
+        prior_policy_p1=dummy,
+        prior_policy_p2=dummy,
+        nn_payout_prediction=np.zeros((5, 5)),
+        parent=None,
+        p1_mud_turns_remaining=simulator.player1_mud_turns,
+        p2_mud_turns_remaining=simulator.player2_mud_turns,
+    )
+
+    return MCTSTree(game=simulator, root=root, gamma=gamma, predict_fn=predict_fn)
+
+
 def play_and_record_game(
     config: SamplingConfig,
     games_dir: Path,
@@ -362,36 +395,16 @@ def play_and_record_game(
     cheese_available = config.game.cheese_count
     positions = 0
     total_simulations = 0
+    reuse_tree = config.sampling.reuse_tree
+
+    # Tree state for reuse (None on first iteration)
+    tree: MCTSTree | None = None
 
     with GameRecorder(game, games_dir, config.game.width, config.game.height) as recorder:
         while not is_terminal(game):
-            # Create predict_fn if NN context available
-            # Note: build_tree deep-copies the game, so we need to create predict_fn
-            # for the copy, not the original. We pass None here and let build_tree
-            # handle it, or we restructure to pass nn_ctx.
-            # Actually, we need to create predict_fn AFTER build_tree gets the simulator.
-            # Let's restructure build_tree to handle this.
-            predict_fn = None
-            if nn_ctx is not None:
-                # We need the simulator from inside build_tree, so we'll inline
-                # the tree creation here to capture the simulator reference
-                simulator = copy.deepcopy(game)
-                predict_fn = make_predict_fn(nn_ctx, simulator)
-                dummy = np.ones(5) / 5
-                root = MCTSNode(
-                    game_state=None,
-                    prior_policy_p1=dummy,
-                    prior_policy_p2=dummy,
-                    nn_payout_prediction=np.zeros((5, 5)),
-                    parent=None,
-                    p1_mud_turns_remaining=simulator.player1_mud_turns,
-                    p2_mud_turns_remaining=simulator.player2_mud_turns,
-                )
-                tree = MCTSTree(
-                    game=simulator, root=root, gamma=config.mcts.gamma, predict_fn=predict_fn
-                )
-            else:
-                tree = build_tree(game, config.mcts.gamma)
+            # Create or reuse tree
+            if tree is None or not reuse_tree:
+                tree = _create_tree_for_sampling(game, config.mcts.gamma, nn_ctx)
 
             search = config.mcts.build(tree)
             result = search.search()
@@ -415,6 +428,10 @@ def play_and_record_game(
             )
 
             game.make_move(a1, a2)
+
+            # Advance tree for next iteration (if reusing)
+            if reuse_tree:
+                tree.advance_root(a1, a2)
 
     # Determine winner
     score_p1, score_p2 = game.player1_score, game.player2_score

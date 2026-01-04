@@ -1,0 +1,24 @@
+# Quick head-to-head: fresh vs reuse at 100 simulations
+agents:
+  mcts_fresh:
+    variant: mcts
+    simulations: 100
+    search_variant: prior_sampling
+    reuse_tree: false
+
+  mcts_reuse:
+    variant: mcts
+    simulations: 100
+    search_variant: prior_sampling
+    reuse_tree: true
+
+games_per_matchup: 40
+game:
+  width: 5
+  height: 5
+  cheese_count: 5
+  max_turns: 100
+  wall_density: 0.0
+  mud_density: 0.0
+
+workers: 1

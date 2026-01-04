@@ -56,7 +56,12 @@ class NNAgent(Agent):
         return self._agent.get_move(game, player)
 
     def reset(self) -> None:
-        """Reset for new game (no-op, stateless)."""
+        """Reset for new game."""
+        self._agent.reset()
+
+    def observe_move(self, action_p1: int, action_p2: int) -> None:
+        """Forward move observation to wrapped agent."""
+        self._agent.observe_move(action_p1, action_p2)
 
     @property
     def name(self) -> str:

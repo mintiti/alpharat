@@ -108,6 +108,10 @@ def play_game(
         # Execute simultaneous moves
         game.make_move(action_p1, action_p2)
 
+        # Notify agents of the moves (enables tree reuse)
+        agent_p1.observe_move(action_p1, action_p2)
+        agent_p2.observe_move(action_p1, action_p2)
+
     # Determine winner
     p1, p2 = game.player1_score, game.player2_score
     if p1 > p2:

@@ -177,15 +177,16 @@ class MCTSTree:
         # Get or create child
         if effective_pair in self.root.children:
             new_root = self.root.children[effective_pair]
-            # If simulator is at current root, advance game state to stay in sync
-            if self.simulator_node == self.root:
-                move_undo = self.game.make_move(Direction(action_p1), Direction(action_p2))
-                new_root.move_undo = move_undo
+            # Navigate simulator to new root position
+            # This handles the case where simulator is elsewhere after search
+            self._navigate_to(self.root)
+            move_undo = self.game.make_move(Direction(action_p1), Direction(action_p2))
+            new_root.move_undo = move_undo
         else:
-            # Child doesn't exist - create via make_move_from (handles game advancement)
+            # Child doesn't exist - create via make_move_from (handles navigation)
             new_root, _ = self.make_move_from(self.root, action_p1, action_p2)
 
-        # Update tree state (keep parent refs intact)
+        # Update tree state
         self.root = new_root
         self._sim_path = [new_root]
 
@@ -229,10 +230,10 @@ class MCTSTree:
         self._sim_path = target_path
 
     def _get_path_from_root(self, node: MCTSNode) -> list[MCTSNode]:
-        """Get path from root to given node.
+        """Get path from current root to given node.
 
         Args:
-            node: Target node
+            node: Target node (must be a descendant of self.root or self.root itself)
 
         Returns:
             List of nodes from root to target (inclusive)
@@ -241,6 +242,8 @@ class MCTSTree:
         current: MCTSNode | None = node
         while current is not None:
             path.append(current)
+            if current is self.root:
+                break
             current = current.parent
         return list(reversed(path))
 

@@ -41,6 +41,18 @@ class Agent(ABC):
         """
         return  # noqa: B027
 
+    def observe_move(self, action_p1: int, action_p2: int) -> None:
+        """Called after both players' actions are known.
+
+        Enables tree reuse: agents can advance internal state based on actual moves.
+        Override this if your agent maintains state (e.g., MCTS tree) between turns.
+
+        Args:
+            action_p1: Player 1's action (0-4).
+            action_p2: Player 2's action (0-4).
+        """
+        return  # noqa: B027
+
     @property
     def name(self) -> str:
         """Human-readable name for this agent."""
