@@ -13,7 +13,7 @@ optim:
   p_augment: 0.5
 
 data:
-  train_dir: data_nn/7cd10189-3d50-4dc8-8d93-cf1306487a37/train
-  val_dir: data_nn/7cd10189-3d50-4dc8-8d93-cf1306487a37/val
+  train_dir: data/nn_guided/7cd10189-3d50-4dc8-8d93-cf1306487a37/train
+  val_dir: data/nn_guided/7cd10189-3d50-4dc8-8d93-cf1306487a37/val
 
 seed: 42

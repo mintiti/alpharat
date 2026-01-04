@@ -72,22 +72,31 @@ def build_benchmark_config(
     settings: BenchmarkSettings,
 ) -> TournamentConfig:
     """Build tournament config for benchmarking a trained model."""
+    from alpharat.mcts.decoupled_puct import DecoupledPUCTConfig
+
     game_params = get_game_params_from_checkpoint(checkpoint_path)
 
     checkpoint_str = str(checkpoint_path)
+
+    # Default MCTS config for benchmarking
+    mcts_config = DecoupledPUCTConfig(
+        simulations=settings.mcts_simulations,
+        c_puct=4.73,
+        force_k=0.0,  # Disabled by default to match training data
+    )
 
     agents: dict[str, AgentConfigBase] = {
         "random": RandomAgentConfig(),
         "greedy": GreedyAgentConfig(),
         "mcts": MCTSAgentConfig(
-            simulations=settings.mcts_simulations,
+            mcts=mcts_config,
         ),
         "nn": NNAgentConfig(
             checkpoint=checkpoint_str,
             temperature=1.0,
         ),
         "mcts+nn": MCTSAgentConfig(
-            simulations=settings.mcts_simulations,
+            mcts=mcts_config,
             checkpoint=checkpoint_str,
         ),
     }
@@ -96,7 +105,7 @@ def build_benchmark_config(
         baseline_str = str(settings.baseline_checkpoint)
         agents["nn-prev"] = NNAgentConfig(checkpoint=baseline_str, temperature=1.0)
         agents["mcts+nn-prev"] = MCTSAgentConfig(
-            simulations=settings.mcts_simulations,
+            mcts=mcts_config,
             checkpoint=baseline_str,
         )
 
