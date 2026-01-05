@@ -88,15 +88,40 @@ def sparse_payout_loss(
     pred_payout: torch.Tensor,
     action_p1: torch.Tensor,
     action_p2: torch.Tensor,
-    target_value: torch.Tensor,
+    p1_value: torch.Tensor,
+    p2_value: torch.Tensor,
 ) -> torch.Tensor:
-    """MSE loss only on the played action pair."""
+    """MSE loss at played action pair using actual game outcomes.
+
+    Supervises the NN's payout prediction with ground truth outcomes:
+    - p1_value: how much P1 actually scored from this position
+    - p2_value: how much P2 actually scored from this position
+
+    Args:
+        pred_payout: Predicted bimatrix, shape (batch, 2, 5, 5).
+        action_p1: P1's action, shape (batch, 1).
+        action_p2: P2's action, shape (batch, 1).
+        p1_value: P1's actual remaining score, shape (batch,) or (batch, 1).
+        p2_value: P2's actual remaining score, shape (batch,) or (batch, 1).
+
+    Returns:
+        Average MSE loss over both players' values at played action.
+    """
     n = pred_payout.shape[0]
     batch_idx = torch.arange(n, device=pred_payout.device)
     a1 = action_p1.squeeze(-1).long()
     a2 = action_p2.squeeze(-1).long()
-    pred_value = pred_payout[batch_idx, a1, a2]
-    return F.mse_loss(pred_value, target_value.squeeze(-1))
+
+    # Extract predicted values at played action pair for both players
+    pred_p1 = pred_payout[batch_idx, 0, a1, a2]
+    pred_p2 = pred_payout[batch_idx, 1, a1, a2]
+
+    # Targets are actual game outcomes
+    target_p1 = p1_value.squeeze(-1)
+    target_p2 = p2_value.squeeze(-1)
+
+    # Average loss over both players
+    return 0.5 * (F.mse_loss(pred_p1, target_p1) + F.mse_loss(pred_p2, target_p2))
 
 
 def compute_losses(
@@ -125,10 +150,12 @@ def compute_losses(
     loss_p2 = F.cross_entropy(logits_p2, data["policy_p2"])
 
     if loss_variant == "mcts":
+        # Full matrix MSE - still uses MCTS estimates (deprecated)
         loss_value = F.mse_loss(pred_payout, data["payout_matrix"])
     else:
+        # Sparse DQN: supervise with actual game outcomes
         loss_value = sparse_payout_loss(
-            pred_payout, data["action_p1"], data["action_p2"], data["value"]
+            pred_payout, data["action_p1"], data["action_p2"], data["p1_value"], data["p2_value"]
         )
 
     loss = policy_weight * (loss_p1 + loss_p2) + value_weight * loss_value
@@ -147,7 +174,11 @@ def compute_detailed_metrics(
     p2_metrics = compute_policy_metrics(logits_p2.detach(), data["policy_p2"])
     payout_metrics = compute_payout_metrics(pred_payout.detach(), data["payout_matrix"])
     value_metrics = compute_value_metrics(
-        pred_payout.detach(), data["action_p1"], data["action_p2"], data["value"]
+        pred_payout.detach(),
+        data["action_p1"],
+        data["action_p2"],
+        data["p1_value"],
+        data["p2_value"],
     )
 
     metrics: dict[str, float] = {}

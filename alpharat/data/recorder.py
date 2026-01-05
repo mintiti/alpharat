@@ -257,7 +257,7 @@ class GameRecorder:
             raise ValueError(f"Invalid result: {self.data.result}")
 
         for i, pos in enumerate(self.data.positions):
-            if pos.payout_matrix.shape != (5, 5):
+            if pos.payout_matrix.shape != (2, 5, 5):
                 raise ValueError(
                     f"Position {i}: invalid payout_matrix shape {pos.payout_matrix.shape}"
                 )
@@ -298,7 +298,7 @@ class GameRecorder:
         p2_mud = np.zeros(n, dtype=np.int8)
         cheese_mask = np.zeros((n, h, w), dtype=bool)
         turn = np.zeros(n, dtype=np.int16)
-        payout_matrix = np.zeros((n, 5, 5), dtype=np.float32)
+        payout_matrix = np.zeros((n, 2, 5, 5), dtype=np.float32)
         visit_counts = np.zeros((n, 5, 5), dtype=np.int32)
         prior_p1 = np.zeros((n, 5), dtype=np.float32)
         prior_p2 = np.zeros((n, 5), dtype=np.float32)

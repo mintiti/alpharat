@@ -78,11 +78,11 @@ def build_benchmark_config(
 
     checkpoint_str = str(checkpoint_path)
 
-    # Default MCTS config for benchmarking
+    # Default MCTS config for benchmarking (matches sampling defaults)
     mcts_config = DecoupledPUCTConfig(
         simulations=settings.mcts_simulations,
-        c_puct=4.73,
-        force_k=0.0,  # Disabled by default to match training data
+        c_puct=8.34,
+        force_k=0.88,
     )
 
     agents: dict[str, AgentConfigBase] = {
@@ -134,7 +134,7 @@ def main() -> None:
     parser.add_argument("--games", type=int, default=50, help="Games per matchup")
     parser.add_argument("--workers", type=int, default=4, help="Parallel workers for games")
     parser.add_argument("--device", type=str, default="cpu", help="Device for NN inference")
-    parser.add_argument("--mcts-sims", type=int, default=200, help="MCTS simulations for baseline")
+    parser.add_argument("--mcts-sims", type=int, default=554, help="MCTS simulations for baseline")
 
     # Skip flags
     parser.add_argument(

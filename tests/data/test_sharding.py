@@ -66,7 +66,7 @@ def _create_game_npz(
 
     turn = np.arange(n, dtype=np.int16)
 
-    payout_matrix = np.zeros((n, 5, 5), dtype=np.float32)
+    payout_matrix = np.zeros((n, 2, 5, 5), dtype=np.float32)
     visit_counts = np.ones((n, 5, 5), dtype=np.int32) * 10
 
     # Uniform policies
@@ -233,7 +233,8 @@ class TestPrepareTrainingSet:
                     "observations",
                     "policy_p1",
                     "policy_p2",
-                    "value",
+                    "p1_value",
+                    "p2_value",
                     "payout_matrix",
                     "action_p1",
                     "action_p2",
@@ -264,8 +265,9 @@ class TestPrepareTrainingSet:
                 assert data["observations"].shape == (n, 181)  # 5×5 flat obs
                 assert data["policy_p1"].shape == (n, 5)
                 assert data["policy_p2"].shape == (n, 5)
-                assert data["value"].shape == (n,)
-                assert data["payout_matrix"].shape == (n, 5, 5)
+                assert data["p1_value"].shape == (n,)
+                assert data["p2_value"].shape == (n,)
+                assert data["payout_matrix"].shape == (n, 2, 5, 5)
                 assert data["action_p1"].shape == (n,)
                 assert data["action_p2"].shape == (n,)
                 assert data["cheese_outcomes"].shape == (n, 5, 5)  # (N, H, W)
@@ -292,7 +294,8 @@ class TestPrepareTrainingSet:
                 assert data["observations"].dtype == np.float32
                 assert data["policy_p1"].dtype == np.float32
                 assert data["policy_p2"].dtype == np.float32
-                assert data["value"].dtype == np.float32
+                assert data["p1_value"].dtype == np.float32
+                assert data["p2_value"].dtype == np.float32
                 assert data["payout_matrix"].dtype == np.float32
                 assert data["action_p1"].dtype == np.int8
                 assert data["action_p2"].dtype == np.int8
@@ -320,9 +323,9 @@ class TestPrepareTrainingSet:
 
             # First two shards should have 4 positions
             with np.load(shards[0]) as data:
-                assert len(data["value"]) == 4
+                assert len(data["p1_value"]) == 4
             with np.load(shards[1]) as data:
-                assert len(data["value"]) == 4
+                assert len(data["p1_value"]) == 4
 
     def test_last_shard_may_be_smaller(self) -> None:
         """Last shard can have fewer positions."""
@@ -344,7 +347,7 @@ class TestPrepareTrainingSet:
             shards = sorted(result_dir.glob("shard_*.npz"))
             # Last shard should have 1 position (9 - 4 - 4 = 1)
             with np.load(shards[-1]) as data:
-                assert len(data["value"]) == 1
+                assert len(data["p1_value"]) == 1
 
     def test_shuffles_positions(self) -> None:
         """Positions should be shuffled across games."""
@@ -418,7 +421,7 @@ class TestPrepareTrainingSet:
                 np.load(list(result_dir2.glob("shard_*.npz"))[0]) as d2,
             ):
                 # Values should be same set but potentially different order
-                assert set(d1["value"].tolist()) == set(d2["value"].tolist())
+                assert set(d1["p1_value"].tolist()) == set(d2["p1_value"].tolist())
                 # With high probability, order should differ
                 # (not guaranteed but very likely with 9 positions)
 
@@ -475,15 +478,16 @@ class TestLoadAllPositions:
             batch_dir = _create_batch(tmp_path, "batch1", num_games=2)
 
             builder = FlatObservationBuilder(width=5, height=5)
-            obs, p1, p2, values, payout, a1, a2, cheese, w, h = _load_all_positions(
+            obs, p1, p2, p1_values, p2_values, payout, a1, a2, cheese, w, h = _load_all_positions(
                 [batch_dir], builder
             )
 
-            assert len(values) == 6  # 2 games × 3 positions
+            assert len(p1_values) == 6  # 2 games × 3 positions
+            assert len(p2_values) == 6
             assert obs.shape[0] == 6
             assert p1.shape == (6, 5)
             assert p2.shape == (6, 5)
-            assert payout.shape == (6, 5, 5)
+            assert payout.shape == (6, 2, 5, 5)
             assert a1.shape == (6,)
             assert a2.shape == (6,)
             assert cheese.shape == (6, 5, 5)
@@ -502,14 +506,25 @@ class TestWriteShards:
             obs = np.zeros((10, 181), dtype=np.float32)
             p1 = np.zeros((10, 5), dtype=np.float32)
             p2 = np.zeros((10, 5), dtype=np.float32)
-            values = np.zeros(10, dtype=np.float32)
-            payout = np.zeros((10, 5, 5), dtype=np.float32)
+            p1_values = np.zeros(10, dtype=np.float32)
+            p2_values = np.zeros(10, dtype=np.float32)
+            payout = np.zeros((10, 2, 5, 5), dtype=np.float32)
             a1 = np.zeros(10, dtype=np.int8)
             a2 = np.zeros(10, dtype=np.int8)
             cheese = np.zeros((10, 5, 5), dtype=np.int8)
 
             shard_count = _write_shards(
-                tmp_path, obs, p1, p2, values, payout, a1, a2, cheese, positions_per_shard=3
+                tmp_path,
+                obs,
+                p1,
+                p2,
+                p1_values,
+                p2_values,
+                payout,
+                a1,
+                a2,
+                cheese,
+                positions_per_shard=3,
             )
 
             assert shard_count == 4  # 10 positions / 3 per shard = 4 shards (ceil)
@@ -523,14 +538,25 @@ class TestWriteShards:
             obs = np.zeros((5, 181), dtype=np.float32)
             p1 = np.zeros((5, 5), dtype=np.float32)
             p2 = np.zeros((5, 5), dtype=np.float32)
-            values = np.zeros(5, dtype=np.float32)
-            payout = np.zeros((5, 5, 5), dtype=np.float32)
+            p1_values = np.zeros(5, dtype=np.float32)
+            p2_values = np.zeros(5, dtype=np.float32)
+            payout = np.zeros((5, 2, 5, 5), dtype=np.float32)
             a1 = np.zeros(5, dtype=np.int8)
             a2 = np.zeros(5, dtype=np.int8)
             cheese = np.zeros((5, 5, 5), dtype=np.int8)
 
             _write_shards(
-                tmp_path, obs, p1, p2, values, payout, a1, a2, cheese, positions_per_shard=2
+                tmp_path,
+                obs,
+                p1,
+                p2,
+                p1_values,
+                p2_values,
+                payout,
+                a1,
+                a2,
+                cheese,
+                positions_per_shard=2,
             )
 
             assert (tmp_path / "shard_0000.npz").exists()

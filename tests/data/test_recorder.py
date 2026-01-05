@@ -165,7 +165,7 @@ class TestDirectionHelpers:
 def make_mock_search_result() -> SearchResult:
     """Create a mock SearchResult for testing."""
     return SearchResult(
-        payout_matrix=np.zeros((5, 5), dtype=np.float64),
+        payout_matrix=np.zeros((2, 5, 5), dtype=np.float64),
         policy_p1=np.ones(5, dtype=np.float64) / 5,
         policy_p2=np.ones(5, dtype=np.float64) / 5,
     )
@@ -467,7 +467,7 @@ class TestSavedArrays:
             assert data["p2_mud"].shape == (3,)
             assert data["cheese_mask"].shape == (3, 4, 5)
             assert data["turn"].shape == (3,)
-            assert data["payout_matrix"].shape == (3, 5, 5)
+            assert data["payout_matrix"].shape == (3, 2, 5, 5)
             assert data["visit_counts"].shape == (3, 5, 5)
             assert data["prior_p1"].shape == (3, 5)
             assert data["prior_p2"].shape == (3, 5)
@@ -634,14 +634,25 @@ class TestRoundtrip:
         """MCTS outputs should survive roundtrip with correct values."""
         game = FakeGame(width=5, height=5)
 
-        # Create non-trivial MCTS data
+        # Create non-trivial MCTS data (bimatrix: P1 and P2 payoffs)
         payout = np.array(
             [
-                [0.1, 0.2, 0.3, 0.4, 0.5],
-                [-0.1, -0.2, -0.3, -0.4, -0.5],
-                [1.0, 0.0, -1.0, 0.5, -0.5],
-                [0.0, 0.0, 0.0, 0.0, 0.0],
-                [0.9, 0.8, 0.7, 0.6, 0.55],
+                # P1's payoffs
+                [
+                    [0.1, 0.2, 0.3, 0.4, 0.5],
+                    [-0.1, -0.2, -0.3, -0.4, -0.5],
+                    [1.0, 0.0, -1.0, 0.5, -0.5],
+                    [0.0, 0.0, 0.0, 0.0, 0.0],
+                    [0.9, 0.8, 0.7, 0.6, 0.55],
+                ],
+                # P2's payoffs
+                [
+                    [-0.1, -0.2, -0.3, -0.4, -0.5],
+                    [0.1, 0.2, 0.3, 0.4, 0.5],
+                    [-1.0, 0.0, 1.0, -0.5, 0.5],
+                    [0.0, 0.0, 0.0, 0.0, 0.0],
+                    [-0.9, -0.8, -0.7, -0.6, -0.55],
+                ],
             ],
             dtype=np.float64,
         )

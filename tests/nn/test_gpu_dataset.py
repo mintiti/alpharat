@@ -58,7 +58,7 @@ def _create_game_npz(
 
     turn = np.arange(n, dtype=np.int16)
 
-    payout_matrix = np.zeros((n, 5, 5), dtype=np.float32)
+    payout_matrix = np.zeros((n, 2, 5, 5), dtype=np.float32)
     visit_counts = np.ones((n, 5, 5), dtype=np.int32) * 10
 
     prior_p1 = np.ones((n, 5), dtype=np.float32) / 5
@@ -190,7 +190,8 @@ class TestGPUDataset:
             assert "observation" in batch
             assert "policy_p1" in batch
             assert "policy_p2" in batch
-            assert "value" in batch
+            assert "p1_value" in batch
+            assert "p2_value" in batch
             assert "payout_matrix" in batch
             assert "action_p1" in batch
             assert "action_p2" in batch
@@ -206,8 +207,9 @@ class TestGPUDataset:
             assert batch["observation"].shape == (2, 181)
             assert batch["policy_p1"].shape == (2, 5)
             assert batch["policy_p2"].shape == (2, 5)
-            assert batch["value"].shape == (2, 1)
-            assert batch["payout_matrix"].shape == (2, 5, 5)
+            assert batch["p1_value"].shape == (2, 1)
+            assert batch["p2_value"].shape == (2, 1)
+            assert batch["payout_matrix"].shape == (2, 2, 5, 5)
             assert batch["action_p1"].shape == (2, 1)
             assert batch["action_p2"].shape == (2, 1)
 
@@ -257,10 +259,11 @@ class TestGPUDatasetAugmentation:
             # Get data with augmentation (p_swap=1.0 to guarantee changes)
             batches_aug = list(dataset.epoch_iter(5, augment=True, p_swap=1.0, shuffle=False))
 
-            # Values should be negated when swapped
+            # Values should be swapped when swapped
             for b_no, b_aug in zip(batches_no_aug, batches_aug, strict=True):
-                # All values should be negated (p_swap=1.0)
-                torch.testing.assert_close(b_no["value"], -b_aug["value"])
+                # All values should be swapped (p_swap=1.0)
+                torch.testing.assert_close(b_no["p1_value"], b_aug["p2_value"])
+                torch.testing.assert_close(b_no["p2_value"], b_aug["p1_value"])
 
     def test_augment_swaps_policies(self) -> None:
         """Augmentation should swap p1/p2 policies."""
@@ -288,7 +291,8 @@ class TestGPUDatasetAugmentation:
             batches2 = list(dataset.epoch_iter(2, augment=False, shuffle=False))
 
             for b1, b2 in zip(batches1, batches2, strict=True):
-                torch.testing.assert_close(b1["value"], b2["value"])
+                torch.testing.assert_close(b1["p1_value"], b2["p1_value"])
+                torch.testing.assert_close(b1["p2_value"], b2["p2_value"])
                 torch.testing.assert_close(b1["policy_p1"], b2["policy_p1"])
 
 

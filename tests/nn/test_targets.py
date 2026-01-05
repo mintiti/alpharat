@@ -59,7 +59,7 @@ def _make_position_data(
         p2_mud=0,
         cheese_positions=[(2, 2)],
         turn=turn,
-        payout_matrix=np.zeros((5, 5), dtype=np.float32),
+        payout_matrix=np.zeros((2, 5, 5), dtype=np.float32),
         visit_counts=np.zeros((5, 5), dtype=np.int32),
         prior_p1=np.ones(5, dtype=np.float32) / 5,
         prior_p2=np.ones(5, dtype=np.float32) / 5,
@@ -100,100 +100,112 @@ class TestBuildTargets:
         assert result.policy_p1.dtype == np.float32
         assert result.policy_p2.dtype == np.float32
 
-    def test_value_is_remaining_differential(self) -> None:
-        """Value should be remaining score differential (final - current)."""
-        # Final: 5-2=3, Current: 1-0=1, Remaining: 3-1=2
+    def test_values_are_remaining_scores(self) -> None:
+        """Values should be remaining scores for each player."""
+        # Final: p1=5, p2=2, Current: p1=1, p2=0
+        # p1_value = 5-1 = 4, p2_value = 2-0 = 2
         game = _make_game_data(final_p1_score=5.0, final_p2_score=2.0)
         position = _make_position_data(p1_score=1.0, p2_score=0.0)
 
         result = build_targets(game, position)
 
-        assert result.value == pytest.approx(2.0)
+        assert result.p1_value == pytest.approx(4.0)
+        assert result.p2_value == pytest.approx(2.0)
 
-    def test_value_at_game_start(self) -> None:
-        """At game start (score 0-0), value equals final differential."""
+    def test_values_at_game_start(self) -> None:
+        """At game start (score 0-0), values equal final scores."""
         game = _make_game_data(final_p1_score=5.0, final_p2_score=2.0)
         position = _make_position_data(p1_score=0.0, p2_score=0.0)
 
         result = build_targets(game, position)
 
-        # Remaining = final_diff - 0 = 3.0
-        assert result.value == pytest.approx(3.0)
+        assert result.p1_value == pytest.approx(5.0)
+        assert result.p2_value == pytest.approx(2.0)
 
-    def test_value_at_game_end(self) -> None:
-        """At game end (current = final), value is zero."""
+    def test_values_at_game_end(self) -> None:
+        """At game end (current = final), values are zero."""
         game = _make_game_data(final_p1_score=5.0, final_p2_score=2.0)
         position = _make_position_data(p1_score=5.0, p2_score=2.0)
 
         result = build_targets(game, position)
 
-        # Remaining = 3 - 3 = 0
-        assert result.value == pytest.approx(0.0)
+        assert result.p1_value == pytest.approx(0.0)
+        assert result.p2_value == pytest.approx(0.0)
 
-    def test_value_p1_ahead_will_extend_lead(self) -> None:
-        """P1 ahead and will extend lead: positive value."""
-        # Current: 2-1=1, Final: 5-2=3, Remaining: 3-1=2
+    def test_values_p1_ahead_will_extend_lead(self) -> None:
+        """P1 ahead and will extend lead."""
+        # Current: p1=2, p2=1, Final: p1=5, p2=2
+        # p1_value = 5-2 = 3, p2_value = 2-1 = 1
         game = _make_game_data(final_p1_score=5.0, final_p2_score=2.0)
         position = _make_position_data(p1_score=2.0, p2_score=1.0)
 
         result = build_targets(game, position)
 
-        assert result.value > 0
-        assert result.value == pytest.approx(2.0)
+        assert result.p1_value > result.p2_value  # P1 will gain more
+        assert result.p1_value == pytest.approx(3.0)
+        assert result.p2_value == pytest.approx(1.0)
 
-    def test_value_p1_ahead_will_lose_lead(self) -> None:
-        """P1 ahead but will lose lead: negative value."""
-        # Current: 3-1=2, Final: 3-4=-1, Remaining: -1-2=-3
+    def test_values_p1_ahead_will_lose_lead(self) -> None:
+        """P1 ahead but will lose lead."""
+        # Current: p1=3, p2=1, Final: p1=3, p2=4
+        # p1_value = 3-3 = 0, p2_value = 4-1 = 3
         game = _make_game_data(final_p1_score=3.0, final_p2_score=4.0)
         position = _make_position_data(p1_score=3.0, p2_score=1.0)
 
         result = build_targets(game, position)
 
-        assert result.value < 0
-        assert result.value == pytest.approx(-3.0)
+        assert result.p2_value > result.p1_value  # P2 will gain more
+        assert result.p1_value == pytest.approx(0.0)
+        assert result.p2_value == pytest.approx(3.0)
 
-    def test_value_p2_ahead_will_extend_lead(self) -> None:
-        """P2 ahead and will extend lead: negative value."""
-        # Current: 1-2=-1, Final: 2-5=-3, Remaining: -3-(-1)=-2
+    def test_values_p2_ahead_will_extend_lead(self) -> None:
+        """P2 ahead and will extend lead."""
+        # Current: p1=1, p2=2, Final: p1=2, p2=5
+        # p1_value = 2-1 = 1, p2_value = 5-2 = 3
         game = _make_game_data(final_p1_score=2.0, final_p2_score=5.0)
         position = _make_position_data(p1_score=1.0, p2_score=2.0)
 
         result = build_targets(game, position)
 
-        assert result.value < 0
-        assert result.value == pytest.approx(-2.0)
+        assert result.p2_value > result.p1_value  # P2 will gain more
+        assert result.p1_value == pytest.approx(1.0)
+        assert result.p2_value == pytest.approx(3.0)
 
-    def test_value_draw_from_tied_position(self) -> None:
-        """Draw game from tied position: zero value."""
-        # Current: 2-2=0, Final: 4-4=0, Remaining: 0-0=0
+    def test_values_draw_from_tied_position(self) -> None:
+        """Draw game from tied position: equal remaining values."""
+        # Current: p1=2, p2=2, Final: p1=4, p2=4
+        # p1_value = 4-2 = 2, p2_value = 4-2 = 2
         game = _make_game_data(final_p1_score=4.0, final_p2_score=4.0)
         position = _make_position_data(p1_score=2.0, p2_score=2.0)
 
         result = build_targets(game, position)
 
-        assert result.value == pytest.approx(0.0)
+        assert result.p1_value == pytest.approx(2.0)
+        assert result.p2_value == pytest.approx(2.0)
 
-    def test_value_half_point_scores(self) -> None:
+    def test_values_half_point_scores(self) -> None:
         """Should handle 0.5 point scores (simultaneous cheese collection)."""
-        # Current: 1.5-1=0.5, Final: 3.5-2.5=1, Remaining: 1-0.5=0.5
+        # Current: p1=1.5, p2=1.0, Final: p1=3.5, p2=2.5
+        # p1_value = 3.5-1.5 = 2.0, p2_value = 2.5-1.0 = 1.5
         game = _make_game_data(final_p1_score=3.5, final_p2_score=2.5)
         position = _make_position_data(p1_score=1.5, p2_score=1.0)
 
         result = build_targets(game, position)
 
-        assert result.value == pytest.approx(0.5)
+        assert result.p1_value == pytest.approx(2.0)
+        assert result.p2_value == pytest.approx(1.5)
 
-    def test_value_varies_by_position_in_same_game(self) -> None:
+    def test_values_vary_by_position_in_same_game(self) -> None:
         """Different positions in same game should have different values."""
         game = _make_game_data(final_p1_score=4.0, final_p2_score=2.0)
 
-        # Early position: 0-0, remaining = 2
+        # Early position: p1=0, p2=0 -> p1_value=4, p2_value=2
         early = _make_position_data(p1_score=0.0, p2_score=0.0, turn=0)
-        # Mid position: 2-1, remaining = 2-1=1
+        # Mid position: p1=2, p2=1 -> p1_value=2, p2_value=1
         mid = _make_position_data(p1_score=2.0, p2_score=1.0, turn=50)
-        # Late position: 3-2, remaining = 2-1=1
+        # Late position: p1=3, p2=2 -> p1_value=1, p2_value=0
         late = _make_position_data(p1_score=3.0, p2_score=2.0, turn=90)
-        # End position: 4-2, remaining = 2-2=0
+        # End position: p1=4, p2=2 -> p1_value=0, p2_value=0
         end = _make_position_data(p1_score=4.0, p2_score=2.0, turn=100)
 
         early_result = build_targets(game, early)
@@ -201,10 +213,14 @@ class TestBuildTargets:
         late_result = build_targets(game, late)
         end_result = build_targets(game, end)
 
-        assert early_result.value == pytest.approx(2.0)
-        assert mid_result.value == pytest.approx(1.0)
-        assert late_result.value == pytest.approx(1.0)
-        assert end_result.value == pytest.approx(0.0)
+        assert early_result.p1_value == pytest.approx(4.0)
+        assert early_result.p2_value == pytest.approx(2.0)
+        assert mid_result.p1_value == pytest.approx(2.0)
+        assert mid_result.p2_value == pytest.approx(1.0)
+        assert late_result.p1_value == pytest.approx(1.0)
+        assert late_result.p2_value == pytest.approx(0.0)
+        assert end_result.p1_value == pytest.approx(0.0)
+        assert end_result.p2_value == pytest.approx(0.0)
 
     def test_returns_target_bundle(self) -> None:
         """Should return TargetBundle dataclass."""

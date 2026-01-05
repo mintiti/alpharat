@@ -92,15 +92,40 @@ def sparse_payout_loss(
     pred_payout: torch.Tensor,
     action_p1: torch.Tensor,
     action_p2: torch.Tensor,
-    target_value: torch.Tensor,
+    p1_value: torch.Tensor,
+    p2_value: torch.Tensor,
 ) -> torch.Tensor:
-    """MSE loss only on the played action pair."""
+    """MSE loss at played action pair using actual game outcomes.
+
+    Supervises the NN's payout prediction with ground truth outcomes:
+    - p1_value: how much P1 actually scored from this position
+    - p2_value: how much P2 actually scored from this position
+
+    Args:
+        pred_payout: Predicted bimatrix, shape (batch, 2, 5, 5).
+        action_p1: P1's action, shape (batch, 1).
+        action_p2: P2's action, shape (batch, 1).
+        p1_value: P1's actual remaining score, shape (batch,) or (batch, 1).
+        p2_value: P2's actual remaining score, shape (batch,) or (batch, 1).
+
+    Returns:
+        Average MSE loss over both players' values at played action.
+    """
     n = pred_payout.shape[0]
     batch_idx = torch.arange(n, device=pred_payout.device)
     a1 = action_p1.squeeze(-1).long()
     a2 = action_p2.squeeze(-1).long()
-    pred_value = pred_payout[batch_idx, a1, a2]
-    return F.mse_loss(pred_value, target_value.squeeze(-1))
+
+    # Extract predicted values at played action pair for both players
+    pred_p1 = pred_payout[batch_idx, 0, a1, a2]
+    pred_p2 = pred_payout[batch_idx, 1, a1, a2]
+
+    # Targets are actual game outcomes
+    target_p1 = p1_value.squeeze(-1)
+    target_p2 = p2_value.squeeze(-1)
+
+    # Average loss over both players
+    return 0.5 * (F.mse_loss(pred_p1, target_p1) + F.mse_loss(pred_p2, target_p2))
 
 
 def compute_ownership_loss(
@@ -187,10 +212,12 @@ def compute_local_value_losses(
 
     # Value loss (payout matrix)
     if loss_variant == "mcts":
+        # Full matrix MSE - still uses MCTS estimates (deprecated)
         loss_value = F.mse_loss(pred_payout, data["payout_matrix"])
     else:
+        # Sparse DQN: supervise with actual game outcomes
         loss_value = sparse_payout_loss(
-            pred_payout, data["action_p1"], data["action_p2"], data["value"]
+            pred_payout, data["action_p1"], data["action_p2"], data["p1_value"], data["p2_value"]
         )
 
     # Ownership loss (auxiliary task)
@@ -481,7 +508,8 @@ def run_local_value_training(
                         out["pred_payout"].detach(),
                         batch["action_p1"],
                         batch["action_p2"],
-                        batch["value"],
+                        batch["p1_value"],
+                        batch["p2_value"],
                     )
                     own_metrics = compute_ownership_metrics(
                         out["ownership_logits"].detach(), batch["cheese_outcomes"]
@@ -547,7 +575,8 @@ def run_local_value_training(
                         vl_out["pred_payout"],
                         val_batch["action_p1"],
                         val_batch["action_p2"],
-                        val_batch["value"],
+                        val_batch["p1_value"],
+                        val_batch["p2_value"],
                     )
                     own_metrics = compute_ownership_metrics(
                         vl_out["ownership_logits"], val_batch["cheese_outcomes"]

@@ -94,8 +94,8 @@ class LocalValueMLP(nn.Module):
         self.policy_p1_head = nn.Linear(hidden_dim, num_actions)
         self.policy_p2_head = nn.Linear(hidden_dim, num_actions)
 
-        # Payout matrix head (same as PyRatMLP)
-        self.payout_head = nn.Linear(hidden_dim, num_actions * num_actions)
+        # Payout matrix head: 2×5×5 bimatrix (P1 and P2 payoffs)
+        self.payout_head = nn.Linear(hidden_dim, 2 * num_actions * num_actions)
 
         # Ownership head: predict 4-class distribution per cell (auxiliary task)
         # Architecture: trunk → hidden → per-cell logits
@@ -158,7 +158,7 @@ class LocalValueMLP(nn.Module):
             Tuple of:
                 - logits_p1: Raw logits for P1 policy, shape (batch, 5).
                 - logits_p2: Raw logits for P2 policy, shape (batch, 5).
-                - payout_matrix: Predicted payout values, shape (batch, 5, 5).
+                - payout_matrix: Predicted payout values, shape (batch, 2, 5, 5).
                 - ownership_logits: Per-cell ownership logits, shape (batch, H, W, 4).
                 - ownership_value: Derived value from ownership, shape (batch,).
         """
@@ -168,9 +168,9 @@ class LocalValueMLP(nn.Module):
         logits_p1 = self.policy_p1_head(features)
         logits_p2 = self.policy_p2_head(features)
 
-        # Payout matrix head
+        # Payout matrix head (bimatrix: 2×5×5)
         payout_flat = self.payout_head(features)
-        payout_matrix = payout_flat.view(-1, self.num_actions, self.num_actions)
+        payout_matrix = payout_flat.view(-1, 2, self.num_actions, self.num_actions)
 
         # Ownership head (auxiliary task)
         ownership_flat = self.ownership_head(features)  # (batch, H*W*4)
@@ -209,7 +209,7 @@ class LocalValueMLP(nn.Module):
             Tuple of:
                 - policy_p1: Probabilities for P1, shape (batch, 5).
                 - policy_p2: Probabilities for P2, shape (batch, 5).
-                - payout_matrix: Predicted payout values, shape (batch, 5, 5).
+                - payout_matrix: Predicted payout values, shape (batch, 2, 5, 5).
                 - ownership_probs: Per-cell probabilities, shape (batch, H, W, 4).
                 - ownership_value: Derived value from ownership, shape (batch,).
         """

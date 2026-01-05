@@ -22,13 +22,12 @@ def build_targets(game: GameData, position: PositionData) -> TargetBundle:
     Policy targets come from the Nash equilibrium computed by MCTS
     at this position (stored in position.policy_p1/p2).
 
-    Value target is the remaining score differential from this position
-    to game end. This is the expected future reward sum with gamma=1:
-        V(s) = final_diff - current_diff
-             = (final_p1 - final_p2) - (current_p1 - current_p2)
+    Value targets are the actual remaining scores for each player:
+        p1_value = final_p1_score - current_p1_score
+        p2_value = final_p2_score - current_p2_score
 
-    A value of +2.0 means P1 will gain 2 more cheese than P2 from
-    this position onwards.
+    These are ground truth outcomes used to supervise the payout matrix
+    at the played action pair.
 
     Cheese outcomes are masked to only include cheese still on the board
     at this position. Cells without active cheese get CHEESE_INACTIVE (-1).
@@ -39,11 +38,10 @@ def build_targets(game: GameData, position: PositionData) -> TargetBundle:
         position: Position-level data containing Nash policies and current scores.
 
     Returns:
-        TargetBundle with policy, value, payout_matrix, action, and cheese targets.
+        TargetBundle with policy, values, payout_matrix, action, and cheese targets.
     """
-    final_diff = game.final_p1_score - game.final_p2_score
-    current_diff = position.p1_score - position.p2_score
-    remaining_diff = final_diff - current_diff
+    p1_value = game.final_p1_score - position.p1_score
+    p2_value = game.final_p2_score - position.p2_score
 
     assert game.cheese_outcomes is not None
 
@@ -58,7 +56,8 @@ def build_targets(game: GameData, position: PositionData) -> TargetBundle:
     return TargetBundle(
         policy_p1=position.policy_p1.astype(np.float32),
         policy_p2=position.policy_p2.astype(np.float32),
-        value=remaining_diff,
+        p1_value=p1_value,
+        p2_value=p2_value,
         payout_matrix=position.payout_matrix.astype(np.float32),
         action_p1=position.action_p1,
         action_p2=position.action_p2,

@@ -134,12 +134,15 @@ def _verify_targets(
     np.testing.assert_allclose(targets.policy_p1, pos.policy_p1, err_msg="Policy P1 mismatch")
     np.testing.assert_allclose(targets.policy_p2, pos.policy_p2, err_msg="Policy P2 mismatch")
 
-    # Value is remaining differential: final_diff - current_diff
-    final_diff = game_data.final_p1_score - game_data.final_p2_score
-    current_diff = pos.p1_score - pos.p2_score
-    expected_value = final_diff - current_diff
-    assert targets.value == pytest.approx(expected_value), (
-        f"Value mismatch: {targets.value} != {expected_value}"
+    # p1_value = remaining score P1 can get = final_p1_score - current_p1_score
+    # p2_value = remaining score P2 can get = final_p2_score - current_p2_score
+    expected_p1_value = game_data.final_p1_score - pos.p1_score
+    expected_p2_value = game_data.final_p2_score - pos.p2_score
+    assert targets.p1_value == pytest.approx(expected_p1_value), (
+        f"P1 value mismatch: {targets.p1_value} != {expected_p1_value}"
+    )
+    assert targets.p2_value == pytest.approx(expected_p2_value), (
+        f"P2 value mismatch: {targets.p2_value} != {expected_p2_value}"
     )
 
 
@@ -159,25 +162,31 @@ def _verify_training_shards(
     # Load all shard data
     all_policies_p1 = []
     all_policies_p2 = []
-    all_values = []
+    all_p1_values = []
+    all_p2_values = []
     for i in range(manifest.shard_count):
         with np.load(training_dir / f"shard_{i:04d}.npz") as data:
             all_policies_p1.append(data["policy_p1"])
             all_policies_p2.append(data["policy_p2"])
-            all_values.append(data["value"])
+            all_p1_values.append(data["p1_value"])
+            all_p2_values.append(data["p2_value"])
 
     all_policies_p1 = np.concatenate(all_policies_p1)
     all_policies_p2 = np.concatenate(all_policies_p2)
-    all_values = np.concatenate(all_values)
+    all_p1_values = np.concatenate(all_p1_values)
+    all_p2_values = np.concatenate(all_p2_values)
 
-    # Compute expected values for each position (remaining differential)
-    final_diff = game_data.final_p1_score - game_data.final_p2_score
-    expected_values = [final_diff - (pos.p1_score - pos.p2_score) for pos in game_data.positions]
+    # Compute expected values for each position (remaining score each player will get)
+    expected_p1_values = [game_data.final_p1_score - pos.p1_score for pos in game_data.positions]
+    expected_p2_values = [game_data.final_p2_score - pos.p2_score for pos in game_data.positions]
 
     # Values in shards are shuffled, so check the set of values matches
     # (can't check order since prepare_training_set shuffles)
     np.testing.assert_allclose(
-        sorted(all_values), sorted(expected_values), err_msg="Shard values mismatch"
+        sorted(all_p1_values), sorted(expected_p1_values), err_msg="Shard p1_values mismatch"
+    )
+    np.testing.assert_allclose(
+        sorted(all_p2_values), sorted(expected_p2_values), err_msg="Shard p2_values mismatch"
     )
 
     # Policies should be valid distributions
