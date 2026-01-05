@@ -86,7 +86,7 @@ class DecoupledPUCTSearch:
         Expansion: Create child node when reaching unexpanded action pair.
         Backup: Propagate discounted values up the path.
         """
-        path: list[tuple[MCTSNode, int, int, float]] = []
+        path: list[tuple[MCTSNode, int, int, tuple[float, float]]] = []
         current = self.tree.root
         leaf_child: MCTSNode | None = None
 
@@ -113,12 +113,22 @@ class DecoupledPUCTSearch:
         if not path:
             return  # Root was terminal
 
-        # Compute leaf value
+        # Compute leaf value as tuple for both players
         if leaf_child is None or leaf_child.is_terminal:
-            g = 0.0
+            g: tuple[float, float] = (0.0, 0.0)
         else:
-            g = float(
-                leaf_child.prior_policy_p1 @ leaf_child.payout_matrix @ leaf_child.prior_policy_p2
+            # NN's expected value under its own policy for each player
+            g = (
+                float(
+                    leaf_child.prior_policy_p1
+                    @ leaf_child.payout_matrix[0]
+                    @ leaf_child.prior_policy_p2
+                ),
+                float(
+                    leaf_child.prior_policy_p1
+                    @ leaf_child.payout_matrix[1]
+                    @ leaf_child.prior_policy_p2
+                ),
             )
 
         self.tree.backup(path, g=g)
@@ -132,12 +142,12 @@ class DecoupledPUCTSearch:
         Returns:
             Tuple of (action_p1, action_p2) selected via PUCT formula.
         """
-        # Marginal Q-values
-        # P1 maximizes payout_matrix, expects P2 to play prior_p2
-        q1 = node.payout_matrix @ node.prior_policy_p2
+        # Marginal Q-values from bimatrix payout
+        # P1 maximizes payout_matrix[0], expects P2 to play prior_p2
+        q1 = node.payout_matrix[0] @ node.prior_policy_p2
 
-        # P2 minimizes payout_matrix (zero-sum), expects P1 to play prior_p1
-        q2 = -(node.payout_matrix.T @ node.prior_policy_p1)
+        # P2 maximizes payout_matrix[1], expects P1 to play prior_p1
+        q2 = node.payout_matrix[1].T @ node.prior_policy_p1
 
         # Marginal visit counts
         n1 = node.action_visits.sum(axis=1)  # sum over P2 actions

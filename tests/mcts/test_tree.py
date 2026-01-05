@@ -110,7 +110,7 @@ def fake_tree(fake_game: FakeGame) -> MCTSTree:
     """Tree backed by FakeGame."""
     prior_p1 = np.ones(5) / 5
     prior_p2 = np.ones(5) / 5
-    nn_payout = np.zeros((5, 5))
+    nn_payout = np.zeros((2, 5, 5))  # Bimatrix format: [p1_payoffs, p2_payoffs]
     root = MCTSNode(
         game_state=None,
         prior_policy_p1=prior_p1,
@@ -132,7 +132,7 @@ def root_node() -> MCTSNode:
     """Create a root node with uniform priors."""
     prior_p1 = np.ones(5) / 5
     prior_p2 = np.ones(5) / 5
-    nn_payout = np.zeros((5, 5))
+    nn_payout = np.zeros((2, 5, 5))  # Bimatrix format: [p1_payoffs, p2_payoffs]
 
     return MCTSNode(
         game_state=None,
@@ -203,12 +203,12 @@ class TestMakeMoveFrom:
         )
 
     def test_reward_calculation_no_cheese(self, tree: MCTSTree) -> None:
-        """Reward should be 0 when no cheese is collected."""
+        """Reward should be (0, 0) when no cheese is collected."""
         # Make a move that doesn't collect cheese
         child, reward = tree.make_move_from(tree.root, action_p1=4, action_p2=4)  # STAY
 
-        # No cheese collected, reward should be 0
-        assert reward == pytest.approx(0.0)
+        # No cheese collected, reward should be (0, 0) tuple
+        assert reward == (0.0, 0.0)
 
     def test_make_move_from_child_already_there(self, tree: MCTSTree) -> None:
         """Making move when simulator is already at node should not navigate."""
@@ -370,14 +370,15 @@ class TestBackup:
         # Create a child
         child, _ = tree.make_move_from(tree.root, 0, 0)
 
-        # Backup path with one step
-        path = [(tree.root, 0, 0, 1.0)]  # (node, action_p1, action_p2, reward)
+        # Backup path with one step - tuple rewards (p1_reward, p2_reward)
+        path = [(tree.root, 0, 0, (1.0, -0.5))]  # (node, action_p1, action_p2, reward)
         tree.backup(path)
 
-        # Root should have updated Q-value
+        # Root should have updated Q-value for both players
         assert tree.root.action_visits[0, 0] == 1
-        # value = reward + gamma * 0 = 1.0 + 1.0 * 0 = 1.0
-        assert tree.root.payout_matrix[0, 0] == pytest.approx(1.0)
+        # value = reward + gamma * 0 = (1.0, -0.5) + 1.0 * (0, 0) = (1.0, -0.5)
+        assert tree.root.payout_matrix[0, 0, 0] == pytest.approx(1.0)  # P1's payout
+        assert tree.root.payout_matrix[1, 0, 0] == pytest.approx(-0.5)  # P2's payout
 
     def test_backup_with_discount_factor(self, tree: MCTSTree) -> None:
         """Backup should apply gamma discounting."""
@@ -387,33 +388,36 @@ class TestBackup:
         # Create path: root → child
         child, _ = tree_discounted.make_move_from(tree.root, 0, 0)
 
-        # Backup path with two steps
-        # At child: reward = 0.5, future value = 0
-        # At root: reward = 1.0, future value = 0.5
+        # Backup path with two steps - tuple rewards (p1_reward, p2_reward)
+        # At child: reward = (0.5, 0.0), future value = (0, 0)
+        # At root: reward = (1.0, 0.0), future value = (0.5, 0.0)
         path = [
-            (tree.root, 0, 0, 1.0),  # reward at root
-            (child, 1, 1, 0.5),  # reward at child
+            (tree.root, 0, 0, (1.0, 0.0)),  # reward at root
+            (child, 1, 1, (0.5, 0.0)),  # reward at child
         ]
         tree_discounted.backup(path)
 
-        # Child: value = 0.5 + 0.9 * 0 = 0.5
-        assert child.payout_matrix[1, 1] == pytest.approx(0.5)
+        # Child: value = (0.5, 0.0) + 0.9 * (0, 0) = (0.5, 0.0)
+        assert child.payout_matrix[0, 1, 1] == pytest.approx(0.5)  # P1's payout
 
-        # Root: value = 1.0 + 0.9 * 0.5 = 1.45
-        assert tree.root.payout_matrix[0, 0] == pytest.approx(1.45)
+        # Root: value = (1.0, 0.0) + 0.9 * (0.5, 0.0) = (1.45, 0.0)
+        assert tree.root.payout_matrix[0, 0, 0] == pytest.approx(1.45)  # P1's payout
 
     def test_backup_multiple_visits(self, tree: MCTSTree) -> None:
         """Multiple backups should use incremental mean."""
-        # First backup
-        path1 = [(tree.root, 0, 0, 10.0)]
+        # First backup - tuple rewards (p1_reward, p2_reward)
+        path1 = [(tree.root, 0, 0, (10.0, -10.0))]
         tree.backup(path1)
-        assert tree.root.payout_matrix[0, 0] == pytest.approx(10.0)
+        assert tree.root.payout_matrix[0, 0, 0] == pytest.approx(10.0)  # P1
+        assert tree.root.payout_matrix[1, 0, 0] == pytest.approx(-10.0)  # P2
 
         # Second backup to same action
-        path2 = [(tree.root, 0, 0, 6.0)]
+        path2 = [(tree.root, 0, 0, (6.0, -6.0))]
         tree.backup(path2)
-        # Q = 10.0 + (6.0 - 10.0) / 2 = 8.0
-        assert tree.root.payout_matrix[0, 0] == pytest.approx(8.0)
+        # P1: Q = 10.0 + (6.0 - 10.0) / 2 = 8.0
+        # P2: Q = -10.0 + (-6.0 - (-10.0)) / 2 = -8.0
+        assert tree.root.payout_matrix[0, 0, 0] == pytest.approx(8.0)  # P1
+        assert tree.root.payout_matrix[1, 0, 0] == pytest.approx(-8.0)  # P2
         assert tree.root.action_visits[0, 0] == 2
 
 

@@ -28,16 +28,15 @@ def compute_nash_equilibrium(
     p1_effective: list[int] | None = None,
     p2_effective: list[int] | None = None,
 ) -> tuple[np.ndarray, np.ndarray]:
-    """Compute Nash equilibrium mixed strategies for a zero-sum game.
+    """Compute Nash equilibrium mixed strategies for a bimatrix game.
 
-    Given a payout matrix from Player 1's perspective (higher is better for P1),
-    computes the Nash equilibrium mixed strategies for both players.
-
-    For zero-sum games, P2's payoff is the negative of P1's payoff.
+    Given separate payout matrices for each player, computes the Nash equilibrium
+    mixed strategies for both players.
 
     Args:
-        payout_matrix: Payout matrix from P1 perspective, shape [p1_actions, p2_actions]
-                      Entry [i,j] is P1's payoff when P1 plays action i and P2 plays j
+        payout_matrix: Shape [2, p1_actions, p2_actions] where [0] is P1's payoffs
+                      and [1] is P2's payoffs. Entry [0,i,j] is P1's payoff when
+                      P1 plays action i and P2 plays j.
         p1_effective: Optional effective action mapping for P1's actions. If provided,
                      computation reduces to effective actions only.
         p2_effective: Optional effective action mapping for P2's actions.
@@ -48,7 +47,7 @@ def compute_nash_equilibrium(
         actions will have probability 0.
 
     Note:
-        - For games with multiple Nash equilibria, returns one (implementation dependent)
+        - For games with multiple Nash equilibria, returns a random one
         - Uses support enumeration from nashpy library
         - Strategies are returned as numpy arrays of shape [num_actions]
         - With equivalence, computation is on reduced matrix for efficiency/uniqueness
@@ -64,33 +63,29 @@ def compute_nash_equilibrium(
 def _compute_nash_raw(
     payout_matrix: np.ndarray,
 ) -> tuple[np.ndarray, np.ndarray]:
-    """Compute Nash equilibrium on raw matrix without equivalence handling.
+    """Compute Nash equilibrium on raw bimatrix game without equivalence handling.
 
     Internal function used by compute_nash_equilibrium.
+
+    Args:
+        payout_matrix: Shape [2, p1_actions, p2_actions] where [0] is P1's payoffs
+                      and [1] is P2's payoffs.
     """
-    num_p1, num_p2 = payout_matrix.shape
+    p1_payoffs = payout_matrix[0]
+    p2_payoffs = payout_matrix[1]
+    num_p1, num_p2 = p1_payoffs.shape
 
-    # Degenerate matrix check: if all entries are nearly equal (constant matrix),
-    # any strategy is a Nash equilibrium. Return uniform to avoid arbitrary
-    # tie-breaking that systematically biases P1.
-    # This catches: all zeros, all ones, any constant value.
-    if np.allclose(payout_matrix, payout_matrix.flat[0]):
-        logger.debug("Constant payout matrix detected, returning uniform strategies")
+    # Optimization: if both matrices are constant, any strategy is Nash
+    # Skip computing equilibria - return uniform directly
+    p1_constant = np.allclose(p1_payoffs, p1_payoffs.flat[0])
+    p2_constant = np.allclose(p2_payoffs, p2_payoffs.flat[0])
+    if p1_constant and p2_constant:
         return np.ones(num_p1) / num_p1, np.ones(num_p2) / num_p2
 
-    # Sparse matrix check: if any row or column is all zeros, the game is under-explored.
-    # This commonly occurs with few MCTS simulations and leads to multiple equilibria
-    # with arbitrary first-equilibrium selection that biases P1.
-    has_zero_row = np.any(np.all(np.isclose(payout_matrix, 0), axis=1))
-    has_zero_col = np.any(np.all(np.isclose(payout_matrix, 0), axis=0))
-    if has_zero_row or has_zero_col:
-        logger.debug("Sparse payout matrix (zero row/col) detected, returning uniform")
-        return np.ones(num_p1) / num_p1, np.ones(num_p2) / num_p2
-
-    # Create zero-sum game
-    # P1 wants to maximize payout_matrix
-    # P2 wants to minimize payout_matrix (maximize -payout_matrix)
-    game = nash.Game(payout_matrix, -payout_matrix)
+    # Create bimatrix game
+    # P1 wants to maximize p1_payoffs
+    # P2 wants to maximize p2_payoffs
+    game = nash.Game(p1_payoffs, p2_payoffs)
 
     # Compute Nash equilibrium using support enumeration
     # Catch warnings about degenerate games for observability
@@ -100,20 +95,24 @@ def _compute_nash_raw(
 
         if caught:
             logger.debug(
-                "Degenerate Nash equilibrium: %d equilibria found for matrix:\n%s",
+                "Degenerate Nash equilibrium: %d equilibria found for matrices:\nP1:\n%s\nP2:\n%s",
                 len(equilibria),
-                payout_matrix,
+                p1_payoffs,
+                p2_payoffs,
             )
 
     if len(equilibria) == 0:
-        # No equilibrium found (shouldn't happen for valid zero-sum games)
+        # No equilibrium found (shouldn't happen for valid games)
         logger.warning("No Nash equilibrium found, falling back to uniform")
         return np.ones(num_p1) / num_p1, np.ones(num_p2) / num_p2
 
-    # Return centroid of equilibria (handles single equilibrium too — mean of one is itself)
-    p1_strategies = np.array([eq[0] for eq in equilibria])
-    p2_strategies = np.array([eq[1] for eq in equilibria])
-    return p1_strategies.mean(axis=0), p2_strategies.mean(axis=0)
+    # Return a random equilibrium
+    # Note: For general-sum games, centroid of equilibria is NOT guaranteed to be
+    # an equilibrium itself. Random selection avoids arbitrary bias while ensuring
+    # we always return a valid Nash equilibrium.
+    idx = np.random.randint(len(equilibria))
+    p1_strat, p2_strat = equilibria[idx]
+    return np.asarray(p1_strat), np.asarray(p2_strat)
 
 
 def compute_nash_value(

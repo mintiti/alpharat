@@ -68,14 +68,14 @@ class MCTSTree:
 
     def make_move_from(
         self, node: MCTSNode, action_p1: int, action_p2: int
-    ) -> tuple[MCTSNode, float]:
+    ) -> tuple[MCTSNode, tuple[float, float]]:
         """Make a move from given node, creating child if needed.
 
         This method:
         1. Navigates simulator to the target node
         2. Records scores before move
         3. Executes move on game
-        4. Calculates reward (score differential)
+        4. Calculates reward (separate for each player)
         5. Creates or retrieves child node
         6. Updates simulator path
 
@@ -85,7 +85,7 @@ class MCTSTree:
             action_p2: Player 2's action (0-4)
 
         Returns:
-            Tuple of (child_node, reward) where reward is the zero-sum reward
+            Tuple of (child_node, reward) where reward is (p1_delta, p2_delta)
         """
         # Navigate simulator to target node if not already there
         if self.simulator_node != node:
@@ -123,30 +123,38 @@ class MCTSTree:
             )
             node.children[effective_pair] = child
 
-        # Calculate reward (zero-sum: p1_delta - p2_delta)
+        # Calculate separate rewards for each player
         p1_score_after, p2_score_after = self.game.player1_score, self.game.player2_score
-        reward = (p1_score_after - p1_score_before) - (p2_score_after - p2_score_before)
+        reward = (p1_score_after - p1_score_before, p2_score_after - p2_score_before)
 
         # Update simulator path
         self._sim_path.append(child)
 
         return child, reward
 
-    def backup(self, path: list[tuple[MCTSNode, int, int, float]], g: float = 0.0) -> None:
+    def backup(
+        self,
+        path: list[tuple[MCTSNode, int, int, tuple[float, float]]],
+        g: tuple[float, float] = (0.0, 0.0),
+    ) -> None:
         """Backup values through the tree with discounting.
 
         Args:
             path: List of (node, action_p1, action_p2, reward) tuples
                  from the search path, in forward order (root to leaf)
-            g: Leaf value (NN's value estimate for the expanded node).
-               Defaults to 0.0 for terminal states.
+                 where reward is (p1_reward, p2_reward)
+            g: Leaf value tuple (p1_value, p2_value) from NN estimate.
+               Defaults to (0.0, 0.0) for terminal states.
         """
         value = g
 
         # Backup in reverse (from leaf to root)
         for node, action_p1, action_p2, reward in reversed(path):
-            # Apply discounting: value = reward + gamma * future_value
-            value = reward + self.gamma * value
+            # Apply discounting to both player values: value = reward + gamma * future
+            value = (
+                reward[0] + self.gamma * value[0],
+                reward[1] + self.gamma * value[1],
+            )
 
             # Update node statistics
             node.backup(action_p1, action_p2, value)
@@ -295,12 +303,15 @@ class MCTSTree:
         Args:
             p1_effective: Effective action mapping for P1 (used for smart uniform priors).
             p2_effective: Effective action mapping for P2 (used for smart uniform priors).
+
+        Returns:
+            Tuple of (prior_p1, prior_p2, payout) where payout has shape (2, 5, 5)
         """
         if self._predict_fn is None:
             # Smart uniform: only spread probability over actions that do different things
             prior_p1 = self._smart_uniform_prior(p1_effective)
             prior_p2 = self._smart_uniform_prior(p2_effective)
-            payout = np.zeros((5, 5))
+            payout = np.zeros((2, 5, 5))  # Separate payoffs for P1 and P2
             return prior_p1, prior_p2, payout
 
         observation = self._get_observation()
