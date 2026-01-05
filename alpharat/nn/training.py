@@ -356,7 +356,8 @@ def run_training(
                 "observation": train["observation"][batch_idx],
                 "policy_p1": train["policy_p1"][batch_idx],
                 "policy_p2": train["policy_p2"][batch_idx],
-                "value": train["value"][batch_idx],
+                "p1_value": train["p1_value"][batch_idx],
+                "p2_value": train["p2_value"][batch_idx],
                 "payout_matrix": train["payout_matrix"][batch_idx],
                 "action_p1": train["action_p1"][batch_idx],
                 "action_p2": train["action_p2"][batch_idx],
@@ -414,10 +415,11 @@ def run_training(
                     "observation": val["observation"][start_idx:end_idx],
                     "policy_p1": val["policy_p1"][start_idx:end_idx],
                     "policy_p2": val["policy_p2"][start_idx:end_idx],
+                    "p1_value": val["p1_value"][start_idx:end_idx],
+                    "p2_value": val["p2_value"][start_idx:end_idx],
                     "payout_matrix": val["payout_matrix"][start_idx:end_idx],
                     "action_p1": val["action_p1"][start_idx:end_idx],
                     "action_p2": val["action_p2"][start_idx:end_idx],
-                    "value": val["value"][start_idx:end_idx],
                 }
 
                 (
