@@ -159,6 +159,9 @@ class MCTSSearch:
             root.payout_matrix,
             root.p1_effective,
             root.p2_effective,
+            prior_p1=root.prior_policy_p1,
+            prior_p2=root.prior_policy_p2,
+            action_visits=root.action_visits,
         )
         return SearchResult(
             payout_matrix=root.payout_matrix.copy(),
