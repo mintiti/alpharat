@@ -20,7 +20,7 @@ if TYPE_CHECKING:
 
     from alpharat.mcts import MCTSConfig
     from alpharat.nn.builders.flat import FlatObservationBuilder
-    from alpharat.nn.models import LocalValueMLP, PyRatMLP
+    from alpharat.nn.models import LocalValueMLP, PyRatMLP, SymmetricMLP
 
 
 class MCTSAgent(Agent):
@@ -56,7 +56,7 @@ class MCTSAgent(Agent):
         self._device = device
 
         # NN components (lazily loaded)
-        self._model: PyRatMLP | LocalValueMLP | None = None
+        self._model: PyRatMLP | LocalValueMLP | SymmetricMLP | None = None
         self._builder: FlatObservationBuilder | None = None
         self._width: int = 0
         self._height: int = 0
@@ -85,8 +85,20 @@ class MCTSAgent(Agent):
 
         obs_dim = self._width * self._height * 7 + 6
 
+        # Detect model type from checkpoint
+        model_type = ckpt.get("model_type", None)
         optim_config = config.get("optim", {})
-        if "ownership_weight" in optim_config:
+
+        if model_type == "symmetric":
+            from alpharat.nn.models import SymmetricMLP
+
+            self._model = SymmetricMLP(
+                width=self._width,
+                height=self._height,
+                hidden_dim=hidden_dim,
+                dropout=dropout,
+            )
+        elif "ownership_weight" in optim_config:
             from alpharat.nn.models import LocalValueMLP
 
             self._model = LocalValueMLP(
