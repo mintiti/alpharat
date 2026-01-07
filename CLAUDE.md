@@ -37,11 +37,13 @@ alpharat/
 ├── data/           # Data pipeline: sampling, recording, sharding
 ├── nn/             # Neural network: observation builders, targets, models
 ├── ai/             # Agents: MCTS, random, greedy
-└── eval/           # Evaluation: game execution, tournaments
+├── eval/           # Evaluation: game execution, tournaments
+└── experiments/    # Experiment management: ExperimentManager, manifest
 
 scripts/            # Entry points: sample.py, train_mcts.py
-configs/            # YAML configs for sampling, evaluation, benchmarks
+configs/            # YAML config templates for sampling, training, evaluation
 tests/              # Mirrors alpharat/ structure
+experiments/        # Data folder (NOT in git): batches, shards, runs, benchmarks
 ```
 
 ### alpharat/mcts/
@@ -117,6 +119,57 @@ Each architecture folder contains `config.py` (ModelConfig, OptimConfig) and `lo
 | `game.py` | `play_game()` — execute single game between agents |
 | `runner.py` | `evaluate()` — run N games, compute stats |
 | `tournament.py` | `run_tournament()` — round-robin with thread pool |
+
+### alpharat/experiments/
+
+| File | Purpose |
+|------|---------|
+| `manager.py` | `ExperimentManager` — central API for managing artifacts |
+| `schema.py` | Pydantic schemas for manifest entries |
+| `paths.py` | Path constants and helpers |
+| `templates.py` | Notes and CLAUDE.md templates |
+
+---
+
+## Experiments Folder
+
+The `experiments/` folder (NOT in git) stores all experiment artifacts with automatic lineage tracking.
+
+```
+experiments/
+├── manifest.yaml          # Central index of all artifacts
+├── batches/{group}/{uuid}/ # Raw game recordings
+├── shards/{uuid}/         # Processed train/val splits
+├── runs/{name}/           # Training runs with checkpoints
+└── benchmarks/{name}/     # Tournament results
+```
+
+### Using ExperimentManager
+
+```python
+from alpharat.experiments import ExperimentManager
+
+exp = ExperimentManager()
+
+# Sampling
+batch_dir = exp.create_batch(
+    group="uniform_5x5",
+    mcts_config=mcts_config,
+    game_params=game_params,
+)
+
+# Training
+run_dir = exp.create_run(
+    name="bimatrix_mlp_v1",
+    config=train_config.model_dump(),
+    source_shards="shard_uuid",
+)
+
+# Query
+exp.list_batches()
+exp.list_runs()
+exp.get_run_path("bimatrix_mlp_v1")
+```
 
 ---
 
