@@ -42,6 +42,16 @@ class TrainingSetManifest(BaseModel):
     height: int
 
 
+class ShardingResult(BaseModel):
+    """Result from preparing a training set with split."""
+
+    shard_id: str
+    shard_dir: str  # Path as string for Pydantic
+    total_positions: int
+    train_positions: int
+    val_positions: int
+
+
 def prepare_training_set(
     batch_dirs: list[Path],
     output_dir: Path,
@@ -169,7 +179,7 @@ def prepare_training_set_with_split(
     val_ratio: float = 0.1,
     positions_per_shard: int = 10000,
     seed: int | None = None,
-) -> Path:
+) -> ShardingResult:
     """Prepare training set with game-level train/val split.
 
     Splits games (not positions) into train and validation sets to prevent
@@ -195,7 +205,7 @@ def prepare_training_set_with_split(
         seed: Random seed for shuffling. If None, uses random seed.
 
     Returns:
-        Path to created training set directory (parent containing train/ and val/).
+        ShardingResult with shard ID, path, and position counts.
 
     Raises:
         ValueError: If batch_dirs is empty, val_ratio invalid, or dimensions mismatch.
@@ -236,7 +246,7 @@ def prepare_training_set_with_split(
     logger.info(f"Processing train split: {len(train_files)} games")
     train_dir = training_set_dir / "train"
     train_dir.mkdir()
-    _process_game_files_to_shards(
+    train_positions = _process_game_files_to_shards(
         game_files=train_files,
         output_dir=train_dir,
         builder=builder,
@@ -247,13 +257,14 @@ def prepare_training_set_with_split(
     )
 
     # Process val split (if any validation games)
+    val_positions = 0
     if val_files:
         logger.info(f"Processing val split: {len(val_files)} games")
         val_dir = training_set_dir / "val"
         val_dir.mkdir()
         # Use different seed for val shuffle
         val_seed = seed + 1 if seed is not None else None
-        _process_game_files_to_shards(
+        val_positions = _process_game_files_to_shards(
             game_files=val_files,
             output_dir=val_dir,
             builder=builder,
@@ -263,7 +274,13 @@ def prepare_training_set_with_split(
             source_batches=[d.name for d in batch_dirs],
         )
 
-    return training_set_dir
+    return ShardingResult(
+        shard_id=training_set_id,
+        shard_dir=str(training_set_dir),
+        total_positions=train_positions + val_positions,
+        train_positions=train_positions,
+        val_positions=val_positions,
+    )
 
 
 def _process_game_files_to_shards(
@@ -274,7 +291,7 @@ def _process_game_files_to_shards(
     seed: int | None,
     training_set_id: str,
     source_batches: list[str],
-) -> None:
+) -> int:
     """Process game files into shards for a single split.
 
     Args:
@@ -285,6 +302,9 @@ def _process_game_files_to_shards(
         seed: Random seed for shuffling positions.
         training_set_id: ID for the manifest.
         source_batches: Batch names for the manifest.
+
+    Returns:
+        Number of positions written.
     """
     # Load and process all positions
     (
@@ -345,6 +365,8 @@ def _process_game_files_to_shards(
         height=height,
     )
     _save_manifest(output_dir, manifest)
+
+    return total_positions
 
 
 def load_training_set_manifest(training_set_dir: Path) -> TrainingSetManifest:

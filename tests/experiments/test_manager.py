@@ -26,7 +26,7 @@ from alpharat.experiments.paths import (
     TRAIN_DIR,
     VAL_DIR,
 )
-from alpharat.mcts import DecoupledPUCTConfig, PriorSamplingConfig
+from alpharat.mcts import DecoupledPUCTConfig
 
 
 class TestExperimentManagerInit:
@@ -97,7 +97,7 @@ class TestBatchOperations:
             exp = ExperimentManager(tmpdir)
             batch_dir = exp.create_batch(
                 group="test_group",
-                mcts_config=PriorSamplingConfig(simulations=100),
+                mcts_config=DecoupledPUCTConfig(simulations=100),
                 game_params=GameParams(width=5, height=5, max_turns=30, cheese_count=5),
             )
 
@@ -111,7 +111,7 @@ class TestBatchOperations:
             exp = ExperimentManager(tmpdir)
             batch_dir = exp.create_batch(
                 group="test_group",
-                mcts_config=PriorSamplingConfig(simulations=100),
+                mcts_config=DecoupledPUCTConfig(simulations=100),
                 game_params=GameParams(width=5, height=5, max_turns=30, cheese_count=5),
             )
 
@@ -143,7 +143,7 @@ class TestBatchOperations:
         with tempfile.TemporaryDirectory() as tmpdir:
             exp = ExperimentManager(tmpdir)
             game_params = GameParams(width=5, height=5, max_turns=30, cheese_count=5)
-            mcts_config = PriorSamplingConfig(simulations=100)
+            mcts_config = DecoupledPUCTConfig(simulations=100)
 
             exp.create_batch(group="group_a", mcts_config=mcts_config, game_params=game_params)
             exp.create_batch(group="group_b", mcts_config=mcts_config, game_params=game_params)
@@ -159,7 +159,7 @@ class TestBatchOperations:
             exp = ExperimentManager(tmpdir)
             batch_dir = exp.create_batch(
                 group="test_group",
-                mcts_config=PriorSamplingConfig(simulations=100),
+                mcts_config=DecoupledPUCTConfig(simulations=100),
                 game_params=GameParams(width=5, height=5, max_turns=30, cheese_count=5),
             )
 
@@ -387,7 +387,7 @@ class TestManifestPersistence:
             exp1 = ExperimentManager(tmpdir)
             exp1.create_batch(
                 group="group1",
-                mcts_config=PriorSamplingConfig(simulations=100),
+                mcts_config=DecoupledPUCTConfig(simulations=100),
                 game_params=GameParams(width=5, height=5, max_turns=30, cheese_count=5),
             )
             exp1.create_run(name="run1", config={"lr": 0.001}, source_shards="s1")

@@ -262,6 +262,40 @@ class ExperimentManager:
         manifest = self.load_manifest()
         return list(manifest.shards.keys())
 
+    def register_shards(
+        self,
+        shard_id: str,
+        source_batches: list[str],
+        total_positions: int,
+        train_positions: int,
+        val_positions: int,
+    ) -> None:
+        """Register an existing shard set in the manifest.
+
+        Use this when shards were created externally (e.g., by sharding code).
+        The shard directory must already exist at the expected location.
+
+        Args:
+            shard_id: UUID of the shard set.
+            source_batches: List of batch IDs used to create these shards.
+            total_positions: Total number of positions.
+            train_positions: Number of training positions.
+            val_positions: Number of validation positions.
+        """
+        self._ensure_initialized()
+
+        entry = ShardEntry(
+            uuid=shard_id,
+            created_at=datetime.now(UTC),
+            source_batches=source_batches,
+            total_positions=total_positions,
+            train_positions=train_positions,
+            val_positions=val_positions,
+        )
+        manifest = self._load_manifest()
+        manifest.shards[shard_id] = entry
+        self._save_manifest(manifest)
+
     # --- Run Operations ---
 
     def create_run(

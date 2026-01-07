@@ -1,5 +1,6 @@
 # Phase 1 Experiment: MCTS vs Random
 # Goal: Sanity check that MCTS beats random on 5x5 with 99% confidence
+# Usage: uv run python scripts/benchmark.py configs/mcts_vs_random.yaml --name mcts_vs_random
 
 agents:
   puct_200:

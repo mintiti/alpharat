@@ -105,6 +105,7 @@ def run_training(
     output_dir: Path = Path("checkpoints"),
     run_name: str | None = None,
     use_amp: bool | None = None,
+    checkpoints_subdir: str = "",
 ) -> Path:
     """Run training loop for any model architecture.
 
@@ -123,6 +124,8 @@ def run_training(
         output_dir: Directory for checkpoints and logs.
         run_name: Name for this run. Auto-generated if None.
         use_amp: Enable AMP. None auto-detects, True/False forces on/off.
+        checkpoints_subdir: Subdirectory for checkpoints within run_dir.
+            Set to "checkpoints" when using ExperimentManager.
 
     Returns:
         Path to best model checkpoint.
@@ -207,7 +210,10 @@ def run_training(
     model = setup_cuda_optimizations(model, torch_device)
 
     # Training loop
-    best_model_path = run_dir / "best_model.pt"
+    # Checkpoints directory (subdir of run_dir if specified)
+    checkpoint_dir = run_dir / checkpoints_subdir if checkpoints_subdir else run_dir
+    checkpoint_dir.mkdir(parents=True, exist_ok=True)
+    best_model_path = checkpoint_dir / "best_model.pt"
     batch_size = optim_config.batch_size
     n_train = len(train_dataset)
     n_val = len(val_dataset)
@@ -415,7 +421,7 @@ def run_training(
                     "width": width,
                     "height": height,
                 },
-                run_dir / f"checkpoint_epoch_{epoch}.pt",
+                checkpoint_dir / f"checkpoint_epoch_{epoch}.pt",
             )
 
     writer.close()

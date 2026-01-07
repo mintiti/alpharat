@@ -5,18 +5,22 @@ Converts raw game batches into shuffled, sharded training data with train/val sp
 Games (not positions) are split to prevent data leakage.
 
 Usage:
-    uv run python scripts/prepare_shards.py --batches-dir batches --output-dir data
-    uv run python scripts/prepare_shards.py --batches-dir batches --val-ratio 0.15
+    uv run python scripts/prepare_shards.py --batches uniform_5x5
+    uv run python scripts/prepare_shards.py --batches "uniform_5x5/*" --val-ratio 0.15
+    uv run python scripts/prepare_shards.py --batches uniform_5x5/abc123,uniform_5x5/def456
 """
 
 from __future__ import annotations
 
 import argparse
+import fnmatch
 import json
 import logging
 from pathlib import Path
 
 from alpharat.data.sharding import prepare_training_set_with_split
+from alpharat.experiments import ExperimentManager
+from alpharat.experiments.paths import get_shards_dir
 from alpharat.nn.builders.flat import FlatObservationBuilder
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
@@ -26,16 +30,21 @@ logger = logging.getLogger(__name__)
 def main() -> None:
     parser = argparse.ArgumentParser(description="Prepare training shards from game batches.")
     parser.add_argument(
-        "--batches-dir",
-        type=Path,
-        default=Path("batches"),
-        help="Directory containing batch subdirectories (default: batches)",
+        "--batches",
+        type=str,
+        required=True,
+        help=(
+            "Batch IDs to process. Can be: "
+            "'group/*' (all in group), "
+            "'group/uuid,group/uuid2' (specific batches), "
+            "or 'group' (shorthand for 'group/*')"
+        ),
     )
     parser.add_argument(
-        "--output-dir",
+        "--experiments-dir",
         type=Path,
-        default=Path("data"),
-        help="Output directory for training set (default: data)",
+        default=Path("experiments"),
+        help="Experiments directory (default: experiments)",
     )
     parser.add_argument(
         "--val-ratio",
@@ -57,15 +66,18 @@ def main() -> None:
     )
     args = parser.parse_args()
 
-    # Find batch directories
-    batch_dirs = [
-        d for d in args.batches_dir.iterdir() if d.is_dir() and not d.name.startswith(".")
-    ]
-    if not batch_dirs:
-        logger.error(f"No batch directories found in {args.batches_dir}")
+    exp = ExperimentManager(args.experiments_dir)
+
+    # Resolve batch IDs from pattern
+    batch_ids = _resolve_batch_pattern(exp, args.batches)
+    if not batch_ids:
+        logger.error(f"No batches found matching '{args.batches}'")
         return
 
-    logger.info(f"Found {len(batch_dirs)} batch directories")
+    logger.info(f"Processing {len(batch_ids)} batches: {batch_ids}")
+
+    # Get batch directories
+    batch_dirs = [exp.get_batch_path(bid) for bid in batch_ids]
 
     # Get dimensions from first batch metadata
     width, height = _get_dimensions_from_batch(batch_dirs[0])
@@ -80,23 +92,64 @@ def main() -> None:
     # Create builder
     builder = FlatObservationBuilder(width=width, height=height)
 
-    # Prepare shards
+    # Prepare shards (output to experiments/shards/)
     logger.info("Processing games into shards...")
-    output_path = prepare_training_set_with_split(
+    shards_dir = get_shards_dir(exp.root)
+    result = prepare_training_set_with_split(
         batch_dirs=batch_dirs,
-        output_dir=args.output_dir,
+        output_dir=shards_dir,
         builder=builder,
         val_ratio=args.val_ratio,
         positions_per_shard=args.positions_per_shard,
         seed=args.seed,
     )
 
+    # Register in manifest
+    exp.register_shards(
+        shard_id=result.shard_id,
+        source_batches=batch_ids,
+        total_positions=result.total_positions,
+        train_positions=result.train_positions,
+        val_positions=result.val_positions,
+    )
+
+    output_path = Path(result.shard_dir)
     logger.info(f"Training set created: {output_path}")
+    logger.info(f"  Shard ID: {result.shard_id}")
     logger.info(f"  Train dir: {output_path / 'train'}")
     logger.info(f"  Val dir: {output_path / 'val'}")
+    logger.info(f"  Total positions: {result.total_positions}")
+    logger.info(f"  Train positions: {result.train_positions}")
+    logger.info(f"  Val positions: {result.val_positions}")
 
     # Print summary
     _print_summary(output_path)
+
+
+def _resolve_batch_pattern(exp: ExperimentManager, pattern: str) -> list[str]:
+    """Resolve batch pattern to list of batch IDs.
+
+    Patterns:
+        'group/*' -> all batches in group
+        'group' -> shorthand for 'group/*'
+        'group/uuid,group/uuid2' -> specific batches
+    """
+    all_batches = exp.list_batches()
+
+    # Handle comma-separated list
+    if "," in pattern:
+        return [p.strip() for p in pattern.split(",")]
+
+    # Handle 'group' (no /) as 'group/*'
+    if "/" not in pattern:
+        pattern = f"{pattern}/*"
+
+    # Handle wildcard patterns
+    if "*" in pattern:
+        return [b for b in all_batches if fnmatch.fnmatch(b, pattern)]
+
+    # Single batch ID
+    return [pattern] if pattern in all_batches else []
 
 
 def _get_dimensions_from_batch(batch_dir: Path) -> tuple[int, int]:

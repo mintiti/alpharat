@@ -1,5 +1,5 @@
 # LocalValueMLP training configuration
-# Usage: uv run python scripts/train.py configs/train_local_value.yaml
+# Usage: uv run python scripts/train.py configs/train_local_value.yaml --name localvalue_v1
 
 model:
   architecture: local_value
@@ -15,7 +15,9 @@ optim:
   ownership_weight: 1.0
 
 data:
-  train_dir: data/940b6e74-01c1-4a2e-ac6d-9ca2c1ec54c5/train
-  val_dir: data/940b6e74-01c1-4a2e-ac6d-9ca2c1ec54c5/val
+  # Update these paths to your shard directory
+  # Format: experiments/shards/{shard_uuid}/train
+  train_dir: experiments/shards/YOUR_SHARD_UUID/train
+  val_dir: experiments/shards/YOUR_SHARD_UUID/val
 
 seed: 42

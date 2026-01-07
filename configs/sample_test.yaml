@@ -1,4 +1,6 @@
 # Quick test config - 5 games
+# Usage: uv run python scripts/sample.py configs/sample_test.yaml --group test
+
 mcts:
   variant: decoupled_puct
   simulations: 50
@@ -15,5 +17,4 @@ sampling:
   num_games: 5
   workers: 2
 
-output_dir: batches/
 checkpoint: null

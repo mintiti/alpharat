@@ -194,6 +194,75 @@ class TournamentResult:
 
         return "\n".join(lines)
 
+    def standings(self) -> list[dict[str, str | int | float]]:
+        """Return standings as list of dicts (for JSON serialization)."""
+        stats: dict[str, dict[str, int | float]] = {
+            name: {"wins": 0, "draws": 0, "losses": 0, "cheese": 0.0, "games": 0}
+            for name in self.agent_names
+        }
+
+        for name in self.agent_names:
+            for other in self.agent_names:
+                if name == other:
+                    continue
+                m = self._get_matchup(name, other)
+                if m:
+                    stats[name]["wins"] += m.wins_a
+                    stats[name]["draws"] += m.draws
+                    stats[name]["losses"] += m.wins_b
+                    stats[name]["cheese"] += m.avg_cheese_a * (m.wins_a + m.draws + m.wins_b)
+                    stats[name]["games"] += m.wins_a + m.draws + m.wins_b
+
+        for name in self.agent_names:
+            s = stats[name]
+            s["points"] = s["wins"] + s["draws"] * 0.5
+            s["avg_cheese"] = s["cheese"] / s["games"] if s["games"] > 0 else 0.0
+
+        ranked = sorted(
+            self.agent_names,
+            key=lambda n: (stats[n]["points"], stats[n]["wins"]),
+            reverse=True,
+        )
+
+        return [
+            {
+                "rank": i,
+                "agent": name,
+                "wins": stats[name]["wins"],
+                "draws": stats[name]["draws"],
+                "losses": stats[name]["losses"],
+                "points": stats[name]["points"],
+                "avg_cheese": stats[name]["avg_cheese"],
+            }
+            for i, name in enumerate(ranked, 1)
+        ]
+
+    def wdl_matrix(self) -> dict[str, dict[str, tuple[int, int, int]]]:
+        """Return W/D/L matrix as nested dict: agent -> opponent -> (wins, draws, losses)."""
+        result: dict[str, dict[str, tuple[int, int, int]]] = {}
+        for name in self.agent_names:
+            result[name] = {}
+            for other in self.agent_names:
+                if name == other:
+                    continue
+                m = self._get_matchup(name, other)
+                if m:
+                    result[name][other] = (m.wins_a, m.draws, m.wins_b)
+        return result
+
+    def cheese_matrix(self) -> dict[str, dict[str, tuple[float, float]]]:
+        """Return cheese matrix: agent -> opponent -> (scored, conceded)."""
+        result: dict[str, dict[str, tuple[float, float]]] = {}
+        for name in self.agent_names:
+            result[name] = {}
+            for other in self.agent_names:
+                if name == other:
+                    continue
+                m = self._get_matchup(name, other)
+                if m:
+                    result[name][other] = (m.avg_cheese_a, m.avg_cheese_b)
+        return result
+
 
 @dataclass
 class _GameSpec:
