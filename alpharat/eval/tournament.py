@@ -3,18 +3,18 @@
 from __future__ import annotations
 
 import itertools
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import ProcessPoolExecutor, as_completed
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
 
 from pydantic import BaseModel
+from tqdm import tqdm
 
 from alpharat.ai.config import AgentConfig  # noqa: TC001
 from alpharat.data.batch import GameParams  # noqa: TC001
 from alpharat.eval.game import play_game
 
-if TYPE_CHECKING:
-    from alpharat.ai.base import Agent
+# Games per batch - balances parallelism vs agent loading overhead
+_BATCH_SIZE = 10
 
 
 class TournamentConfig(BaseModel):
@@ -195,16 +195,25 @@ class TournamentResult:
 
 
 @dataclass
-class _GameTask:
-    """Internal task for parallel game execution."""
+class _GameSpec:
+    """Specification for a single game within a matchup batch."""
 
-    agent_a_name: str
-    agent_b_name: str
-    agent_a: Agent
-    agent_b: Agent
     game_idx: int
     seed: int
     swap_sides: bool
+
+
+@dataclass
+class _MatchupBatch:
+    """All games for one matchup, with agent configs for worker to build."""
+
+    agent_a_name: str
+    agent_b_name: str
+    agent_a_config: AgentConfig
+    agent_b_config: AgentConfig
+    games: list[_GameSpec]
+    game_params: GameParams
+    device: str = "cpu"
 
 
 @dataclass
@@ -218,51 +227,57 @@ class _GameResult:
     cheese_b: float
 
 
-def _run_single_game(
-    task: _GameTask,
-    game_params: GameParams,
-) -> _GameResult:
-    """Run a single game and return result."""
-    if task.swap_sides:
-        p1_agent, p2_agent = task.agent_b, task.agent_a
-    else:
-        p1_agent, p2_agent = task.agent_a, task.agent_b
+def _run_matchup_batch(batch: _MatchupBatch) -> list[_GameResult]:
+    """Run all games in a matchup batch. Called in worker process."""
+    # Build agents from config (only the 2 needed for this matchup)
+    agent_a = batch.agent_a_config.build(device=batch.device)
+    agent_b = batch.agent_b_config.build(device=batch.device)
 
-    result = play_game(
-        p1_agent,
-        p2_agent,
-        seed=task.seed,
-        width=game_params.width,
-        height=game_params.height,
-        cheese_count=game_params.cheese_count,
-        max_turns=game_params.max_turns,
-        wall_density=game_params.wall_density,
-        mud_density=game_params.mud_density,
-    )
-
-    # Convert to agent_a/agent_b perspective
-    if task.swap_sides:
-        # agent_a was P2, agent_b was P1
-        cheese_a = result.p2_score
-        cheese_b = result.p1_score
-        if result.winner == 1:
-            winner = 2  # agent_b won (was P1)
-        elif result.winner == 2:
-            winner = 1  # agent_a won (was P2)
+    results: list[_GameResult] = []
+    for game in batch.games:
+        if game.swap_sides:
+            p1_agent, p2_agent = agent_b, agent_a
         else:
-            winner = 0
-    else:
-        cheese_a = result.p1_score
-        cheese_b = result.p2_score
-        winner = result.winner
+            p1_agent, p2_agent = agent_a, agent_b
 
-    return _GameResult(
-        agent_a_name=task.agent_a_name,
-        agent_b_name=task.agent_b_name,
-        winner=winner,
-        cheese_a=cheese_a,
-        cheese_b=cheese_b,
-    )
+        result = play_game(
+            p1_agent,
+            p2_agent,
+            seed=game.seed,
+            width=batch.game_params.width,
+            height=batch.game_params.height,
+            cheese_count=batch.game_params.cheese_count,
+            max_turns=batch.game_params.max_turns,
+            wall_density=batch.game_params.wall_density,
+            mud_density=batch.game_params.mud_density,
+        )
+
+        # Convert to agent_a/agent_b perspective
+        if game.swap_sides:
+            cheese_a = result.p2_score
+            cheese_b = result.p1_score
+            if result.winner == 1:
+                winner = 2
+            elif result.winner == 2:
+                winner = 1
+            else:
+                winner = 0
+        else:
+            cheese_a = result.p1_score
+            cheese_b = result.p2_score
+            winner = result.winner
+
+        results.append(
+            _GameResult(
+                agent_a_name=batch.agent_a_name,
+                agent_b_name=batch.agent_b_name,
+                winner=winner,
+                cheese_a=cheese_a,
+                cheese_b=cheese_b,
+            )
+        )
+
+    return results
 
 
 def run_tournament(config: TournamentConfig, *, verbose: bool = True) -> TournamentResult:
@@ -275,76 +290,82 @@ def run_tournament(config: TournamentConfig, *, verbose: bool = True) -> Tournam
     Returns:
         TournamentResult with all matchup results.
     """
-    # Build agents from config
-    agents: dict[str, Agent] = {}
-    for name, agent_config in config.agents.items():
-        agents[name] = agent_config.build(device=config.device)
-
-    agent_names = list(agents.keys())
-
-    # Generate all matchup pairs
+    agent_names = list(config.agents.keys())
     matchup_pairs = list(itertools.combinations(agent_names, 2))
 
-    # Build all game tasks
-    tasks: list[_GameTask] = []
+    # Build batches - chunk each matchup into smaller batches for better parallelism
+    batches: list[_MatchupBatch] = []
+    total_games = 0
+
     for agent_a_name, agent_b_name in matchup_pairs:
+        # Generate all game specs for this matchup
+        all_games: list[_GameSpec] = []
         for game_idx in range(config.games_per_matchup):
-            # Alternate sides for fairness
             swap_sides = game_idx % 2 == 1
-            # Seed for reproducibility
             seed = hash((agent_a_name, agent_b_name, game_idx)) % (2**31)
-            tasks.append(
-                _GameTask(
+            all_games.append(_GameSpec(game_idx=game_idx, seed=seed, swap_sides=swap_sides))
+
+        # Split into chunks of _BATCH_SIZE
+        for i in range(0, len(all_games), _BATCH_SIZE):
+            chunk = all_games[i : i + _BATCH_SIZE]
+            batches.append(
+                _MatchupBatch(
                     agent_a_name=agent_a_name,
                     agent_b_name=agent_b_name,
-                    agent_a=agents[agent_a_name],
-                    agent_b=agents[agent_b_name],
-                    game_idx=game_idx,
-                    seed=seed,
-                    swap_sides=swap_sides,
+                    agent_a_config=config.agents[agent_a_name],
+                    agent_b_config=config.agents[agent_b_name],
+                    games=chunk,
+                    game_params=config.game,
+                    device=config.device,
                 )
             )
+            total_games += len(chunk)
 
     if verbose:
-        print(f"Running {len(tasks)} games ({len(matchup_pairs)} matchups)")
+        print(
+            f"Running {total_games} games ({len(matchup_pairs)} matchups, {len(batches)} batches)"
+        )  # noqa: E501
         print(f"Agents: {', '.join(agent_names)}")
+        print(f"Workers: {config.workers}")
         print()
 
-    # Run games in parallel
-    results: list[_GameResult] = []
-    completed = 0
+    # Run batches in parallel using multiprocessing
+    all_results: list[_GameResult] = []
 
-    with ThreadPoolExecutor(max_workers=config.workers) as executor:
-        futures = {executor.submit(_run_single_game, task, config.game): task for task in tasks}
+    with ProcessPoolExecutor(max_workers=config.workers) as executor:
+        futures = [executor.submit(_run_matchup_batch, batch) for batch in batches]
 
-        for future in as_completed(futures):
-            result = future.result()
-            results.append(result)
-            completed += 1
-
-            if verbose and completed % 10 == 0:
-                print(f"Completed {completed}/{len(tasks)} games")
-
-    if verbose:
-        print(f"Completed {completed}/{len(tasks)} games")
-        print()
+        # Collect results as they complete with progress bar
+        for future in tqdm(
+            as_completed(futures),
+            total=len(batches),
+            desc="Batches",
+            disable=not verbose,
+            unit="batch",
+        ):
+            all_results.extend(future.result())
 
     # Aggregate results by matchup
-    matchup_results: dict[tuple[str, str], MatchupResult] = {}
+    final_matchups: dict[tuple[str, str], MatchupResult] = {}
 
     for agent_a_name, agent_b_name in matchup_pairs:
-        # Collect all games for this matchup
-        games = [
-            r for r in results if r.agent_a_name == agent_a_name and r.agent_b_name == agent_b_name
+        matchup_games = [
+            r
+            for r in all_results
+            if r.agent_a_name == agent_a_name and r.agent_b_name == agent_b_name
         ]
 
-        wins_a = sum(1 for g in games if g.winner == 1)
-        wins_b = sum(1 for g in games if g.winner == 2)
-        draws = sum(1 for g in games if g.winner == 0)
-        avg_cheese_a = sum(g.cheese_a for g in games) / len(games) if games else 0
-        avg_cheese_b = sum(g.cheese_b for g in games) / len(games) if games else 0
+        wins_a = sum(1 for g in matchup_games if g.winner == 1)
+        wins_b = sum(1 for g in matchup_games if g.winner == 2)
+        draws = sum(1 for g in matchup_games if g.winner == 0)
+        avg_cheese_a = (
+            sum(g.cheese_a for g in matchup_games) / len(matchup_games) if matchup_games else 0
+        )
+        avg_cheese_b = (
+            sum(g.cheese_b for g in matchup_games) / len(matchup_games) if matchup_games else 0
+        )
 
-        matchup_results[(agent_a_name, agent_b_name)] = MatchupResult(
+        final_matchups[(agent_a_name, agent_b_name)] = MatchupResult(
             agent_a=agent_a_name,
             agent_b=agent_b_name,
             wins_a=wins_a,
@@ -355,6 +376,6 @@ def run_tournament(config: TournamentConfig, *, verbose: bool = True) -> Tournam
         )
 
     return TournamentResult(
-        matchups=list(matchup_results.values()),
+        matchups=list(final_matchups.values()),
         agent_names=agent_names,
     )
