@@ -26,7 +26,7 @@ if TYPE_CHECKING:
     from pyrat_engine.core.game import PyRat
 
     from alpharat.nn.builders.flat import FlatObservationBuilder
-    from alpharat.nn.models import LocalValueMLP, PyRatMLP
+    from alpharat.nn.models import LocalValueMLP, PyRatMLP, SymmetricMLP
 
 
 # --- Config Models ---
@@ -39,7 +39,7 @@ class NNContext:
     Loaded once per worker process and reused across all games.
     """
 
-    model: PyRatMLP | LocalValueMLP
+    model: PyRatMLP | LocalValueMLP | SymmetricMLP
     builder: FlatObservationBuilder
     width: int
     height: int
@@ -179,14 +179,24 @@ def load_nn_context(checkpoint_path: str, device: str = "cpu") -> NNContext:
     model_config = config.get("model", {})
     hidden_dim = model_config.get("hidden_dim", 256)
     dropout = model_config.get("dropout", 0.0)
+    model_type = ckpt.get("model_type", "mlp")
 
     obs_dim = width * height * 7 + 6
 
     optim_config = config.get("optim", {})
-    if "ownership_weight" in optim_config:
+    if model_type == "symmetric":
+        from alpharat.nn.models import SymmetricMLP
+
+        model: SymmetricMLP | LocalValueMLP | PyRatMLP = SymmetricMLP(
+            width=width,
+            height=height,
+            hidden_dim=hidden_dim,
+            dropout=dropout,
+        )
+    elif "ownership_weight" in optim_config:
         from alpharat.nn.models import LocalValueMLP
 
-        model: LocalValueMLP | PyRatMLP = LocalValueMLP(
+        model = LocalValueMLP(
             obs_dim=obs_dim,
             width=width,
             height=height,
