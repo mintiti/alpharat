@@ -101,7 +101,7 @@ class PyRatMLP(nn.Module):
         logits_p2 = self.policy_p2_head(features)
 
         payout_flat = self.payout_head(features)
-        payout_matrix = payout_flat.view(-1, 2, self.num_actions, self.num_actions)
+        payout_matrix = F.softplus(payout_flat.view(-1, 2, self.num_actions, self.num_actions))
 
         return logits_p1, logits_p2, payout_matrix
 
@@ -126,6 +126,6 @@ class PyRatMLP(nn.Module):
         policy_p2 = F.softmax(self.policy_p2_head(features), dim=-1)
 
         payout_flat = self.payout_head(features)
-        payout_matrix = payout_flat.view(-1, 2, self.num_actions, self.num_actions)
+        payout_matrix = F.softplus(payout_flat.view(-1, 2, self.num_actions, self.num_actions))
 
         return policy_p1, policy_p2, payout_matrix

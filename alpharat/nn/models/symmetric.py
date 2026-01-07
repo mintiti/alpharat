@@ -194,8 +194,8 @@ class SymmetricMLP(nn.Module):
         payout_p1_flat = self.payout_head(torch.cat([h1, agg], dim=-1))
         payout_p2_flat = self.payout_head(torch.cat([h2, agg], dim=-1))  # Same head!
 
-        payout_p1 = payout_p1_flat.view(-1, self.num_actions, self.num_actions)
-        payout_p2 = payout_p2_flat.view(-1, self.num_actions, self.num_actions)
+        payout_p1 = F.softplus(payout_p1_flat.view(-1, self.num_actions, self.num_actions))
+        payout_p2 = F.softplus(payout_p2_flat.view(-1, self.num_actions, self.num_actions))
 
         # Stack into bimatrix [batch, 2, 5, 5]
         # P2's payout needs transpose: her (i,j) is when she plays i, opponent plays j

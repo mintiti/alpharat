@@ -143,6 +143,19 @@ class TestPyRatMLPPredict:
         assert (p1 <= 1).all()
         assert (p2 <= 1).all()
 
+    def test_payout_non_negative(self) -> None:
+        """Payout matrix should be >= 0 (cheese scores can't be negative)."""
+        obs_dim = 181
+        model = PyRatMLP(obs_dim=obs_dim)
+        model.eval()
+
+        # Use large random inputs to stress test
+        x = torch.randn(32, obs_dim) * 10
+        with torch.no_grad():
+            _, _, payout = model.predict(x)
+
+        assert (payout >= 0).all(), f"Found negative payouts: min={payout.min().item()}"
+
 
 class TestPyRatMLPGradients:
     """Tests for gradient flow."""

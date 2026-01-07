@@ -179,6 +179,20 @@ class TestSymmetricMLPPredict:
         assert (p2 >= 0).all()
         assert (p2 <= 1).all()
 
+    def test_payout_non_negative(self) -> None:
+        """Payout matrix should be >= 0 (cheese scores can't be negative)."""
+        width, height = 5, 5
+        obs_dim = width * height * 7 + 6
+        model = SymmetricMLP(width=width, height=height)
+        model.eval()
+
+        # Use large random inputs to stress test
+        x = torch.randn(32, obs_dim) * 10
+        with torch.no_grad():
+            _, _, payout = model.predict(x)
+
+        assert (payout >= 0).all(), f"Found negative payouts: min={payout.min().item()}"
+
 
 class TestSymmetricMLPSymmetry:
     """Tests for structural symmetry guarantees."""
