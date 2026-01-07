@@ -15,14 +15,14 @@ import numpy as np
 class MCTSNode:
     """MCTS node for simultaneous-move games.
 
-    Maintains statistics as payout matrices to handle simultaneous actions
-    from both players. All values are from Player 1's perspective in a
-    zero-sum formulation (score_p1 - score_p2).
+    Maintains statistics as separate payout matrices for each player to handle
+    simultaneous actions. Shape is [2, p1_actions, p2_actions] where index 0 is
+    P1's payoffs and index 1 is P2's payoffs.
 
     Attributes:
         game_state: The game state this node represents
         is_terminal: Whether this is a terminal game state
-        payout_matrix: Accumulated payouts for each action pair [p1_actions, p2_actions]
+        payout_matrix: Accumulated payouts [2, p1_actions, p2_actions]
         action_visits: Visit counts for each action pair [p1_actions, p2_actions]
         prior_policy_p1: Neural network policy prior for player 1
         prior_policy_p2: Neural network policy prior for player 2
@@ -122,7 +122,7 @@ class MCTSNode:
         """Whether this node has been expanded (has children)."""
         return len(self.children) > 0
 
-    def backup(self, action_p1: int, action_p2: int, value: float) -> None:
+    def backup(self, action_p1: int, action_p2: int, value: tuple[float, float]) -> None:
         """Update statistics after visiting a child node.
 
         Uses incremental mean update formula: Q_new = Q_old + (G - Q_old) / (n + 1)
@@ -133,13 +133,13 @@ class MCTSNode:
         Args:
             action_p1: Player 1's action that led to child
             action_p2: Player 2's action that led to child
-            value: Return value from child (from P1's perspective, zero-sum)
+            value: Tuple of (p1_value, p2_value) representing returns for each player
         """
         # Find all actions equivalent to the given actions
         p1_equiv = self._get_equivalent_actions(action_p1, player=1)
         p2_equiv = self._get_equivalent_actions(action_p2, player=2)
 
-        # Update the rectangular region of equivalent action pairs
+        # Update the rectangular region of equivalent action pairs for both players
         self._update_region(p1_equiv, p2_equiv, value)
 
     def _get_equivalent_actions(self, action: int, player: int) -> list[int]:
@@ -160,35 +160,42 @@ class MCTSNode:
         self,
         row_idx: int | slice | list[int],
         col_idx: int | slice | list[int],
-        value: float,
+        value: tuple[float, float],
     ) -> None:
         """Update a region of the payout matrix using incremental mean formula.
 
         Args:
             row_idx: Row index, slice, or list of indices to update
             col_idx: Column index, slice, or list of indices to update
-            value: New value to incorporate
+            value: Tuple of (p1_value, p2_value) to incorporate
         """
-        # Build the index for numpy array access
+        p1_value, p2_value = value
+
+        # Build the index for numpy array access (for the action dimensions)
         if isinstance(row_idx, list) and isinstance(col_idx, list):
             # Both are lists - use np.ix_ for outer product indexing
-            idx: tuple[np.ndarray, ...] | tuple[int | slice | list[int], ...] = np.ix_(
+            action_idx: tuple[np.ndarray, ...] | tuple[int | slice | list[int], ...] = np.ix_(
                 row_idx, col_idx
             )
         else:
             # At least one is int or slice - use tuple directly
-            idx = (row_idx, col_idx)
+            action_idx = (row_idx, col_idx)
 
-        # Get current Q-values and visit counts for the region
-        current_q = self.payout_matrix[idx]
-        current_n = self.action_visits[idx]
+        # Get current visit counts for the region
+        current_n = self.action_visits[action_idx]
 
-        # Incremental mean update: Q_new = Q_old + (G - Q_old) / (n + 1)
-        new_q = current_q + (value - current_q) / (current_n + 1)
+        # Update P1's payout matrix (index 0)
+        current_q_p1 = self.payout_matrix[(0,) + action_idx]
+        new_q_p1 = current_q_p1 + (p1_value - current_q_p1) / (current_n + 1)
+        self.payout_matrix[(0,) + action_idx] = new_q_p1
 
-        # Update the payout matrix and increment visit counts
-        self.payout_matrix[idx] = new_q
-        self.action_visits[idx] = current_n + 1
+        # Update P2's payout matrix (index 1)
+        current_q_p2 = self.payout_matrix[(1,) + action_idx]
+        new_q_p2 = current_q_p2 + (p2_value - current_q_p2) / (current_n + 1)
+        self.payout_matrix[(1,) + action_idx] = new_q_p2
+
+        # Increment visit counts
+        self.action_visits[action_idx] = current_n + 1
 
     def __repr__(self) -> str:
         """String representation for debugging."""

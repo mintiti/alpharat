@@ -9,6 +9,11 @@ optim:
   lr: 1e-3
   policy_weight: 1.0
   value_weight: 1.0
+  # Nash consistency loss: enforces game-theoretic consistency between payout and policy
+  # - nash_weight: loss weight (0 = disabled)
+  # - nash_mode: "target" uses MCTS policies, "predicted" uses NN's own policies
+  nash_weight: 0.0
+  nash_mode: target
   loss_variant: dqn  # "mcts" (full matrix) or "dqn" (sparse)
   p_augment: 0.5      # probability of player swap augmentation per sample
 

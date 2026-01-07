@@ -102,7 +102,7 @@ def fake_game() -> FakeGame:
 def uniform_root() -> MCTSNode:
     """Create root node with uniform priors."""
     prior = np.ones(5) / 5
-    nn_payout = np.zeros((5, 5))
+    nn_payout = np.zeros((2, 5, 5))  # Bimatrix format: [p1_payoffs, p2_payoffs]
     return MCTSNode(
         game_state=None,
         prior_policy_p1=prior,
@@ -165,9 +165,7 @@ class TestTerminalHandling:
         """Search on terminal root should return current state without simulations."""
         # Create terminal root node
         prior = np.ones(5) / 5
-        nn_payout = np.array([[1.0, 0.5], [0.5, 0.0]])  # Small matrix for test
-        nn_payout_full = np.zeros((5, 5))
-        nn_payout_full[:2, :2] = nn_payout
+        nn_payout_full = np.zeros((2, 5, 5))  # Bimatrix format
 
         root = MCTSNode(
             game_state=None,
@@ -230,13 +228,16 @@ class TestLeafValue:
         """Backup should use NN's expected value for non-terminal leaf."""
         # Create root with specific payout prediction
         prior = np.array([0.5, 0.5, 0.0, 0.0, 0.0])  # Only first two actions
-        nn_payout = np.ones((5, 5)) * 10.0  # High payout for testing
+        # Bimatrix: P1 gets +10, P2 gets -10 (zero-sum for simplicity)
+        nn_payout = np.zeros((2, 5, 5))
+        nn_payout[0] = 10.0  # P1's payoffs
+        nn_payout[1] = -10.0  # P2's payoffs
 
         root = MCTSNode(
             game_state=None,
             prior_policy_p1=prior,
             prior_policy_p2=prior,
-            nn_payout_prediction=np.zeros((5, 5)),  # Root starts at 0
+            nn_payout_prediction=np.zeros((2, 5, 5)),  # Root starts at 0
         )
 
         # Create game and tree with custom predict_fn
@@ -252,8 +253,6 @@ class TestLeafValue:
         search.search()
 
         # The root payout should have been updated with a value backed up from leaf
-        # Expected leaf value: prior @ nn_payout @ prior = 0.5*0.5*10 * 4 = 10.0
-        # (because the 2x2 submatrix is all 10s and prior focuses on those)
         assert tree.root.total_visits > 0
 
         # At least one action pair should have non-zero payout
@@ -272,7 +271,7 @@ class TestWithRealGame:
     def real_tree(self, real_game: PyRat) -> MCTSTree:
         """Tree with real PyRat game."""
         prior = np.ones(5) / 5
-        nn_payout = np.zeros((5, 5))
+        nn_payout = np.zeros((2, 5, 5))  # Bimatrix format
         root = MCTSNode(
             game_state=None,
             prior_policy_p1=prior,
@@ -314,12 +313,13 @@ class TestBackupWithLeafValue:
         # Create a child
         child, reward = fake_tree.make_move_from(fake_tree.root, 0, 0)
 
-        # Backup with specific leaf value
-        path = [(fake_tree.root, 0, 0, 1.0)]
-        fake_tree.backup(path, g=5.0)
+        # Backup with specific leaf value - tuple (p1_value, p2_value)
+        path = [(fake_tree.root, 0, 0, (1.0, -1.0))]
+        fake_tree.backup(path, g=(5.0, -5.0))
 
-        # Value at root should be: reward + gamma * g = 1.0 + 1.0 * 5.0 = 6.0
-        assert fake_tree.root.payout_matrix[0, 0] == pytest.approx(6.0)
+        # Value = reward + gamma * g = (1.0, -1.0) + 1.0 * (5.0, -5.0) = (6.0, -6.0)
+        assert fake_tree.root.payout_matrix[0, 0, 0] == pytest.approx(6.0)  # P1
+        assert fake_tree.root.payout_matrix[1, 0, 0] == pytest.approx(-6.0)  # P2
 
     def test_backup_with_discount(self) -> None:
         """Backup should apply gamma to leaf value."""
@@ -329,16 +329,17 @@ class TestBackupWithLeafValue:
             game_state=None,
             prior_policy_p1=prior,
             prior_policy_p2=prior,
-            nn_payout_prediction=np.zeros((5, 5)),
+            nn_payout_prediction=np.zeros((2, 5, 5)),  # Bimatrix format
         )
         tree = MCTSTree(game=game, root=root, gamma=0.5)  # type: ignore[arg-type]
 
         # Create child
         child, _ = tree.make_move_from(root, 1, 1)
 
-        # Backup with leaf value
-        path = [(root, 1, 1, 2.0)]
-        tree.backup(path, g=10.0)
+        # Backup with leaf value - tuple (p1_value, p2_value)
+        path = [(root, 1, 1, (2.0, -2.0))]
+        tree.backup(path, g=(10.0, -10.0))
 
-        # Value at root should be: reward + gamma * g = 2.0 + 0.5 * 10.0 = 7.0
-        assert root.payout_matrix[1, 1] == pytest.approx(7.0)
+        # Value = reward + gamma * g = (2.0, -2.0) + 0.5 * (10.0, -10.0) = (7.0, -7.0)
+        assert root.payout_matrix[0, 1, 1] == pytest.approx(7.0)  # P1
+        assert root.payout_matrix[1, 1, 1] == pytest.approx(-7.0)  # P2

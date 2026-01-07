@@ -3,11 +3,12 @@
 from __future__ import annotations
 
 import copy
-from typing import TYPE_CHECKING, Any, Literal
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
 
 from alpharat.ai.base import Agent
+from alpharat.mcts.decoupled_puct import DecoupledPUCTConfig
 from alpharat.mcts.nash import select_action_from_strategy
 from alpharat.mcts.node import MCTSNode
 from alpharat.mcts.tree import MCTSTree
@@ -17,8 +18,9 @@ if TYPE_CHECKING:
 
     from pyrat_engine.core.game import PyRat
 
+    from alpharat.mcts import MCTSConfig
     from alpharat.nn.builders.flat import FlatObservationBuilder
-    from alpharat.nn.models import LocalValueMLP, PyRatMLP
+    from alpharat.nn.models import LocalValueMLP, PyRatMLP, SymmetricMLP
 
 
 class MCTSAgent(Agent):
@@ -28,20 +30,14 @@ class MCTSAgent(Agent):
     When simulations=0 and checkpoint is set, returns raw NN policy (pure NN mode).
 
     Attributes:
-        simulations: Number of MCTS simulations.
-        c_puct: Exploration constant for PUCT.
-        gamma: Discount factor.
-        search_variant: "prior_sampling" or "decoupled_puct".
+        mcts_config: MCTS search configuration (DecoupledPUCTConfig or PriorSamplingConfig).
         checkpoint: Path to NN checkpoint, or None for uniform priors.
         temperature: Sampling temperature for action selection.
     """
 
     def __init__(
         self,
-        simulations: int = 200,
-        c_puct: float = 4.73,
-        gamma: float = 1.0,
-        search_variant: Literal["prior_sampling", "decoupled_puct"] = "decoupled_puct",
+        mcts_config: MCTSConfig,
         checkpoint: str | None = None,
         temperature: float = 1.0,
         device: str = "cpu",
@@ -49,24 +45,18 @@ class MCTSAgent(Agent):
         """Initialize MCTS agent.
 
         Args:
-            simulations: Number of MCTS simulations. 0 = pure NN mode.
-            c_puct: Exploration constant for decoupled PUCT.
-            gamma: Discount factor for future rewards.
-            search_variant: Which search algorithm to use.
+            mcts_config: MCTS search configuration containing simulations, c_puct, etc.
             checkpoint: Path to NN checkpoint, or None for uniform priors.
             temperature: Sampling temperature. 0 = argmax, 1.0 = proportional.
             device: Device for NN inference ("cpu", "cuda", "mps").
         """
-        self.simulations = simulations
-        self.c_puct = c_puct
-        self.gamma = gamma
-        self.search_variant = search_variant
+        self.mcts_config = mcts_config
         self.checkpoint = checkpoint
         self.temperature = temperature
         self._device = device
 
         # NN components (lazily loaded)
-        self._model: PyRatMLP | LocalValueMLP | None = None
+        self._model: PyRatMLP | LocalValueMLP | SymmetricMLP | None = None
         self._builder: FlatObservationBuilder | None = None
         self._width: int = 0
         self._height: int = 0
@@ -95,8 +85,20 @@ class MCTSAgent(Agent):
 
         obs_dim = self._width * self._height * 7 + 6
 
+        # Detect model type from checkpoint
+        model_type = ckpt.get("model_type", None)
         optim_config = config.get("optim", {})
-        if "ownership_weight" in optim_config:
+
+        if model_type == "symmetric":
+            from alpharat.nn.models import SymmetricMLP
+
+            self._model = SymmetricMLP(
+                width=self._width,
+                height=self._height,
+                hidden_dim=hidden_dim,
+                dropout=dropout,
+            )
+        elif "ownership_weight" in optim_config:
             from alpharat.nn.models import LocalValueMLP
 
             self._model = LocalValueMLP(
@@ -177,20 +179,8 @@ class MCTSAgent(Agent):
         return predict_fn
 
     def _build_search(self, tree: MCTSTree) -> Any:
-        """Build the appropriate search object based on variant."""
-        if self.search_variant == "prior_sampling":
-            from alpharat.mcts.search import MCTSSearch
-
-            return MCTSSearch(tree, self.simulations)
-        else:
-            from alpharat.mcts.decoupled_puct import DecoupledPUCTConfig, DecoupledPUCTSearch
-
-            config = DecoupledPUCTConfig(
-                simulations=self.simulations,
-                gamma=self.gamma,
-                c_puct=self.c_puct,
-            )
-            return DecoupledPUCTSearch(tree, config)
+        """Build the appropriate search object from config."""
+        return self.mcts_config.build(tree)
 
     def _sample_action(self, policy: np.ndarray) -> int:
         """Sample action from policy using temperature."""
@@ -236,7 +226,7 @@ class MCTSAgent(Agent):
         tree = MCTSTree(
             game=simulator,
             root=root,
-            gamma=self.gamma,
+            gamma=self.mcts_config.gamma,
             predict_fn=predict_fn,
         )
 
@@ -246,7 +236,7 @@ class MCTSAgent(Agent):
         policy = result.policy_p1 if player == 1 else result.policy_p2
 
         # Use temperature=1.0 for MCTS Nash (proportional), custom temp for pure NN
-        if self.simulations > 0:
+        if self.mcts_config.simulations > 0:
             return select_action_from_strategy(policy, temperature=1.0)
         else:
             return self._sample_action(policy)
@@ -254,16 +244,17 @@ class MCTSAgent(Agent):
     @property
     def name(self) -> str:
         """Human-readable name for this agent."""
-        if self.simulations == 0:
+        sims = self.mcts_config.simulations
+        if sims == 0:
             # Pure NN mode
             temp_str = "argmax" if self.temperature == 0 else f"t={self.temperature}"
             return f"NN({temp_str})"
 
         # MCTS mode
-        if self.search_variant == "decoupled_puct":
-            base = f"PUCT({self.simulations})"
+        if isinstance(self.mcts_config, DecoupledPUCTConfig):
+            base = f"PUCT({sims})"
         else:
-            base = f"PS({self.simulations})"
+            base = f"PS({sims})"
         if self.checkpoint:
             return f"{base}+NN"
         return base

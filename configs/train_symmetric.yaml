@@ -1,0 +1,31 @@
+# SymmetricMLP training configuration
+# Usage: uv run python scripts/train_and_benchmark_symmetric.py configs/train_symmetric.yaml
+#
+# SymmetricMLP uses DeepSet architecture for structural P1/P2 symmetry.
+# No player swap augmentation needed - symmetry is guaranteed by weight sharing.
+
+model:
+  hidden_dim: 256
+  dropout: 0.0
+
+optim:
+  lr: 1e-3
+  policy_weight: 1.0
+  value_weight: 1.0
+  # Nash consistency loss: enforces game-theoretic consistency between payout and policy
+  # - nash_weight: loss weight (0 = disabled)
+  # - nash_mode: "target" uses MCTS policies, "predicted" uses NN's own policies
+  #   "predicted" acts as self-consistency regularization between policy and payout heads
+  nash_weight: 1.0
+  nash_mode: predicted
+  # Constant-sum regularization: encourages P1 + P2 payouts ≈ total cheese collected
+  # PyRat is approximately constant-sum; this pushes all action pairs toward same sum
+  constant_sum_weight: 1
+  loss_variant: dqn  # "mcts" (full matrix) or "dqn" (sparse)
+  batch_size: 4096
+
+data:
+  train_dir: data/bimatrix/cbb724b0-30ff-4730-b051-7c9014fad554/train
+  val_dir: data/bimatrix/cbb724b0-30ff-4730-b051-7c9014fad554/val
+
+seed: 42

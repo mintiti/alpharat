@@ -100,7 +100,7 @@ class MCTSSearch:
         Expansion: Create child node when reaching unexpanded action pair.
         Backup: Propagate discounted values up the path.
         """
-        path: list[tuple[MCTSNode, int, int, float]] = []
+        path: list[tuple[MCTSNode, int, int, tuple[float, float]]] = []
         current = self.tree.root
         leaf_child: MCTSNode | None = None
 
@@ -128,13 +128,22 @@ class MCTSSearch:
         if not path:
             return  # Root was terminal
 
-        # Compute leaf value (g)
+        # Compute leaf value (g) as tuple for both players
         if leaf_child is None or leaf_child.is_terminal:
-            g = 0.0
+            g: tuple[float, float] = (0.0, 0.0)
         else:
-            # NN's expected value under its own policy
-            g = float(
-                leaf_child.prior_policy_p1 @ leaf_child.payout_matrix @ leaf_child.prior_policy_p2
+            # NN's expected value under its own policy for each player
+            g = (
+                float(
+                    leaf_child.prior_policy_p1
+                    @ leaf_child.payout_matrix[0]
+                    @ leaf_child.prior_policy_p2
+                ),
+                float(
+                    leaf_child.prior_policy_p1
+                    @ leaf_child.payout_matrix[1]
+                    @ leaf_child.prior_policy_p2
+                ),
             )
 
         self.tree.backup(path, g=g)
@@ -150,6 +159,9 @@ class MCTSSearch:
             root.payout_matrix,
             root.p1_effective,
             root.p2_effective,
+            prior_p1=root.prior_policy_p1,
+            prior_p2=root.prior_policy_p2,
+            action_visits=root.action_visits,
         )
         return SearchResult(
             payout_matrix=root.payout_matrix.copy(),

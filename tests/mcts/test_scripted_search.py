@@ -23,7 +23,7 @@ VALUE_TOL = 0.01
 def create_uniform_root(game: PyRat) -> MCTSNode:
     """Create root node with uniform priors."""
     prior = np.ones(5) / 5
-    nn_payout = np.zeros((5, 5))
+    nn_payout = np.zeros((2, 5, 5))  # Bimatrix format: [p1_payoffs, p2_payoffs]
     return MCTSNode(
         game_state=None,
         prior_policy_p1=prior,
@@ -65,9 +65,15 @@ class TestClearWinner:
             f"Full policy: {result.policy_p1}"
         )
 
-        # Value should be exactly 1 (P1 gets the only cheese)
-        value = result.policy_p1 @ result.payout_matrix @ result.policy_p2
-        assert value == pytest.approx(1.0, abs=VALUE_TOL), f"Expected value ≈ 1.0, got {value:.6f}"
+        # P1 gets the cheese (1 point), P2 gets nothing (0 points)
+        p1_value = result.policy_p1 @ result.payout_matrix[0] @ result.policy_p2
+        p2_value = result.policy_p1 @ result.payout_matrix[1] @ result.policy_p2
+        assert p1_value == pytest.approx(1.0, abs=VALUE_TOL), (
+            f"Expected P1 value ≈ 1.0, got {p1_value:.6f}"
+        )
+        assert p2_value == pytest.approx(0.0, abs=VALUE_TOL), (
+            f"Expected P2 value ≈ 0.0, got {p2_value:.6f}"
+        )
 
 
 class TestNonCompetingCheeses:
@@ -106,9 +112,15 @@ class TestNonCompetingCheeses:
             f"Full policy: {result.policy_p2}"
         )
 
-        # Value should be exactly 0 (each gets 1 cheese)
-        value = result.policy_p1 @ result.payout_matrix @ result.policy_p2
-        assert value == pytest.approx(0.0, abs=VALUE_TOL), f"Expected value ≈ 0.0, got {value:.6f}"
+        # Each player gets their own cheese (1 point each)
+        p1_value = result.policy_p1 @ result.payout_matrix[0] @ result.policy_p2
+        p2_value = result.policy_p1 @ result.payout_matrix[1] @ result.policy_p2
+        assert p1_value == pytest.approx(1.0, abs=VALUE_TOL), (
+            f"Expected P1 value ≈ 1.0, got {p1_value:.6f}"
+        )
+        assert p2_value == pytest.approx(1.0, abs=VALUE_TOL), (
+            f"Expected P2 value ≈ 1.0, got {p2_value:.6f}"
+        )
 
 
 class TestMirrorSymmetric:
@@ -155,9 +167,15 @@ class TestMirrorSymmetric:
             f"Full policy: {result.policy_p2}"
         )
 
-        # Value should be exactly 0 (symmetric game, each gets one cheese)
-        value = result.policy_p1 @ result.payout_matrix @ result.policy_p2
-        assert value == pytest.approx(0.0, abs=VALUE_TOL), f"Expected value ≈ 0.0, got {value:.6f}"
+        # Each player gets their own cheese (1 point each)
+        p1_value = result.policy_p1 @ result.payout_matrix[0] @ result.policy_p2
+        p2_value = result.policy_p1 @ result.payout_matrix[1] @ result.policy_p2
+        assert p1_value == pytest.approx(1.0, abs=VALUE_TOL), (
+            f"Expected P1 value ≈ 1.0, got {p1_value:.6f}"
+        )
+        assert p2_value == pytest.approx(1.0, abs=VALUE_TOL), (
+            f"Expected P2 value ≈ 1.0, got {p2_value:.6f}"
+        )
 
 
 class TestBlockedDirections:
@@ -221,12 +239,12 @@ class TestMatchingPenniesNash:
         """Nash solver should find 50/50 for matching pennies."""
         from alpharat.mcts.nash import compute_nash_equilibrium, compute_nash_value
 
-        matching_pennies = np.array(
-            [
-                [1.0, -1.0],
-                [-1.0, 1.0],
-            ]
-        )
+        # Matching pennies as bimatrix game:
+        # P1 wants to match (gets +1), P2 wants to mismatch (gets +1)
+        # This is zero-sum: P2's payoffs = -P1's payoffs
+        p1_payoffs = np.array([[1.0, -1.0], [-1.0, 1.0]])
+        p2_payoffs = -p1_payoffs  # Zero-sum
+        matching_pennies = np.stack([p1_payoffs, p2_payoffs])
 
         p1_strat, p2_strat = compute_nash_equilibrium(matching_pennies)
 
@@ -244,9 +262,15 @@ class TestMatchingPenniesNash:
             f"Expected P2[1] = 0.5, got {p2_strat[1]:.3f}"
         )
 
-        # Value should be 0
-        value = compute_nash_value(matching_pennies, p1_strat, p2_strat)
-        assert value == pytest.approx(0.0, abs=0.01), f"Expected value = 0, got {value:.3f}"
+        # Expected values should both be 0 (fair game)
+        p1_value = compute_nash_value(p1_payoffs, p1_strat, p2_strat)
+        p2_value = compute_nash_value(p2_payoffs, p1_strat, p2_strat)
+        assert p1_value == pytest.approx(0.0, abs=0.01), (
+            f"Expected P1 value = 0, got {p1_value:.3f}"
+        )
+        assert p2_value == pytest.approx(0.0, abs=0.01), (
+            f"Expected P2 value = 0, got {p2_value:.3f}"
+        )
 
 
 class TestSymmetricGameValue:
@@ -272,7 +296,11 @@ class TestSymmetricGameValue:
         )
 
     def test_symmetric_game_has_zero_value(self, game: PyRat) -> None:
-        """Value should be 0 for symmetric game regardless of equilibrium."""
+        """Symmetric game: players should have equal expected payoffs.
+
+        Note: This is a multi-step game (cheese is 4 steps away), so we check
+        the symmetry property rather than exact convergence values.
+        """
         np.random.seed(42)
 
         root = create_uniform_root(game)
@@ -280,11 +308,16 @@ class TestSymmetricGameValue:
         search = MCTSSearch(tree, n_sims=N_SIMS)
         result = search.search()
 
-        # Value should be 0 (symmetric game)
-        value = result.policy_p1 @ result.payout_matrix @ result.policy_p2
-        assert value == pytest.approx(0.0, abs=VALUE_TOL), (
-            f"Expected value ≈ 0.0 for symmetric game, got {value:.6f}"
+        # Key property: symmetric game → equal expected payoffs for both players
+        p1_value = result.policy_p1 @ result.payout_matrix[0] @ result.policy_p2
+        p2_value = result.policy_p1 @ result.payout_matrix[1] @ result.policy_p2
+        assert p1_value == pytest.approx(p2_value, abs=VALUE_TOL), (
+            f"Symmetric game should have equal payoffs: P1={p1_value:.6f}, P2={p2_value:.6f}"
         )
+
+        # Both values should be non-negative (both players can get cheese)
+        assert p1_value >= 0, f"P1 value should be non-negative, got {p1_value:.6f}"
+        assert p2_value >= 0, f"P2 value should be non-negative, got {p2_value:.6f}"
 
         # Players should go toward cheese (UP or RIGHT for P1, DOWN or LEFT for P2)
         p1_toward_cheese = result.policy_p1[Direction.UP] + result.policy_p1[Direction.RIGHT]
@@ -342,6 +375,12 @@ class TestRaceToSameCheese:
             f"Full policy: {result.policy_p2}"
         )
 
-        # Value should be exactly 0 (both get half the cheese)
-        value = result.policy_p1 @ result.payout_matrix @ result.policy_p2
-        assert value == pytest.approx(0.0, abs=VALUE_TOL), f"Expected value ≈ 0.0, got {value:.6f}"
+        # Both race to the same cheese and split it (0.5 each)
+        p1_value = result.policy_p1 @ result.payout_matrix[0] @ result.policy_p2
+        p2_value = result.policy_p1 @ result.payout_matrix[1] @ result.policy_p2
+        assert p1_value == pytest.approx(0.5, abs=VALUE_TOL), (
+            f"Expected P1 value ≈ 0.5, got {p1_value:.6f}"
+        )
+        assert p2_value == pytest.approx(0.5, abs=VALUE_TOL), (
+            f"Expected P2 value ≈ 0.5, got {p2_value:.6f}"
+        )

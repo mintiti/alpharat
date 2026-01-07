@@ -40,7 +40,19 @@ See [CLAUDE.md](CLAUDE.md) for implementation details.
 
 ## Status
 
-Experimental. The MCTS core and data pipeline work. Training loop exists but hasn't been tested much. Don't know yet if this learns anything useful.
+**5×5 validation complete.** Self-play loop works — each iteration produces a stronger model.
+
+| Milestone | Status |
+|-----------|--------|
+| MCTS beats Random/Greedy | ✅ |
+| NN learns from MCTS | ✅ |
+| MCTS+NN beats pure MCTS | ✅ |
+| Self-play iteration improves models | ✅ |
+| Walls / mud / larger grids | Not yet tested |
+
+Current best: 1106 Elo (MCTS+NN after 2 iterations), undefeated in 300 games.
+
+See [.mt/experiment-log.md](.mt/experiment-log.md) for full results and roadmap.
 
 ## License
 

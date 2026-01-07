@@ -265,19 +265,21 @@ class TestComputePayoutMetrics:
     """Tests for compute_payout_metrics()."""
 
     def test_returns_all_metrics(self) -> None:
-        """Should return dict with explained_variance and correlation."""
-        pred = torch.randn(4, 5, 5)
-        target = torch.randn(4, 5, 5)
+        """Should return dict with per-player explained_variance and correlation."""
+        pred = torch.randn(4, 2, 5, 5)
+        target = torch.randn(4, 2, 5, 5)
 
         result = compute_payout_metrics(pred, target)
 
-        assert "explained_variance" in result
-        assert "correlation" in result
+        assert "p1_explained_variance" in result
+        assert "p1_correlation" in result
+        assert "p2_explained_variance" in result
+        assert "p2_correlation" in result
 
     def test_returns_floats(self) -> None:
         """All values should be Python floats."""
-        pred = torch.randn(4, 5, 5)
-        target = torch.randn(4, 5, 5)
+        pred = torch.randn(4, 2, 5, 5)
+        target = torch.randn(4, 2, 5, 5)
 
         result = compute_payout_metrics(pred, target)
 

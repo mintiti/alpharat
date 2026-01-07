@@ -14,7 +14,7 @@ class PyRatMLP(nn.Module):
         observation[obs_dim] → trunk[Linear→BN→ReLU→Drop]×2 →
             ├─ policy_p1[5] (log_softmax for training, softmax for inference)
             ├─ policy_p2[5] (log_softmax for training, softmax for inference)
-            └─ payout_matrix[25] → reshape(5,5)
+            └─ payout_matrix[50] → reshape(2,5,5)
     """
 
     def __init__(
@@ -54,8 +54,8 @@ class PyRatMLP(nn.Module):
         self.policy_p1_head = nn.Linear(hidden_dim, num_actions)
         self.policy_p2_head = nn.Linear(hidden_dim, num_actions)
 
-        # Value head (outputs full 5x5 payout matrix)
-        self.payout_head = nn.Linear(hidden_dim, num_actions * num_actions)
+        # Value head (outputs 2×5×5 bimatrix: P1 and P2 payoffs)
+        self.payout_head = nn.Linear(hidden_dim, 2 * num_actions * num_actions)
 
         self._init_weights()
 
@@ -93,7 +93,7 @@ class PyRatMLP(nn.Module):
             Tuple of:
                 - logits_p1: Raw logits for P1, shape (batch, 5).
                 - logits_p2: Raw logits for P2, shape (batch, 5).
-                - payout_matrix: Predicted payout values, shape (batch, 5, 5).
+                - payout_matrix: Predicted payout values, shape (batch, 2, 5, 5).
         """
         features = self.trunk(x)
 
@@ -101,7 +101,7 @@ class PyRatMLP(nn.Module):
         logits_p2 = self.policy_p2_head(features)
 
         payout_flat = self.payout_head(features)
-        payout_matrix = payout_flat.view(-1, self.num_actions, self.num_actions)
+        payout_matrix = F.softplus(payout_flat.view(-1, 2, self.num_actions, self.num_actions))
 
         return logits_p1, logits_p2, payout_matrix
 
@@ -118,7 +118,7 @@ class PyRatMLP(nn.Module):
             Tuple of:
                 - policy_p1: Probabilities for P1, shape (batch, 5).
                 - policy_p2: Probabilities for P2, shape (batch, 5).
-                - payout_matrix: Predicted payout values, shape (batch, 5, 5).
+                - payout_matrix: Predicted payout values, shape (batch, 2, 5, 5).
         """
         features = self.trunk(x)
 
@@ -126,6 +126,6 @@ class PyRatMLP(nn.Module):
         policy_p2 = F.softmax(self.policy_p2_head(features), dim=-1)
 
         payout_flat = self.payout_head(features)
-        payout_matrix = payout_flat.view(-1, self.num_actions, self.num_actions)
+        payout_matrix = F.softplus(payout_flat.view(-1, 2, self.num_actions, self.num_actions))
 
         return policy_p1, policy_p2, payout_matrix

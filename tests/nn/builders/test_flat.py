@@ -377,7 +377,7 @@ class TestFlatDataset:
             assert len(dataset) == 6  # 2 games × 3 positions
 
     def test_getitem_returns_correct_keys(self) -> None:
-        """__getitem__ should return dict with obs, policies, value."""
+        """__getitem__ should return dict with obs, policies, values."""
         with tempfile.TemporaryDirectory() as tmpdir:
             training_set_dir = _create_training_set(Path(tmpdir))
             dataset = FlatDataset(training_set_dir)
@@ -387,7 +387,8 @@ class TestFlatDataset:
             assert "observation" in item
             assert "policy_p1" in item
             assert "policy_p2" in item
-            assert "value" in item
+            assert "p1_value" in item
+            assert "p2_value" in item
 
     def test_getitem_observation_shape(self) -> None:
         """Observation should have correct shape."""
@@ -410,15 +411,16 @@ class TestFlatDataset:
             assert item["policy_p1"].shape == (5,)
             assert item["policy_p2"].shape == (5,)
 
-    def test_getitem_value_shape(self) -> None:
-        """Value should be 1D array with single element."""
+    def test_getitem_value_shapes(self) -> None:
+        """Values should be 1D arrays with single element."""
         with tempfile.TemporaryDirectory() as tmpdir:
             training_set_dir = _create_training_set(Path(tmpdir))
             dataset = FlatDataset(training_set_dir)
 
             item = dataset[0]
 
-            assert item["value"].shape == (1,)
+            assert item["p1_value"].shape == (1,)
+            assert item["p2_value"].shape == (1,)
 
     def test_getitem_dtypes(self) -> None:
         """All arrays should be float32."""
@@ -431,7 +433,8 @@ class TestFlatDataset:
             assert item["observation"].dtype == np.float32
             assert item["policy_p1"].dtype == np.float32
             assert item["policy_p2"].dtype == np.float32
-            assert item["value"].dtype == np.float32
+            assert item["p1_value"].dtype == np.float32
+            assert item["p2_value"].dtype == np.float32
 
     def test_obs_shape_property(self) -> None:
         """obs_shape should match builder."""

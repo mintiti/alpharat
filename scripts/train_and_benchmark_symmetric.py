@@ -1,13 +1,16 @@
 #!/usr/bin/env python3
-"""Train a LocalValueMLP and benchmark it against baselines.
+"""Train a SymmetricMLP and benchmark it against baselines.
 
 This convenience script chains training with evaluation:
-1. Trains a LocalValueMLP using the provided config
+1. Trains a SymmetricMLP using the provided config
 2. Benchmarks the trained model against Random, Greedy, and pure MCTS
 
+SymmetricMLP has structural P1/P2 symmetry via DeepSet architecture,
+so no player swap augmentation is needed during training.
+
 Usage:
-    uv run python scripts/train_and_benchmark_local_value.py configs/train_local_value.yaml
-    uv run python scripts/train_and_benchmark_local_value.py configs/train_local_value.yaml \\
+    uv run python scripts/train_and_benchmark_symmetric.py configs/train_symmetric.yaml
+    uv run python scripts/train_and_benchmark_symmetric.py configs/train_symmetric.yaml \\
         --games 100 --device mps
 """
 
@@ -30,7 +33,7 @@ from alpharat.ai.config import (
 from alpharat.data.batch import GameParams
 from alpharat.eval.elo import compute_elo, from_tournament_result
 from alpharat.eval.tournament import TournamentConfig, run_tournament
-from alpharat.nn.local_value_training import LocalValueTrainConfig, run_local_value_training
+from alpharat.nn.symmetric_training import SymmetricTrainConfig, run_symmetric_training
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
@@ -56,6 +59,7 @@ def get_game_params_from_checkpoint(checkpoint_path: Path) -> GameParams:
     width = checkpoint.get("width", 5)
     height = checkpoint.get("height", 5)
 
+    # Use defaults for other params, matching training data
     return GameParams(
         width=width,
         height=height,
@@ -77,11 +81,11 @@ def build_benchmark_config(
 
     checkpoint_str = str(checkpoint_path)
 
-    # Default MCTS config for benchmarking
+    # Default MCTS config for benchmarking (matches sampling defaults)
     mcts_config = DecoupledPUCTConfig(
         simulations=settings.mcts_simulations,
-        c_puct=4.73,
-        force_k=0.0,  # Disabled by default to match training data
+        c_puct=8.34,
+        force_k=0.88,
     )
 
     agents: dict[str, AgentConfigBase] = {
@@ -109,7 +113,7 @@ def build_benchmark_config(
         )
 
     return TournamentConfig(
-        agents=agents,  # type: ignore[arg-type]
+        agents=agents,  # type: ignore[arg-type]  # AgentConfigBase is compatible
         games_per_matchup=settings.games_per_matchup,
         game=game_params,
         workers=settings.workers,
@@ -119,7 +123,7 @@ def build_benchmark_config(
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Train a LocalValueMLP and benchmark it against baselines."
+        description="Train a SymmetricMLP and benchmark it against baselines."
     )
 
     # Training args
@@ -133,7 +137,7 @@ def main() -> None:
     parser.add_argument("--games", type=int, default=50, help="Games per matchup")
     parser.add_argument("--workers", type=int, default=4, help="Parallel workers for games")
     parser.add_argument("--device", type=str, default="cpu", help="Device for NN inference")
-    parser.add_argument("--mcts-sims", type=int, default=200, help="MCTS simulations for baseline")
+    parser.add_argument("--mcts-sims", type=int, default=554, help="MCTS simulations for baseline")
 
     # Skip flags
     parser.add_argument(
@@ -147,7 +151,7 @@ def main() -> None:
 
     # Parse config (needed for resume_from even when skipping training)
     config_data = yaml.safe_load(args.config.read_text())
-    config = LocalValueTrainConfig.model_validate(config_data)
+    config = SymmetricTrainConfig.model_validate(config_data)
 
     # Phase 1: Training
     if args.skip_training:
@@ -157,10 +161,10 @@ def main() -> None:
         logger.info(f"Skipping training, using checkpoint: {checkpoint_path}")
     else:
         logger.info("=" * 60)
-        logger.info("Phase 1: Training (LocalValueMLP)")
+        logger.info("Phase 1: Training (SymmetricMLP)")
         logger.info("=" * 60)
 
-        checkpoint_path = run_local_value_training(
+        checkpoint_path = run_symmetric_training(
             config,
             epochs=args.epochs,
             checkpoint_every=args.checkpoint_every,

@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING
 
 from alpharat.ai.base import Agent
 from alpharat.ai.mcts_agent import MCTSAgent
+from alpharat.mcts.decoupled_puct import DecoupledPUCTConfig
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -41,8 +42,9 @@ class NNAgent(Agent):
             temperature: Sampling temperature. 0 = argmax, >0 = sample from policy.
             device: Device to run inference on ("cpu", "cuda", "mps").
         """
+        mcts_config = DecoupledPUCTConfig(simulations=0)
         self._agent = MCTSAgent(
-            simulations=0,
+            mcts_config=mcts_config,
             checkpoint=str(checkpoint_path),
             temperature=temperature,
             device=device,

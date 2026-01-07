@@ -130,18 +130,20 @@ def compute_policy_metrics(logits: Tensor, target: Tensor) -> dict[str, float]:
 
 
 def compute_payout_metrics(pred: Tensor, target: Tensor) -> dict[str, float]:
-    """Compute all payout matrix metrics for a batch.
+    """Compute payout matrix metrics for a batch, per player.
 
     Args:
-        pred: Predicted payout matrices, shape (batch, 5, 5).
-        target: Target payout matrices, shape (batch, 5, 5).
+        pred: Predicted payout matrices, shape (batch, 2, 5, 5).
+        target: Target payout matrices, shape (batch, 2, 5, 5).
 
     Returns:
-        Dict with explained_variance and correlation.
+        Dict with explained_variance and correlation for each player.
     """
     return {
-        "explained_variance": explained_variance(pred, target).item(),
-        "correlation": payout_correlation(pred, target).item(),
+        "p1_explained_variance": explained_variance(pred[:, 0], target[:, 0]).item(),
+        "p1_correlation": payout_correlation(pred[:, 0], target[:, 0]).item(),
+        "p2_explained_variance": explained_variance(pred[:, 1], target[:, 1]).item(),
+        "p2_correlation": payout_correlation(pred[:, 1], target[:, 1]).item(),
     }
 
 
@@ -149,32 +151,39 @@ def compute_value_metrics(
     pred_payout: Tensor,
     action_p1: Tensor,
     action_p2: Tensor,
-    target_value: Tensor,
+    p1_value: Tensor,
+    p2_value: Tensor,
 ) -> dict[str, float]:
-    """Compute metrics for scalar value at played action pair.
+    """Compute metrics for value predictions at played action pair.
 
-    Extracts pred_payout[a1, a2] and compares to target_value.
+    Compares pred_payout[:, player, a1, a2] to actual game outcomes.
 
     Args:
-        pred_payout: Predicted payout matrices, shape (batch, 5, 5).
+        pred_payout: Predicted payout matrices, shape (batch, 2, 5, 5).
         action_p1: P1 action indices, shape (batch,) or (batch, 1).
         action_p2: P2 action indices, shape (batch,) or (batch, 1).
-        target_value: Target value (remaining_diff), shape (batch,) or (batch, 1).
+        p1_value: P1's actual remaining score, shape (batch,) or (batch, 1).
+        p2_value: P2's actual remaining score, shape (batch,) or (batch, 1).
 
     Returns:
-        Dict with explained_variance and correlation for the scalar value.
+        Dict with explained_variance and correlation for each player's value.
     """
     batch_size = pred_payout.shape[0]
     batch_idx = torch.arange(batch_size, device=pred_payout.device)
 
     a1 = action_p1.squeeze().long()
     a2 = action_p2.squeeze().long()
-    pred_value = pred_payout[batch_idx, a1, a2]
-    target_value_squeezed = target_value.squeeze()
+
+    pred_p1 = pred_payout[batch_idx, 0, a1, a2]
+    pred_p2 = pred_payout[batch_idx, 1, a1, a2]
+    target_p1 = p1_value.squeeze()
+    target_p2 = p2_value.squeeze()
 
     return {
-        "explained_variance": explained_variance(pred_value, target_value_squeezed).item(),
-        "correlation": payout_correlation(pred_value, target_value_squeezed).item(),
+        "p1_explained_variance": explained_variance(pred_p1, target_p1).item(),
+        "p1_correlation": payout_correlation(pred_p1, target_p1).item(),
+        "p2_explained_variance": explained_variance(pred_p2, target_p2).item(),
+        "p2_correlation": payout_correlation(pred_p2, target_p2).item(),
     }
 
 

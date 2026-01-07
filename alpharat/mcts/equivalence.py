@@ -72,21 +72,27 @@ def reduce_matrix(
     invariant), no information is lost.
 
     Args:
-        matrix: Full payout matrix [num_actions_p1, num_actions_p2].
+        matrix: Full payout matrix, either [num_actions_p1, num_actions_p2] or
+               [2, num_actions_p1, num_actions_p2] for separate player payoffs.
         p1_effective: Effective action mapping for player 1.
         p2_effective: Effective action mapping for player 2.
 
     Returns:
         Tuple of:
-        - reduced_matrix: Smaller matrix with only effective actions
+        - reduced_matrix: Smaller matrix with only effective actions (same dims as input)
         - p1_actions: List of effective actions for P1 (row indices in reduced)
         - p2_actions: List of effective actions for P2 (column indices in reduced)
     """
     p1_actions = get_effective_actions(p1_effective)
     p2_actions = get_effective_actions(p2_effective)
 
-    # Extract submatrix using effective action indices
-    reduced = matrix[np.ix_(p1_actions, p2_actions)]
+    # Handle both 2D and 3D (bimatrix) formats
+    if matrix.ndim == 3:
+        # Shape (2, p1_actions, p2_actions) - reduce both player matrices
+        reduced = matrix[:, np.ix_(p1_actions, p2_actions)[0], np.ix_(p1_actions, p2_actions)[1]]
+    else:
+        # Shape (p1_actions, p2_actions) - legacy 2D format
+        reduced = matrix[np.ix_(p1_actions, p2_actions)]
 
     return reduced, p1_actions, p2_actions
 

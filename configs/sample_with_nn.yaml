@@ -3,8 +3,9 @@
 
 mcts:
   variant: decoupled_puct
-  simulations: 200
-  c_puct: 4.73057493635652
+  simulations: 554
+  c_puct: 8.342921588471766
+  force_k: 0.8834383744890093
 
 game:
   width: 5
@@ -20,4 +21,4 @@ sampling:
   device: mps  # Use "cpu", "cuda", or "mps"
 
 output_dir: batches/
-checkpoint: checkpoints/train_20251227_231834/best_model.pt
+checkpoint: checkpoints/train_20260105_160105/best_model.pt

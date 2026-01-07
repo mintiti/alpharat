@@ -21,7 +21,7 @@ class TestPyRatMLPForward:
 
         assert log_p1.shape == (batch_size, 5)
         assert log_p2.shape == (batch_size, 5)
-        assert payout.shape == (batch_size, 5, 5)
+        assert payout.shape == (batch_size, 2, 5, 5)
 
     def test_single_sample(self) -> None:
         """Should handle single sample (batch_size=1) in eval mode.
@@ -38,7 +38,7 @@ class TestPyRatMLPForward:
 
         assert log_p1.shape == (1, 5)
         assert log_p2.shape == (1, 5)
-        assert payout.shape == (1, 5, 5)
+        assert payout.shape == (1, 2, 5, 5)
 
     def test_softmax_of_logits_sums_to_one(self) -> None:
         """softmax(logits) should sum to 1."""
@@ -79,7 +79,7 @@ class TestPyRatMLPForward:
 
         assert log_p1.shape == (4, 5)
         assert log_p2.shape == (4, 5)
-        assert payout.shape == (4, 5, 5)
+        assert payout.shape == (4, 2, 5, 5)
 
     def test_different_obs_dim(self) -> None:
         """Should work with different observation dimensions."""
@@ -91,7 +91,7 @@ class TestPyRatMLPForward:
 
         assert log_p1.shape == (4, 5)
         assert log_p2.shape == (4, 5)
-        assert payout.shape == (4, 5, 5)
+        assert payout.shape == (4, 2, 5, 5)
 
 
 class TestPyRatMLPPredict:
@@ -108,7 +108,7 @@ class TestPyRatMLPPredict:
 
         assert p1.shape == (batch_size, 5)
         assert p2.shape == (batch_size, 5)
-        assert payout.shape == (batch_size, 5, 5)
+        assert payout.shape == (batch_size, 2, 5, 5)
 
     def test_probs_sum_to_one(self) -> None:
         """Probabilities should sum to 1."""
@@ -142,6 +142,19 @@ class TestPyRatMLPPredict:
 
         assert (p1 <= 1).all()
         assert (p2 <= 1).all()
+
+    def test_payout_non_negative(self) -> None:
+        """Payout matrix should be >= 0 (cheese scores can't be negative)."""
+        obs_dim = 181
+        model = PyRatMLP(obs_dim=obs_dim)
+        model.eval()
+
+        # Use large random inputs to stress test
+        x = torch.randn(32, obs_dim) * 10
+        with torch.no_grad():
+            _, _, payout = model.predict(x)
+
+        assert (payout >= 0).all(), f"Found negative payouts: min={payout.min().item()}"
 
 
 class TestPyRatMLPGradients:

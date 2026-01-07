@@ -14,9 +14,16 @@ Example YAML:
         checkpoint: checkpoints/best_model.pt
       mcts_baseline:
         variant: mcts
-        simulations: 200
+        mcts:
+          variant: decoupled_puct
+          simulations: 200
+          c_puct: 4.73
+          force_k: 0.0
       mcts_with_nn:
         variant: mcts
+        mcts:
+          variant: decoupled_puct
+          simulations: 200
         checkpoint: checkpoints/best_model.pt
 """
 
@@ -26,6 +33,8 @@ from abc import abstractmethod
 from typing import TYPE_CHECKING, Annotated, Literal
 
 from pydantic import BaseModel, Field
+
+from alpharat.mcts import MCTSConfig  # noqa: TC001
 
 if TYPE_CHECKING:
     from alpharat.ai.base import Agent
@@ -89,9 +98,13 @@ class NNAgentConfig(AgentConfigBase):
     def build(self, device: str = "cpu") -> Agent:
         """Build an MCTSAgent with simulations=0 (pure NN mode)."""
         from alpharat.ai.mcts_agent import MCTSAgent
+        from alpharat.mcts.decoupled_puct import DecoupledPUCTConfig
+
+        # Create a dummy config with simulations=0 (pure NN mode)
+        mcts_config = DecoupledPUCTConfig(simulations=0)
 
         return MCTSAgent(
-            simulations=0,
+            mcts_config=mcts_config,
             checkpoint=self.checkpoint,
             temperature=self.temperature,
             device=device,
@@ -101,15 +114,16 @@ class NNAgentConfig(AgentConfigBase):
 class MCTSAgentConfig(AgentConfigBase):
     """Configuration for MCTS agent with optional NN priors.
 
+    The `mcts` field contains the search configuration (DecoupledPUCTConfig or
+    PriorSamplingConfig). This is the single source of truth for MCTS parameters
+    like simulations, c_puct, and force_k.
+
     When checkpoint is set, uses NN predictions as priors during search.
     When simulations=0, skips MCTS and returns raw NN policy.
     """
 
     variant: Literal["mcts"] = "mcts"
-    simulations: int = 200
-    c_puct: float = 4.73  # Optimized default from sampling
-    gamma: float = 1.0
-    search_variant: Literal["prior_sampling", "decoupled_puct"] = "decoupled_puct"
+    mcts: Annotated[MCTSConfig, Field(discriminator="variant")]
     checkpoint: str | None = None
     temperature: float = 1.0  # For action sampling (Nash uses 1.0)
 
@@ -118,10 +132,7 @@ class MCTSAgentConfig(AgentConfigBase):
         from alpharat.ai.mcts_agent import MCTSAgent
 
         return MCTSAgent(
-            simulations=self.simulations,
-            c_puct=self.c_puct,
-            gamma=self.gamma,
-            search_variant=self.search_variant,
+            mcts_config=self.mcts,
             checkpoint=self.checkpoint,
             temperature=self.temperature,
             device=device,

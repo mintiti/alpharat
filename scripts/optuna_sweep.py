@@ -18,6 +18,7 @@ import pandas as pd
 
 from alpharat.ai import GreedyAgent, MCTSAgent
 from alpharat.eval.game import play_game
+from alpharat.mcts.decoupled_puct import DecoupledPUCTConfig
 
 # Game parameters - 5x5 open maze
 WIDTH, HEIGHT = 5, 5
@@ -28,14 +29,16 @@ GAMES_PER_CONFIG = 100
 
 def objective(trial: optuna.Trial) -> float:
     """Run games vs Greedy, return win rate."""
-    # Continuous ranges for TPE compatibility (GridSampler ignores these)
-    n_sims = trial.suggest_int("n_sims", 10, 2000, log=True)
+    n_sims = trial.suggest_int("n_sims", 200, 1200, log=True)
     c_puct = trial.suggest_float("c_puct", 0.5, 16.0, log=True)
+    # force_k is under sqrt, so log scale. 0.01 ≈ disabled, 64 = aggressive forcing
+    force_k = trial.suggest_float("force_k", 0.01, 64.0, log=True)
 
     wins = 0.0
     for game_idx in range(GAMES_PER_CONFIG):
         seed = game_idx  # Same mazes for all configs
-        agent = MCTSAgent(simulations=n_sims, c_puct=c_puct)
+        mcts_config = DecoupledPUCTConfig(simulations=n_sims, c_puct=c_puct, force_k=force_k)
+        agent = MCTSAgent(mcts_config=mcts_config)
         opponent = GreedyAgent()
 
         result = play_game(
@@ -73,7 +76,11 @@ def enqueue_seed_trials(study: optuna.Study, csv_path: str, top_n: int) -> None:
 
     for _, row in df.iterrows():
         study.enqueue_trial(
-            {"n_sims": int(row["Param n_sims"]), "c_puct": float(row["Param c_puct"])}
+            {
+                "n_sims": int(row["Param n_sims"]),
+                "c_puct": float(row["Param c_puct"]),
+                "force_k": float(row["Param force_k"]),
+            }
         )
     print(f"Enqueued {len(df)} seed trials from {csv_path}")
 
@@ -81,7 +88,7 @@ def enqueue_seed_trials(study: optuna.Study, csv_path: str, top_n: int) -> None:
 def main() -> None:
     parser = argparse.ArgumentParser(description="PUCT parameter sweep with Optuna")
     parser.add_argument("--n-jobs", type=int, default=1, help="Parallel workers")
-    parser.add_argument("--study-name", default="puct_vs_greedy_5x5", help="Study name")
+    parser.add_argument("--study-name", default="bimatrix_mcts_5x5", help="Study name")
     parser.add_argument("--seed-from", type=str, help="CSV file to seed trials from")
     parser.add_argument("--seed-top", type=int, default=20, help="Number of top configs to seed")
     args = parser.parse_args()
@@ -89,7 +96,7 @@ def main() -> None:
     # Ensure results directory exists
     Path("results").mkdir(exist_ok=True)
 
-    storage = "sqlite:///results/puct_vs_greedy_5x5.db"
+    storage = "sqlite:///results/bimatrix_mcts_5x5.db"
     pruner = optuna.pruners.HyperbandPruner(
         min_resource=40,
         max_resource=GAMES_PER_CONFIG,

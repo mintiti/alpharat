@@ -65,8 +65,9 @@ def prepare_training_set(
         - observations: from builder.save_to_arrays()
         - policy_p1: float32 (N, 5)
         - policy_p2: float32 (N, 5)
-        - value: float32 (N,)
-        - payout_matrix: float32 (N, 5, 5)
+        - p1_value: float32 (N,) — P1's actual remaining score
+        - p2_value: float32 (N,) — P2's actual remaining score
+        - payout_matrix: float32 (N, 2, 5, 5)
         - action_p1: int8 (N,)
         - action_p2: int8 (N,)
         - cheese_outcomes: int8 (N, H, W) — position-level ownership targets.
@@ -94,7 +95,8 @@ def prepare_training_set(
         all_obs,
         all_policy_p1,
         all_policy_p2,
-        all_values,
+        all_p1_values,
+        all_p2_values,
         all_payout_matrices,
         all_action_p1,
         all_action_p2,
@@ -103,7 +105,7 @@ def prepare_training_set(
         height,
     ) = _load_all_positions(batch_dirs, builder)
 
-    total_positions = len(all_values)
+    total_positions = len(all_p1_values)
     if total_positions == 0:
         raise ValueError("No positions found in batch directories")
 
@@ -114,7 +116,8 @@ def prepare_training_set(
     all_obs = all_obs[indices]
     all_policy_p1 = all_policy_p1[indices]
     all_policy_p2 = all_policy_p2[indices]
-    all_values = all_values[indices]
+    all_p1_values = all_p1_values[indices]
+    all_p2_values = all_p2_values[indices]
     all_payout_matrices = all_payout_matrices[indices]
     all_action_p1 = all_action_p1[indices]
     all_action_p2 = all_action_p2[indices]
@@ -131,7 +134,8 @@ def prepare_training_set(
         all_obs,
         all_policy_p1,
         all_policy_p2,
-        all_values,
+        all_p1_values,
+        all_p2_values,
         all_payout_matrices,
         all_action_p1,
         all_action_p2,
@@ -286,7 +290,8 @@ def _process_game_files_to_shards(
         obs_array,
         policy_p1_array,
         policy_p2_array,
-        values_array,
+        p1_values_array,
+        p2_values_array,
         payout_array,
         action_p1_array,
         action_p2_array,
@@ -295,7 +300,7 @@ def _process_game_files_to_shards(
         height,
     ) = _load_positions_from_files(game_files, builder)
 
-    total_positions = len(values_array)
+    total_positions = len(p1_values_array)
 
     # Shuffle positions within this split
     rng = np.random.default_rng(seed)
@@ -304,7 +309,8 @@ def _process_game_files_to_shards(
     obs_array = obs_array[indices]
     policy_p1_array = policy_p1_array[indices]
     policy_p2_array = policy_p2_array[indices]
-    values_array = values_array[indices]
+    p1_values_array = p1_values_array[indices]
+    p2_values_array = p2_values_array[indices]
     payout_array = payout_array[indices]
     action_p1_array = action_p1_array[indices]
     action_p2_array = action_p2_array[indices]
@@ -316,7 +322,8 @@ def _process_game_files_to_shards(
         obs_array,
         policy_p1_array,
         policy_p2_array,
-        values_array,
+        p1_values_array,
+        p2_values_array,
         payout_array,
         action_p1_array,
         action_p2_array,
@@ -368,6 +375,7 @@ def _load_positions_from_files(
     np.ndarray,
     np.ndarray,
     np.ndarray,
+    np.ndarray,
     int,
     int,
 ]:
@@ -382,8 +390,9 @@ def _load_positions_from_files(
             - observations: float32 (N, obs_dim)
             - policy_p1: float32 (N, 5)
             - policy_p2: float32 (N, 5)
-            - values: float32 (N,)
-            - payout_matrices: float32 (N, 5, 5)
+            - p1_values: float32 (N,) — P1's remaining score (actual game outcome)
+            - p2_values: float32 (N,) — P2's remaining score (actual game outcome)
+            - payout_matrices: float32 (N, 2, 5, 5)
             - action_p1: int8 (N,)
             - action_p2: int8 (N,)
             - cheese_outcomes: int8 (N, H, W) — position-level ownership targets.
@@ -397,7 +406,8 @@ def _load_positions_from_files(
     all_observations: list[np.ndarray] = []
     all_policy_p1: list[np.ndarray] = []
     all_policy_p2: list[np.ndarray] = []
-    all_values: list[float] = []
+    all_p1_values: list[float] = []
+    all_p2_values: list[float] = []
     all_payout_matrices: list[np.ndarray] = []
     all_action_p1: list[int] = []
     all_action_p2: list[int] = []
@@ -428,7 +438,8 @@ def _load_positions_from_files(
             all_observations.append(obs)
             all_policy_p1.append(targets.policy_p1)
             all_policy_p2.append(targets.policy_p2)
-            all_values.append(targets.value)
+            all_p1_values.append(targets.p1_value)
+            all_p2_values.append(targets.p2_value)
             all_payout_matrices.append(targets.payout_matrix)
             all_action_p1.append(targets.action_p1)
             all_action_p2.append(targets.action_p2)
@@ -441,7 +452,8 @@ def _load_positions_from_files(
         np.stack(all_observations),
         np.stack(all_policy_p1),
         np.stack(all_policy_p2),
-        np.array(all_values, dtype=np.float32),
+        np.array(all_p1_values, dtype=np.float32),
+        np.array(all_p2_values, dtype=np.float32),
         np.stack(all_payout_matrices),
         np.array(all_action_p1, dtype=np.int8),
         np.array(all_action_p2, dtype=np.int8),
@@ -455,6 +467,7 @@ def _load_all_positions(
     batch_dirs: list[Path],
     builder: ObservationBuilder,
 ) -> tuple[
+    np.ndarray,
     np.ndarray,
     np.ndarray,
     np.ndarray,
@@ -496,7 +509,8 @@ def _write_shards(
     observations: np.ndarray,
     policy_p1: np.ndarray,
     policy_p2: np.ndarray,
-    values: np.ndarray,
+    p1_values: np.ndarray,
+    p2_values: np.ndarray,
     payout_matrices: np.ndarray,
     action_p1: np.ndarray,
     action_p2: np.ndarray,
@@ -510,8 +524,9 @@ def _write_shards(
         observations: All observations, shape (N, obs_dim).
         policy_p1: All P1 policies, shape (N, 5).
         policy_p2: All P2 policies, shape (N, 5).
-        values: All values, shape (N,).
-        payout_matrices: All payout matrices, shape (N, 5, 5).
+        p1_values: P1's remaining scores, shape (N,).
+        p2_values: P2's remaining scores, shape (N,).
+        payout_matrices: All payout matrices, shape (N, 2, 5, 5).
         action_p1: All P1 actions, shape (N,).
         action_p2: All P2 actions, shape (N,).
         cheese_outcomes: Position-level ownership targets, shape (N, H, W).
@@ -521,7 +536,7 @@ def _write_shards(
     Returns:
         Number of shards written.
     """
-    n_positions = len(values)
+    n_positions = len(p1_values)
     n_shards = (n_positions + positions_per_shard - 1) // positions_per_shard
     shard_count = 0
 
@@ -539,7 +554,8 @@ def _write_shards(
             observations=observations[start_idx:end_idx],
             policy_p1=policy_p1[start_idx:end_idx],
             policy_p2=policy_p2[start_idx:end_idx],
-            value=values[start_idx:end_idx],
+            p1_value=p1_values[start_idx:end_idx],
+            p2_value=p2_values[start_idx:end_idx],
             payout_matrix=payout_matrices[start_idx:end_idx],
             action_p1=action_p1[start_idx:end_idx],
             action_p2=action_p2[start_idx:end_idx],

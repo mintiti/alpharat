@@ -31,6 +31,7 @@ from pathlib import Path
 
 import yaml
 
+from alpharat.eval.elo import compute_elo, from_tournament_result
 from alpharat.eval.tournament import TournamentConfig, run_tournament
 
 
@@ -59,6 +60,14 @@ def main() -> None:
     print(result.wdl_table())
     print()
     print(result.cheese_table())
+
+    # Compute and print Elo ratings
+    print()
+    records = from_tournament_result(result)
+    # Use first agent as anchor if no greedy, otherwise greedy
+    anchor = "greedy" if "greedy" in config.agents else list(config.agents.keys())[0]
+    elo_result = compute_elo(records, anchor=anchor, anchor_elo=1000, compute_uncertainty=True)
+    print(elo_result.format_table())
 
 
 if __name__ == "__main__":

@@ -42,7 +42,7 @@ class PositionData:
     p2_mud: int
     cheese_positions: list[tuple[int, int]]
     turn: int
-    payout_matrix: np.ndarray  # (5, 5)
+    payout_matrix: np.ndarray  # (2, 5, 5) — bimatrix: [0]=P1's payoffs, [1]=P2's
     visit_counts: np.ndarray  # (5, 5)
     prior_p1: np.ndarray  # (5,)
     prior_p2: np.ndarray  # (5,)

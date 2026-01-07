@@ -216,9 +216,13 @@ Two selection strategies:
 
 Both compute Nash equilibrium at the root after search completes.
 
-### Zero-Sum Formulation
+### Value Formulation
 
-All values from Player 1's perspective: `score_p1 - score_p2`. Value of +2 means P1 ahead by 2 cheese.
+Payout matrices store **absolute cheese gains** for each player separately:
+- `payout[0, i, j]` = expected cheese P1 collects from this position
+- `payout[1, i, j]` = expected cheese P2 collects from this position
+
+PyRat is approximately **constant-sum** (not zero-sum): P1 + P2 ≈ remaining_cheese. Exact under infinite horizon; approximate under turn limits (wasted moves reduce total collection).
 
 ---
 

@@ -44,6 +44,7 @@ class BenchmarkSettings:
     workers: int
     device: str
     mcts_simulations: int
+    baseline_checkpoint: Path | None = None
 
 
 def get_game_params_from_checkpoint(checkpoint_path: Path) -> GameParams:
@@ -71,25 +72,42 @@ def build_benchmark_config(
     settings: BenchmarkSettings,
 ) -> TournamentConfig:
     """Build tournament config for benchmarking a trained model."""
+    from alpharat.mcts.decoupled_puct import DecoupledPUCTConfig
+
     game_params = get_game_params_from_checkpoint(checkpoint_path)
 
     checkpoint_str = str(checkpoint_path)
+
+    # Default MCTS config for benchmarking (matches sampling defaults)
+    mcts_config = DecoupledPUCTConfig(
+        simulations=settings.mcts_simulations,
+        c_puct=8.34,
+        force_k=0.88,
+    )
 
     agents: dict[str, AgentConfigBase] = {
         "random": RandomAgentConfig(),
         "greedy": GreedyAgentConfig(),
         "mcts": MCTSAgentConfig(
-            simulations=settings.mcts_simulations,
+            mcts=mcts_config,
         ),
         "nn": NNAgentConfig(
             checkpoint=checkpoint_str,
             temperature=1.0,
         ),
         "mcts+nn": MCTSAgentConfig(
-            simulations=settings.mcts_simulations,
+            mcts=mcts_config,
             checkpoint=checkpoint_str,
         ),
     }
+
+    if settings.baseline_checkpoint:
+        baseline_str = str(settings.baseline_checkpoint)
+        agents["nn-prev"] = NNAgentConfig(checkpoint=baseline_str, temperature=1.0)
+        agents["mcts+nn-prev"] = MCTSAgentConfig(
+            mcts=mcts_config,
+            checkpoint=baseline_str,
+        )
 
     return TournamentConfig(
         agents=agents,  # type: ignore[arg-type]  # AgentConfigBase is compatible
@@ -116,7 +134,7 @@ def main() -> None:
     parser.add_argument("--games", type=int, default=50, help="Games per matchup")
     parser.add_argument("--workers", type=int, default=4, help="Parallel workers for games")
     parser.add_argument("--device", type=str, default="cpu", help="Device for NN inference")
-    parser.add_argument("--mcts-sims", type=int, default=200, help="MCTS simulations for baseline")
+    parser.add_argument("--mcts-sims", type=int, default=554, help="MCTS simulations for baseline")
 
     # Skip flags
     parser.add_argument(
@@ -128,6 +146,10 @@ def main() -> None:
 
     args = parser.parse_args()
 
+    # Parse config (needed for resume_from even when skipping training)
+    config_data = yaml.safe_load(args.config.read_text())
+    config = TrainConfig.model_validate(config_data)
+
     # Phase 1: Training
     if args.skip_training:
         if args.checkpoint is None:
@@ -138,9 +160,6 @@ def main() -> None:
         logger.info("=" * 60)
         logger.info("Phase 1: Training")
         logger.info("=" * 60)
-
-        config_data = yaml.safe_load(args.config.read_text())
-        config = TrainConfig.model_validate(config_data)
 
         checkpoint_path = run_training(
             config,
@@ -161,6 +180,11 @@ def main() -> None:
     logger.info("")
     logger.info("Checkpoint: %s", checkpoint_path)
     logger.info("  → Used by: nn, mcts+nn")
+
+    baseline = Path(config.resume_from) if config.resume_from else None
+    if baseline:
+        logger.info("Baseline: %s", baseline)
+        logger.info("  → Used by: nn-prev, mcts+nn-prev")
     logger.info("")
 
     settings = BenchmarkSettings(
@@ -168,6 +192,7 @@ def main() -> None:
         workers=args.workers,
         device=args.device,
         mcts_simulations=args.mcts_sims,
+        baseline_checkpoint=baseline,
     )
 
     tournament_config = build_benchmark_config(checkpoint_path, settings)
