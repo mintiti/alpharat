@@ -14,11 +14,15 @@ from __future__ import annotations
 import argparse
 import time
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
 
-from alpharat.ai.base import Agent
 from alpharat.ai.greedy_agent import GreedyAgent
 from alpharat.ai.mcts_agent import MCTSAgent
 from alpharat.eval.game import play_game
+from alpharat.mcts.decoupled_puct import DecoupledPUCTConfig
+
+if TYPE_CHECKING:
+    from alpharat.ai.base import Agent
 
 
 @dataclass
@@ -38,6 +42,29 @@ class BenchmarkResult:
         """MCTS win rate (wins / decisive games)."""
         decisive = self.mcts_wins + self.greedy_wins
         return self.mcts_wins / decisive if decisive > 0 else 0.5
+
+    @property
+    def time_per_game(self) -> float:
+        """Average time per game in seconds."""
+        return self.total_time / self.games
+
+
+@dataclass
+class HeadToHeadResult:
+    """Result of MCTS reuse vs MCTS fresh head-to-head."""
+
+    simulations: int
+    games: int
+    reuse_wins: int
+    fresh_wins: int
+    draws: int
+    total_time: float
+
+    @property
+    def reuse_win_rate(self) -> float:
+        """Reuse win rate (wins / decisive games)."""
+        decisive = self.reuse_wins + self.fresh_wins
+        return self.reuse_wins / decisive if decisive > 0 else 0.5
 
     @property
     def time_per_game(self) -> float:
@@ -81,9 +108,8 @@ def run_vs_greedy(
         mcts_is_p1 = game_idx % 2 == 0
 
         agent_mcts = MCTSAgent(
-            simulations=simulations,
+            mcts_config=DecoupledPUCTConfig(simulations=simulations),
             reuse_tree=reuse_tree,
-            search_variant="prior_sampling",
         )
         agent_greedy = GreedyAgent()
 
@@ -123,6 +149,104 @@ def run_vs_greedy(
         draws=draws,
         total_time=total_time,
     )
+
+
+def run_head_to_head(
+    simulations: int,
+    n_games: int,
+    width: int = 5,
+    height: int = 5,
+    cheese_count: int = 5,
+    max_turns: int = 100,
+    c_puct: float = 8.34,
+    force_k: float = 0.88,
+    checkpoint: str | None = None,
+) -> HeadToHeadResult:
+    """Run MCTS with tree reuse vs MCTS without tree reuse.
+
+    Alternates which agent plays as P1/P2 for fairness.
+
+    Args:
+        simulations: Number of MCTS simulations per move.
+        n_games: Number of games to play.
+        width: Maze width.
+        height: Maze height.
+        cheese_count: Number of cheese pieces.
+        max_turns: Maximum turns per game.
+
+    Returns:
+        HeadToHeadResult with statistics.
+    """
+    reuse_wins = 0
+    fresh_wins = 0
+    draws = 0
+
+    start_time = time.perf_counter()
+
+    for game_idx in range(n_games):
+        # Alternate sides for fairness
+        reuse_is_p1 = game_idx % 2 == 0
+
+        config = DecoupledPUCTConfig(simulations=simulations, c_puct=c_puct, force_k=force_k)
+        agent_reuse = MCTSAgent(mcts_config=config, reuse_tree=True, checkpoint=checkpoint)
+        agent_fresh = MCTSAgent(mcts_config=config, reuse_tree=False, checkpoint=checkpoint)
+
+        if reuse_is_p1:
+            agent_p1, agent_p2 = agent_reuse, agent_fresh
+        else:
+            agent_p1, agent_p2 = agent_fresh, agent_reuse
+
+        result = play_game(
+            agent_p1,
+            agent_p2,
+            width=width,
+            height=height,
+            cheese_count=cheese_count,
+            max_turns=max_turns,
+            seed=game_idx,
+        )
+
+        # Determine winner from reuse agent's perspective
+        if result.winner == 0:
+            draws += 1
+        elif (result.winner == 1 and reuse_is_p1) or (result.winner == 2 and not reuse_is_p1):
+            reuse_wins += 1
+        else:
+            fresh_wins += 1
+
+    total_time = time.perf_counter() - start_time
+
+    return HeadToHeadResult(
+        simulations=simulations,
+        games=n_games,
+        reuse_wins=reuse_wins,
+        fresh_wins=fresh_wins,
+        draws=draws,
+        total_time=total_time,
+    )
+
+
+def format_head_to_head_table(results: list[HeadToHeadResult]) -> str:
+    """Format head-to-head results as a table."""
+    lines = [
+        "MCTS Head-to-Head: Tree Reuse vs Fresh",
+        "=" * 70,
+        "",
+        f"{'Sims':>6} | {'Reuse W':>8} | {'Fresh W':>8} | {'Draw':>5} | {'Reuse Win%':>11}",
+        "-" * 70,
+    ]
+
+    for r in results:
+        lines.append(
+            f"{r.simulations:>6} | {r.reuse_wins:>8} | {r.fresh_wins:>8} | "
+            f"{r.draws:>5} | {r.reuse_win_rate:>10.1%}"
+        )
+
+    lines.append("-" * 70)
+    lines.append("")
+    lines.append("Win% > 50% means tree reuse helps")
+
+    return "\n".join(lines)
 
 
 def format_table(results: list[tuple[BenchmarkResult, BenchmarkResult]]) -> str:
@@ -167,7 +291,7 @@ def format_table(results: list[tuple[BenchmarkResult, BenchmarkResult]]) -> str:
 def main() -> None:
     """Run the benchmark."""
     parser = argparse.ArgumentParser(
-        description="Benchmark MCTS tree reuse: measure win rate vs greedy"
+        description="Benchmark MCTS tree reuse: measure win rate vs greedy or head-to-head"
     )
     parser.add_argument(
         "--games",
@@ -178,13 +302,24 @@ def main() -> None:
     parser.add_argument(
         "--simulations",
         type=str,
-        default="50,100,200",
-        help="Comma-separated list of simulation counts (default: 50,100,200)",
+        default="100,200,500",
+        help="Comma-separated list of simulation counts (default: 100,200,500)",
     )
     parser.add_argument("--width", type=int, default=5, help="Maze width (default: 5)")
     parser.add_argument("--height", type=int, default=5, help="Maze height (default: 5)")
     parser.add_argument("--cheese", type=int, default=5, help="Cheese count (default: 5)")
     parser.add_argument("--max-turns", type=int, default=100, help="Max turns (default: 100)")
+    parser.add_argument(
+        "--head-to-head",
+        action="store_true",
+        help="Run reuse vs fresh MCTS instead of vs greedy",
+    )
+    parser.add_argument(
+        "--checkpoint",
+        type=str,
+        default=None,
+        help="Path to NN checkpoint for guided MCTS",
+    )
 
     args = parser.parse_args()
 
@@ -192,45 +327,75 @@ def main() -> None:
 
     print("MCTS Tree Reuse Benchmark")
     print("=" * 40)
-    print("Testing MCTS (fresh vs reuse) against Greedy baseline")
+
+    if args.head_to_head:
+        print("Mode: Head-to-head (reuse vs fresh MCTS)")
+    else:
+        print("Mode: vs Greedy baseline")
+
+    if args.checkpoint:
+        print(f"Checkpoint: {args.checkpoint}")
     print(f"Games per config: {args.games}")
     print(f"Simulation counts: {sim_counts}")
     print(f"Maze: {args.width}x{args.height}, {args.cheese} cheese, max {args.max_turns} turns")
     print()
 
-    results = []
-    for sims in sim_counts:
-        print(f"Running {args.games} games with {sims} simulations...")
+    if args.head_to_head:
+        results_h2h = []
+        for sims in sim_counts:
+            print(f"Running {args.games} games with {sims} simulations (reuse vs fresh)...")
+            result = run_head_to_head(
+                simulations=sims,
+                n_games=args.games,
+                width=args.width,
+                height=args.height,
+                cheese_count=args.cheese,
+                max_turns=args.max_turns,
+                checkpoint=args.checkpoint,
+            )
+            print(
+                f"  Reuse: {result.reuse_wins}W, Fresh: {result.fresh_wins}W, "
+                f"Draw: {result.draws} ({result.time_per_game:.2f}s/game)"
+            )
+            results_h2h.append(result)
+            print()
 
-        print("  Fresh tree...")
-        fresh = run_vs_greedy(
-            simulations=sims,
-            reuse_tree=False,
-            n_games=args.games,
-            width=args.width,
-            height=args.height,
-            cheese_count=args.cheese,
-            max_turns=args.max_turns,
-        )
-        print(f"    Win rate: {fresh.win_rate:.1%} ({fresh.time_per_game:.2f}s/game)")
-
-        print("  Tree reuse...")
-        reuse = run_vs_greedy(
-            simulations=sims,
-            reuse_tree=True,
-            n_games=args.games,
-            width=args.width,
-            height=args.height,
-            cheese_count=args.cheese,
-            max_turns=args.max_turns,
-        )
-        print(f"    Win rate: {reuse.win_rate:.1%} ({reuse.time_per_game:.2f}s/game)")
-
-        results.append((fresh, reuse))
         print()
+        print(format_head_to_head_table(results_h2h))
+    else:
+        results = []
+        for sims in sim_counts:
+            print(f"Running {args.games} games with {sims} simulations...")
 
-    print()
-    print(format_table(results))
+            print("  Fresh tree...")
+            fresh = run_vs_greedy(
+                simulations=sims,
+                reuse_tree=False,
+                n_games=args.games,
+                width=args.width,
+                height=args.height,
+                cheese_count=args.cheese,
+                max_turns=args.max_turns,
+            )
+            print(f"    Win rate: {fresh.win_rate:.1%} ({fresh.time_per_game:.2f}s/game)")
+
+            print("  Tree reuse...")
+            reuse = run_vs_greedy(
+                simulations=sims,
+                reuse_tree=True,
+                n_games=args.games,
+                width=args.width,
+                height=args.height,
+                cheese_count=args.cheese,
+                max_turns=args.max_turns,
+            )
+            print(f"    Win rate: {reuse.win_rate:.1%} ({reuse.time_per_game:.2f}s/game)")
+
+            results.append((fresh, reuse))
+            print()
+
+        print()
+        print(format_table(results))
 
 
 if __name__ == "__main__":

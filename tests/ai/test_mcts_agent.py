@@ -7,6 +7,7 @@ from pyrat_engine.core.game import PyRat
 
 from alpharat.ai.mcts_agent import MCTSAgent
 from alpharat.eval.game import play_game
+from alpharat.mcts.decoupled_puct import DecoupledPUCTConfig
 
 
 @pytest.fixture
@@ -20,7 +21,7 @@ class TestObserveMoveBasics:
 
     def test_observe_move_noop_when_reuse_disabled(self, small_game: PyRat) -> None:
         """observe_move should do nothing when reuse_tree=False."""
-        agent = MCTSAgent(simulations=10, reuse_tree=False)
+        agent = MCTSAgent(mcts_config=DecoupledPUCTConfig(simulations=10), reuse_tree=False)
 
         # Get a move to set up state
         agent.get_move(small_game, player=1)
@@ -33,7 +34,7 @@ class TestObserveMoveBasics:
 
     def test_observe_move_advances_tree_when_reuse_enabled(self, small_game: PyRat) -> None:
         """observe_move should advance tree root when reuse_tree=True."""
-        agent = MCTSAgent(simulations=10, reuse_tree=True)
+        agent = MCTSAgent(mcts_config=DecoupledPUCTConfig(simulations=10), reuse_tree=True)
 
         # Get a move to create tree
         action = agent.get_move(small_game, player=1)
@@ -52,7 +53,7 @@ class TestObserveMoveBasics:
 
     def test_observe_move_warns_without_prior_get_move(self, small_game: PyRat) -> None:
         """observe_move should warn if called without prior get_move."""
-        agent = MCTSAgent(simulations=10, reuse_tree=True)
+        agent = MCTSAgent(mcts_config=DecoupledPUCTConfig(simulations=10), reuse_tree=True)
 
         # Call observe_move without get_move first
         with warnings.catch_warnings(record=True) as w:
@@ -67,7 +68,7 @@ class TestGetMoveWithReuse:
 
     def test_get_move_creates_tree_on_first_call(self, small_game: PyRat) -> None:
         """First get_move should create a tree."""
-        agent = MCTSAgent(simulations=10, reuse_tree=True)
+        agent = MCTSAgent(mcts_config=DecoupledPUCTConfig(simulations=10), reuse_tree=True)
 
         assert agent._tree is None
         agent.get_move(small_game, player=1)
@@ -75,7 +76,7 @@ class TestGetMoveWithReuse:
 
     def test_get_move_reuses_tree_after_observe(self, small_game: PyRat) -> None:
         """get_move should reuse tree after proper observe_move."""
-        agent = MCTSAgent(simulations=10, reuse_tree=True)
+        agent = MCTSAgent(mcts_config=DecoupledPUCTConfig(simulations=10), reuse_tree=True)
 
         # First turn
         action = agent.get_move(small_game, player=1)
@@ -98,7 +99,7 @@ class TestGetMoveWithReuse:
 
     def test_get_move_warns_on_missing_observe(self, small_game: PyRat) -> None:
         """get_move should warn if observe_move was skipped."""
-        agent = MCTSAgent(simulations=10, reuse_tree=True)
+        agent = MCTSAgent(mcts_config=DecoupledPUCTConfig(simulations=10), reuse_tree=True)
 
         # First get_move
         action = agent.get_move(small_game, player=1)
@@ -115,7 +116,7 @@ class TestGetMoveWithReuse:
 
     def test_is_tree_valid_after_observe_move(self, small_game: PyRat) -> None:
         """_is_tree_valid should validate after proper observe_move cycle."""
-        agent = MCTSAgent(simulations=10, reuse_tree=True)
+        agent = MCTSAgent(mcts_config=DecoupledPUCTConfig(simulations=10), reuse_tree=True)
 
         # No tree yet - should be invalid
         assert not agent._is_tree_valid(small_game)
@@ -140,7 +141,7 @@ class TestReset:
 
     def test_reset_clears_tree_state(self, small_game: PyRat) -> None:
         """reset should clear all tree-related state."""
-        agent = MCTSAgent(simulations=10, reuse_tree=True)
+        agent = MCTSAgent(mcts_config=DecoupledPUCTConfig(simulations=10), reuse_tree=True)
 
         # Build up some state
         agent.get_move(small_game, player=1)
@@ -162,8 +163,8 @@ class TestFullGameWithReuse:
 
     def test_full_game_completes_with_reuse(self) -> None:
         """A full game should complete successfully with tree reuse."""
-        agent_p1 = MCTSAgent(simulations=10, reuse_tree=True)
-        agent_p2 = MCTSAgent(simulations=10, reuse_tree=True)
+        agent_p1 = MCTSAgent(mcts_config=DecoupledPUCTConfig(simulations=10), reuse_tree=True)
+        agent_p2 = MCTSAgent(mcts_config=DecoupledPUCTConfig(simulations=10), reuse_tree=True)
 
         result = play_game(
             agent_p1,
@@ -182,8 +183,8 @@ class TestFullGameWithReuse:
 
     def test_full_game_completes_without_reuse(self) -> None:
         """A full game should complete successfully without tree reuse (baseline)."""
-        agent_p1 = MCTSAgent(simulations=10, reuse_tree=False)
-        agent_p2 = MCTSAgent(simulations=10, reuse_tree=False)
+        agent_p1 = MCTSAgent(mcts_config=DecoupledPUCTConfig(simulations=10), reuse_tree=False)
+        agent_p2 = MCTSAgent(mcts_config=DecoupledPUCTConfig(simulations=10), reuse_tree=False)
 
         result = play_game(
             agent_p1,
@@ -202,8 +203,8 @@ class TestFullGameWithReuse:
 
     def test_mixed_agents_reuse_and_fresh(self) -> None:
         """Game with one agent using reuse and one without should work."""
-        agent_p1 = MCTSAgent(simulations=10, reuse_tree=True)
-        agent_p2 = MCTSAgent(simulations=10, reuse_tree=False)
+        agent_p1 = MCTSAgent(mcts_config=DecoupledPUCTConfig(simulations=10), reuse_tree=True)
+        agent_p2 = MCTSAgent(mcts_config=DecoupledPUCTConfig(simulations=10), reuse_tree=False)
 
         result = play_game(
             agent_p1,
@@ -224,7 +225,7 @@ class TestTreeStatePreservation:
 
     def test_payout_matrix_preserved_after_advance(self, small_game: PyRat) -> None:
         """Payout matrix values should be preserved after advancing root."""
-        agent = MCTSAgent(simulations=50, reuse_tree=True)
+        agent = MCTSAgent(mcts_config=DecoupledPUCTConfig(simulations=50), reuse_tree=True)
 
         # First turn
         action = agent.get_move(small_game, player=1)
@@ -248,7 +249,7 @@ class TestTreeStatePreservation:
 
     def test_children_preserved_after_advance(self, small_game: PyRat) -> None:
         """Children of old root should be preserved after advancing."""
-        agent = MCTSAgent(simulations=50, reuse_tree=True)
+        agent = MCTSAgent(mcts_config=DecoupledPUCTConfig(simulations=50), reuse_tree=True)
 
         # First turn
         action = agent.get_move(small_game, player=1)
