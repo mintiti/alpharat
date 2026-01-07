@@ -191,6 +191,7 @@ class SymmetricMLP(nn.Module):
         logits_p2 = self.policy_head(torch.cat([h2, agg], dim=-1))  # Same head!
 
         # Payout head (rho)
+        # softplus ensures non-negative outputs
         payout_p1_flat = self.payout_head(torch.cat([h1, agg], dim=-1))
         payout_p2_flat = self.payout_head(torch.cat([h2, agg], dim=-1))  # Same head!
 

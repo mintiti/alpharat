@@ -43,6 +43,39 @@ def _swap_players_in_obs(obs: torch.Tensor, width: int, height: int) -> torch.Te
     return swapped
 
 
+def _make_valid_obs(width: int, height: int, batch_size: int = 1) -> torch.Tensor:
+    """Create valid observation with proper structure.
+
+    Creates observations with:
+    - Zero maze (no walls)
+    - Random player positions (one-hot)
+    - Binary cheese mask
+    - Valid scalars
+    """
+    spatial = width * height
+    obs_dim = spatial * 7 + 6
+    obs = torch.zeros(batch_size, obs_dim)
+
+    # Random player positions (one-hot)
+    p1_pos_start = spatial * 4
+    p2_pos_start = spatial * 5
+    for i in range(batch_size):
+        p1_idx = int(torch.randint(0, spatial, (1,)).item())
+        p2_idx = int(torch.randint(0, spatial, (1,)).item())
+        obs[i, p1_pos_start + p1_idx] = 1.0
+        obs[i, p2_pos_start + p2_idx] = 1.0
+
+    # Binary cheese mask (random ~20% of cells have cheese)
+    cheese_start = spatial * 6
+    obs[:, cheese_start : cheese_start + spatial] = (torch.rand(batch_size, spatial) > 0.8).float()
+
+    # Valid scalars
+    scalars_start = spatial * 7
+    obs[:, scalars_start + 1] = 0.5  # progress
+
+    return obs
+
+
 def _make_symmetric_obs(width: int, height: int, batch_size: int = 1) -> torch.Tensor:
     """Create observation where both players are in identical positions.
 
@@ -182,12 +215,11 @@ class TestSymmetricMLPPredict:
     def test_payout_non_negative(self) -> None:
         """Payout matrix should be >= 0 (cheese scores can't be negative)."""
         width, height = 5, 5
-        obs_dim = width * height * 7 + 6
         model = SymmetricMLP(width=width, height=height)
         model.eval()
 
-        # Use large random inputs to stress test
-        x = torch.randn(32, obs_dim) * 10
+        # Use valid observations (payout bounded by remaining_cheese which is non-negative)
+        x = _make_valid_obs(width, height, batch_size=32)
         with torch.no_grad():
             _, _, payout = model.predict(x)
 
@@ -364,11 +396,10 @@ class TestSymmetricMLPInitialization:
     def test_initial_policy_near_uniform(self) -> None:
         """Fresh model should output near-uniform policies."""
         width, height = 5, 5
-        obs_dim = width * height * 7 + 6
         model = SymmetricMLP(width=width, height=height)
         model.eval()
 
-        x = torch.randn(32, obs_dim)
+        x = _make_valid_obs(width, height, batch_size=32)
         with torch.no_grad():
             p1, p2, _ = model.predict(x)
 
@@ -377,18 +408,19 @@ class TestSymmetricMLPInitialization:
         assert (p2.mean(dim=0) - uniform).abs().max() < 0.1
 
     def test_initial_payout_near_zero(self) -> None:
-        """Fresh model should predict payouts near zero."""
+        """Fresh model should predict small non-negative payouts."""
         width, height = 5, 5
-        obs_dim = width * height * 7 + 6
         model = SymmetricMLP(width=width, height=height)
         model.eval()
 
-        x = torch.randn(32, obs_dim)
+        x = _make_valid_obs(width, height, batch_size=32)
         with torch.no_grad():
             _, _, payout = model.predict(x)
 
-        assert payout.mean().abs() < 1.0
-        assert payout.abs().max() < 5.0
+        # softplus ensures non-negative, small init keeps values small
+        assert (payout >= 0).all()
+        # With std=0.01 init, softplus(x≈0) ≈ 0.69, should be well under 5
+        assert payout.max() < 5.0
 
 
 class TestSymmetricMLPConsistency:
