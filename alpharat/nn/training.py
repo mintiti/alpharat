@@ -53,6 +53,9 @@ class OptimConfig(BaseModel):
     lr: float = 1e-3
     policy_weight: float = 1.0
     value_weight: float = 1.0
+    nash_weight: float = 0.0  # Nash consistency loss weight (0 = disabled)
+    nash_mode: Literal["target", "predicted"] = "target"
+    constant_sum_weight: float = 0.0  # Constant-sum regularization weight (0 = disabled)
     loss_variant: Literal["mcts", "dqn"] = "dqn"
     p_augment: float = 0.5
     batch_size: int = 4096
@@ -124,25 +127,115 @@ def sparse_payout_loss(
     return 0.5 * (F.mse_loss(pred_p1, target_p1) + F.mse_loss(pred_p2, target_p2))
 
 
+def nash_consistency_loss(
+    pred_payout: torch.Tensor,
+    pi1: torch.Tensor,
+    pi2: torch.Tensor,
+    support_threshold: float = 1e-3,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Enforce game-theoretic consistency between payout matrix and policies.
+
+    Forces the predicted payout matrix to be a valid game whose Nash equilibrium
+    is the given policy. Two components:
+
+    1. Indifference: Actions in support (π > threshold) must have equal expected utility.
+    2. No profitable deviation: Actions outside support must not be better
+       than the equilibrium value.
+
+    Can be used with either:
+    - Target policies (from MCTS): enforces payout consistency with MCTS Nash
+    - Predicted policies (from NN): enforces self-consistency between NN heads
+
+    Args:
+        pred_payout: Predicted bimatrix, shape (batch, 2, 5, 5).
+            pred_payout[:, 0] is P1's payoff, pred_payout[:, 1] is P2's payoff.
+        pi1: P1's policy, shape (batch, 5). Either target or predicted.
+        pi2: P2's policy, shape (batch, 5). Either target or predicted.
+        support_threshold: Actions with π > threshold are considered in support.
+            Default 1e-3 corresponds to ~1 MCTS visit out of 1000 simulations.
+
+    Returns:
+        Tuple of (total_loss, indifference_loss, deviation_loss).
+    """
+    # P1's expected payoff per action against P2's strategy
+    # pred_payout[:, 0] is [batch, 5, 5], pi2 is [batch, 5]
+    # exp1[i] = sum_j P1[i,j] * pi2[j]
+    exp1 = torch.einsum("bij,bj->bi", pred_payout[:, 0], pi2)  # [batch, 5]
+
+    # P2's expected payoff per action against P1's strategy
+    # pred_payout[:, 1] is [batch, 5, 5] where [i,j] = P2's payoff when P1 plays i, P2 plays j
+    # exp2[j] = sum_i P2[i,j] * pi1[i]
+    exp2 = torch.einsum("bij,bi->bj", pred_payout[:, 1], pi1)  # [batch, 5]
+
+    # Equilibrium values
+    val1 = (pi1 * exp1).sum(dim=-1, keepdim=True)  # [batch, 1]
+    val2 = (pi2 * exp2).sum(dim=-1, keepdim=True)  # [batch, 1]
+
+    # Support masks
+    support1 = pi1 > support_threshold  # [batch, 5]
+    support2 = pi2 > support_threshold  # [batch, 5]
+
+    # Indifference loss: actions in support should have equal expected payoff
+    indiff1 = (support1.float() * (exp1 - val1) ** 2).mean()
+    indiff2 = (support2.float() * (exp2 - val2) ** 2).mean()
+    indifference_loss = indiff1 + indiff2
+
+    # No profitable deviation: actions outside support shouldn't be better than V
+    outside1 = ~support1
+    outside2 = ~support2
+    dev1 = (outside1.float() * F.relu(exp1 - val1) ** 2).mean()
+    dev2 = (outside2.float() * F.relu(exp2 - val2) ** 2).mean()
+    deviation_loss = dev1 + dev2
+
+    total_loss = indifference_loss + deviation_loss
+
+    return total_loss, indifference_loss, deviation_loss
+
+
+def constant_sum_loss(
+    pred_payout: torch.Tensor,
+    p1_value: torch.Tensor,
+    p2_value: torch.Tensor,
+) -> torch.Tensor:
+    """Regularize payout matrix toward constant-sum (approximately zero-sum game).
+
+    PyRat is approximately constant-sum: total cheese collected is bounded by
+    remaining cheese. This loss encourages all action pairs to sum to approximately
+    the same value (the total cheese collected in the actual game).
+
+    Args:
+        pred_payout: Predicted bimatrix, shape (batch, 2, 5, 5).
+        p1_value: P1's actual cheese gained, shape (batch,) or (batch, 1).
+        p2_value: P2's actual cheese gained, shape (batch,) or (batch, 1).
+
+    Returns:
+        MSE loss between sum of predicted payouts and total collected.
+    """
+    # Sum of both players' predicted payouts for each action pair
+    sum_payout = pred_payout[:, 0] + pred_payout[:, 1]  # [batch, 5, 5]
+
+    # Target: total cheese collected in the actual game
+    total_collected = p1_value.squeeze(-1) + p2_value.squeeze(-1)  # [batch]
+
+    # MSE between predicted sum and actual total (broadcast across all action pairs)
+    return F.mse_loss(sum_payout, total_collected.view(-1, 1, 1).expand_as(sum_payout))
+
+
 def compute_losses(
     model: PyRatMLP,
     data: dict[str, torch.Tensor],
     loss_variant: Literal["mcts", "dqn"],
     policy_weight: float,
     value_weight: float,
-) -> tuple[
-    torch.Tensor,
-    torch.Tensor,
-    torch.Tensor,
-    torch.Tensor,
-    torch.Tensor,
-    torch.Tensor,
-    torch.Tensor,
-]:
+    nash_weight: float = 0.0,
+    nash_mode: Literal["target", "predicted"] = "target",
+    constant_sum_weight: float = 0.0,
+) -> dict[str, torch.Tensor]:
     """Forward pass and loss computation.
 
     Returns:
-        (loss, loss_p1, loss_p2, loss_value, logits_p1, logits_p2, pred_payout)
+        Dict with keys: loss, loss_p1, loss_p2, loss_value, loss_nash, loss_indiff,
+        loss_dev, loss_constant_sum, logits_p1, logits_p2, pred_payout.
     """
     logits_p1, logits_p2, pred_payout = model(data["observation"])
 
@@ -158,9 +251,48 @@ def compute_losses(
             pred_payout, data["action_p1"], data["action_p2"], data["p1_value"], data["p2_value"]
         )
 
-    loss = policy_weight * (loss_p1 + loss_p2) + value_weight * loss_value
+    # Nash consistency loss (game-theoretic constraint)
+    if nash_weight > 0:
+        if nash_mode == "predicted":
+            # Use NN's own predicted policies — self-consistency regularization
+            pi1 = F.softmax(logits_p1, dim=-1)
+            pi2 = F.softmax(logits_p2, dim=-1)
+        else:
+            # Use target policies from MCTS
+            pi1 = data["policy_p1"]
+            pi2 = data["policy_p2"]
+        loss_nash, loss_indiff, loss_dev = nash_consistency_loss(pred_payout, pi1, pi2)
+    else:
+        # Return zeros when disabled (for consistent logging)
+        zero = torch.tensor(0.0, device=pred_payout.device)
+        loss_nash, loss_indiff, loss_dev = zero, zero, zero
 
-    return loss, loss_p1, loss_p2, loss_value, logits_p1, logits_p2, pred_payout
+    # Constant-sum regularization (encourages P1 + P2 ≈ total collected)
+    if constant_sum_weight > 0:
+        loss_csum = constant_sum_loss(pred_payout, data["p1_value"], data["p2_value"])
+    else:
+        loss_csum = torch.tensor(0.0, device=pred_payout.device)
+
+    loss = (
+        policy_weight * (loss_p1 + loss_p2)
+        + value_weight * loss_value
+        + nash_weight * loss_nash
+        + constant_sum_weight * loss_csum
+    )
+
+    return {
+        "loss": loss,
+        "loss_p1": loss_p1,
+        "loss_p2": loss_p2,
+        "loss_value": loss_value,
+        "loss_nash": loss_nash,
+        "loss_indiff": loss_indiff,
+        "loss_dev": loss_dev,
+        "loss_constant_sum": loss_csum,
+        "logits_p1": logits_p1,
+        "logits_p2": logits_p2,
+        "pred_payout": pred_payout,
+    }
 
 
 def compute_detailed_metrics(
@@ -370,24 +502,31 @@ def run_training(
 
             optimizer.zero_grad()
 
-            loss, loss_p1, loss_p2, loss_value, logits_p1, logits_p2, pred_payout = compute_losses(
+            out = compute_losses(
                 model,
                 batch,
                 optim_cfg.loss_variant,
                 optim_cfg.policy_weight,
                 optim_cfg.value_weight,
+                optim_cfg.nash_weight,
+                optim_cfg.nash_mode,
+                optim_cfg.constant_sum_weight,
             )
 
-            loss.backward()
+            out["loss"].backward()
             optimizer.step()
 
             # Accumulate loss metrics
             train_acc.update(
                 {
-                    "loss_total": loss.item(),
-                    "loss_policy_p1": loss_p1.item(),
-                    "loss_policy_p2": loss_p2.item(),
-                    "loss_value": loss_value.item(),
+                    "loss_total": out["loss"].item(),
+                    "loss_policy_p1": out["loss_p1"].item(),
+                    "loss_policy_p2": out["loss_p2"].item(),
+                    "loss_value": out["loss_value"].item(),
+                    "loss_nash": out["loss_nash"].item(),
+                    "loss_indiff": out["loss_indiff"].item(),
+                    "loss_dev": out["loss_dev"].item(),
+                    "loss_constant_sum": out["loss_constant_sum"].item(),
                 },
                 batch_size=curr_batch_size,
             )
@@ -396,7 +535,9 @@ def run_training(
             if compute_detailed:
                 with torch.no_grad():
                     train_acc.update(
-                        compute_detailed_metrics(batch, logits_p1, logits_p2, pred_payout),
+                        compute_detailed_metrics(
+                            batch, out["logits_p1"], out["logits_p2"], out["pred_payout"]
+                        ),
                         batch_size=curr_batch_size,
                     )
 
@@ -422,28 +563,27 @@ def run_training(
                     "action_p2": val["action_p2"][start_idx:end_idx],
                 }
 
-                (
-                    vl,
-                    vl_p1,
-                    vl_p2,
-                    vl_value,
-                    vl_logits_p1,
-                    vl_logits_p2,
-                    vl_pred_payout,
-                ) = compute_losses(
+                vl_out = compute_losses(
                     model,
                     val_batch,
                     optim_cfg.loss_variant,
                     optim_cfg.policy_weight,
                     optim_cfg.value_weight,
+                    optim_cfg.nash_weight,
+                    optim_cfg.nash_mode,
+                    optim_cfg.constant_sum_weight,
                 )
 
                 val_acc.update(
                     {
-                        "loss_total": vl.item(),
-                        "loss_policy_p1": vl_p1.item(),
-                        "loss_policy_p2": vl_p2.item(),
-                        "loss_value": vl_value.item(),
+                        "loss_total": vl_out["loss"].item(),
+                        "loss_policy_p1": vl_out["loss_p1"].item(),
+                        "loss_policy_p2": vl_out["loss_p2"].item(),
+                        "loss_value": vl_out["loss_value"].item(),
+                        "loss_nash": vl_out["loss_nash"].item(),
+                        "loss_indiff": vl_out["loss_indiff"].item(),
+                        "loss_dev": vl_out["loss_dev"].item(),
+                        "loss_constant_sum": vl_out["loss_constant_sum"].item(),
                     },
                     batch_size=curr_batch_size,
                 )
@@ -451,7 +591,10 @@ def run_training(
                 if compute_detailed:
                     val_acc.update(
                         compute_detailed_metrics(
-                            val_batch, vl_logits_p1, vl_logits_p2, vl_pred_payout
+                            val_batch,
+                            vl_out["logits_p1"],
+                            vl_out["logits_p2"],
+                            vl_out["pred_payout"],
                         ),
                         batch_size=curr_batch_size,
                     )
@@ -465,12 +608,15 @@ def run_training(
             writer.add_scalar(f"val/{key}", value, epoch)
 
         # Log to console
+        nash_str = ""
+        if optim_cfg.nash_weight > 0:
+            nash_str = f", nash={train_metrics['loss_nash']:.4f}"
         logger.info(
             f"Epoch {epoch} - "
             f"Train: {train_metrics['loss_total']:.4f} "
             f"(p1={train_metrics['loss_policy_p1']:.4f}, "
             f"p2={train_metrics['loss_policy_p2']:.4f}, "
-            f"val={train_metrics['loss_value']:.4f}) | "
+            f"val={train_metrics['loss_value']:.4f}{nash_str}) | "
             f"Val: {val_metrics['loss_total']:.4f}"
         )
 
