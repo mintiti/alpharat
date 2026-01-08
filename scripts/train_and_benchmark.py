@@ -30,7 +30,8 @@ from alpharat.ai.config import (
 from alpharat.data.batch import GameParams
 from alpharat.eval.elo import compute_elo, from_tournament_result
 from alpharat.eval.tournament import TournamentConfig, run_tournament
-from alpharat.nn.training import TrainConfig, run_training
+from alpharat.nn.config import TrainConfig
+from alpharat.nn.training import run_training
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)

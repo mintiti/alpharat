@@ -4,15 +4,15 @@ This module provides a single training function that works with any architecture
 by using dependency injection through the ModelConfig interface.
 
 Usage:
-    from alpharat.nn.training.loop import TrainConfig, run_training
-    from alpharat.nn.architectures.mlp.config import MLPModelConfig, MLPOptimConfig
+    import yaml
+    from alpharat.nn.config import TrainConfig
+    from alpharat.nn.training import run_training
 
-    config = TrainConfig(
-        model=MLPModelConfig(hidden_dim=256),
-        optim=MLPOptimConfig(lr=1e-3),
-        data=DataConfig(train_dir="data/train", val_dir="data/val"),
-    )
+    config = TrainConfig.model_validate(yaml.safe_load(config_path.read_text()))
     run_training(config, epochs=100)
+
+The architecture is determined by the 'architecture' field in the YAML config,
+and Pydantic automatically dispatches to the correct config class.
 """
 
 from __future__ import annotations
@@ -33,7 +33,7 @@ from alpharat.nn.metrics import (
     compute_policy_metrics,
     compute_value_metrics,
 )
-from alpharat.nn.training.keys import LossKey
+from alpharat.nn.training.keys import BatchKey, LossKey, ModelOutput
 from alpharat.nn.training_utils import (
     backward_with_amp,
     select_device,
@@ -44,7 +44,7 @@ from alpharat.nn.training_utils import (
 if TYPE_CHECKING:
     from torch import nn
 
-    from alpharat.nn.training.config import BaseModelConfig, BaseOptimConfig, DataConfig
+    from alpharat.nn.config import TrainConfig
     from alpharat.nn.training.protocols import AugmentationStrategy, LossFunction
 
 logger = logging.getLogger(__name__)
@@ -62,16 +62,16 @@ def _compute_detailed_metrics(
         Dict of metric name -> value.
     """
     # Concatenate all batch outputs
-    all_logits_p1 = torch.cat([d["logits_p1"] for d in all_outputs])
-    all_logits_p2 = torch.cat([d["logits_p2"] for d in all_outputs])
-    all_pred_payout = torch.cat([d["pred_payout"] for d in all_outputs])
-    all_policy_p1 = torch.cat([d["policy_p1"] for d in all_outputs])
-    all_policy_p2 = torch.cat([d["policy_p2"] for d in all_outputs])
-    all_payout_matrix = torch.cat([d["payout_matrix"] for d in all_outputs])
-    all_action_p1 = torch.cat([d["action_p1"] for d in all_outputs])
-    all_action_p2 = torch.cat([d["action_p2"] for d in all_outputs])
-    all_p1_value = torch.cat([d["p1_value"] for d in all_outputs])
-    all_p2_value = torch.cat([d["p2_value"] for d in all_outputs])
+    all_logits_p1 = torch.cat([d[ModelOutput.LOGITS_P1] for d in all_outputs])
+    all_logits_p2 = torch.cat([d[ModelOutput.LOGITS_P2] for d in all_outputs])
+    all_pred_payout = torch.cat([d[ModelOutput.PAYOUT] for d in all_outputs])
+    all_policy_p1 = torch.cat([d[BatchKey.POLICY_P1] for d in all_outputs])
+    all_policy_p2 = torch.cat([d[BatchKey.POLICY_P2] for d in all_outputs])
+    all_payout_matrix = torch.cat([d[BatchKey.PAYOUT_MATRIX] for d in all_outputs])
+    all_action_p1 = torch.cat([d[BatchKey.ACTION_P1] for d in all_outputs])
+    all_action_p2 = torch.cat([d[BatchKey.ACTION_P2] for d in all_outputs])
+    all_p1_value = torch.cat([d[BatchKey.P1_VALUE] for d in all_outputs])
+    all_p2_value = torch.cat([d[BatchKey.P2_VALUE] for d in all_outputs])
 
     # Compute metrics on full epoch data
     p1_metrics = compute_policy_metrics(all_logits_p1, all_policy_p1)
@@ -96,9 +96,7 @@ def _compute_detailed_metrics(
 
 
 def run_training(
-    model_config: BaseModelConfig,
-    optim_config: BaseOptimConfig,
-    data_config: DataConfig,
+    config: TrainConfig,
     *,
     epochs: int = 100,
     checkpoint_every: int = 10,
@@ -107,8 +105,6 @@ def run_training(
     output_dir: Path = Path("checkpoints"),
     run_name: str | None = None,
     use_amp: bool | None = None,
-    seed: int = 42,
-    resume_from: str | None = None,
 ) -> Path:
     """Run training loop for any model architecture.
 
@@ -119,9 +115,7 @@ def run_training(
         - build_augmentation(): Get the augmentation strategy
 
     Args:
-        model_config: Architecture-specific model configuration.
-        optim_config: Optimization parameters (lr, weights, batch_size).
-        data_config: Training and validation data paths.
+        config: Full training configuration (model, optim, data, seed, resume_from).
         epochs: Number of epochs to train.
         checkpoint_every: Save checkpoint every N epochs.
         metrics_every: Compute detailed metrics every N epochs.
@@ -129,12 +123,16 @@ def run_training(
         output_dir: Directory for checkpoints and logs.
         run_name: Name for this run. Auto-generated if None.
         use_amp: Enable AMP. None auto-detects, True/False forces on/off.
-        seed: Random seed for reproducibility.
-        resume_from: Path to checkpoint to resume from.
 
     Returns:
         Path to best model checkpoint.
     """
+    # Unpack config
+    model_config = config.model
+    optim_config = config.optim
+    data_config = config.data
+    seed = config.seed
+    resume_from = config.resume_from
     # Generate run name
     if run_name is None:
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -175,6 +173,9 @@ def run_training(
     logger.info(
         f"width={width}, height={height}, train={len(train_dataset)}, val={len(val_dataset)}"
     )
+
+    # Inject data dimensions into model config before building
+    model_config.set_data_dimensions(width, height)
 
     # Build model from config (models are nn.Module subclasses)
     model: nn.Module = model_config.build_model()  # type: ignore[assignment]
@@ -229,21 +230,21 @@ def run_training(
             batch_idx = train_indices[start_idx:end_idx]
             curr_batch_size = len(batch_idx)
 
-            # Extract batch
-            batch = {
-                "observation": train["observation"][batch_idx],
-                "policy_p1": train["policy_p1"][batch_idx],
-                "policy_p2": train["policy_p2"][batch_idx],
-                "p1_value": train["p1_value"][batch_idx],
-                "p2_value": train["p2_value"][batch_idx],
-                "payout_matrix": train["payout_matrix"][batch_idx],
-                "action_p1": train["action_p1"][batch_idx],
-                "action_p2": train["action_p2"][batch_idx],
+            # Extract batch (typed as dict[str, ...] since BatchKey is StrEnum)
+            batch: dict[str, torch.Tensor] = {
+                BatchKey.OBSERVATION: train[BatchKey.OBSERVATION][batch_idx],
+                BatchKey.POLICY_P1: train[BatchKey.POLICY_P1][batch_idx],
+                BatchKey.POLICY_P2: train[BatchKey.POLICY_P2][batch_idx],
+                BatchKey.P1_VALUE: train[BatchKey.P1_VALUE][batch_idx],
+                BatchKey.P2_VALUE: train[BatchKey.P2_VALUE][batch_idx],
+                BatchKey.PAYOUT_MATRIX: train[BatchKey.PAYOUT_MATRIX][batch_idx],
+                BatchKey.ACTION_P1: train[BatchKey.ACTION_P1][batch_idx],
+                BatchKey.ACTION_P2: train[BatchKey.ACTION_P2][batch_idx],
             }
 
             # Include cheese_outcomes if available (for LocalValueMLP)
-            if "cheese_outcomes" in train:
-                batch["cheese_outcomes"] = train["cheese_outcomes"][batch_idx]
+            if BatchKey.CHEESE_OUTCOMES in train:
+                batch[BatchKey.CHEESE_OUTCOMES] = train[BatchKey.CHEESE_OUTCOMES][batch_idx]
 
             # Apply augmentation
             if augmentation.needs_augmentation:
@@ -255,10 +256,10 @@ def run_training(
             with torch.autocast(torch_device.type, dtype=amp_dtype, enabled=amp_enabled):
                 # Pass cheese_mask if available (for LocalValueMLP ownership value)
                 model_kwargs = {}
-                if "cheese_outcomes" in batch:
-                    model_kwargs["cheese_mask"] = batch["cheese_outcomes"] >= 0
+                if BatchKey.CHEESE_OUTCOMES in batch:
+                    model_kwargs["cheese_mask"] = batch[BatchKey.CHEESE_OUTCOMES] >= 0
 
-                model_output = model(batch["observation"], **model_kwargs)
+                model_output = model(batch[BatchKey.OBSERVATION], **model_kwargs)
                 losses = loss_fn(model_output, batch, optim_config)
 
             # Backward pass
@@ -270,20 +271,18 @@ def run_training(
 
             # Accumulate outputs for detailed metrics
             if compute_detailed:
-                from alpharat.nn.training.keys import ModelOutput
-
                 train_detailed_outputs.append(
                     {
-                        "logits_p1": model_output[ModelOutput.LOGITS_P1].detach().clone(),
-                        "logits_p2": model_output[ModelOutput.LOGITS_P2].detach().clone(),
-                        "pred_payout": model_output[ModelOutput.PAYOUT].detach().clone(),
-                        "policy_p1": batch["policy_p1"],
-                        "policy_p2": batch["policy_p2"],
-                        "payout_matrix": batch["payout_matrix"],
-                        "action_p1": batch["action_p1"],
-                        "action_p2": batch["action_p2"],
-                        "p1_value": batch["p1_value"],
-                        "p2_value": batch["p2_value"],
+                        ModelOutput.LOGITS_P1: model_output[ModelOutput.LOGITS_P1].detach().clone(),
+                        ModelOutput.LOGITS_P2: model_output[ModelOutput.LOGITS_P2].detach().clone(),
+                        ModelOutput.PAYOUT: model_output[ModelOutput.PAYOUT].detach().clone(),
+                        BatchKey.POLICY_P1: batch[BatchKey.POLICY_P1],
+                        BatchKey.POLICY_P2: batch[BatchKey.POLICY_P2],
+                        BatchKey.PAYOUT_MATRIX: batch[BatchKey.PAYOUT_MATRIX],
+                        BatchKey.ACTION_P1: batch[BatchKey.ACTION_P1],
+                        BatchKey.ACTION_P2: batch[BatchKey.ACTION_P2],
+                        BatchKey.P1_VALUE: batch[BatchKey.P1_VALUE],
+                        BatchKey.P2_VALUE: batch[BatchKey.P2_VALUE],
                     }
                 )
 
@@ -307,47 +306,46 @@ def run_training(
                 end_idx = min(start_idx + batch_size, n_val)
                 curr_batch_size = end_idx - start_idx
 
-                val_batch = {
-                    "observation": val["observation"][start_idx:end_idx],
-                    "policy_p1": val["policy_p1"][start_idx:end_idx],
-                    "policy_p2": val["policy_p2"][start_idx:end_idx],
-                    "p1_value": val["p1_value"][start_idx:end_idx],
-                    "p2_value": val["p2_value"][start_idx:end_idx],
-                    "payout_matrix": val["payout_matrix"][start_idx:end_idx],
-                    "action_p1": val["action_p1"][start_idx:end_idx],
-                    "action_p2": val["action_p2"][start_idx:end_idx],
+                val_batch: dict[str, torch.Tensor] = {
+                    BatchKey.OBSERVATION: val[BatchKey.OBSERVATION][start_idx:end_idx],
+                    BatchKey.POLICY_P1: val[BatchKey.POLICY_P1][start_idx:end_idx],
+                    BatchKey.POLICY_P2: val[BatchKey.POLICY_P2][start_idx:end_idx],
+                    BatchKey.P1_VALUE: val[BatchKey.P1_VALUE][start_idx:end_idx],
+                    BatchKey.P2_VALUE: val[BatchKey.P2_VALUE][start_idx:end_idx],
+                    BatchKey.PAYOUT_MATRIX: val[BatchKey.PAYOUT_MATRIX][start_idx:end_idx],
+                    BatchKey.ACTION_P1: val[BatchKey.ACTION_P1][start_idx:end_idx],
+                    BatchKey.ACTION_P2: val[BatchKey.ACTION_P2][start_idx:end_idx],
                 }
 
-                if "cheese_outcomes" in val:
-                    val_batch["cheese_outcomes"] = val["cheese_outcomes"][start_idx:end_idx]
+                if BatchKey.CHEESE_OUTCOMES in val:
+                    cheese_key = BatchKey.CHEESE_OUTCOMES
+                    val_batch[cheese_key] = val[cheese_key][start_idx:end_idx]
 
                 with torch.autocast(torch_device.type, dtype=amp_dtype, enabled=amp_enabled):
                     # Pass cheese_mask if available (for LocalValueMLP ownership value)
                     model_kwargs = {}
-                    if "cheese_outcomes" in val_batch:
-                        model_kwargs["cheese_mask"] = val_batch["cheese_outcomes"] >= 0
+                    if BatchKey.CHEESE_OUTCOMES in val_batch:
+                        model_kwargs["cheese_mask"] = val_batch[BatchKey.CHEESE_OUTCOMES] >= 0
 
-                    model_output = model(val_batch["observation"], **model_kwargs)
+                    model_output = model(val_batch[BatchKey.OBSERVATION], **model_kwargs)
                     losses = loss_fn(model_output, val_batch, optim_config)
 
                 loss_metrics = {k: v for k, v in losses.items() if k.startswith("loss")}
                 val_acc.update(loss_metrics, batch_size=curr_batch_size)
 
                 if compute_detailed:
-                    from alpharat.nn.training.keys import ModelOutput
-
                     val_detailed_outputs.append(
                         {
-                            "logits_p1": model_output[ModelOutput.LOGITS_P1].clone(),
-                            "logits_p2": model_output[ModelOutput.LOGITS_P2].clone(),
-                            "pred_payout": model_output[ModelOutput.PAYOUT].clone(),
-                            "policy_p1": val_batch["policy_p1"],
-                            "policy_p2": val_batch["policy_p2"],
-                            "payout_matrix": val_batch["payout_matrix"],
-                            "action_p1": val_batch["action_p1"],
-                            "action_p2": val_batch["action_p2"],
-                            "p1_value": val_batch["p1_value"],
-                            "p2_value": val_batch["p2_value"],
+                            ModelOutput.LOGITS_P1: model_output[ModelOutput.LOGITS_P1].clone(),
+                            ModelOutput.LOGITS_P2: model_output[ModelOutput.LOGITS_P2].clone(),
+                            ModelOutput.PAYOUT: model_output[ModelOutput.PAYOUT].clone(),
+                            BatchKey.POLICY_P1: val_batch[BatchKey.POLICY_P1],
+                            BatchKey.POLICY_P2: val_batch[BatchKey.POLICY_P2],
+                            BatchKey.PAYOUT_MATRIX: val_batch[BatchKey.PAYOUT_MATRIX],
+                            BatchKey.ACTION_P1: val_batch[BatchKey.ACTION_P1],
+                            BatchKey.ACTION_P2: val_batch[BatchKey.ACTION_P2],
+                            BatchKey.P1_VALUE: val_batch[BatchKey.P1_VALUE],
+                            BatchKey.P2_VALUE: val_batch[BatchKey.P2_VALUE],
                         }
                     )
 

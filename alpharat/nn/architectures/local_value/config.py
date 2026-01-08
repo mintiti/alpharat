@@ -2,10 +2,10 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Literal
 
 from alpharat.nn.augmentation import PlayerSwapStrategy
-from alpharat.nn.training.config import BaseModelConfig, BaseOptimConfig
+from alpharat.nn.training.base import BaseModelConfig, BaseOptimConfig
 
 if TYPE_CHECKING:
     from alpharat.nn.training.protocols import AugmentationStrategy, LossFunction, TrainableModel
@@ -16,6 +16,9 @@ class LocalValueModelConfig(BaseModelConfig):
 
     Uses player swap augmentation like MLP.
     """
+
+    # Discriminator for Pydantic union dispatch
+    architecture: Literal["local_value"] = "local_value"
 
     # Architecture parameters
     hidden_dim: int = 256
@@ -28,6 +31,12 @@ class LocalValueModelConfig(BaseModelConfig):
     obs_dim: int | None = None
     width: int | None = None
     height: int | None = None
+
+    def set_data_dimensions(self, width: int, height: int) -> None:
+        """Set all dimension fields from data."""
+        self.obs_dim = width * height * 7 + 6
+        self.width = width
+        self.height = height
 
     def build_model(self) -> TrainableModel:
         """Construct LocalValueMLP instance."""
@@ -58,6 +67,9 @@ class LocalValueModelConfig(BaseModelConfig):
 
 class LocalValueOptimConfig(BaseOptimConfig):
     """Optimization configuration for LocalValueMLP training."""
+
+    # Discriminator for Pydantic union dispatch
+    architecture: Literal["local_value"] = "local_value"
 
     # LocalValueMLP-specific loss weight
     ownership_weight: float = 1.0

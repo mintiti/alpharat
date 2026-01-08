@@ -8,7 +8,7 @@ import torch
 import torch.nn.functional as F
 
 from alpharat.nn.losses import constant_sum_loss, nash_consistency_loss, sparse_payout_loss
-from alpharat.nn.training.keys import LossKey, ModelOutput
+from alpharat.nn.training.keys import BatchKey, LossKey, ModelOutput
 
 if TYPE_CHECKING:
     from alpharat.nn.architectures.mlp.config import MLPOptimConfig
@@ -35,16 +35,16 @@ def compute_mlp_losses(
     pred_payout = model_output[ModelOutput.PAYOUT]
 
     # Policy losses (cross-entropy with soft targets)
-    loss_p1 = F.cross_entropy(logits_p1, batch["policy_p1"])
-    loss_p2 = F.cross_entropy(logits_p2, batch["policy_p2"])
+    loss_p1 = F.cross_entropy(logits_p1, batch[BatchKey.POLICY_P1])
+    loss_p2 = F.cross_entropy(logits_p2, batch[BatchKey.POLICY_P2])
 
     # Payout loss (sparse - only at played action pair)
     loss_value = sparse_payout_loss(
         pred_payout,
-        batch["action_p1"],
-        batch["action_p2"],
-        batch["p1_value"],
-        batch["p2_value"],
+        batch[BatchKey.ACTION_P1],
+        batch[BatchKey.ACTION_P2],
+        batch[BatchKey.P1_VALUE],
+        batch[BatchKey.P2_VALUE],
     )
 
     # Combine base losses
@@ -63,8 +63,8 @@ def compute_mlp_losses(
 
     if config.nash_weight > 0:
         if config.nash_mode == "target":
-            pi1 = batch["policy_p1"]
-            pi2 = batch["policy_p2"]
+            pi1 = batch[BatchKey.POLICY_P1]
+            pi2 = batch[BatchKey.POLICY_P2]
         else:  # predicted
             pi1 = F.softmax(logits_p1, dim=-1)
             pi2 = F.softmax(logits_p2, dim=-1)
@@ -82,8 +82,8 @@ def compute_mlp_losses(
     if config.constant_sum_weight > 0:
         loss_constant_sum = constant_sum_loss(
             pred_payout,
-            batch["p1_value"],
-            batch["p2_value"],
+            batch[BatchKey.P1_VALUE],
+            batch[BatchKey.P2_VALUE],
         )
         loss = loss + config.constant_sum_weight * loss_constant_sum
 

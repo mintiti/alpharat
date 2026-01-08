@@ -5,7 +5,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Literal
 
 from alpharat.nn.augmentation import NoAugmentation
-from alpharat.nn.training.config import BaseModelConfig, BaseOptimConfig
+from alpharat.nn.training.base import BaseModelConfig, BaseOptimConfig
 
 if TYPE_CHECKING:
     from alpharat.nn.training.protocols import AugmentationStrategy, LossFunction, TrainableModel
@@ -17,6 +17,9 @@ class SymmetricModelConfig(BaseModelConfig):
     No augmentation needed - structural symmetry handles P1/P2 symmetry.
     """
 
+    # Discriminator for Pydantic union dispatch
+    architecture: Literal["symmetric"] = "symmetric"
+
     # Architecture parameters
     hidden_dim: int = 256
     dropout: float = 0.0
@@ -24,6 +27,11 @@ class SymmetricModelConfig(BaseModelConfig):
     # Dimensions (set at build time based on data)
     width: int | None = None
     height: int | None = None
+
+    def set_data_dimensions(self, width: int, height: int) -> None:
+        """Set grid dimensions from data."""
+        self.width = width
+        self.height = height
 
     def build_model(self) -> TrainableModel:
         """Construct SymmetricMLP instance."""
@@ -54,7 +62,10 @@ class SymmetricModelConfig(BaseModelConfig):
 class SymmetricOptimConfig(BaseOptimConfig):
     """Optimization configuration for SymmetricMLP training."""
 
-    # MLP-specific loss weights
+    # Discriminator for Pydantic union dispatch
+    architecture: Literal["symmetric"] = "symmetric"
+
+    # Symmetric-specific loss weights
     nash_weight: float = 0.0
     nash_mode: Literal["target", "predicted"] = "target"
     constant_sum_weight: float = 0.0

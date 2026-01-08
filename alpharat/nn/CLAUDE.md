@@ -1,0 +1,167 @@
+# Neural Network Module
+
+Training infrastructure for PyRat neural networks with pluggable architectures.
+
+## Quick Start
+
+```bash
+# Train any architecture (auto-detected from config)
+uv run python scripts/train.py configs/train.yaml --epochs 100
+
+# Train and benchmark against baselines
+uv run python scripts/train_and_benchmark.py configs/train.yaml --games 50
+```
+
+## Config Format
+
+All architectures use the same YAML schema. Pydantic discriminated unions auto-dispatch based on `architecture`:
+
+```yaml
+model:
+  architecture: mlp  # or "symmetric" or "local_value"
+  hidden_dim: 256
+  dropout: 0.0
+  p_augment: 0.5     # mlp/local_value only
+
+optim:
+  architecture: mlp  # must match model
+  lr: 1e-3
+  batch_size: 4096
+  policy_weight: 1.0
+  value_weight: 1.0
+  # Architecture-specific:
+  nash_weight: 0.0   # mlp/symmetric
+  ownership_weight: 1.0  # local_value only
+
+data:
+  train_dir: data/train
+  val_dir: data/val
+
+seed: 42
+resume_from: null  # or path to checkpoint
+```
+
+## Architecture Comparison
+
+| Architecture | Description | Augmentation |
+|--------------|-------------|--------------|
+| `mlp` | Flat observation, shared trunk, separate policy/payout heads | Player swap |
+| `symmetric` | Structural P1/P2 symmetry in network design | None needed |
+| `local_value` | Per-cell ownership logits + global payout matrix | Player swap |
+
+## Module Structure
+
+```
+nn/
+├── config.py           # TrainConfig with discriminated unions (imports architectures)
+│
+├── training/           # Generic training infrastructure (no arch knowledge)
+│   ├── loop.py        # run_training() - works with any architecture
+│   ├── base.py        # BaseModelConfig, BaseOptimConfig, DataConfig
+│   ├── protocols.py   # TrainableModel, LossFunction, AugmentationStrategy
+│   └── keys.py        # ModelOutput, LossKey, BatchKey (StrEnum)
+│
+├── architectures/      # Architecture-specific configs + losses
+│   ├── mlp/
+│   │   ├── config.py  # MLPModelConfig, MLPOptimConfig
+│   │   └── loss.py    # compute_mlp_losses()
+│   ├── symmetric/
+│   │   ├── config.py  # SymmetricModelConfig, SymmetricOptimConfig
+│   │   └── loss.py    # compute_symmetric_losses()
+│   └── local_value/
+│       ├── config.py  # LocalValueModelConfig, LocalValueOptimConfig
+│       └── loss.py    # compute_local_value_losses()
+│
+├── models/            # nn.Module implementations
+│   ├── mlp.py         # PyRatMLP
+│   ├── symmetric.py   # SymmetricMLP
+│   └── local_value.py # LocalValueMLP
+│
+├── losses/            # Shared loss utilities
+│   └── shared.py      # policy_loss(), value_loss(), nash_consistency_loss()
+│
+├── builders/          # Observation builders
+│   └── flat.py        # FlatObservationBuilder - 1D encoding
+│
+└── augmentation.py    # PlayerSwapStrategy, NoAugmentation
+```
+
+## Adding a New Architecture
+
+1. Create `architectures/myarch/config.py`:
+
+```python
+from typing import Literal
+from alpharat.nn.training.config import BaseModelConfig, BaseOptimConfig
+
+class MyArchModelConfig(BaseModelConfig):
+    architecture: Literal["myarch"] = "myarch"  # Discriminator
+    # Architecture params...
+
+    def set_data_dimensions(self, width: int, height: int) -> None:
+        # Set any dimension fields needed by build_model()
+        pass
+
+    def build_model(self) -> TrainableModel:
+        from alpharat.nn.models.myarch import MyArchMLP
+        return MyArchMLP(...)
+
+    def build_loss_fn(self) -> LossFunction:
+        from alpharat.nn.architectures.myarch.loss import compute_myarch_losses
+        return compute_myarch_losses
+
+    def build_augmentation(self) -> AugmentationStrategy:
+        return PlayerSwapStrategy(p_swap=self.p_augment)
+
+class MyArchOptimConfig(BaseOptimConfig):
+    architecture: Literal["myarch"] = "myarch"
+    # Loss weights...
+```
+
+2. Create `architectures/myarch/loss.py`:
+
+```python
+def compute_myarch_losses(
+    model_output: dict[str, torch.Tensor],
+    batch: dict[str, torch.Tensor],
+    config: MyArchOptimConfig,
+) -> dict[str, torch.Tensor]:
+    # Compute losses, return dict with LossKey.TOTAL
+    ...
+```
+
+3. Create `models/myarch.py` implementing the model.
+
+4. Register in `nn/config.py`:
+
+```python
+ModelConfig = Annotated[
+    MLPModelConfig | SymmetricModelConfig | LocalValueModelConfig | MyArchModelConfig,
+    Discriminator("architecture"),
+]
+# Same for OptimConfig
+```
+
+## Reproducibility
+
+Checkpoints save everything needed to reproduce training:
+- Model state dict
+- Optimizer state dict
+- Full config (model + optim + data)
+- Data dimensions (width, height)
+- Best validation loss
+
+Resume training:
+```yaml
+resume_from: checkpoints/train_20260101_120000/best_model.pt
+```
+
+## Key Protocols
+
+Models must implement `TrainableModel`:
+- `forward(x, **kwargs) -> dict[str, Tensor]` — returns logits + payout
+- `predict(x, **kwargs) -> dict[str, Tensor]` — returns probs + payout
+
+Loss functions must return `dict[str, Tensor]` with at least `LossKey.TOTAL`.
+
+Augmentation strategies must implement `__call__(batch, width, height) -> batch`.

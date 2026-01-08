@@ -2,19 +2,18 @@
 
 from __future__ import annotations
 
-from typing import Any
-
 import torch
 import torch.nn.functional as F
 
+from alpharat.nn.architectures.local_value.config import LocalValueOptimConfig  # noqa: TC001
 from alpharat.nn.losses import compute_ownership_loss, sparse_payout_loss
-from alpharat.nn.training.keys import LossKey, ModelOutput
+from alpharat.nn.training.keys import BatchKey, LossKey, ModelOutput
 
 
 def compute_local_value_losses(
     model_output: dict[str, torch.Tensor],
     batch: dict[str, torch.Tensor],
-    config: Any,
+    config: LocalValueOptimConfig,
 ) -> dict[str, torch.Tensor]:
     """Compute losses for LocalValueMLP.
 
@@ -32,28 +31,25 @@ def compute_local_value_losses(
     ownership_logits = model_output[ModelOutput.OWNERSHIP_LOGITS]
 
     # Policy losses
-    loss_p1 = F.cross_entropy(logits_p1, batch["policy_p1"])
-    loss_p2 = F.cross_entropy(logits_p2, batch["policy_p2"])
+    loss_p1 = F.cross_entropy(logits_p1, batch[BatchKey.POLICY_P1])
+    loss_p2 = F.cross_entropy(logits_p2, batch[BatchKey.POLICY_P2])
 
     # Sparse payout loss
     loss_value = sparse_payout_loss(
         pred_payout,
-        batch["action_p1"],
-        batch["action_p2"],
-        batch["p1_value"],
-        batch["p2_value"],
+        batch[BatchKey.ACTION_P1],
+        batch[BatchKey.ACTION_P2],
+        batch[BatchKey.P1_VALUE],
+        batch[BatchKey.P2_VALUE],
     )
 
     # Ownership loss (auxiliary task)
-    loss_ownership = compute_ownership_loss(ownership_logits, batch["cheese_outcomes"])
-
-    # Weighted total
-    ownership_weight = getattr(config, "ownership_weight", 1.0)
+    loss_ownership = compute_ownership_loss(ownership_logits, batch[BatchKey.CHEESE_OUTCOMES])
 
     loss = (
         config.policy_weight * (loss_p1 + loss_p2)
         + config.value_weight * loss_value
-        + ownership_weight * loss_ownership
+        + config.ownership_weight * loss_ownership
     )
 
     return {

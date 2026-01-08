@@ -5,7 +5,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Literal
 
 from alpharat.nn.augmentation import PlayerSwapStrategy
-from alpharat.nn.training.config import BaseModelConfig, BaseOptimConfig
+from alpharat.nn.training.base import BaseModelConfig, BaseOptimConfig
 
 if TYPE_CHECKING:
     from alpharat.nn.training.protocols import AugmentationStrategy, LossFunction, TrainableModel
@@ -18,6 +18,9 @@ class MLPModelConfig(BaseModelConfig):
     needed by the training loop.
     """
 
+    # Discriminator for Pydantic union dispatch
+    architecture: Literal["mlp"] = "mlp"
+
     # Architecture parameters
     hidden_dim: int = 256
     dropout: float = 0.0
@@ -27,6 +30,10 @@ class MLPModelConfig(BaseModelConfig):
 
     # obs_dim is set at build time based on data
     obs_dim: int | None = None
+
+    def set_data_dimensions(self, width: int, height: int) -> None:
+        """Compute and set obs_dim from data dimensions."""
+        self.obs_dim = width * height * 7 + 6
 
     def build_model(self) -> TrainableModel:
         """Construct PyRatMLP instance."""
@@ -56,7 +63,8 @@ class MLPModelConfig(BaseModelConfig):
 class MLPOptimConfig(BaseOptimConfig):
     """Optimization configuration for MLP training."""
 
-    # Base params inherited: lr, policy_weight, value_weight, batch_size
+    # Discriminator for Pydantic union dispatch
+    architecture: Literal["mlp"] = "mlp"
 
     # MLP-specific loss weights
     nash_weight: float = 0.0

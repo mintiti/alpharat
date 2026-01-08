@@ -1,21 +1,19 @@
 """Generic training infrastructure.
 
-Provides protocols, configs, and utilities for training any model architecture.
+Provides protocols, configs, and the training loop for any model architecture.
 
-For backward compatibility, TrainConfig and run_training for MLP are re-exported here.
+Note: TrainConfig lives in nn/config.py (not here) because it's a union over
+architecture-specific configs. Import it from there:
+
+    from alpharat.nn.config import TrainConfig
+    from alpharat.nn.training import run_training
 """
 
 from __future__ import annotations
 
-from alpharat.nn.mlp_training import TrainConfig, run_training
-from alpharat.nn.training.config import (
-    BaseModelConfig,
-    BaseOptimConfig,
-    DataConfig,
-    TrainingConfig,
-)
+from alpharat.nn.training.base import BaseModelConfig, BaseOptimConfig, DataConfig
 from alpharat.nn.training.keys import ArchitectureType, BatchKey, LossKey, ModelOutput
-from alpharat.nn.training.loop import run_training as run_generic_training
+from alpharat.nn.training.loop import run_training
 from alpharat.nn.training.protocols import (
     AugmentationStrategy,
     LossFunction,
@@ -32,14 +30,10 @@ __all__ = [
     "TrainableModel",
     "LossFunction",
     "AugmentationStrategy",
-    # Configs
+    # Configs (base classes only — TrainConfig is in nn/config.py)
     "BaseModelConfig",
     "BaseOptimConfig",
     "DataConfig",
-    "TrainingConfig",
     # Training
-    "run_generic_training",
-    # Backward compat (MLP)
-    "TrainConfig",
     "run_training",
 ]

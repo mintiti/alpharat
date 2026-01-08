@@ -14,7 +14,8 @@ from pathlib import Path
 
 import yaml
 
-from alpharat.nn.training import TrainConfig, run_training
+from alpharat.nn.config import TrainConfig
+from alpharat.nn.training import run_training
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 

@@ -59,8 +59,8 @@ class BatchKey(StrEnum):
     POLICY_P2 = "policy_p2"
     ACTION_P1 = "action_p1"
     ACTION_P2 = "action_p2"
-    VALUE_P1 = "value_p1"
-    VALUE_P2 = "value_p2"
+    P1_VALUE = "p1_value"
+    P2_VALUE = "p2_value"
     PAYOUT_MATRIX = "payout_matrix"
     CHEESE_OUTCOMES = "cheese_outcomes"
 

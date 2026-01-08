@@ -1,7 +1,7 @@
 """Base configuration classes for training.
 
-Provides Pydantic models for training configuration. Architecture-specific
-configs extend these base classes.
+These are in a separate module to avoid circular imports between
+training/config.py and architecture-specific configs.
 """
 
 from __future__ import annotations
@@ -34,20 +34,16 @@ class DataConfig(BaseModel):
     val_dir: str
 
 
-class TrainingConfig(BaseModel):
-    """Universal training parameters."""
-
-    seed: int = 42
-    resume_from: str | None = None
-    use_amp: bool | None = None  # None = auto-detect based on device
-
-
 class BaseModelConfig(BaseModel):
     """Base config that knows how to build everything the trainer needs.
 
     Subclasses must implement the build_* methods to provide model-specific
     instantiation logic. This is the single entry point for the training loop.
     """
+
+    def set_data_dimensions(self, width: int, height: int) -> None:
+        """Set dimension fields based on data. Override in subclasses."""
+        pass  # Default: no dimensions needed
 
     def build_model(self) -> TrainableModel:
         """Construct the model instance."""
