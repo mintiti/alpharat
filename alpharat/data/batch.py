@@ -24,6 +24,7 @@ class GameParams(BaseModel):
     cheese_count: int
     wall_density: float | None = None  # None = use pyrat default (0.7)
     mud_density: float | None = None  # None = use pyrat default (0.1)
+    symmetric: bool = True  # False = asymmetric maze/cheese generation
 
 
 # --- Batch Metadata ---
