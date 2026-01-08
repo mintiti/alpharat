@@ -34,10 +34,11 @@ if TYPE_CHECKING:
 
 def _verify_maze_edges(maze: np.ndarray, height: int, width: int) -> None:
     """Verify edge cells have walls (-1) in appropriate directions."""
-    # Top edge (y=0): UP blocked
-    assert np.all(maze[0, :, Direction.UP] == -1), "Top edge should block UP"
-    # Bottom edge (y=height-1): DOWN blocked
-    assert np.all(maze[height - 1, :, Direction.DOWN] == -1), "Bottom edge should block DOWN"
+    # Y-up coordinate system: y=0 is BOTTOM, y=height-1 is TOP
+    # Bottom edge (y=0): DOWN blocked
+    assert np.all(maze[0, :, Direction.DOWN] == -1), "Bottom edge should block DOWN"
+    # Top edge (y=height-1): UP blocked
+    assert np.all(maze[height - 1, :, Direction.UP] == -1), "Top edge should block UP"
     # Left edge (x=0): LEFT blocked
     assert np.all(maze[:, 0, Direction.LEFT] == -1), "Left edge should block LEFT"
     # Right edge (x=width-1): RIGHT blocked
@@ -317,11 +318,9 @@ class TestPipelineIntegrity:
         maze_section = obs[: height * width * 4].reshape(height, width, 4)
 
         # Walls should be -1, valid moves should be > 0 (normalized cost)
-        # Check that edge walls are preserved
-        assert np.all(maze_section[0, :, Direction.UP] == -1), "Top edge UP should be -1"
-        assert np.all(maze_section[height - 1, :, Direction.DOWN] == -1), (
-            "Bottom edge DOWN should be -1"
-        )
+        # Check that edge walls are preserved (Y-up: y=0 is bottom, y=height-1 is top)
+        assert np.all(maze_section[0, :, Direction.DOWN] == -1), "Bottom edge DOWN should be -1"
+        assert np.all(maze_section[height - 1, :, Direction.UP] == -1), "Top edge UP should be -1"
         assert np.all(maze_section[:, 0, Direction.LEFT] == -1), "Left edge LEFT should be -1"
         assert np.all(maze_section[:, width - 1, Direction.RIGHT] == -1), (
             "Right edge RIGHT should be -1"

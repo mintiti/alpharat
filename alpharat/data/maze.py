@@ -7,11 +7,11 @@ from typing import Any
 import numpy as np
 from pyrat_engine.core.types import Coordinates, Direction
 
-# Delta tuple -> Direction mapping
+# Delta tuple -> Direction mapping (Y-up coordinate system: UP increases Y)
 _DELTA_TO_DIRECTION: dict[tuple[int, int], Direction] = {
-    (0, -1): Direction.UP,
+    (0, 1): Direction.UP,
     (1, 0): Direction.RIGHT,
-    (0, 1): Direction.DOWN,
+    (0, -1): Direction.DOWN,
     (-1, 0): Direction.LEFT,
 }
 
@@ -39,10 +39,11 @@ def build_maze_array(game: Any, width: int, height: int) -> np.ndarray:
     maze = np.ones((height, width, 4), dtype=np.int8)
 
     # Mark edge boundaries as walls (-1)
+    # Y-up coordinate system: y=0 is bottom, y=height-1 is top
     maze[:, 0, Direction.LEFT] = -1
     maze[:, width - 1, Direction.RIGHT] = -1
-    maze[0, :, Direction.UP] = -1
-    maze[height - 1, :, Direction.DOWN] = -1
+    maze[0, :, Direction.DOWN] = -1  # Bottom edge: can't go DOWN
+    maze[height - 1, :, Direction.UP] = -1  # Top edge: can't go UP
 
     # Mark walls from game.wall_entries()
     for wall in game.wall_entries():

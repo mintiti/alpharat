@@ -35,6 +35,11 @@ from alpharat.nn.metrics import (
     compute_value_metrics,
 )
 from alpharat.nn.models import LocalValueMLP
+from alpharat.nn.training_utils import (
+    backward_with_amp,
+    select_device,
+    setup_amp,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -329,6 +334,7 @@ def run_local_value_training(
     device: str = "auto",
     output_dir: Path = Path("checkpoints"),
     run_name: str | None = None,
+    use_amp: bool | None = None,
 ) -> Path:
     """Run training loop for LocalValueMLP.
 
@@ -341,6 +347,8 @@ def run_local_value_training(
         device: Device to use ("auto", "cpu", "cuda", "mps").
         output_dir: Directory for checkpoints and logs.
         run_name: Name for this run (for tensorboard). Auto-generated if None.
+        use_amp: Enable automatic mixed precision. None (default) auto-detects based
+            on GPU capability. True forces AMP on, False forces it off.
 
     Returns:
         Path to best model checkpoint.
@@ -353,17 +361,14 @@ def run_local_value_training(
     # Set seed
     torch.manual_seed(config.seed)
 
-    # Device selection
-    if device == "auto":
-        if torch.cuda.is_available():
-            torch_device = torch.device("cuda")
-        elif torch.backends.mps.is_available():
-            torch_device = torch.device("mps")
-        else:
-            torch_device = torch.device("cpu")
-    else:
-        torch_device = torch.device(device)
+    # Device and AMP setup
+    torch_device = select_device(device)
     logger.info(f"Using device: {torch_device}")
+
+    amp = setup_amp(torch_device, use_amp)
+    amp_enabled = amp.enabled
+    amp_dtype = amp.dtype
+    scaler = amp.scaler
 
     # Resolve model config (from config.model or checkpoint)
     model_config, checkpoint = _resolve_model_config(config, torch_device)
@@ -445,7 +450,8 @@ def run_local_value_training(
                 "observation": train["observation"][batch_idx],
                 "policy_p1": train["policy_p1"][batch_idx],
                 "policy_p2": train["policy_p2"][batch_idx],
-                "value": train["value"][batch_idx],
+                "p1_value": train["p1_value"][batch_idx],
+                "p2_value": train["p2_value"][batch_idx],
                 "payout_matrix": train["payout_matrix"][batch_idx],
                 "action_p1": train["action_p1"][batch_idx],
                 "action_p2": train["action_p2"][batch_idx],
@@ -459,16 +465,18 @@ def run_local_value_training(
 
             optimizer.zero_grad()
 
-            out = compute_local_value_losses(
-                model,
-                batch,
-                optim_cfg.policy_weight,
-                optim_cfg.value_weight,
-                optim_cfg.ownership_weight,
-            )
+            # Forward pass with AMP autocast
+            with torch.autocast(torch_device.type, dtype=amp_dtype, enabled=amp_enabled):
+                out = compute_local_value_losses(
+                    model,
+                    batch,
+                    optim_cfg.policy_weight,
+                    optim_cfg.value_weight,
+                    optim_cfg.ownership_weight,
+                )
 
-            out["loss"].backward()
-            optimizer.step()
+            # Backward pass with optional gradient scaling (CUDA only)
+            backward_with_amp(out["loss"], optimizer, scaler)
 
             # Accumulate loss metrics
             train_acc.update(
@@ -505,7 +513,7 @@ def run_local_value_training(
                         out["ownership_logits"].detach(), batch["cheese_outcomes"]
                     )
 
-                    detailed = {}
+                    detailed: dict[str, float | torch.Tensor] = {}
                     detailed.update({f"p1/{k}": v for k, v in p1_metrics.items()})
                     detailed.update({f"p2/{k}": v for k, v in p2_metrics.items()})
                     detailed.update({f"payout/{k}": v for k, v in payout_mets.items()})
@@ -528,20 +536,23 @@ def run_local_value_training(
                     "observation": val["observation"][start_idx:end_idx],
                     "policy_p1": val["policy_p1"][start_idx:end_idx],
                     "policy_p2": val["policy_p2"][start_idx:end_idx],
+                    "p1_value": val["p1_value"][start_idx:end_idx],
+                    "p2_value": val["p2_value"][start_idx:end_idx],
                     "payout_matrix": val["payout_matrix"][start_idx:end_idx],
                     "action_p1": val["action_p1"][start_idx:end_idx],
                     "action_p2": val["action_p2"][start_idx:end_idx],
-                    "value": val["value"][start_idx:end_idx],
                     "cheese_outcomes": val["cheese_outcomes"][start_idx:end_idx],
                 }
 
-                vl_out = compute_local_value_losses(
-                    model,
-                    val_batch,
-                    optim_cfg.policy_weight,
-                    optim_cfg.value_weight,
-                    optim_cfg.ownership_weight,
-                )
+                # Validation forward pass with AMP autocast
+                with torch.autocast(torch_device.type, dtype=amp_dtype, enabled=amp_enabled):
+                    vl_out = compute_local_value_losses(
+                        model,
+                        val_batch,
+                        optim_cfg.policy_weight,
+                        optim_cfg.value_weight,
+                        optim_cfg.ownership_weight,
+                    )
 
                 val_acc.update(
                     {
@@ -571,13 +582,13 @@ def run_local_value_training(
                         vl_out["ownership_logits"], val_batch["cheese_outcomes"]
                     )
 
-                    detailed = {}
-                    detailed.update({f"p1/{k}": v for k, v in p1_metrics.items()})
-                    detailed.update({f"p2/{k}": v for k, v in p2_metrics.items()})
-                    detailed.update({f"payout/{k}": v for k, v in payout_mets.items()})
-                    detailed.update({f"value/{k}": v for k, v in value_mets.items()})
-                    detailed.update({f"ownership/{k}": v for k, v in own_metrics.items()})
-                    val_acc.update(detailed, batch_size=curr_batch_size)
+                    val_detailed: dict[str, float | torch.Tensor] = {}
+                    val_detailed.update({f"p1/{k}": v for k, v in p1_metrics.items()})
+                    val_detailed.update({f"p2/{k}": v for k, v in p2_metrics.items()})
+                    val_detailed.update({f"payout/{k}": v for k, v in payout_mets.items()})
+                    val_detailed.update({f"value/{k}": v for k, v in value_mets.items()})
+                    val_detailed.update({f"ownership/{k}": v for k, v in own_metrics.items()})
+                    val_acc.update(val_detailed, batch_size=curr_batch_size)
 
             val_metrics = val_acc.compute()
 

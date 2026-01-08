@@ -132,7 +132,7 @@ def main() -> None:
     # Benchmark args
     parser.add_argument("--games", type=int, default=50, help="Games per matchup")
     parser.add_argument("--workers", type=int, default=4, help="Parallel workers for games")
-    parser.add_argument("--device", type=str, default="cpu", help="Device for NN inference")
+    parser.add_argument("--device", type=str, default="auto", help="Device (auto, cpu, cuda, mps)")
     parser.add_argument("--mcts-sims", type=int, default=200, help="MCTS simulations for baseline")
 
     # Skip flags

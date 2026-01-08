@@ -41,10 +41,11 @@ class FakeGame:
     Matches the public API of pyrat_engine.core.game.PyRat.
     """
 
+    # Y-up coordinate system: UP increases Y, DOWN decreases Y
     _DELTAS = {
-        0: (0, -1),  # UP
+        0: (0, 1),  # UP
         1: (1, 0),  # RIGHT
-        2: (0, 1),  # DOWN
+        2: (0, -1),  # DOWN
         3: (-1, 0),  # LEFT
         4: (0, 0),  # STAY
     }
@@ -322,8 +323,9 @@ class TestNavigationStateSync:
         b, _ = fake_tree.make_move_from(fake_tree.root, 0, 2)
 
         # Expected positions if we start from root and only apply (UP, DOWN)
-        assert game.player1_position == (5, 4)
-        assert game.player2_position == (5, 6)
+        # Y-up coordinate system: UP increases Y, DOWN decreases Y
+        assert game.player1_position == (5, 6)  # UP from (5, 5)
+        assert game.player2_position == (5, 4)  # DOWN from (5, 5)
         assert game.turn == 1  # navigation unwinds to root then applies one move
         assert fake_tree.simulator_node == b
 

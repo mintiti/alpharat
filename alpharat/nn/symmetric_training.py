@@ -25,13 +25,19 @@ from torch.utils.tensorboard import SummaryWriter
 
 from alpharat.nn.gpu_dataset import GPUDataset
 from alpharat.nn.metrics import (
-    MetricsAccumulator,
+    GPUMetricsAccumulator,
     compute_payout_metrics,
     compute_policy_metrics,
     compute_value_metrics,
 )
 from alpharat.nn.models import SymmetricMLP
 from alpharat.nn.training import constant_sum_loss, nash_consistency_loss
+from alpharat.nn.training_utils import (
+    backward_with_amp,
+    select_device,
+    setup_amp,
+    setup_cuda_optimizations,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -200,33 +206,6 @@ def compute_losses(
     }
 
 
-def compute_detailed_metrics(
-    data: dict[str, torch.Tensor],
-    logits_p1: torch.Tensor,
-    logits_p2: torch.Tensor,
-    pred_payout: torch.Tensor,
-) -> dict[str, float]:
-    """Compute diagnostic metrics (expensive on full dataset)."""
-    p1_metrics = compute_policy_metrics(logits_p1.detach(), data["policy_p1"])
-    p2_metrics = compute_policy_metrics(logits_p2.detach(), data["policy_p2"])
-    payout_metrics = compute_payout_metrics(pred_payout.detach(), data["payout_matrix"])
-    value_metrics = compute_value_metrics(
-        pred_payout.detach(),
-        data["action_p1"],
-        data["action_p2"],
-        data["p1_value"],
-        data["p2_value"],
-    )
-
-    metrics: dict[str, float] = {}
-    metrics.update({f"p1/{k}": v for k, v in p1_metrics.items()})
-    metrics.update({f"p2/{k}": v for k, v in p2_metrics.items()})
-    metrics.update({f"payout/{k}": v for k, v in payout_metrics.items()})
-    metrics.update({f"value/{k}": v for k, v in value_metrics.items()})
-
-    return metrics
-
-
 # --- Main Training Function ---
 
 
@@ -279,6 +258,7 @@ def run_symmetric_training(
     device: str = "auto",
     output_dir: Path = Path("checkpoints"),
     run_name: str | None = None,
+    use_amp: bool | None = None,
 ) -> Path:
     """Run training loop for SymmetricMLP.
 
@@ -291,6 +271,8 @@ def run_symmetric_training(
         device: Device to use ("auto", "cpu", "cuda", "mps").
         output_dir: Directory for checkpoints and logs.
         run_name: Name for this run (for tensorboard). Auto-generated if None.
+        use_amp: Enable automatic mixed precision. None (default) auto-detects based
+            on GPU capability. True forces AMP on, False forces it off.
 
     Returns:
         Path to best model checkpoint.
@@ -303,17 +285,14 @@ def run_symmetric_training(
     # Set seed
     torch.manual_seed(config.seed)
 
-    # Device selection
-    if device == "auto":
-        if torch.cuda.is_available():
-            torch_device = torch.device("cuda")
-        elif torch.backends.mps.is_available():
-            torch_device = torch.device("mps")
-        else:
-            torch_device = torch.device("cpu")
-    else:
-        torch_device = torch.device(device)
+    # Device and AMP setup
+    torch_device = select_device(device)
     logger.info(f"Using device: {torch_device}")
+
+    amp = setup_amp(torch_device, use_amp)
+    amp_enabled = amp.enabled
+    amp_dtype = amp.dtype
+    scaler = amp.scaler
 
     # Resolve model config (from config.model or checkpoint)
     model_config, checkpoint = _resolve_model_config(config, torch_device)
@@ -366,6 +345,11 @@ def run_symmetric_training(
         best_val_loss = checkpoint.get("best_val_loss", float("inf"))
         logger.info(f"Resuming from epoch {start_epoch}")
 
+    # CUDA optimizations (TF32 + torch.compile)
+    # Keep reference to original model for saving (torch.compile wraps it)
+    unwrapped_model = model
+    model = setup_cuda_optimizations(model, torch_device)  # type: ignore[assignment]
+
     # Training loop
     best_model_path = run_dir / "best_model.pt"
     optim_cfg = config.optim
@@ -382,8 +366,11 @@ def run_symmetric_training(
         # Shuffle training data
         train_indices = torch.randperm(n_train, device=torch_device)
 
-        # Accumulate metrics over mini-batches
-        train_acc = MetricsAccumulator()
+        # Accumulate metrics over mini-batches (GPU-resident, no per-batch sync)
+        train_acc = GPUMetricsAccumulator(torch_device)
+
+        # For detailed metrics: accumulate outputs, compute once at epoch end
+        train_detailed_outputs: list[dict[str, torch.Tensor]] = []
 
         for start_idx in range(0, n_train, batch_size):
             end_idx = min(start_idx + batch_size, n_train)
@@ -404,49 +391,97 @@ def run_symmetric_training(
 
             optimizer.zero_grad()
 
-            out = compute_losses(
-                model,
-                batch,
-                optim_cfg.policy_weight,
-                optim_cfg.value_weight,
-                optim_cfg.nash_weight,
-                optim_cfg.nash_mode,
-                optim_cfg.constant_sum_weight,
-            )
+            # Forward pass with AMP autocast
+            with torch.autocast(torch_device.type, dtype=amp_dtype, enabled=amp_enabled):
+                out = compute_losses(
+                    model,
+                    batch,
+                    optim_cfg.policy_weight,
+                    optim_cfg.value_weight,
+                    optim_cfg.nash_weight,
+                    optim_cfg.nash_mode,
+                    optim_cfg.constant_sum_weight,
+                )
 
-            out["loss"].backward()
-            optimizer.step()
+            # Backward pass with optional gradient scaling (CUDA only)
+            backward_with_amp(out["loss"], optimizer, scaler)
 
-            # Accumulate loss metrics
+            # Accumulate loss metrics (no .item() - stays on GPU)
             train_acc.update(
                 {
-                    "loss_total": out["loss"].item(),
-                    "loss_policy_p1": out["loss_p1"].item(),
-                    "loss_policy_p2": out["loss_p2"].item(),
-                    "loss_value": out["loss_value"].item(),
-                    "loss_nash": out["loss_nash"].item(),
-                    "loss_indiff": out["loss_indiff"].item(),
-                    "loss_dev": out["loss_dev"].item(),
-                    "loss_constant_sum": out["loss_constant_sum"].item(),
+                    "loss_total": out["loss"],
+                    "loss_policy_p1": out["loss_p1"],
+                    "loss_policy_p2": out["loss_p2"],
+                    "loss_value": out["loss_value"],
+                    "loss_nash": out["loss_nash"],
+                    "loss_indiff": out["loss_indiff"],
+                    "loss_dev": out["loss_dev"],
+                    "loss_constant_sum": out["loss_constant_sum"],
                 },
                 batch_size=curr_batch_size,
             )
 
-            # Accumulate detailed metrics (expensive, only when needed)
+            # Accumulate outputs for detailed metrics (computed at epoch end)
+            # Note: .clone() needed because CUDA graphs reuse memory buffers
             if compute_detailed:
-                with torch.no_grad():
-                    train_acc.update(
-                        compute_detailed_metrics(
-                            batch, out["logits_p1"], out["logits_p2"], out["pred_payout"]
-                        ),
-                        batch_size=curr_batch_size,
-                    )
+                train_detailed_outputs.append(
+                    {
+                        "logits_p1": out["logits_p1"].detach().clone(),
+                        "logits_p2": out["logits_p2"].detach().clone(),
+                        "pred_payout": out["pred_payout"].detach().clone(),
+                        "policy_p1": batch["policy_p1"],
+                        "policy_p2": batch["policy_p2"],
+                        "payout_matrix": batch["payout_matrix"],
+                        "action_p1": batch["action_p1"],
+                        "action_p2": batch["action_p2"],
+                        "p1_value": batch["p1_value"],
+                        "p2_value": batch["p2_value"],
+                    }
+                )
 
+        # Compute epoch metrics (single sync point)
         train_metrics = train_acc.compute()
+
+        # Compute detailed metrics at epoch end (if needed)
+        if compute_detailed and train_detailed_outputs:
+            with torch.no_grad():
+                # Concatenate all batch outputs
+                all_logits_p1 = torch.cat([d["logits_p1"] for d in train_detailed_outputs])
+                all_logits_p2 = torch.cat([d["logits_p2"] for d in train_detailed_outputs])
+                all_pred_payout = torch.cat([d["pred_payout"] for d in train_detailed_outputs])
+                all_policy_p1 = torch.cat([d["policy_p1"] for d in train_detailed_outputs])
+                all_policy_p2 = torch.cat([d["policy_p2"] for d in train_detailed_outputs])
+                all_payout_matrix = torch.cat([d["payout_matrix"] for d in train_detailed_outputs])
+                all_action_p1 = torch.cat([d["action_p1"] for d in train_detailed_outputs])
+                all_action_p2 = torch.cat([d["action_p2"] for d in train_detailed_outputs])
+                all_p1_value = torch.cat([d["p1_value"] for d in train_detailed_outputs])
+                all_p2_value = torch.cat([d["p2_value"] for d in train_detailed_outputs])
+
+                # Compute metrics on full epoch data
+                p1_metrics = compute_policy_metrics(all_logits_p1, all_policy_p1)
+                p2_metrics = compute_policy_metrics(all_logits_p2, all_policy_p2)
+                payout_metrics = compute_payout_metrics(all_pred_payout, all_payout_matrix)
+                value_metrics = compute_value_metrics(
+                    all_pred_payout, all_action_p1, all_action_p2, all_p1_value, all_p2_value
+                )
+
+                # Add to train_metrics (convert tensors to floats)
+                for k, v in p1_metrics.items():
+                    train_metrics[f"p1/{k}"] = v.item()
+                for k, v in p2_metrics.items():
+                    train_metrics[f"p2/{k}"] = v.item()
+                for k, v in payout_metrics.items():
+                    train_metrics[f"payout/{k}"] = v.item()
+                for k, v in value_metrics.items():
+                    train_metrics[f"value/{k}"] = v.item()
+
+            # Free memory
+            del train_detailed_outputs
 
         # === Validate ===
         model.eval()
-        val_acc = MetricsAccumulator()
+        val_acc = GPUMetricsAccumulator(torch_device)
+        val_detailed_outputs: list[dict[str, torch.Tensor]] = []
 
         with torch.no_grad():
             for start_idx in range(0, n_val, batch_size):
@@ -464,42 +499,84 @@ def run_symmetric_training(
                     "action_p2": val["action_p2"][start_idx:end_idx],
                 }
 
-                vl_out = compute_losses(
-                    model,
-                    val_batch,
-                    optim_cfg.policy_weight,
-                    optim_cfg.value_weight,
-                    optim_cfg.nash_weight,
-                    optim_cfg.nash_mode,
-                    optim_cfg.constant_sum_weight,
-                )
+                # Validation forward pass with AMP autocast
+                with torch.autocast(torch_device.type, dtype=amp_dtype, enabled=amp_enabled):
+                    vl_out = compute_losses(
+                        model,
+                        val_batch,
+                        optim_cfg.policy_weight,
+                        optim_cfg.value_weight,
+                        optim_cfg.nash_weight,
+                        optim_cfg.nash_mode,
+                        optim_cfg.constant_sum_weight,
+                    )
 
                 val_acc.update(
                     {
-                        "loss_total": vl_out["loss"].item(),
-                        "loss_policy_p1": vl_out["loss_p1"].item(),
-                        "loss_policy_p2": vl_out["loss_p2"].item(),
-                        "loss_value": vl_out["loss_value"].item(),
-                        "loss_nash": vl_out["loss_nash"].item(),
-                        "loss_indiff": vl_out["loss_indiff"].item(),
-                        "loss_dev": vl_out["loss_dev"].item(),
-                        "loss_constant_sum": vl_out["loss_constant_sum"].item(),
+                        "loss_total": vl_out["loss"],
+                        "loss_policy_p1": vl_out["loss_p1"],
+                        "loss_policy_p2": vl_out["loss_p2"],
+                        "loss_value": vl_out["loss_value"],
+                        "loss_nash": vl_out["loss_nash"],
+                        "loss_indiff": vl_out["loss_indiff"],
+                        "loss_dev": vl_out["loss_dev"],
+                        "loss_constant_sum": vl_out["loss_constant_sum"],
                     },
                     batch_size=curr_batch_size,
                 )
 
                 if compute_detailed:
-                    val_acc.update(
-                        compute_detailed_metrics(
-                            val_batch,
-                            vl_out["logits_p1"],
-                            vl_out["logits_p2"],
-                            vl_out["pred_payout"],
-                        ),
-                        batch_size=curr_batch_size,
+                    val_detailed_outputs.append(
+                        {
+                            "logits_p1": vl_out["logits_p1"].clone(),
+                            "logits_p2": vl_out["logits_p2"].clone(),
+                            "pred_payout": vl_out["pred_payout"].clone(),
+                            "policy_p1": val_batch["policy_p1"],
+                            "policy_p2": val_batch["policy_p2"],
+                            "payout_matrix": val_batch["payout_matrix"],
+                            "action_p1": val_batch["action_p1"],
+                            "action_p2": val_batch["action_p2"],
+                            "p1_value": val_batch["p1_value"],
+                            "p2_value": val_batch["p2_value"],
+                        }
                     )
 
+            # Compute epoch metrics (single sync point)
             val_metrics = val_acc.compute()
+
+            # Compute detailed metrics at epoch end (if needed)
+            if compute_detailed and val_detailed_outputs:
+                # Concatenate all batch outputs
+                all_logits_p1 = torch.cat([d["logits_p1"] for d in val_detailed_outputs])
+                all_logits_p2 = torch.cat([d["logits_p2"] for d in val_detailed_outputs])
+                all_pred_payout = torch.cat([d["pred_payout"] for d in val_detailed_outputs])
+                all_policy_p1 = torch.cat([d["policy_p1"] for d in val_detailed_outputs])
+                all_policy_p2 = torch.cat([d["policy_p2"] for d in val_detailed_outputs])
+                all_payout_matrix = torch.cat([d["payout_matrix"] for d in val_detailed_outputs])
+                all_action_p1 = torch.cat([d["action_p1"] for d in val_detailed_outputs])
+                all_action_p2 = torch.cat([d["action_p2"] for d in val_detailed_outputs])
+                all_p1_value = torch.cat([d["p1_value"] for d in val_detailed_outputs])
+                all_p2_value = torch.cat([d["p2_value"] for d in val_detailed_outputs])
+
+                # Compute metrics on full epoch data
+                p1_metrics = compute_policy_metrics(all_logits_p1, all_policy_p1)
+                p2_metrics = compute_policy_metrics(all_logits_p2, all_policy_p2)
+                payout_metrics = compute_payout_metrics(all_pred_payout, all_payout_matrix)
+                value_metrics = compute_value_metrics(
+                    all_pred_payout, all_action_p1, all_action_p2, all_p1_value, all_p2_value
+                )
+
+                # Add to val_metrics (convert tensors to floats)
+                for k, v in p1_metrics.items():
+                    val_metrics[f"p1/{k}"] = v.item()
+                for k, v in p2_metrics.items():
+                    val_metrics[f"p2/{k}"] = v.item()
+                for k, v in payout_metrics.items():
+                    val_metrics[f"payout/{k}"] = v.item()
+                for k, v in value_metrics.items():
+                    val_metrics[f"value/{k}"] = v.item()
+
+                del val_detailed_outputs
 
         # Log to tensorboard
         for key, value in train_metrics.items():
@@ -530,7 +607,7 @@ def run_symmetric_training(
             torch.save(
                 {
                     "epoch": epoch,
-                    "model_state_dict": model.state_dict(),
+                    "model_state_dict": unwrapped_model.state_dict(),
                     "optimizer_state_dict": optimizer.state_dict(),
                     "val_loss": best_val_loss,
                     "best_val_loss": best_val_loss,
@@ -548,7 +625,7 @@ def run_symmetric_training(
             torch.save(
                 {
                     "epoch": epoch,
-                    "model_state_dict": model.state_dict(),
+                    "model_state_dict": unwrapped_model.state_dict(),
                     "optimizer_state_dict": optimizer.state_dict(),
                     "val_loss": val_metrics["loss_total"],
                     "best_val_loss": best_val_loss,

@@ -120,6 +120,11 @@ class MCTSAgent(Agent):
         self._model.load_state_dict(ckpt["model_state_dict"])
         self._model.to(device)
         self._model.eval()
+
+        # Compile model for faster inference (CUDA only - MPS has issues)
+        if device.type == "cuda":
+            self._model = torch.compile(self._model, mode="reduce-overhead")  # type: ignore[assignment]
+
         self._model_loaded = True
 
     def _validate_dimensions(self, game: PyRat) -> None:
@@ -168,7 +173,7 @@ class MCTSAgent(Agent):
 
             obs_tensor = torch.from_numpy(obs).unsqueeze(0).to(device)
 
-            with torch.no_grad():
+            with torch.inference_mode():
                 result = model.predict(obs_tensor)
                 policy_p1 = result[0].squeeze(0).cpu().numpy()
                 policy_p2 = result[1].squeeze(0).cpu().numpy()

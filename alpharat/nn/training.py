@@ -29,6 +29,11 @@ from alpharat.nn.metrics import (
     compute_value_metrics,
 )
 from alpharat.nn.models import PyRatMLP
+from alpharat.nn.training_utils import (
+    backward_with_amp,
+    select_device,
+    setup_amp,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -290,7 +295,7 @@ def compute_detailed_metrics(
     logits_p1: torch.Tensor,
     logits_p2: torch.Tensor,
     pred_payout: torch.Tensor,
-) -> dict[str, float]:
+) -> dict[str, torch.Tensor]:
     """Compute diagnostic metrics (expensive on full dataset)."""
     p1_metrics = compute_policy_metrics(logits_p1.detach(), data["policy_p1"])
     p2_metrics = compute_policy_metrics(logits_p2.detach(), data["policy_p2"])
@@ -303,7 +308,7 @@ def compute_detailed_metrics(
         data["p2_value"],
     )
 
-    metrics: dict[str, float] = {}
+    metrics: dict[str, torch.Tensor] = {}
     metrics.update({f"p1/{k}": v for k, v in p1_metrics.items()})
     metrics.update({f"p2/{k}": v for k, v in p2_metrics.items()})
     metrics.update({f"payout/{k}": v for k, v in payout_metrics.items()})
@@ -364,6 +369,7 @@ def run_training(
     device: str = "auto",
     output_dir: Path = Path("checkpoints"),
     run_name: str | None = None,
+    use_amp: bool | None = None,
 ) -> Path:
     """Run mini-batch training loop.
 
@@ -376,6 +382,8 @@ def run_training(
         device: Device to use ("auto", "cpu", "cuda", "mps").
         output_dir: Directory for checkpoints and logs.
         run_name: Name for this run (for tensorboard). Auto-generated if None.
+        use_amp: Enable automatic mixed precision. None (default) auto-detects based
+            on GPU capability. True forces AMP on, False forces it off.
 
     Returns:
         Path to best model checkpoint.
@@ -388,17 +396,14 @@ def run_training(
     # Set seed
     torch.manual_seed(config.seed)
 
-    # Device selection
-    if device == "auto":
-        if torch.cuda.is_available():
-            torch_device = torch.device("cuda")
-        elif torch.backends.mps.is_available():
-            torch_device = torch.device("mps")
-        else:
-            torch_device = torch.device("cpu")
-    else:
-        torch_device = torch.device(device)
+    # Device and AMP setup
+    torch_device = select_device(device)
     logger.info(f"Using device: {torch_device}")
+
+    amp = setup_amp(torch_device, use_amp)
+    amp_enabled = amp.enabled
+    amp_dtype = amp.dtype
+    scaler = amp.scaler
 
     # Resolve model config (from config.model or checkpoint)
     model_config, checkpoint = _resolve_model_config(config, torch_device)
@@ -492,18 +497,20 @@ def run_training(
 
             optimizer.zero_grad()
 
-            out = compute_losses(
-                model,
-                batch,
-                optim_cfg.policy_weight,
-                optim_cfg.value_weight,
-                optim_cfg.nash_weight,
-                optim_cfg.nash_mode,
-                optim_cfg.constant_sum_weight,
-            )
+            # Forward pass with AMP autocast
+            with torch.autocast(torch_device.type, dtype=amp_dtype, enabled=amp_enabled):
+                out = compute_losses(
+                    model,
+                    batch,
+                    optim_cfg.policy_weight,
+                    optim_cfg.value_weight,
+                    optim_cfg.nash_weight,
+                    optim_cfg.nash_mode,
+                    optim_cfg.constant_sum_weight,
+                )
 
-            out["loss"].backward()
-            optimizer.step()
+            # Backward pass with optional gradient scaling (CUDA only)
+            backward_with_amp(out["loss"], optimizer, scaler)
 
             # Accumulate loss metrics
             train_acc.update(
@@ -552,15 +559,17 @@ def run_training(
                     "action_p2": val["action_p2"][start_idx:end_idx],
                 }
 
-                vl_out = compute_losses(
-                    model,
-                    val_batch,
-                    optim_cfg.policy_weight,
-                    optim_cfg.value_weight,
-                    optim_cfg.nash_weight,
-                    optim_cfg.nash_mode,
-                    optim_cfg.constant_sum_weight,
-                )
+                # Validation forward pass with AMP autocast
+                with torch.autocast(torch_device.type, dtype=amp_dtype, enabled=amp_enabled):
+                    vl_out = compute_losses(
+                        model,
+                        val_batch,
+                        optim_cfg.policy_weight,
+                        optim_cfg.value_weight,
+                        optim_cfg.nash_weight,
+                        optim_cfg.nash_mode,
+                        optim_cfg.constant_sum_weight,
+                    )
 
                 val_acc.update(
                     {

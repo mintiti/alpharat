@@ -71,11 +71,12 @@ class TestBuildMazeArray:
         game = FakeGame(width=5, height=4)
         maze = build_maze_array(game, width=5, height=4)
 
-        # UP edge (y=0): can't move up (direction 0)
-        assert np.all(maze[0, :, 0] == -1)
+        # Y-up coordinate system: y=0 is BOTTOM, y=height-1 is TOP
+        # BOTTOM edge (y=0): can't move down (direction 2)
+        assert np.all(maze[0, :, 2] == -1)
 
-        # DOWN edge (y=height-1): can't move down (direction 2)
-        assert np.all(maze[3, :, 2] == -1)
+        # TOP edge (y=height-1): can't move up (direction 0)
+        assert np.all(maze[3, :, 0] == -1)
 
         # LEFT edge (x=0): can't move left (direction 3)
         assert np.all(maze[:, 0, 3] == -1)
@@ -110,23 +111,25 @@ class TestBuildMazeArray:
     def test_mud_costs(self) -> None:
         """Mud should have its cost value in both directions."""
         # Mud between (1,1) and (1,2) with cost 3 - vertical connection
+        # Y-up: (1,1) to (1,2) is UP (Y increases)
         muds = [((1, 1), (1, 2), 3)]
         game = FakeGame(width=5, height=5, muds=muds)
         maze = build_maze_array(game, width=5, height=5)
 
-        # From (1,1), direction DOWN (2) should cost 3
-        assert maze[1, 1, 2] == 3
+        # From (1,1), direction UP (0) should cost 3
+        assert maze[1, 1, 0] == 3
 
-        # From (1,2), direction UP (0) should cost 3
-        assert maze[2, 1, 0] == 3
+        # From (1,2), direction DOWN (2) should cost 3
+        assert maze[2, 1, 2] == 3
 
 
 class TestDirectionHelpers:
     """Tests for direction helper functions."""
 
     def test_coords_to_direction_up(self) -> None:
+        # Y-up coordinate system: UP increases Y
         from_pos = Coordinates(2, 2)
-        to_pos = Coordinates(2, 1)
+        to_pos = Coordinates(2, 3)
         assert _coords_to_direction(from_pos, to_pos) == Direction.UP
 
     def test_coords_to_direction_right(self) -> None:
@@ -135,8 +138,9 @@ class TestDirectionHelpers:
         assert _coords_to_direction(from_pos, to_pos) == Direction.RIGHT
 
     def test_coords_to_direction_down(self) -> None:
+        # Y-up coordinate system: DOWN decreases Y
         from_pos = Coordinates(2, 2)
-        to_pos = Coordinates(2, 3)
+        to_pos = Coordinates(2, 1)
         assert _coords_to_direction(from_pos, to_pos) == Direction.DOWN
 
     def test_coords_to_direction_left(self) -> None:
@@ -589,9 +593,11 @@ class TestRoundtrip:
         assert loaded.maze[1, 1, Direction.RIGHT] == -1
         assert loaded.maze[1, 2, Direction.LEFT] == -1
 
-        # Mud at (2,2) -> (2,3): DOWN from (2,2) costs 5, UP from (2,3) costs 5
-        assert loaded.maze[2, 2, Direction.DOWN] == 5
-        assert loaded.maze[3, 2, Direction.UP] == 5
+        # Mud at (2,2) -> (2,3): Y-up means (2,2) to (2,3) is UP
+        # From (2,2), direction UP (0) costs 5
+        assert loaded.maze[2, 2, Direction.UP] == 5
+        # From (2,3), direction DOWN (2) costs 5
+        assert loaded.maze[3, 2, Direction.DOWN] == 5
 
     def test_roundtrip_position_game_state(self) -> None:
         """Position game state should survive roundtrip."""

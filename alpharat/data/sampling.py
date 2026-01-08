@@ -216,6 +216,10 @@ def load_nn_context(checkpoint_path: str, device: str = "cpu") -> NNContext:
     model.to(torch_device)
     model.eval()
 
+    # Compile model for faster inference (CUDA only - MPS has issues)
+    if torch_device.type == "cuda":
+        model = torch.compile(model, mode="reduce-overhead")  # type: ignore[assignment]
+
     return NNContext(
         model=model,
         builder=builder,
@@ -259,7 +263,7 @@ def make_predict_fn(
 
         obs_tensor = torch.from_numpy(obs).unsqueeze(0).to(device)
 
-        with torch.no_grad():
+        with torch.inference_mode():
             result = model.predict(obs_tensor)
             policy_p1 = result[0].squeeze(0).cpu().numpy()
             policy_p2 = result[1].squeeze(0).cpu().numpy()
