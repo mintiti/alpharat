@@ -218,7 +218,7 @@ def load_nn_context(checkpoint_path: str, device: str = "cpu") -> NNContext:
 
     # Compile model for faster inference (CUDA only - MPS has issues)
     if torch_device.type == "cuda":
-        model = torch.compile(model, mode="reduce-overhead")
+        model = torch.compile(model, mode="reduce-overhead")  # type: ignore[assignment]
 
     return NNContext(
         model=model,

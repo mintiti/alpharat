@@ -32,6 +32,12 @@ from alpharat.nn.metrics import (
 )
 from alpharat.nn.models import SymmetricMLP
 from alpharat.nn.training import constant_sum_loss, nash_consistency_loss
+from alpharat.nn.training_utils import (
+    backward_with_amp,
+    select_device,
+    setup_amp,
+    setup_cuda_optimizations,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -243,25 +249,6 @@ def _resolve_model_config(
     return model_config, checkpoint
 
 
-def _should_use_amp(device: torch.device) -> bool:
-    """Check if AMP should be enabled based on device capabilities.
-
-    Returns True for:
-    - CUDA with compute capability >= 7.0 (Volta+ has Tensor Cores)
-    - MPS (Apple Silicon has good float16 support)
-
-    Returns False for:
-    - CUDA with compute capability < 7.0 (modest benefit not worth complexity)
-    - CPU (no benefit)
-    """
-    if device.type == "cuda":
-        major, _ = torch.cuda.get_device_capability(device)
-        return major >= 7
-    elif device.type == "mps":
-        return True
-    return False
-
-
 def run_symmetric_training(
     config: SymmetricTrainConfig,
     *,
@@ -298,34 +285,14 @@ def run_symmetric_training(
     # Set seed
     torch.manual_seed(config.seed)
 
-    # Device selection
-    if device == "auto":
-        if torch.cuda.is_available():
-            torch_device = torch.device("cuda")
-        elif torch.backends.mps.is_available():
-            torch_device = torch.device("mps")
-        else:
-            torch_device = torch.device("cpu")
-    else:
-        torch_device = torch.device(device)
+    # Device and AMP setup
+    torch_device = select_device(device)
     logger.info(f"Using device: {torch_device}")
 
-    # AMP setup (auto-detect if not specified)
-    amp_enabled = _should_use_amp(torch_device) if use_amp is None else use_amp
-    amp_dtype = torch.float16 if amp_enabled else None
-
-    # GradScaler only for CUDA (MPS doesn't support it)
-    scaler = (
-        torch.amp.GradScaler("cuda") if (amp_enabled and torch_device.type == "cuda") else None
-    )
-
-    if amp_enabled:
-        capability = ""
-        if torch_device.type == "cuda":
-            major, minor = torch.cuda.get_device_capability(torch_device)
-            capability = f" (SM {major}.{minor})"
-        scaler_str = "yes" if scaler else "no"
-        logger.info(f"AMP enabled{capability}: dtype={amp_dtype}, scaler={scaler_str}")
+    amp = setup_amp(torch_device, use_amp)
+    amp_enabled = amp.enabled
+    amp_dtype = amp.dtype
+    scaler = amp.scaler
 
     # Resolve model config (from config.model or checkpoint)
     model_config, checkpoint = _resolve_model_config(config, torch_device)
@@ -378,19 +345,10 @@ def run_symmetric_training(
         best_val_loss = checkpoint.get("best_val_loss", float("inf"))
         logger.info(f"Resuming from epoch {start_epoch}")
 
-    # CUDA optimizations
+    # CUDA optimizations (TF32 + torch.compile)
     # Keep reference to original model for saving (torch.compile wraps it)
     unwrapped_model = model
-
-    if torch_device.type == "cuda":
-        # Enable TF32 for faster matmul on Ampere+ GPUs (RTX 30xx, A100, etc.)
-        torch.set_float32_matmul_precision("high")
-        logger.info("Enabled TensorFloat32 matmul precision")
-
-        # Compile model for faster training
-        # Options: "default" (balanced), "max-autotune" (slower start, faster run)
-        model = torch.compile(model, mode="default")
-        logger.info("Model compiled with torch.compile(mode='default')")
+    model = setup_cuda_optimizations(model, torch_device)  # type: ignore[assignment]
 
     # Training loop
     best_model_path = run_dir / "best_model.pt"
@@ -446,13 +404,7 @@ def run_symmetric_training(
                 )
 
             # Backward pass with optional gradient scaling (CUDA only)
-            if scaler is not None:
-                scaler.scale(out["loss"]).backward()
-                scaler.step(optimizer)
-                scaler.update()
-            else:
-                out["loss"].backward()
-                optimizer.step()
+            backward_with_amp(out["loss"], optimizer, scaler)
 
             # Accumulate loss metrics (no .item() - stays on GPU)
             train_acc.update(
@@ -472,18 +424,20 @@ def run_symmetric_training(
             # Accumulate outputs for detailed metrics (computed at epoch end)
             # Note: .clone() needed because CUDA graphs reuse memory buffers
             if compute_detailed:
-                train_detailed_outputs.append({
-                    "logits_p1": out["logits_p1"].detach().clone(),
-                    "logits_p2": out["logits_p2"].detach().clone(),
-                    "pred_payout": out["pred_payout"].detach().clone(),
-                    "policy_p1": batch["policy_p1"],
-                    "policy_p2": batch["policy_p2"],
-                    "payout_matrix": batch["payout_matrix"],
-                    "action_p1": batch["action_p1"],
-                    "action_p2": batch["action_p2"],
-                    "p1_value": batch["p1_value"],
-                    "p2_value": batch["p2_value"],
-                })
+                train_detailed_outputs.append(
+                    {
+                        "logits_p1": out["logits_p1"].detach().clone(),
+                        "logits_p2": out["logits_p2"].detach().clone(),
+                        "pred_payout": out["pred_payout"].detach().clone(),
+                        "policy_p1": batch["policy_p1"],
+                        "policy_p2": batch["policy_p2"],
+                        "payout_matrix": batch["payout_matrix"],
+                        "action_p1": batch["action_p1"],
+                        "action_p2": batch["action_p2"],
+                        "p1_value": batch["p1_value"],
+                        "p2_value": batch["p2_value"],
+                    }
+                )
 
         # Compute epoch metrics (single sync point)
         train_metrics = train_acc.compute()
@@ -572,18 +526,20 @@ def run_symmetric_training(
                 )
 
                 if compute_detailed:
-                    val_detailed_outputs.append({
-                        "logits_p1": vl_out["logits_p1"].clone(),
-                        "logits_p2": vl_out["logits_p2"].clone(),
-                        "pred_payout": vl_out["pred_payout"].clone(),
-                        "policy_p1": val_batch["policy_p1"],
-                        "policy_p2": val_batch["policy_p2"],
-                        "payout_matrix": val_batch["payout_matrix"],
-                        "action_p1": val_batch["action_p1"],
-                        "action_p2": val_batch["action_p2"],
-                        "p1_value": val_batch["p1_value"],
-                        "p2_value": val_batch["p2_value"],
-                    })
+                    val_detailed_outputs.append(
+                        {
+                            "logits_p1": vl_out["logits_p1"].clone(),
+                            "logits_p2": vl_out["logits_p2"].clone(),
+                            "pred_payout": vl_out["pred_payout"].clone(),
+                            "policy_p1": val_batch["policy_p1"],
+                            "policy_p2": val_batch["policy_p2"],
+                            "payout_matrix": val_batch["payout_matrix"],
+                            "action_p1": val_batch["action_p1"],
+                            "action_p2": val_batch["action_p2"],
+                            "p1_value": val_batch["p1_value"],
+                            "p2_value": val_batch["p2_value"],
+                        }
+                    )
 
             # Compute epoch metrics (single sync point)
             val_metrics = val_acc.compute()

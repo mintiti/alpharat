@@ -256,8 +256,95 @@ Line length 100. Enabled: pycodestyle, pyflakes, isort, pep8-naming, pyupgrade, 
 **pyrat-engine imports:**
 ```python
 from pyrat_engine.core.game import PyRat, MoveUndo
-from pyrat_engine.core.types import Direction
+from pyrat_engine.core.types import Coordinates, Direction, Wall, Mud
 ```
+
+---
+
+## pyrat_engine Types — Use Them, Don't Reinvent Them
+
+The pyrat_engine types are the **source of truth** for coordinates, directions, and maze topology. Don't reimplement their behavior — use them directly.
+
+### Coordinate System (Y-up)
+
+PyRat uses a **Y-up** coordinate system (opposite of screen/image coords):
+- Origin `(0, 0)` at **bottom-left**
+- **UP increases Y**, DOWN decreases Y
+- X increases to the right
+
+### Coordinates
+
+```python
+from pyrat_engine.core.types import Coordinates
+
+pos = Coordinates(x=2, y=3)
+neighbor = pos.get_neighbor(Direction.UP)  # Coordinates(2, 4)
+
+# Subtraction returns a TUPLE (dx, dy), not Coordinates
+delta = pos2 - pos1  # → tuple[int, int]
+dx, dy = pos2 - pos1  # Can unpack directly
+
+# Other operations
+pos.manhattan_distance(other)  # int
+pos.is_adjacent_to(other)      # bool
+pos[0], pos[1]                 # x, y via indexing
+```
+
+### Direction (IntEnum)
+
+Direction values ARE integers — use them as array indices:
+
+```python
+from pyrat_engine.core.types import Direction
+
+# Direction.UP=0, RIGHT=1, DOWN=2, LEFT=3, STAY=4
+maze[y, x, Direction.UP] = -1       # Direct indexing
+action_probs[Direction.RIGHT] = 0.5 # Works in numpy arrays
+
+# Construct from int
+Direction(action_int)  # int → Direction
+```
+
+### Wall and Mud
+
+Use real types for maze features, not mocks:
+
+```python
+from pyrat_engine.core.types import Wall, Mud, Coordinates
+
+# Construction (tuples or Coordinates both work)
+Wall((1, 1), (1, 2))
+Wall(Coordinates(1, 1), Coordinates(1, 2))
+
+Mud((1, 1), (1, 2), value=3)  # value = turns to traverse
+
+# Query from game
+for wall in game.wall_entries():
+    print(wall.pos1, wall.pos2)
+    wall.blocks_movement(from_pos, to_pos)  # bool
+
+for mud in game.mud_entries():
+    print(mud.pos1, mud.pos2, mud.value)
+```
+
+### Getting Deltas the Right Way
+
+If you need direction→delta mappings, derive them from the engine:
+
+```python
+# Derive from Coordinates arithmetic — don't hardcode
+origin = Coordinates(0, 0)
+DIRECTION_DELTAS = {
+    d: origin.get_neighbor(d) - origin
+    for d in Direction
+}
+# Result: {UP: (0,1), RIGHT: (1,0), DOWN: (0,-1), LEFT: (-1,0), STAY: (0,0)}
+
+# Or go the other way: delta → direction
+DELTA_TO_DIRECTION = {v: k for k, v in DIRECTION_DELTAS.items() if k != Direction.STAY}
+```
+
+**Don't hardcode** `{Direction.UP: (0, -1)}` — that's wrong and will cause bugs.
 
 ---
 

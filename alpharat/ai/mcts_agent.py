@@ -123,7 +123,7 @@ class MCTSAgent(Agent):
 
         # Compile model for faster inference (CUDA only - MPS has issues)
         if device.type == "cuda":
-            self._model = torch.compile(self._model, mode="reduce-overhead")
+            self._model = torch.compile(self._model, mode="reduce-overhead")  # type: ignore[assignment]
 
         self._model_loaded = True
 

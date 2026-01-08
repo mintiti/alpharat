@@ -2,9 +2,14 @@
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
 import torch
 import torch.nn.functional as F
 from torch import Tensor
+
+if TYPE_CHECKING:
+    from collections.abc import Mapping
 
 
 def top_k_accuracy(logits: Tensor, target: Tensor, k: int = 1) -> Tensor:
@@ -206,18 +211,20 @@ class MetricsAccumulator:
         self._sums: dict[str, float] = {}
         self._counts: dict[str, int] = {}
 
-    def update(self, metrics: dict[str, float], batch_size: int = 1) -> None:
+    def update(self, metrics: Mapping[str, float | Tensor], batch_size: int = 1) -> None:
         """Add batch metrics weighted by batch size.
 
         Args:
-            metrics: Dict of metric name to scalar value.
+            metrics: Mapping of metric name to scalar value (float or 0-dim Tensor).
             batch_size: Number of samples in this batch (for weighted average).
         """
         for key, value in metrics.items():
             if key not in self._sums:
                 self._sums[key] = 0.0
                 self._counts[key] = 0
-            self._sums[key] += value * batch_size
+            # Handle both float and Tensor values
+            v = value.item() if isinstance(value, Tensor) else value
+            self._sums[key] += v * batch_size
             self._counts[key] += batch_size
 
     def compute(self) -> dict[str, float]:
@@ -288,9 +295,7 @@ class GPUMetricsAccumulator:
         results: dict[str, float] = {}
         for key in self._tensors:
             stacked = torch.stack(self._tensors[key])
-            weights = torch.tensor(
-                self._weights[key], device=self._device, dtype=stacked.dtype
-            )
+            weights = torch.tensor(self._weights[key], device=self._device, dtype=stacked.dtype)
             weighted_avg = (stacked * weights).sum() / weights.sum()
             results[key] = weighted_avg.item()
         return results

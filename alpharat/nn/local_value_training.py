@@ -35,6 +35,11 @@ from alpharat.nn.metrics import (
     compute_value_metrics,
 )
 from alpharat.nn.models import LocalValueMLP
+from alpharat.nn.training_utils import (
+    backward_with_amp,
+    select_device,
+    setup_amp,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -320,25 +325,6 @@ def _resolve_model_config(
     return model_config, checkpoint
 
 
-def _should_use_amp(device: torch.device) -> bool:
-    """Check if AMP should be enabled based on device capabilities.
-
-    Returns True for:
-    - CUDA with compute capability >= 7.0 (Volta+ has Tensor Cores)
-    - MPS (Apple Silicon has good float16 support)
-
-    Returns False for:
-    - CUDA with compute capability < 7.0 (modest benefit not worth complexity)
-    - CPU (no benefit)
-    """
-    if device.type == "cuda":
-        major, _ = torch.cuda.get_device_capability(device)
-        return major >= 7
-    elif device.type == "mps":
-        return True
-    return False
-
-
 def run_local_value_training(
     config: LocalValueTrainConfig,
     *,
@@ -375,34 +361,14 @@ def run_local_value_training(
     # Set seed
     torch.manual_seed(config.seed)
 
-    # Device selection
-    if device == "auto":
-        if torch.cuda.is_available():
-            torch_device = torch.device("cuda")
-        elif torch.backends.mps.is_available():
-            torch_device = torch.device("mps")
-        else:
-            torch_device = torch.device("cpu")
-    else:
-        torch_device = torch.device(device)
+    # Device and AMP setup
+    torch_device = select_device(device)
     logger.info(f"Using device: {torch_device}")
 
-    # AMP setup (auto-detect if not specified)
-    amp_enabled = _should_use_amp(torch_device) if use_amp is None else use_amp
-    amp_dtype = torch.float16 if amp_enabled else None
-
-    # GradScaler only for CUDA (MPS doesn't support it)
-    scaler = (
-        torch.amp.GradScaler("cuda") if (amp_enabled and torch_device.type == "cuda") else None
-    )
-
-    if amp_enabled:
-        capability = ""
-        if torch_device.type == "cuda":
-            major, minor = torch.cuda.get_device_capability(torch_device)
-            capability = f" (SM {major}.{minor})"
-        scaler_str = "yes" if scaler else "no"
-        logger.info(f"AMP enabled{capability}: dtype={amp_dtype}, scaler={scaler_str}")
+    amp = setup_amp(torch_device, use_amp)
+    amp_enabled = amp.enabled
+    amp_dtype = amp.dtype
+    scaler = amp.scaler
 
     # Resolve model config (from config.model or checkpoint)
     model_config, checkpoint = _resolve_model_config(config, torch_device)
@@ -484,7 +450,8 @@ def run_local_value_training(
                 "observation": train["observation"][batch_idx],
                 "policy_p1": train["policy_p1"][batch_idx],
                 "policy_p2": train["policy_p2"][batch_idx],
-                "value": train["value"][batch_idx],
+                "p1_value": train["p1_value"][batch_idx],
+                "p2_value": train["p2_value"][batch_idx],
                 "payout_matrix": train["payout_matrix"][batch_idx],
                 "action_p1": train["action_p1"][batch_idx],
                 "action_p2": train["action_p2"][batch_idx],
@@ -509,13 +476,7 @@ def run_local_value_training(
                 )
 
             # Backward pass with optional gradient scaling (CUDA only)
-            if scaler is not None:
-                scaler.scale(out["loss"]).backward()
-                scaler.step(optimizer)
-                scaler.update()
-            else:
-                out["loss"].backward()
-                optimizer.step()
+            backward_with_amp(out["loss"], optimizer, scaler)
 
             # Accumulate loss metrics
             train_acc.update(
@@ -552,7 +513,7 @@ def run_local_value_training(
                         out["ownership_logits"].detach(), batch["cheese_outcomes"]
                     )
 
-                    detailed = {}
+                    detailed: dict[str, float | torch.Tensor] = {}
                     detailed.update({f"p1/{k}": v for k, v in p1_metrics.items()})
                     detailed.update({f"p2/{k}": v for k, v in p2_metrics.items()})
                     detailed.update({f"payout/{k}": v for k, v in payout_mets.items()})
@@ -575,10 +536,11 @@ def run_local_value_training(
                     "observation": val["observation"][start_idx:end_idx],
                     "policy_p1": val["policy_p1"][start_idx:end_idx],
                     "policy_p2": val["policy_p2"][start_idx:end_idx],
+                    "p1_value": val["p1_value"][start_idx:end_idx],
+                    "p2_value": val["p2_value"][start_idx:end_idx],
                     "payout_matrix": val["payout_matrix"][start_idx:end_idx],
                     "action_p1": val["action_p1"][start_idx:end_idx],
                     "action_p2": val["action_p2"][start_idx:end_idx],
-                    "value": val["value"][start_idx:end_idx],
                     "cheese_outcomes": val["cheese_outcomes"][start_idx:end_idx],
                 }
 
@@ -620,13 +582,13 @@ def run_local_value_training(
                         vl_out["ownership_logits"], val_batch["cheese_outcomes"]
                     )
 
-                    detailed = {}
-                    detailed.update({f"p1/{k}": v for k, v in p1_metrics.items()})
-                    detailed.update({f"p2/{k}": v for k, v in p2_metrics.items()})
-                    detailed.update({f"payout/{k}": v for k, v in payout_mets.items()})
-                    detailed.update({f"value/{k}": v for k, v in value_mets.items()})
-                    detailed.update({f"ownership/{k}": v for k, v in own_metrics.items()})
-                    val_acc.update(detailed, batch_size=curr_batch_size)
+                    val_detailed: dict[str, float | torch.Tensor] = {}
+                    val_detailed.update({f"p1/{k}": v for k, v in p1_metrics.items()})
+                    val_detailed.update({f"p2/{k}": v for k, v in p2_metrics.items()})
+                    val_detailed.update({f"payout/{k}": v for k, v in payout_mets.items()})
+                    val_detailed.update({f"value/{k}": v for k, v in value_mets.items()})
+                    val_detailed.update({f"ownership/{k}": v for k, v in own_metrics.items()})
+                    val_acc.update(val_detailed, batch_size=curr_batch_size)
 
             val_metrics = val_acc.compute()
 
