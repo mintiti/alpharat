@@ -44,10 +44,9 @@ class GreedyAgent(Agent):
         Returns:
             First action to take, or None if no cheese reachable
         """
-        # Movement matrix is the same regardless of player perspective
+        # Movement matrix for mud costs (same regardless of player perspective)
         obs = game.get_observation(is_player_one=True)
         movement_matrix = obs.movement_matrix
-        width, height = game.width, game.height
 
         # Priority queue: (cost, counter, position, first_move)
         # counter breaks ties to avoid comparing Coordinates
@@ -66,20 +65,12 @@ class GreedyAgent(Agent):
             if pos in cheeses:
                 return first_move
 
-            # Explore neighbors (4 cardinal directions)
-            for direction in (Direction.UP, Direction.RIGHT, Direction.DOWN, Direction.LEFT):
+            # Explore only valid moves (skips walls and out-of-bounds)
+            for direction in game.get_valid_moves(pos):  # type: ignore[attr-defined]
                 neighbor = pos.get_neighbor(direction)
 
-                # Bounds check
-                if not (0 <= neighbor.x < width and 0 <= neighbor.y < height):
-                    continue
-
-                # Check movement cost from movement_matrix
-                move_cost = movement_matrix[pos.x, pos.y, direction]
-                if move_cost < 0:  # Wall
-                    continue
-
                 # Cost: 1 for normal move, or mud value for mud
+                move_cost = movement_matrix[pos.x, pos.y, direction]
                 edge_cost = 1 if move_cost == 0 else int(move_cost)
                 new_cost = cost + edge_cost
 
