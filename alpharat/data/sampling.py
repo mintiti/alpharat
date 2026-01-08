@@ -327,12 +327,13 @@ def create_game(params: GameParams, seed: int) -> PyRat:
     """
     from pyrat_engine.core.game import PyRat
 
-    kwargs: dict[str, int | float] = {
+    kwargs: dict[str, int | float | bool] = {
         "width": params.width,
         "height": params.height,
         "cheese_count": params.cheese_count,
         "max_turns": params.max_turns,
         "seed": seed,
+        "symmetric": params.symmetric,
     }
     if params.wall_density is not None:
         kwargs["wall_density"] = params.wall_density
