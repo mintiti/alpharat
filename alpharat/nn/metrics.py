@@ -111,7 +111,7 @@ def payout_correlation(pred: Tensor, target: Tensor) -> Tensor:
     return numerator / denominator
 
 
-def compute_policy_metrics(logits: Tensor, target: Tensor) -> dict[str, float]:
+def compute_policy_metrics(logits: Tensor, target: Tensor) -> dict[str, Tensor]:
     """Compute all policy metrics for a batch.
 
     Args:
@@ -119,17 +119,17 @@ def compute_policy_metrics(logits: Tensor, target: Tensor) -> dict[str, float]:
         target: Target probabilities (Nash equilibrium), shape (batch, 5).
 
     Returns:
-        Dict with top1_accuracy, top2_accuracy, entropy_pred, entropy_target.
+        Dict with top1_accuracy, top2_accuracy, entropy_pred, entropy_target as tensors.
     """
     return {
-        "top1_accuracy": top_k_accuracy(logits, target, k=1).item(),
-        "top2_accuracy": top_k_accuracy(logits, target, k=2).item(),
-        "entropy_pred": policy_entropy(logits).item(),
-        "entropy_target": target_entropy(target).item(),
+        "top1_accuracy": top_k_accuracy(logits, target, k=1),
+        "top2_accuracy": top_k_accuracy(logits, target, k=2),
+        "entropy_pred": policy_entropy(logits),
+        "entropy_target": target_entropy(target),
     }
 
 
-def compute_payout_metrics(pred: Tensor, target: Tensor) -> dict[str, float]:
+def compute_payout_metrics(pred: Tensor, target: Tensor) -> dict[str, Tensor]:
     """Compute payout matrix metrics for a batch, per player.
 
     Args:
@@ -137,13 +137,13 @@ def compute_payout_metrics(pred: Tensor, target: Tensor) -> dict[str, float]:
         target: Target payout matrices, shape (batch, 2, 5, 5).
 
     Returns:
-        Dict with explained_variance and correlation for each player.
+        Dict with explained_variance and correlation for each player as tensors.
     """
     return {
-        "p1_explained_variance": explained_variance(pred[:, 0], target[:, 0]).item(),
-        "p1_correlation": payout_correlation(pred[:, 0], target[:, 0]).item(),
-        "p2_explained_variance": explained_variance(pred[:, 1], target[:, 1]).item(),
-        "p2_correlation": payout_correlation(pred[:, 1], target[:, 1]).item(),
+        "p1_explained_variance": explained_variance(pred[:, 0], target[:, 0]),
+        "p1_correlation": payout_correlation(pred[:, 0], target[:, 0]),
+        "p2_explained_variance": explained_variance(pred[:, 1], target[:, 1]),
+        "p2_correlation": payout_correlation(pred[:, 1], target[:, 1]),
     }
 
 
@@ -153,7 +153,7 @@ def compute_value_metrics(
     action_p2: Tensor,
     p1_value: Tensor,
     p2_value: Tensor,
-) -> dict[str, float]:
+) -> dict[str, Tensor]:
     """Compute metrics for value predictions at played action pair.
 
     Compares pred_payout[:, player, a1, a2] to actual game outcomes.
@@ -166,7 +166,7 @@ def compute_value_metrics(
         p2_value: P2's actual remaining score, shape (batch,) or (batch, 1).
 
     Returns:
-        Dict with explained_variance and correlation for each player's value.
+        Dict with explained_variance and correlation for each player's value as tensors.
     """
     batch_size = pred_payout.shape[0]
     batch_idx = torch.arange(batch_size, device=pred_payout.device)
@@ -180,10 +180,10 @@ def compute_value_metrics(
     target_p2 = p2_value.squeeze()
 
     return {
-        "p1_explained_variance": explained_variance(pred_p1, target_p1).item(),
-        "p1_correlation": payout_correlation(pred_p1, target_p1).item(),
-        "p2_explained_variance": explained_variance(pred_p2, target_p2).item(),
-        "p2_correlation": payout_correlation(pred_p2, target_p2).item(),
+        "p1_explained_variance": explained_variance(pred_p1, target_p1),
+        "p1_correlation": payout_correlation(pred_p1, target_p1),
+        "p2_explained_variance": explained_variance(pred_p2, target_p2),
+        "p2_correlation": payout_correlation(pred_p2, target_p2),
     }
 
 
@@ -232,3 +232,70 @@ class MetricsAccumulator:
         """Clear all accumulated values for next epoch."""
         self._sums.clear()
         self._counts.clear()
+
+
+class GPUMetricsAccumulator:
+    """Accumulates metrics as GPU tensors, syncs only at compute().
+
+    Unlike MetricsAccumulator which requires .item() calls per batch (forcing
+    GPU-CPU sync), this class keeps tensors on GPU and only transfers to CPU
+    once at epoch end. This can dramatically improve GPU utilization.
+
+    Usage:
+        acc = GPUMetricsAccumulator(device)
+        for batch in loader:
+            out = compute_losses(...)
+            acc.update({
+                "loss": out["loss"],  # No .item() - stays on GPU
+                "loss_p1": out["loss_p1"],
+            }, batch_size=len(batch))
+        epoch_metrics = acc.compute()  # Single sync point
+    """
+
+    def __init__(self, device: torch.device) -> None:
+        """Initialize empty accumulator.
+
+        Args:
+            device: GPU device for tensor operations.
+        """
+        self._device = device
+        self._tensors: dict[str, list[Tensor]] = {}
+        self._weights: dict[str, list[int]] = {}
+
+    def update(self, metrics: dict[str, Tensor], batch_size: int) -> None:
+        """Store detached tensors without syncing to CPU.
+
+        Args:
+            metrics: Dict of metric name to scalar tensor (0-dim).
+            batch_size: Number of samples in this batch (for weighted average).
+        """
+        for key, value in metrics.items():
+            if key not in self._tensors:
+                self._tensors[key] = []
+                self._weights[key] = []
+            self._tensors[key].append(value.detach())
+            self._weights[key].append(batch_size)
+
+    def compute(self) -> dict[str, float]:
+        """Compute weighted averages and transfer to CPU.
+
+        This is the single sync point - all accumulated tensors are
+        processed on GPU first, then results transferred to CPU.
+
+        Returns:
+            Dict of metric name to epoch-level average (as float).
+        """
+        results: dict[str, float] = {}
+        for key in self._tensors:
+            stacked = torch.stack(self._tensors[key])
+            weights = torch.tensor(
+                self._weights[key], device=self._device, dtype=stacked.dtype
+            )
+            weighted_avg = (stacked * weights).sum() / weights.sum()
+            results[key] = weighted_avg.item()
+        return results
+
+    def reset(self) -> None:
+        """Clear all accumulated values for next epoch."""
+        self._tensors.clear()
+        self._weights.clear()

@@ -250,15 +250,16 @@ class TestComputePolicyMetrics:
         assert "entropy_pred" in result
         assert "entropy_target" in result
 
-    def test_returns_floats(self) -> None:
-        """All values should be Python floats."""
+    def test_returns_tensors(self) -> None:
+        """All values should be scalar tensors (for GPU-efficient accumulation)."""
         logits = torch.tensor([[2.0, 1.0, 0.0, 0.0, 0.0]])
         target = torch.tensor([[0.8, 0.1, 0.05, 0.03, 0.02]])
 
         result = compute_policy_metrics(logits, target)
 
         for key, value in result.items():
-            assert isinstance(value, float), f"{key} is not float"
+            assert isinstance(value, torch.Tensor), f"{key} is not Tensor"
+            assert value.dim() == 0, f"{key} is not a scalar tensor"
 
 
 class TestComputePayoutMetrics:
@@ -276,15 +277,16 @@ class TestComputePayoutMetrics:
         assert "p2_explained_variance" in result
         assert "p2_correlation" in result
 
-    def test_returns_floats(self) -> None:
-        """All values should be Python floats."""
+    def test_returns_tensors(self) -> None:
+        """All values should be scalar tensors (for GPU-efficient accumulation)."""
         pred = torch.randn(4, 2, 5, 5)
         target = torch.randn(4, 2, 5, 5)
 
         result = compute_payout_metrics(pred, target)
 
         for key, value in result.items():
-            assert isinstance(value, float), f"{key} is not float"
+            assert isinstance(value, torch.Tensor), f"{key} is not Tensor"
+            assert value.dim() == 0, f"{key} is not a scalar tensor"
 
 
 class TestMetricsAccumulator:

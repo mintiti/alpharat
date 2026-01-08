@@ -144,6 +144,11 @@ def main() -> None:
         "--checkpoint", type=Path, default=None, help="Existing checkpoint (with --skip-training)"
     )
 
+    # AMP flags (mutually exclusive: auto-detect by default)
+    amp_group = parser.add_mutually_exclusive_group()
+    amp_group.add_argument("--amp", action="store_true", help="Force enable AMP")
+    amp_group.add_argument("--no-amp", action="store_true", help="Force disable AMP")
+
     args = parser.parse_args()
 
     # Parse config (needed for resume_from even when skipping training)
@@ -161,6 +166,9 @@ def main() -> None:
         logger.info("Phase 1: Training")
         logger.info("=" * 60)
 
+        # Tri-state AMP: True (force on), False (force off), None (auto-detect)
+        use_amp = True if args.amp else (False if args.no_amp else None)
+
         checkpoint_path = run_training(
             config,
             epochs=args.epochs,
@@ -168,6 +176,7 @@ def main() -> None:
             device=args.device,
             output_dir=args.output_dir,
             run_name=args.run_name,
+            use_amp=use_amp,
         )
 
         logger.info(f"Training complete. Best checkpoint: {checkpoint_path}")

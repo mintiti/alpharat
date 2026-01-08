@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import itertools
+import multiprocessing as mp
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from dataclasses import dataclass
 
@@ -330,9 +331,11 @@ def run_tournament(config: TournamentConfig, *, verbose: bool = True) -> Tournam
         print()
 
     # Run batches in parallel using multiprocessing
+    # Use spawn context for CUDA compatibility (fork doesn't work with CUDA)
     all_results: list[_GameResult] = []
+    ctx = mp.get_context("spawn")
 
-    with ProcessPoolExecutor(max_workers=config.workers) as executor:
+    with ProcessPoolExecutor(max_workers=config.workers, mp_context=ctx) as executor:
         futures = [executor.submit(_run_matchup_batch, batch) for batch in batches]
 
         # Collect results as they complete with progress bar
