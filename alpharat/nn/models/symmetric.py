@@ -6,6 +6,8 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+from alpharat.nn.training.keys import ModelOutput
+
 
 class SymmetricMLP(nn.Module):
     """DeepSet-based symmetric model for two-player games.
@@ -161,17 +163,18 @@ class SymmetricMLP(nn.Module):
 
         return shared_raw, p1_raw, p2_raw
 
-    def forward(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    def forward(self, x: torch.Tensor, **kwargs: object) -> dict[str, torch.Tensor]:
         """Forward pass returning logits.
 
         Args:
             x: Observation tensor of shape (batch, obs_dim).
+            **kwargs: Ignored (for protocol compatibility).
 
         Returns:
-            Tuple of:
-                - logits_p1: Raw logits for P1, shape (batch, 5).
-                - logits_p2: Raw logits for P2, shape (batch, 5).
-                - payout_matrix: Predicted payout values, shape (batch, 2, 5, 5).
+            Dict with:
+                - ModelOutput.LOGITS_P1: Raw logits for P1, shape (batch, 5).
+                - ModelOutput.LOGITS_P2: Raw logits for P2, shape (batch, 5).
+                - ModelOutput.PAYOUT: Predicted payout values, shape (batch, 2, 5, 5).
         """
         # Parse and encode
         shared_raw, p1_raw, p2_raw = self._parse_obs(x)
@@ -203,19 +206,28 @@ class SymmetricMLP(nn.Module):
         # But bimatrix[1,i,j] should be P2's payout when P1 plays i, P2 plays j
         payout_matrix = torch.stack([payout_p1, payout_p2.transpose(-1, -2)], dim=1)
 
-        return logits_p1, logits_p2, payout_matrix
+        return {
+            ModelOutput.LOGITS_P1: logits_p1,
+            ModelOutput.LOGITS_P2: logits_p2,
+            ModelOutput.PAYOUT: payout_matrix,
+        }
 
-    def predict(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    def predict(self, x: torch.Tensor, **kwargs: object) -> dict[str, torch.Tensor]:
         """Inference pass with softmax probabilities.
 
         Args:
             x: Observation tensor of shape (batch, obs_dim).
+            **kwargs: Ignored (for protocol compatibility).
 
         Returns:
-            Tuple of:
-                - policy_p1: Probabilities for P1, shape (batch, 5).
-                - policy_p2: Probabilities for P2, shape (batch, 5).
-                - payout_matrix: Predicted payout values, shape (batch, 2, 5, 5).
+            Dict with:
+                - ModelOutput.POLICY_P1: Probabilities for P1, shape (batch, 5).
+                - ModelOutput.POLICY_P2: Probabilities for P2, shape (batch, 5).
+                - ModelOutput.PAYOUT: Predicted payout values, shape (batch, 2, 5, 5).
         """
-        logits_p1, logits_p2, payout_matrix = self.forward(x)
-        return F.softmax(logits_p1, dim=-1), F.softmax(logits_p2, dim=-1), payout_matrix
+        output = self.forward(x)
+        return {
+            ModelOutput.POLICY_P1: F.softmax(output[ModelOutput.LOGITS_P1], dim=-1),
+            ModelOutput.POLICY_P2: F.softmax(output[ModelOutput.LOGITS_P2], dim=-1),
+            ModelOutput.PAYOUT: output[ModelOutput.PAYOUT],
+        }

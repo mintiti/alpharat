@@ -267,3 +267,64 @@ class BatchAugmentation:
             batch = swap_player_perspective_batch(batch, mask, self.width, self.height)
 
         return batch
+
+
+# --- AugmentationStrategy implementations ---
+
+
+class PlayerSwapStrategy:
+    """Augmentation strategy that randomly swaps P1/P2 perspective.
+
+    Implements the AugmentationStrategy protocol for use with the generic trainer.
+    """
+
+    def __init__(self, p_swap: float = 0.5) -> None:
+        """Initialize player swap strategy.
+
+        Args:
+            p_swap: Probability of swapping each sample.
+        """
+        self.p_swap = p_swap
+
+    def __call__(
+        self,
+        batch: dict[str, torch.Tensor],
+        width: int,
+        height: int,
+    ) -> dict[str, torch.Tensor]:
+        """Apply player swap augmentation."""
+        n = batch["observation"].shape[0]
+        device = batch["observation"].device
+        mask = torch.rand(n, device=device) < self.p_swap
+
+        if mask.any():
+            batch = swap_player_perspective_batch(batch, mask, width, height)
+
+        return batch
+
+    @property
+    def needs_augmentation(self) -> bool:
+        """Player swap is a real augmentation."""
+        return self.p_swap > 0
+
+
+class NoAugmentation:
+    """No-op augmentation strategy.
+
+    Used for models with structural symmetry (e.g., SymmetricMLP) that don't
+    need player swap augmentation.
+    """
+
+    def __call__(
+        self,
+        batch: dict[str, torch.Tensor],
+        width: int,
+        height: int,
+    ) -> dict[str, torch.Tensor]:
+        """Return batch unchanged."""
+        return batch
+
+    @property
+    def needs_augmentation(self) -> bool:
+        """No augmentation needed."""
+        return False

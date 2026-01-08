@@ -1,13 +1,13 @@
-"""Training for SymmetricMLP with structural P1/P2 symmetry.
+"""Mini-batch training for PyRat MLP neural network.
 
 Backward-compatible wrapper around the generic training loop.
-Uses SymmetricModelConfig and SymmetricOptimConfig under the hood.
+Uses MLPModelConfig and MLPOptimConfig under the hood.
 
 Usage:
-    from alpharat.nn.symmetric_training import SymmetricTrainConfig, run_symmetric_training
+    from alpharat.nn.training import TrainConfig, run_training
 
-    config = SymmetricTrainConfig.model_validate(yaml.safe_load(config_path.read_text()))
-    run_symmetric_training(config, epochs=100, output_dir=Path("runs"))
+    config = TrainConfig.model_validate(yaml.safe_load(config_path.read_text()))
+    run_training(config, epochs=100, output_dir=Path("runs"))
 """
 
 from __future__ import annotations
@@ -18,10 +18,7 @@ from typing import Literal
 
 from pydantic import BaseModel
 
-from alpharat.nn.architectures.symmetric.config import (
-    SymmetricModelConfig,
-    SymmetricOptimConfig,
-)
+from alpharat.nn.architectures.mlp.config import MLPModelConfig, MLPOptimConfig
 from alpharat.nn.training.config import DataConfig
 from alpharat.nn.training.loop import run_training as _run_training
 
@@ -31,18 +28,15 @@ logger = logging.getLogger(__name__)
 # --- Config Models (backward-compatible) ---
 
 
-class SymmetricModelConfigOld(BaseModel):
-    """Model architecture parameters for SymmetricMLP."""
+class ModelConfig(BaseModel):
+    """Model architecture parameters."""
 
     hidden_dim: int = 256
     dropout: float = 0.0
 
 
-class SymmetricOptimConfigOld(BaseModel):
-    """Optimization parameters for symmetric training.
-
-    No p_augment field - structural symmetry makes augmentation unnecessary.
-    """
+class OptimConfig(BaseModel):
+    """Optimization parameters."""
 
     lr: float = 1e-3
     policy_weight: float = 1.0
@@ -50,18 +44,12 @@ class SymmetricOptimConfigOld(BaseModel):
     nash_weight: float = 0.0
     nash_mode: Literal["target", "predicted"] = "target"
     constant_sum_weight: float = 0.0
+    p_augment: float = 0.5
     batch_size: int = 4096
 
 
-class SymmetricDataConfig(BaseModel):
-    """Data paths."""
-
-    train_dir: str
-    val_dir: str
-
-
-class SymmetricTrainConfig(BaseModel):
-    """Full training configuration for SymmetricMLP.
+class TrainConfig(BaseModel):
+    """Full training configuration for MLP.
 
     Either `model` or `resume_from` must be provided:
     - model only: fresh start with specified architecture
@@ -69,15 +57,15 @@ class SymmetricTrainConfig(BaseModel):
     - both: validate they match, then resume
     """
 
-    model: SymmetricModelConfigOld | None = None
-    optim: SymmetricOptimConfigOld = SymmetricOptimConfigOld()
-    data: SymmetricDataConfig
+    model: ModelConfig | None = None
+    optim: OptimConfig = OptimConfig()
+    data: DataConfig
     resume_from: str | None = None
     seed: int = 42
 
 
-def run_symmetric_training(
-    config: SymmetricTrainConfig,
+def run_training(
+    config: TrainConfig,
     *,
     epochs: int = 100,
     checkpoint_every: int = 10,
@@ -87,7 +75,7 @@ def run_symmetric_training(
     run_name: str | None = None,
     use_amp: bool | None = None,
 ) -> Path:
-    """Run SymmetricMLP training loop.
+    """Run MLP training loop.
 
     Wrapper around the generic training loop for backward compatibility.
 
@@ -114,7 +102,7 @@ def run_symmetric_training(
     if config.resume_from is not None:
         torch_device = select_device(device)
         checkpoint = torch.load(config.resume_from, map_location=torch_device, weights_only=False)
-        checkpoint_model = SymmetricModelConfigOld(**checkpoint["config"]["model"])
+        checkpoint_model = ModelConfig(**checkpoint["config"]["model"])
 
         if model_config is not None:
             if model_config != checkpoint_model:
@@ -130,21 +118,22 @@ def run_symmetric_training(
     if model_config is None:
         raise ValueError("Either 'model' or 'resume_from' must be provided in config")
 
-    # Load data to get dimensions (needed for model config)
+    # Load data to get obs_dim (needed for model config)
     train_dir = Path(config.data.train_dir)
     torch_device = select_device(device)
     train_dataset = GPUDataset(train_dir, torch_device)
     width, height = train_dataset.width, train_dataset.height
+    obs_dim = width * height * 7 + 6
 
     # Convert to new architecture configs
-    symmetric_model_config = SymmetricModelConfig(
+    mlp_model_config = MLPModelConfig(
         hidden_dim=model_config.hidden_dim,
         dropout=model_config.dropout,
-        width=width,
-        height=height,
+        p_augment=config.optim.p_augment,
+        obs_dim=obs_dim,
     )
 
-    symmetric_optim_config = SymmetricOptimConfig(
+    mlp_optim_config = MLPOptimConfig(
         lr=config.optim.lr,
         policy_weight=config.optim.policy_weight,
         value_weight=config.optim.value_weight,
@@ -161,8 +150,8 @@ def run_symmetric_training(
 
     # Delegate to generic training loop
     return _run_training(
-        model_config=symmetric_model_config,
-        optim_config=symmetric_optim_config,
+        model_config=mlp_model_config,
+        optim_config=mlp_optim_config,
         data_config=data_config,
         epochs=epochs,
         checkpoint_every=checkpoint_every,

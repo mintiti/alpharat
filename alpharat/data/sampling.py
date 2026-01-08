@@ -265,9 +265,10 @@ def make_predict_fn(
 
         with torch.inference_mode():
             result = model.predict(obs_tensor)
-            policy_p1 = result[0].squeeze(0).cpu().numpy()
-            policy_p2 = result[1].squeeze(0).cpu().numpy()
-            payout = result[2].squeeze(0).cpu().numpy()
+            # Dict interface - all models now return dicts
+            policy_p1 = result["policy_p1"].squeeze(0).cpu().numpy()
+            policy_p2 = result["policy_p2"].squeeze(0).cpu().numpy()
+            payout = result["payout"].squeeze(0).cpu().numpy()
 
         return policy_p1, policy_p2, payout
 

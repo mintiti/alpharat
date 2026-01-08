@@ -1,0 +1,64 @@
+"""Configuration for MLP architecture."""
+
+from __future__ import annotations
+
+from typing import TYPE_CHECKING, Literal
+
+from alpharat.nn.augmentation import PlayerSwapStrategy
+from alpharat.nn.training.config import BaseModelConfig, BaseOptimConfig
+
+if TYPE_CHECKING:
+    from alpharat.nn.training.protocols import AugmentationStrategy, LossFunction, TrainableModel
+
+
+class MLPModelConfig(BaseModelConfig):
+    """Model configuration for PyRatMLP.
+
+    Bundles architecture parameters with the ability to build all components
+    needed by the training loop.
+    """
+
+    # Architecture parameters
+    hidden_dim: int = 256
+    dropout: float = 0.0
+
+    # Augmentation parameter (lives with model since it's model-specific)
+    p_augment: float = 0.5
+
+    # obs_dim is set at build time based on data
+    obs_dim: int | None = None
+
+    def build_model(self) -> TrainableModel:
+        """Construct PyRatMLP instance."""
+        from alpharat.nn.models.mlp import PyRatMLP
+
+        if self.obs_dim is None:
+            msg = "obs_dim must be set before building model"
+            raise ValueError(msg)
+
+        return PyRatMLP(
+            obs_dim=self.obs_dim,
+            hidden_dim=self.hidden_dim,
+            dropout=self.dropout,
+        )
+
+    def build_loss_fn(self) -> LossFunction:
+        """Get MLP loss function."""
+        from alpharat.nn.architectures.mlp.loss import compute_mlp_losses
+
+        return compute_mlp_losses
+
+    def build_augmentation(self) -> AugmentationStrategy:
+        """Get player swap augmentation strategy."""
+        return PlayerSwapStrategy(p_swap=self.p_augment)
+
+
+class MLPOptimConfig(BaseOptimConfig):
+    """Optimization configuration for MLP training."""
+
+    # Base params inherited: lr, policy_weight, value_weight, batch_size
+
+    # MLP-specific loss weights
+    nash_weight: float = 0.0
+    nash_mode: Literal["target", "predicted"] = "target"
+    constant_sum_weight: float = 0.0
