@@ -21,7 +21,6 @@ optim:
   # Constant-sum regularization: encourages P1 + P2 payouts ≈ total cheese collected
   # PyRat is approximately constant-sum; this pushes all action pairs toward same sum
   constant_sum_weight: 1
-  loss_variant: dqn  # "mcts" (full matrix) or "dqn" (sparse)
   batch_size: 4096
 
 data:

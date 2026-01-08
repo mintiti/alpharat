@@ -15,7 +15,7 @@ import time
 
 from alpharat.data.batch import GameParams
 from alpharat.data.sampling import build_tree, create_game
-from alpharat.mcts.search import MCTSSearch
+from alpharat.mcts import DecoupledPUCTConfig, DecoupledPUCTSearch
 
 
 def benchmark_sims_per_second(
@@ -33,7 +33,8 @@ def benchmark_sims_per_second(
     )
     game = create_game(params, seed=42)
     tree = build_tree(game, gamma=1.0)
-    search = MCTSSearch(tree, n_sims=n_sims)
+    config = DecoupledPUCTConfig(simulations=n_sims)
+    search = DecoupledPUCTSearch(tree, config)
 
     start = time.perf_counter()
     search.search()
@@ -48,7 +49,8 @@ def run_for_profile(n_sims: int = 5000) -> None:
     params = GameParams(width=5, height=5, cheese_count=5, max_turns=100)
     game = create_game(params, seed=42)
     tree = build_tree(game, gamma=1.0)
-    search = MCTSSearch(tree, n_sims=n_sims)
+    config = DecoupledPUCTConfig(simulations=n_sims)
+    search = DecoupledPUCTSearch(tree, config)
     search.search()
 
 

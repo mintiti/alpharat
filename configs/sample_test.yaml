@@ -1,8 +1,9 @@
 # Quick test config - 5 games
 mcts:
-  variant: prior_sampling
+  variant: decoupled_puct
   simulations: 50
   gamma: 1.0
+  c_puct: 1.5
 
 game:
   width: 7

@@ -50,8 +50,7 @@ tests/              # Mirrors alpharat/ structure
 |------|---------|
 | `node.py` | `MCTSNode` — payout matrices `[5,5]` instead of Q-values, action equivalence |
 | `tree.py` | `MCTSTree` — efficient navigation via `make_move/unmake_move` |
-| `search.py` | `MCTSSearch` — prior-based sampling, returns Nash equilibrium at root |
-| `decoupled_puct.py` | Alternative selection: each player picks via PUCT formula independently |
+| `decoupled_puct.py` | `DecoupledPUCTSearch` — each player picks via PUCT formula, returns Nash at root |
 | `equivalence.py` | Action equivalence utilities (walls/edges/mud → same outcome) |
 | `nash.py` | Nash equilibrium computation via nashpy |
 
@@ -208,13 +207,9 @@ Standard MCTS stores one value per action. For simultaneous games, we need the e
 
 Nodes don't store full game states. The tree owns one PyRat simulator and navigates by making/unmaking moves. Efficient for deep trees.
 
-### Prior Sampling vs Decoupled PUCT
+### Decoupled PUCT Selection
 
-Two selection strategies:
-- **Prior sampling** (`search.py`): Sample actions from NN policy priors during search
-- **Decoupled PUCT** (`decoupled_puct.py`): Each player selects via PUCT formula independently
-
-Both compute Nash equilibrium at the root after search completes.
+The search uses decoupled PUCT (`decoupled_puct.py`): each player selects actions independently via the PUCT formula, maximizing Q + exploration bonus. After search completes, Nash equilibrium is computed at the root for the final policy.
 
 ### Value Formulation
 

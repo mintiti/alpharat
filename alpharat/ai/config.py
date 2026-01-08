@@ -114,9 +114,8 @@ class NNAgentConfig(AgentConfigBase):
 class MCTSAgentConfig(AgentConfigBase):
     """Configuration for MCTS agent with optional NN priors.
 
-    The `mcts` field contains the search configuration (DecoupledPUCTConfig or
-    PriorSamplingConfig). This is the single source of truth for MCTS parameters
-    like simulations, c_puct, and force_k.
+    The `mcts` field contains the search configuration (DecoupledPUCTConfig).
+    This is the single source of truth for MCTS parameters like simulations, c_puct, and force_k.
 
     When checkpoint is set, uses NN predictions as priors during search.
     When simulations=0, skips MCTS and returns raw NN policy.

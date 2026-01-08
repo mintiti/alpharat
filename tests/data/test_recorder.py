@@ -11,7 +11,7 @@ from pyrat_engine.core.types import Coordinates, Direction, Mud, Wall
 from alpharat.data.loader import load_game_data
 from alpharat.data.maze import _coords_to_direction, _opposite_direction, build_maze_array
 from alpharat.data.recorder import GameRecorder
-from alpharat.mcts.search import SearchResult
+from alpharat.mcts import SearchResult
 
 
 class FakeGame:

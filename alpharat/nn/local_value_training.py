@@ -19,7 +19,6 @@ from __future__ import annotations
 import logging
 from datetime import datetime
 from pathlib import Path
-from typing import Literal
 
 import torch
 import torch.nn.functional as F
@@ -57,7 +56,6 @@ class LocalValueOptimConfig(BaseModel):
     policy_weight: float = 1.0
     value_weight: float = 1.0
     ownership_weight: float = 1.0
-    loss_variant: Literal["mcts", "dqn"] = "mcts"
     p_augment: float = 0.5
     batch_size: int = 4096
 
@@ -173,7 +171,6 @@ def compute_ownership_loss(
 def compute_local_value_losses(
     model: LocalValueMLP,
     data: dict[str, torch.Tensor],
-    loss_variant: Literal["mcts", "dqn"],
     policy_weight: float,
     value_weight: float,
     ownership_weight: float,
@@ -184,7 +181,6 @@ def compute_local_value_losses(
         model: LocalValueMLP model.
         data: Batch dict with observation, policy_p1, policy_p2, payout_matrix,
             action_p1, action_p2, value, cheese_outcomes.
-        loss_variant: "mcts" for full matrix MSE, "dqn" for sparse (played action only).
         policy_weight: Weight for policy loss.
         value_weight: Weight for value/payout loss.
         ownership_weight: Weight for ownership loss.
@@ -193,7 +189,7 @@ def compute_local_value_losses(
         Dict with all losses and model outputs:
             - loss: Total weighted loss
             - loss_p1, loss_p2: Policy losses
-            - loss_value: Payout matrix loss (MSE, full or sparse)
+            - loss_value: Payout matrix loss
             - loss_ownership: Ownership loss
             - logits_p1, logits_p2: Policy logits
             - pred_payout: Predicted payout matrix
@@ -210,15 +206,10 @@ def compute_local_value_losses(
     loss_p1 = F.cross_entropy(logits_p1, data["policy_p1"])
     loss_p2 = F.cross_entropy(logits_p2, data["policy_p2"])
 
-    # Value loss (payout matrix)
-    if loss_variant == "mcts":
-        # Full matrix MSE - still uses MCTS estimates (deprecated)
-        loss_value = F.mse_loss(pred_payout, data["payout_matrix"])
-    else:
-        # Sparse DQN: supervise with actual game outcomes
-        loss_value = sparse_payout_loss(
-            pred_payout, data["action_p1"], data["action_p2"], data["p1_value"], data["p2_value"]
-        )
+    # Sparse loss: supervise with actual game outcomes at played action pair
+    loss_value = sparse_payout_loss(
+        pred_payout, data["action_p1"], data["action_p2"], data["p1_value"], data["p2_value"]
+    )
 
     # Ownership loss (auxiliary task)
     loss_ownership = compute_ownership_loss(ownership_logits, data["cheese_outcomes"])
@@ -471,7 +462,6 @@ def run_local_value_training(
             out = compute_local_value_losses(
                 model,
                 batch,
-                optim_cfg.loss_variant,
                 optim_cfg.policy_weight,
                 optim_cfg.value_weight,
                 optim_cfg.ownership_weight,
@@ -548,7 +538,6 @@ def run_local_value_training(
                 vl_out = compute_local_value_losses(
                     model,
                     val_batch,
-                    optim_cfg.loss_variant,
                     optim_cfg.policy_weight,
                     optim_cfg.value_weight,
                     optim_cfg.ownership_weight,

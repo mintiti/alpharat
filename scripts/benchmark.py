@@ -7,12 +7,13 @@ Usage:
 
 Example YAML config:
     agents:
-      ps_100:
-        variant: prior_sampling
-        simulations: 100
       puct_100:
         variant: decoupled_puct
         simulations: 100
+        c_puct: 1.5
+      puct_500:
+        variant: decoupled_puct
+        simulations: 500
         c_puct: 1.5
 
     games_per_matchup: 20

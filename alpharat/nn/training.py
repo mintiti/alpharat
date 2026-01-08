@@ -1,9 +1,5 @@
 """Mini-batch training for PyRat neural network.
 
-Two loss variants:
-- "mcts": Full payout matrix supervision (MSE on all 25 entries from MCTS estimates)
-- "dqn": Sparse supervision (MSE only on played action pair vs actual outcome)
-
 Usage:
     from alpharat.nn.training import TrainConfig, run_training
 
@@ -56,7 +52,6 @@ class OptimConfig(BaseModel):
     nash_weight: float = 0.0  # Nash consistency loss weight (0 = disabled)
     nash_mode: Literal["target", "predicted"] = "target"
     constant_sum_weight: float = 0.0  # Constant-sum regularization weight (0 = disabled)
-    loss_variant: Literal["mcts", "dqn"] = "dqn"
     p_augment: float = 0.5
     batch_size: int = 4096
 
@@ -224,7 +219,6 @@ def constant_sum_loss(
 def compute_losses(
     model: PyRatMLP,
     data: dict[str, torch.Tensor],
-    loss_variant: Literal["mcts", "dqn"],
     policy_weight: float,
     value_weight: float,
     nash_weight: float = 0.0,
@@ -242,14 +236,10 @@ def compute_losses(
     loss_p1 = F.cross_entropy(logits_p1, data["policy_p1"])
     loss_p2 = F.cross_entropy(logits_p2, data["policy_p2"])
 
-    if loss_variant == "mcts":
-        # Full matrix MSE - still uses MCTS estimates (deprecated)
-        loss_value = F.mse_loss(pred_payout, data["payout_matrix"])
-    else:
-        # Sparse DQN: supervise with actual game outcomes
-        loss_value = sparse_payout_loss(
-            pred_payout, data["action_p1"], data["action_p2"], data["p1_value"], data["p2_value"]
-        )
+    # Sparse loss: supervise with actual game outcomes at played action pair
+    loss_value = sparse_payout_loss(
+        pred_payout, data["action_p1"], data["action_p2"], data["p1_value"], data["p2_value"]
+    )
 
     # Nash consistency loss (game-theoretic constraint)
     if nash_weight > 0:
@@ -505,7 +495,6 @@ def run_training(
             out = compute_losses(
                 model,
                 batch,
-                optim_cfg.loss_variant,
                 optim_cfg.policy_weight,
                 optim_cfg.value_weight,
                 optim_cfg.nash_weight,
@@ -566,7 +555,6 @@ def run_training(
                 vl_out = compute_losses(
                     model,
                     val_batch,
-                    optim_cfg.loss_variant,
                     optim_cfg.policy_weight,
                     optim_cfg.value_weight,
                     optim_cfg.nash_weight,

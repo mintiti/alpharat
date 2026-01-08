@@ -6,6 +6,7 @@ marginalized over the opponent's prior policy.
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Literal
 
 import numpy as np
@@ -16,8 +17,22 @@ from alpharat.mcts.selection import compute_forced_threshold
 
 if TYPE_CHECKING:
     from alpharat.mcts.node import MCTSNode
-    from alpharat.mcts.search import SearchResult
     from alpharat.mcts.tree import MCTSTree
+
+
+@dataclass
+class SearchResult:
+    """Result of an MCTS search.
+
+    Attributes:
+        payout_matrix: Root's updated payout matrix after search.
+        policy_p1: Nash equilibrium strategy for player 1.
+        policy_p2: Nash equilibrium strategy for player 2.
+    """
+
+    payout_matrix: np.ndarray
+    policy_p1: np.ndarray
+    policy_p2: np.ndarray
 
 
 class DecoupledPUCTConfig(BaseModel):
@@ -239,8 +254,6 @@ class DecoupledPUCTSearch:
         Returns:
             SearchResult with payout matrix and Nash equilibrium strategies.
         """
-        from alpharat.mcts.search import SearchResult
-
         root = self.tree.root
         p1_strat, p2_strat = compute_nash_equilibrium(
             root.payout_matrix,
@@ -265,8 +278,6 @@ class DecoupledPUCTSearch:
         Returns:
             SearchResult with NN payout prediction and prior policies.
         """
-        from alpharat.mcts.search import SearchResult
-
         root = self.tree.root
         return SearchResult(
             payout_matrix=root.payout_matrix.copy(),
