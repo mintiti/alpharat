@@ -4,8 +4,8 @@ import numpy as np
 import pytest
 from pyrat_engine.core.game import PyRat
 
+from alpharat.mcts.decoupled_puct import DecoupledPUCTConfig, DecoupledPUCTSearch, SearchResult
 from alpharat.mcts.node import MCTSNode
-from alpharat.mcts.search import MCTSSearch, SearchResult
 from alpharat.mcts.tree import MCTSTree
 
 
@@ -118,12 +118,17 @@ def fake_tree(fake_game: FakeGame, uniform_root: MCTSNode) -> MCTSTree:
     return MCTSTree(game=fake_game, root=uniform_root, gamma=1.0)  # type: ignore[arg-type]
 
 
+def make_config(simulations: int) -> DecoupledPUCTConfig:
+    """Helper to create search config with given simulations."""
+    return DecoupledPUCTConfig(simulations=simulations)
+
+
 class TestSearchBasics:
     """Basic search functionality tests."""
 
     def test_search_returns_search_result(self, fake_tree: MCTSTree) -> None:
         """Search should return a SearchResult."""
-        search = MCTSSearch(fake_tree, n_sims=5)
+        search = DecoupledPUCTSearch(fake_tree, make_config(5))
         result = search.search()
 
         assert isinstance(result, SearchResult)
@@ -135,7 +140,7 @@ class TestSearchBasics:
         """Search should increase visit counts on root."""
         initial_visits = fake_tree.root.total_visits
 
-        search = MCTSSearch(fake_tree, n_sims=10)
+        search = DecoupledPUCTSearch(fake_tree, make_config(10))
         search.search()
 
         # Visits should have increased
@@ -143,7 +148,7 @@ class TestSearchBasics:
 
     def test_search_returns_valid_nash(self, fake_tree: MCTSTree) -> None:
         """Returned policies should be valid probability distributions."""
-        search = MCTSSearch(fake_tree, n_sims=10)
+        search = DecoupledPUCTSearch(fake_tree, make_config(10))
         result = search.search()
 
         # Policies should sum to 1
@@ -181,7 +186,7 @@ class TestTerminalHandling:
         tree = MCTSTree(game=game, root=root, gamma=1.0)  # type: ignore[arg-type]
 
         # Run search
-        search = MCTSSearch(tree, n_sims=100)
+        search = DecoupledPUCTSearch(tree, make_config(100))
         result = search.search()
 
         # No simulations should have run (no visits beyond initial)
@@ -200,7 +205,7 @@ class TestExpansion:
         # Initially no children
         assert len(fake_tree.root.children) == 0
 
-        search = MCTSSearch(fake_tree, n_sims=10)
+        search = DecoupledPUCTSearch(fake_tree, make_config(10))
         search.search()
 
         # Should have expanded some children
@@ -209,7 +214,7 @@ class TestExpansion:
     def test_search_expands_at_most_n_nodes_per_n_sims(self, fake_tree: MCTSTree) -> None:
         """Each simulation expands at most one node."""
         n_sims = 5
-        search = MCTSSearch(fake_tree, n_sims=n_sims)
+        search = DecoupledPUCTSearch(fake_tree, make_config(n_sims))
         search.search()
 
         # Count total nodes in tree (including root)
@@ -250,7 +255,7 @@ class TestLeafValue:
         tree = MCTSTree(game=game, root=root, gamma=1.0, predict_fn=predict_fn)  # type: ignore[arg-type]
 
         # Run one simulation
-        search = MCTSSearch(tree, n_sims=1)
+        search = DecoupledPUCTSearch(tree, make_config(1))
         search.search()
 
         # The root payout should have been updated with a value backed up from leaf
@@ -283,7 +288,7 @@ class TestWithRealGame:
 
     def test_search_with_real_game(self, real_tree: MCTSTree) -> None:
         """Search should work with real PyRat game."""
-        search = MCTSSearch(real_tree, n_sims=20)
+        search = DecoupledPUCTSearch(real_tree, make_config(20))
         result = search.search()
 
         # Basic sanity checks
@@ -293,7 +298,7 @@ class TestWithRealGame:
 
     def test_search_respects_effective_actions(self, real_tree: MCTSTree) -> None:
         """Search should respect effective action mappings (walls block moves)."""
-        search = MCTSSearch(real_tree, n_sims=50)
+        search = DecoupledPUCTSearch(real_tree, make_config(50))
         result = search.search()
 
         # Blocked actions should have 0 probability in Nash result
@@ -357,7 +362,7 @@ class TestPureNNMode:
         root.prior_policy_p1 = np.array([0.5, 0.25, 0.15, 0.08, 0.02])
         root.prior_policy_p2 = np.array([0.1, 0.2, 0.3, 0.3, 0.1])
 
-        search = MCTSSearch(fake_tree, n_sims=0)
+        search = DecoupledPUCTSearch(fake_tree, make_config(0))
         result = search.search()
 
         # Should return the exact prior policies
@@ -369,7 +374,7 @@ class TestPureNNMode:
         # Initially no children
         assert len(fake_tree.root.children) == 0
 
-        search = MCTSSearch(fake_tree, n_sims=0)
+        search = DecoupledPUCTSearch(fake_tree, make_config(0))
         search.search()
 
         # Still no children - no expansion happened
@@ -379,7 +384,7 @@ class TestPureNNMode:
         """n_sims=0 doesn't accumulate any visits."""
         assert fake_tree.root.total_visits == 0
 
-        search = MCTSSearch(fake_tree, n_sims=0)
+        search = DecoupledPUCTSearch(fake_tree, make_config(0))
         search.search()
 
         # Still zero visits
@@ -392,7 +397,7 @@ class TestPureNNMode:
         # The root's payout_matrix should be the NN prediction
         original_payout = root.payout_matrix.copy()
 
-        search = MCTSSearch(fake_tree, n_sims=0)
+        search = DecoupledPUCTSearch(fake_tree, make_config(0))
         result = search.search()
 
         # Payout matrix should be unchanged (no MCTS backup)

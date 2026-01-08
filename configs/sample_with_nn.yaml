@@ -18,7 +18,7 @@ game:
 sampling:
   num_games: 50000
   workers: 4
-  device: mps  # Use "cpu", "cuda", or "mps"
+  device: auto  # Use "auto", "cpu", "cuda", or "mps"
 
 output_dir: batches/
 checkpoint: checkpoints/train_20260105_160105/best_model.pt
