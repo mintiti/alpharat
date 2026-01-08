@@ -104,11 +104,13 @@ class TestGreedyAgentWithWalls:
             .with_player1_pos(Coordinates(0, 1))
             .with_player2_pos(Coordinates(4, 1))
             .with_cheese([Coordinates(4, 1)])
-            .with_walls([
-                Wall(Coordinates(2, 0), Coordinates(3, 0)),
-                Wall(Coordinates(2, 1), Coordinates(3, 1)),
-                # No wall at y=2 - gap to pass through
-            ])
+            .with_walls(
+                [
+                    Wall(Coordinates(2, 0), Coordinates(3, 0)),
+                    Wall(Coordinates(2, 1), Coordinates(3, 1)),
+                    # No wall at y=2 - gap to pass through
+                ]
+            )
             .build()
         )
         agent = GreedyAgent()
@@ -125,13 +127,15 @@ class TestGreedyAgentWithWalls:
             .with_player1_pos(Coordinates(0, 2))
             .with_player2_pos(Coordinates(4, 2))
             .with_cheese([Coordinates(4, 2)])  # Cheese on other side
-            .with_walls([
-                Wall(Coordinates(1, 0), Coordinates(2, 0)),
-                Wall(Coordinates(1, 1), Coordinates(2, 1)),
-                Wall(Coordinates(1, 2), Coordinates(2, 2)),
-                Wall(Coordinates(1, 3), Coordinates(2, 3)),
-                Wall(Coordinates(1, 4), Coordinates(2, 4)),
-            ])
+            .with_walls(
+                [
+                    Wall(Coordinates(1, 0), Coordinates(2, 0)),
+                    Wall(Coordinates(1, 1), Coordinates(2, 1)),
+                    Wall(Coordinates(1, 2), Coordinates(2, 2)),
+                    Wall(Coordinates(1, 3), Coordinates(2, 3)),
+                    Wall(Coordinates(1, 4), Coordinates(2, 4)),
+                ]
+            )
             .build()
         )
         agent = GreedyAgent()
@@ -188,10 +192,12 @@ class TestGreedyAgentWithMud:
             GameConfigBuilder(7, 3)
             .with_player1_pos(Coordinates(0, 1))
             .with_player2_pos(Coordinates(6, 1))
-            .with_cheese([
-                Coordinates(1, 1),  # Close but behind 5-turn mud
-                Coordinates(4, 1),  # Farther but clear path
-            ])
+            .with_cheese(
+                [
+                    Coordinates(1, 1),  # Close but behind 5-turn mud
+                    Coordinates(4, 1),  # Farther but clear path
+                ]
+            )
             .with_mud([Mud(Coordinates(0, 1), Coordinates(1, 1), 5)])
             .build()
         )
@@ -235,12 +241,14 @@ class TestGreedyAgentEdgeCases:
             GameConfigBuilder(5, 5)
             .with_player1_pos(Coordinates(2, 2))
             .with_player2_pos(Coordinates(4, 4))
-            .with_cheese([
-                Coordinates(2, 0),  # 2 down
-                Coordinates(2, 4),  # 2 up
-                Coordinates(0, 2),  # 2 left
-                Coordinates(4, 2),  # 2 right
-            ])
+            .with_cheese(
+                [
+                    Coordinates(2, 0),  # 2 down
+                    Coordinates(2, 4),  # 2 up
+                    Coordinates(0, 2),  # 2 left
+                    Coordinates(4, 2),  # 2 right
+                ]
+            )
             .build()
         )
         agent = GreedyAgent()
