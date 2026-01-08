@@ -59,7 +59,7 @@ class GreedyAgent(Agent):
             cost, _, pos, first_move = heapq.heappop(pq)
 
             # Skip if we found a better path already
-            if cost > best_cost.get(pos, float("inf")):  # type: ignore[arg-type]
+            if cost > best_cost.get(pos, float("inf")):
                 continue
 
             # Found cheese — return the first move we took to get here
@@ -83,7 +83,7 @@ class GreedyAgent(Agent):
                 edge_cost = 1 if move_cost == 0 else int(move_cost)
                 new_cost = cost + edge_cost
 
-                if new_cost < best_cost.get(neighbor, float("inf")):  # type: ignore[arg-type]
+                if new_cost < best_cost.get(neighbor, float("inf")):
                     best_cost[neighbor] = new_cost
                     # Track first move: if this is from start, it's `direction`
                     new_first_move = first_move if first_move is not None else int(direction)
