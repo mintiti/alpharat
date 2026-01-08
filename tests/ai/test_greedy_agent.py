@@ -6,7 +6,6 @@ GreedyAgent implementation handles walls, mud, and edge cases correctly.
 
 from __future__ import annotations
 
-import pytest
 from pyrat_engine.core import GameConfigBuilder
 from pyrat_engine.core.types import Coordinates, Direction, Mud, Wall
 
