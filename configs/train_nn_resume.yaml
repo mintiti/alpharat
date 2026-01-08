@@ -8,7 +8,6 @@ optim:
   lr: 1e-3
   policy_weight: 1.0
   value_weight: 1.0
-  loss_variant: dqn
   p_augment: 0.5
 
 data:

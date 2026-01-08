@@ -9,7 +9,7 @@ from typing import TYPE_CHECKING, Any
 if TYPE_CHECKING:
     from types import TracebackType
 
-    from alpharat.mcts.search import SearchResult
+    from alpharat.mcts.decoupled_puct import SearchResult
 
 import numpy as np
 

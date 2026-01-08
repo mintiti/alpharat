@@ -30,7 +30,7 @@ class MCTSAgent(Agent):
     When simulations=0 and checkpoint is set, returns raw NN policy (pure NN mode).
 
     Attributes:
-        mcts_config: MCTS search configuration (DecoupledPUCTConfig or PriorSamplingConfig).
+        mcts_config: MCTS search configuration (DecoupledPUCTConfig).
         checkpoint: Path to NN checkpoint, or None for uniform priors.
         temperature: Sampling temperature for action selection.
     """
