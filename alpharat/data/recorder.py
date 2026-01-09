@@ -17,6 +17,23 @@ from alpharat.data.maze import build_maze_array
 from alpharat.data.types import CheeseOutcome, GameData, PositionData
 
 
+def _cheese_to_mask(cheese_positions: list[tuple[int, int]], height: int, width: int) -> np.ndarray:
+    """Convert cheese position list to bool[H, W] mask.
+
+    Args:
+        cheese_positions: List of (x, y) cheese positions.
+        height: Maze height.
+        width: Maze width.
+
+    Returns:
+        Boolean array of shape (height, width).
+    """
+    mask = np.zeros((height, width), dtype=bool)
+    for x, y in cheese_positions:
+        mask[y, x] = True
+    return mask
+
+
 class GameRecorder:
     """Accumulates game data turn-by-turn for training data generation.
 
@@ -361,18 +378,8 @@ class GameRecorder:
         }
 
     def _cheese_to_mask(self, cheese_positions: list[tuple[int, int]]) -> np.ndarray:
-        """Convert cheese position list to bool[H, W] mask.
-
-        Args:
-            cheese_positions: List of (x, y) cheese positions.
-
-        Returns:
-            Boolean array of shape (height, width).
-        """
-        mask = np.zeros((self.height, self.width), dtype=bool)
-        for x, y in cheese_positions:
-            mask[y, x] = True
-        return mask
+        """Convert cheese position list to bool[H, W] mask."""
+        return _cheese_to_mask(cheese_positions, self.height, self.width)
 
 
 class GameBundler:
@@ -417,6 +424,9 @@ class GameBundler:
             compress: If True, use savez_compressed.
         """
         self._output_dir = Path(output_dir)
+        if not self._output_dir.exists():
+            raise ValueError(f"Output directory does not exist: {self._output_dir}")
+
         self.width = width
         self.height = height
         self._threshold_bytes = threshold_bytes
@@ -642,7 +652,4 @@ class GameBundler:
 
     def _cheese_to_mask(self, cheese_positions: list[tuple[int, int]]) -> np.ndarray:
         """Convert cheese position list to bool[H, W] mask."""
-        mask = np.zeros((self.height, self.width), dtype=bool)
-        for x, y in cheese_positions:
-            mask[y, x] = True
-        return mask
+        return _cheese_to_mask(cheese_positions, self.height, self.width)

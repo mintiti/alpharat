@@ -12,6 +12,7 @@ from pyrat_engine.core.types import Coordinates, Direction, Mud, Wall
 from alpharat.data.loader import load_game_data
 from alpharat.data.maze import _coords_to_direction, _opposite_direction, build_maze_array
 from alpharat.data.recorder import GameRecorder
+from alpharat.data.types import PositionData
 from alpharat.mcts import SearchResult
 
 if TYPE_CHECKING:
@@ -971,6 +972,82 @@ class TestGameBundler:
 
             with pytest.raises(ValueError, match="dimensions"):
                 bundler.add_game(recorder.data)
+
+    def test_incomplete_game_raises(self) -> None:
+        """Adding game without cheese_outcomes should raise."""
+        from alpharat.data.recorder import GameBundler
+        from alpharat.data.types import GameData
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            bundler = GameBundler(tmpdir, width=5, height=5)
+
+            # Create game data that isn't finalized (no cheese_outcomes)
+            game_data = GameData(
+                maze=np.zeros((5, 5, 4), dtype=np.int8),
+                initial_cheese=np.zeros((5, 5), dtype=bool),
+                max_turns=100,
+                width=5,
+                height=5,
+                cheese_outcomes=None,  # Not finalized
+            )
+            # Add a position so it's not empty
+            game_data.positions.append(
+                _make_dummy_position(),
+            )
+
+            with pytest.raises(ValueError, match="finalized"):
+                bundler.add_game(game_data)
+
+    def test_empty_positions_raises(self) -> None:
+        """Adding game with no positions should raise."""
+        from alpharat.data.recorder import GameBundler
+        from alpharat.data.types import GameData
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            bundler = GameBundler(tmpdir, width=5, height=5)
+
+            # Create game data with cheese_outcomes but no positions
+            game_data = GameData(
+                maze=np.zeros((5, 5, 4), dtype=np.int8),
+                initial_cheese=np.zeros((5, 5), dtype=bool),
+                max_turns=100,
+                width=5,
+                height=5,
+                cheese_outcomes=np.zeros((5, 5), dtype=np.int8),
+                positions=[],  # Empty
+            )
+
+            with pytest.raises(ValueError, match="no positions"):
+                bundler.add_game(game_data)
+
+    def test_nonexistent_output_dir_raises(self) -> None:
+        """Creating bundler with nonexistent directory should raise."""
+        from alpharat.data.recorder import GameBundler
+
+        with pytest.raises(ValueError, match="does not exist"):
+            GameBundler("/nonexistent/path", width=5, height=5)
+
+
+def _make_dummy_position() -> PositionData:
+    """Create a minimal valid PositionData for testing."""
+    return PositionData(
+        p1_pos=(0, 0),
+        p2_pos=(1, 1),
+        p1_score=0.0,
+        p2_score=0.0,
+        p1_mud=0,
+        p2_mud=0,
+        cheese_positions=[],
+        turn=0,
+        payout_matrix=np.zeros((2, 5, 5), dtype=np.float32),
+        visit_counts=np.zeros((5, 5), dtype=np.int32),
+        prior_p1=np.ones(5, dtype=np.float32) / 5,
+        prior_p2=np.ones(5, dtype=np.float32) / 5,
+        policy_p1=np.ones(5, dtype=np.float32) / 5,
+        policy_p2=np.ones(5, dtype=np.float32) / 5,
+        action_p1=0,
+        action_p2=0,
+    )
 
 
 # =============================================================================
