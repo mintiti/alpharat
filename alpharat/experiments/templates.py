@@ -21,39 +21,50 @@ Summary of outcomes, conclusions.
 EXPERIMENTS_CLAUDE_MD = """\
 # Experiments Folder
 
-This folder contains all experiment artifacts. It is NOT version controlled.
+Experiment artifacts and context. NOT version controlled.
 
 ## Structure
 
 ```
 experiments/
-├── manifest.yaml          # Central index of all artifacts
-├── batches/               # Raw game recordings from sampling
-├── shards/                # Processed train/val splits
-├── runs/                  # Training runs with checkpoints
-└── benchmarks/            # Tournament and benchmark results
+├── manifest.yaml      # Artifact index with lineage
+├── LOG.md             # Experiment log: roadmap, entries, results
+├── IDEAS.md           # Parking lot for unstructured thinking
+├── batches/           # Raw game recordings
+├── shards/            # Processed train/val splits
+├── runs/              # Training runs with checkpoints
+└── benchmarks/        # Tournament results
 ```
 
-## Manifest
+## Context Files
 
-The `manifest.yaml` file is the central index tracking all artifacts and their lineage.
-It is automatically updated by scripts when creating new artifacts.
+**LOG.md** — the official record:
+- Roadmap with phases
+- Decisions and rationale
+- Individual experiment entries (goal, hypothesis, setup, results)
 
-To query lineage:
-- Which checkpoint produced a batch? Check `batches.{id}.parent_checkpoint`
-- Which batches produced shards? Check `shards.{id}.source_batches`
-- Which shards trained a model? Check `runs.{name}.source_shards`
+**IDEAS.md** — the scratchpad:
+- Unstructured thoughts
+- Ideas not ready to test
+- Architecture sketches
 
-## Usage
+## Manifest & Lineage
 
-All scripts use `ExperimentManager` from `alpharat.experiments` to manage artifacts:
+`manifest.yaml` tracks all artifacts and how they connect:
+- Which checkpoint produced a batch? → `batches.{id}.parent_checkpoint`
+- Which batches made shards? → `shards.{id}.source_batches`
+- Which shards trained a model? → `runs.{name}.source_shards`
 
-```python
-from alpharat.experiments import ExperimentManager
+## Working Here
 
-exp = ExperimentManager()
-batch_dir = exp.create_batch(group="my_group", mcts_config=..., game_params=...)
-```
+The `/exp:*` commands are designed to help:
+- `/exp:plan` — before running, to clarify hypothesis
+- `/exp:iterate` — to set up next iteration
+- `/exp:learn` — after running, to capture results
+- `/exp:compare` — to compare runs side-by-side
+- `/exp:status` — quick overview
+
+These commands read LOG.md, IDEAS.md, and manifest automatically.
 """
 
 BATCHES_CLAUDE_MD = """\
