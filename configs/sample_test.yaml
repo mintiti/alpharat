@@ -1,5 +1,7 @@
 # Quick test config - 5 games
-# Usage: uv run python scripts/sample.py configs/sample_test.yaml --group test
+# Usage: uv run python scripts/sample.py configs/sample_test.yaml
+
+group: test  # Required: batch group name
 
 mcts:
   variant: decoupled_puct

@@ -2,10 +2,13 @@
 """Run round-robin tournament from YAML config.
 
 Usage:
-    uv run python scripts/benchmark.py configs/tournament.yaml --name tournament_v1
-    uv run python scripts/benchmark.py configs/tournament.yaml --name baseline_test --workers 8
+    uv run python scripts/benchmark.py configs/tournament.yaml
+    uv run python scripts/benchmark.py configs/tournament.yaml --name override  # Override config
+    uv run python scripts/benchmark.py configs/tournament.yaml --workers 8
 
 Example YAML config:
+    name: tournament_v1  # Required: benchmark name
+
     agents:
       puct_100:
         variant: decoupled_puct
@@ -47,8 +50,8 @@ def main() -> None:
     parser.add_argument(
         "--name",
         type=str,
-        required=True,
-        help="Human-readable benchmark name (e.g., 'tournament_v1', 'baseline_comparison')",
+        default=None,
+        help="Override benchmark name from config (default: use config.name)",
     )
     parser.add_argument("--workers", type=int, help="Override worker count from config")
     parser.add_argument(
@@ -69,6 +72,9 @@ def main() -> None:
     if args.workers:
         config = config.model_copy(update={"workers": args.workers})
 
+    # CLI --name overrides config
+    benchmark_name = args.name if args.name else config.name
+
     exp = ExperimentManager(args.experiments_dir)
 
     # Extract checkpoint names from agent configs (for lineage tracking)
@@ -81,11 +87,11 @@ def main() -> None:
 
     # Create benchmark via ExperimentManager
     bench_dir = exp.create_benchmark(
-        name=args.name,
+        name=benchmark_name,
         config=data,  # Save original config
         checkpoints=checkpoints,
     )
-    logger.info(f"Created benchmark: {args.name}")
+    logger.info(f"Created benchmark: {benchmark_name}")
     logger.info(f"  Benchmark directory: {bench_dir}")
 
     # Run tournament
@@ -109,7 +115,7 @@ def main() -> None:
             for agent, opps in result.cheese_matrix().items()
         },
     }
-    exp.save_benchmark_results(args.name, results_dict)
+    exp.save_benchmark_results(benchmark_name, results_dict)
     logger.info(f"Results saved to {bench_dir / 'results.json'}")
 
     # Print results

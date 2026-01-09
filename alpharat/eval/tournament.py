@@ -22,6 +22,8 @@ class TournamentConfig(BaseModel):
     """Round-robin tournament configuration.
 
     Example YAML:
+        name: baseline_tournament  # Required: benchmark name
+
         agents:
           random:
             variant: random
@@ -45,6 +47,7 @@ class TournamentConfig(BaseModel):
         device: mps
     """
 
+    name: str  # Required: human-chosen benchmark name
     agents: dict[str, AgentConfig]
     games_per_matchup: int
     game: GameParams

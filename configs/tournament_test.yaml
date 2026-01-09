@@ -1,5 +1,7 @@
 # Small test tournament for quick verification
-# Usage: uv run python scripts/benchmark.py configs/tournament_test.yaml --name test_tournament
+# Usage: uv run python scripts/benchmark.py configs/tournament_test.yaml
+
+name: test_tournament  # Required: benchmark name
 
 agents:
   puct_50:

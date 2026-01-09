@@ -37,6 +37,7 @@ class ShardEntry(BaseModel):
     including train/val split statistics.
     """
 
+    group: str
     uuid: str
     created_at: datetime
     source_batches: list[str]

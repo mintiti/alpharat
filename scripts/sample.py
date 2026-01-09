@@ -2,8 +2,9 @@
 """Self-play sampling script for training data generation.
 
 Usage:
-    uv run python scripts/sample.py configs/sample.yaml --group uniform_5x5
-    uv run python scripts/sample.py configs/sample.yaml --group nn_guided_v1 --workers 8
+    uv run python scripts/sample.py configs/sample.yaml
+    uv run python scripts/sample.py configs/sample.yaml --workers 8
+    uv run python scripts/sample.py configs/sample.yaml --group override_name  # Override config
 """
 
 from __future__ import annotations
@@ -24,8 +25,8 @@ def main() -> None:
     parser.add_argument(
         "--group",
         type=str,
-        required=True,
-        help="Human-readable batch group name (e.g., 'uniform_5x5', 'nn_guided_v1')",
+        default=None,
+        help="Override batch group name from config (default: use config.group)",
     )
     parser.add_argument("--workers", type=int, help="Override number of parallel workers")
     args = parser.parse_args()
@@ -33,8 +34,9 @@ def main() -> None:
     # Load config
     config_data = yaml.safe_load(args.config.read_text())
 
-    # Set group from CLI (required)
-    config_data["group"] = args.group
+    # CLI --group overrides config
+    if args.group is not None:
+        config_data["group"] = args.group
 
     config = SamplingConfig.model_validate(config_data)
 

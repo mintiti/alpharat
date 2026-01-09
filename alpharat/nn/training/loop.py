@@ -18,7 +18,6 @@ and Pydantic automatically dispatches to the correct config class.
 from __future__ import annotations
 
 import logging
-from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -103,7 +102,7 @@ def run_training(
     metrics_every: int = 10,
     device: str = "auto",
     output_dir: Path = Path("checkpoints"),
-    run_name: str | None = None,
+    run_name: str,
     use_amp: bool | None = None,
     checkpoints_subdir: str = "",
 ) -> Path:
@@ -122,7 +121,7 @@ def run_training(
         metrics_every: Compute detailed metrics every N epochs.
         device: Device to use ("auto", "cpu", "cuda", "mps").
         output_dir: Directory for checkpoints and logs.
-        run_name: Name for this run. Auto-generated if None.
+        run_name: Name for this run (required, from config.name).
         use_amp: Enable AMP. None auto-detects, True/False forces on/off.
         checkpoints_subdir: Subdirectory for checkpoints within run_dir.
             Set to "checkpoints" when using ExperimentManager.
@@ -136,10 +135,6 @@ def run_training(
     data_config = config.data
     seed = config.seed
     resume_from = config.resume_from
-    # Generate run name
-    if run_name is None:
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        run_name = f"train_{timestamp}"
 
     # Set seed
     torch.manual_seed(seed)

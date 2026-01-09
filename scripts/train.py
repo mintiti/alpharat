@@ -2,9 +2,10 @@
 """Training script for PyRat neural network.
 
 Usage:
-    uv run python scripts/train.py configs/train.yaml --name mlp_baseline_v1
-    uv run python scripts/train.py configs/train.yaml --name mlp_v2 --epochs 200
-    uv run python scripts/train.py configs/train.yaml --name mlp_v2 --amp  # Force AMP
+    uv run python scripts/train.py configs/train.yaml
+    uv run python scripts/train.py configs/train.yaml --epochs 200
+    uv run python scripts/train.py configs/train.yaml --amp  # Force AMP
+    uv run python scripts/train.py configs/train.yaml --name override_name  # Override config name
 """
 
 from __future__ import annotations
@@ -29,8 +30,8 @@ def main() -> None:
     parser.add_argument(
         "--name",
         type=str,
-        required=True,
-        help="Human-readable run name (e.g., 'mlp_baseline_v1', 'localvalue_v2')",
+        default=None,
+        help="Override run name from config (default: use config.name)",
     )
     parser.add_argument("--epochs", type=int, default=100, help="Number of epochs")
     parser.add_argument("--checkpoint-every", type=int, default=10, help="Save every N epochs")
@@ -64,6 +65,9 @@ def main() -> None:
     # Tri-state AMP: True (force on), False (force off), None (auto-detect)
     use_amp = True if args.amp else (False if args.no_amp else None)
 
+    # Run name: CLI override or config.name
+    run_name = args.name if args.name else config.name
+
     exp = ExperimentManager(args.experiments_dir)
 
     # Auto-detect source shards from data path if not specified
@@ -80,26 +84,30 @@ def main() -> None:
     # Create run via ExperimentManager (unless resuming)
     if args.resume is None:
         run_dir = exp.create_run(
-            name=args.name,
+            name=run_name,
             config=config.model_dump(),
             source_shards=source_shards,
             parent_checkpoint=None,
         )
-        logger.info(f"Created run: {args.name}")
+        # Name might have been auto-incremented if same config exists
+        actual_name = run_dir.name
+        if actual_name != run_name:
+            logger.info(f"Run '{run_name}' exists with same config, using '{actual_name}'")
+        logger.info(f"Created run: {actual_name}")
         logger.info(f"  Run directory: {run_dir}")
     else:
         # Resuming - use existing run directory and set resume_from in config
-        run_dir = exp.get_run_path(args.name)
+        run_dir = exp.get_run_path(run_name)
         if not run_dir.exists():
-            logger.error(f"Run '{args.name}' not found at {run_dir}")
+            logger.error(f"Run '{run_name}' not found at {run_dir}")
             return
+        actual_name = run_name
         # Update config with resume path (TrainConfig handles resume via resume_from field)
         config = config.model_copy(update={"resume_from": str(args.resume)})
-        logger.info(f"Resuming run: {args.name}")
+        logger.info(f"Resuming run: {actual_name}")
         logger.info(f"  Run directory: {run_dir}")
 
     # Run training
-    # Use experiments/runs as output_dir and run_name as the run name
     # Checkpoints go to experiments/runs/{name}/checkpoints/
     best_model = run_training(
         config,
@@ -108,9 +116,9 @@ def main() -> None:
         metrics_every=args.metrics_every,
         device=args.device,
         output_dir=run_dir.parent,  # experiments/runs/
-        run_name=args.name,  # creates experiments/runs/{name}/
+        run_name=actual_name,
         use_amp=use_amp,
-        checkpoints_subdir="checkpoints",  # checkpoints go to runs/{name}/checkpoints/
+        checkpoints_subdir="checkpoints",
     )
 
     logger.info(f"Training complete. Best model: {best_model}")

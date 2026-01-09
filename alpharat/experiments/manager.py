@@ -198,6 +198,7 @@ class ExperimentManager:
 
     def create_shards(
         self,
+        group: str,
         source_batches: list[str],
         total_positions: int,
         train_positions: int,
@@ -209,6 +210,7 @@ class ExperimentManager:
         files should be created by the sharding code, which then calls this method.
 
         Args:
+            group: Shard group name (e.g., "5x5_uniform", "7x7_walls").
             source_batches: List of batch IDs used to create these shards.
             total_positions: Total number of positions.
             train_positions: Number of training positions.
@@ -220,7 +222,7 @@ class ExperimentManager:
         self._ensure_initialized()
 
         shard_uuid = str(uuid.uuid4())
-        shard_dir = paths.get_shard_path(self.root, shard_uuid)
+        shard_dir = paths.get_shard_path(self.root, group, shard_uuid)
 
         # Create directory structure
         shard_dir.mkdir(parents=True, exist_ok=False)
@@ -228,7 +230,9 @@ class ExperimentManager:
         (shard_dir / paths.VAL_DIR).mkdir()
 
         # Update manifest
+        shard_id = f"{group}/{shard_uuid}"
         entry = ShardEntry(
+            group=group,
             uuid=shard_uuid,
             created_at=datetime.now(UTC),
             source_batches=source_batches,
@@ -237,7 +241,7 @@ class ExperimentManager:
             val_positions=val_positions,
         )
         manifest = self._load_manifest()
-        manifest.shards[shard_uuid] = entry
+        manifest.shards[shard_id] = entry
         self._save_manifest(manifest)
 
         return shard_dir
@@ -246,25 +250,27 @@ class ExperimentManager:
         """Get path to a shard set by its ID.
 
         Args:
-            shard_id: Shard UUID.
+            shard_id: Shard ID in format "group/uuid".
 
         Returns:
             Path to shard directory.
         """
-        return paths.get_shard_path(self.root, shard_id)
+        group, shard_uuid = shard_id.split("/", 1)
+        return paths.get_shard_path(self.root, group, shard_uuid)
 
     def list_shards(self) -> list[str]:
         """List all shard IDs.
 
         Returns:
-            List of shard UUIDs.
+            List of shard IDs in format "group/uuid".
         """
         manifest = self.load_manifest()
         return list(manifest.shards.keys())
 
     def register_shards(
         self,
-        shard_id: str,
+        group: str,
+        shard_uuid: str,
         source_batches: list[str],
         total_positions: int,
         train_positions: int,
@@ -276,7 +282,8 @@ class ExperimentManager:
         The shard directory must already exist at the expected location.
 
         Args:
-            shard_id: UUID of the shard set.
+            group: Shard group name.
+            shard_uuid: UUID of the shard set.
             source_batches: List of batch IDs used to create these shards.
             total_positions: Total number of positions.
             train_positions: Number of training positions.
@@ -284,8 +291,10 @@ class ExperimentManager:
         """
         self._ensure_initialized()
 
+        shard_id = f"{group}/{shard_uuid}"
         entry = ShardEntry(
-            uuid=shard_id,
+            group=group,
+            uuid=shard_uuid,
             created_at=datetime.now(UTC),
             source_batches=source_batches,
             total_positions=total_positions,
@@ -298,6 +307,33 @@ class ExperimentManager:
 
     # --- Run Operations ---
 
+    def _configs_equal(self, config1: dict[str, Any], config2: dict[str, Any]) -> bool:
+        """Compare configs, ignoring name and resume_from fields."""
+
+        def normalize(cfg: dict[str, Any]) -> dict[str, Any]:
+            # Copy and remove fields that aren't part of the "experiment identity"
+            c = dict(cfg)
+            c.pop("name", None)
+            c.pop("resume_from", None)
+            return c
+
+        return normalize(config1) == normalize(config2)
+
+    def _find_next_run_name(self, base_name: str) -> str:
+        """Find next available run name (base_name, base_name_run2, base_name_run3, ...)."""
+        manifest = self._load_manifest()
+
+        # Check if base name is taken
+        if base_name not in manifest.runs:
+            return base_name
+
+        # Find highest existing run number
+        run_num = 2
+        while f"{base_name}_run{run_num}" in manifest.runs:
+            run_num += 1
+
+        return f"{base_name}_run{run_num}"
+
     def create_run(
         self,
         name: str,
@@ -306,6 +342,9 @@ class ExperimentManager:
         parent_checkpoint: str | None = None,
     ) -> Path:
         """Create a new training run directory.
+
+        If a run with this name exists and has the same config, auto-increments
+        the name (e.g., mlp_v1 → mlp_v1_run2). If configs differ, raises an error.
 
         Args:
             name: Human-readable run name (e.g., "bimatrix_mlp_v1").
@@ -317,13 +356,25 @@ class ExperimentManager:
             Path to the run directory.
 
         Raises:
-            FileExistsError: If a run with this name already exists.
+            ValueError: If a run with this name exists but has a different config.
         """
         self._ensure_initialized()
 
         run_dir = paths.get_run_path(self.root, name)
         if run_dir.exists():
-            raise FileExistsError(f"Run '{name}' already exists at {run_dir}")
+            # Check if configs match
+            manifest = self._load_manifest()
+            existing_config = manifest.runs[name].config
+
+            if self._configs_equal(config, existing_config):
+                # Same experiment, auto-increment run number
+                name = self._find_next_run_name(name)
+                run_dir = paths.get_run_path(self.root, name)
+            else:
+                raise ValueError(
+                    f"Run '{name}' exists with different config. "
+                    f"Pick a new name for this experiment."
+                )
 
         # Create directory structure
         run_dir.mkdir(parents=True, exist_ok=False)

@@ -176,6 +176,7 @@ class TestShardOperations:
         with tempfile.TemporaryDirectory() as tmpdir:
             exp = ExperimentManager(tmpdir)
             shard_dir = exp.create_shards(
+                group="5x5_uniform",
                 source_batches=["group/uuid1"],
                 total_positions=1000,
                 train_positions=900,
@@ -185,12 +186,15 @@ class TestShardOperations:
             assert shard_dir.exists()
             assert (shard_dir / TRAIN_DIR).exists()
             assert (shard_dir / VAL_DIR).exists()
+            # Check path includes group
+            assert "5x5_uniform" in str(shard_dir)
 
     def test_create_shards_updates_manifest(self) -> None:
         """create_shards adds entry to manifest."""
         with tempfile.TemporaryDirectory() as tmpdir:
             exp = ExperimentManager(tmpdir)
             shard_dir = exp.create_shards(
+                group="5x5_uniform",
                 source_batches=["group_a/uuid1", "group_b/uuid2"],
                 total_positions=5000,
                 train_positions=4500,
@@ -198,24 +202,28 @@ class TestShardOperations:
             )
 
             manifest = exp.load_manifest()
-            shard_id = shard_dir.name
+            # Shard ID is now group/uuid
+            shard_id = f"5x5_uniform/{shard_dir.name}"
 
             assert shard_id in manifest.shards
             entry = manifest.shards[shard_id]
+            assert entry.group == "5x5_uniform"
             assert entry.source_batches == ["group_a/uuid1", "group_b/uuid2"]
             assert entry.total_positions == 5000
             assert entry.train_positions == 4500
             assert entry.val_positions == 500
 
     def test_list_shards(self) -> None:
-        """list_shards returns all shard IDs."""
+        """list_shards returns all shard IDs in group/uuid format."""
         with tempfile.TemporaryDirectory() as tmpdir:
             exp = ExperimentManager(tmpdir)
-            exp.create_shards(["b1"], 100, 90, 10)
-            exp.create_shards(["b2"], 200, 180, 20)
+            exp.create_shards("5x5_uniform", ["b1"], 100, 90, 10)
+            exp.create_shards("7x7_walls", ["b2"], 200, 180, 20)
 
             shards = exp.list_shards()
             assert len(shards) == 2
+            assert any("5x5_uniform/" in s for s in shards)
+            assert any("7x7_walls/" in s for s in shards)
 
 
 class TestRunOperations:
@@ -284,14 +292,48 @@ class TestRunOperations:
             assert entry.parent_checkpoint == "previous/best.pt"
             assert entry.config == {"model": {"hidden_dim": 128}}
 
-    def test_create_run_fails_if_exists(self) -> None:
-        """create_run raises FileExistsError if run already exists."""
+    def test_create_run_auto_increments_same_config(self) -> None:
+        """create_run auto-increments name if same config exists."""
         with tempfile.TemporaryDirectory() as tmpdir:
             exp = ExperimentManager(tmpdir)
-            exp.create_run(name="duplicate", config={}, source_shards="s1")
+            config = {"model": {"hidden_dim": 256}}
 
-            with pytest.raises(FileExistsError):
-                exp.create_run(name="duplicate", config={}, source_shards="s2")
+            run1 = exp.create_run(name="my_exp", config=config, source_shards="s1")
+            run2 = exp.create_run(name="my_exp", config=config, source_shards="s1")
+            run3 = exp.create_run(name="my_exp", config=config, source_shards="s1")
+
+            assert run1.name == "my_exp"
+            assert run2.name == "my_exp_run2"
+            assert run3.name == "my_exp_run3"
+
+            # All runs should be in manifest
+            manifest = exp.load_manifest()
+            assert "my_exp" in manifest.runs
+            assert "my_exp_run2" in manifest.runs
+            assert "my_exp_run3" in manifest.runs
+
+    def test_create_run_fails_if_different_config(self) -> None:
+        """create_run raises ValueError if name exists with different config."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            exp = ExperimentManager(tmpdir)
+            exp.create_run(name="my_exp", config={"lr": 0.001}, source_shards="s1")
+
+            with pytest.raises(ValueError, match="different config"):
+                exp.create_run(name="my_exp", config={"lr": 0.01}, source_shards="s1")
+
+    def test_create_run_ignores_name_field_in_config_comparison(self) -> None:
+        """Config comparison ignores 'name' and 'resume_from' fields."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            exp = ExperimentManager(tmpdir)
+            config1 = {"name": "exp1", "model": {"hidden_dim": 256}}
+            config2 = {"name": "exp2", "model": {"hidden_dim": 256}, "resume_from": "ckpt.pt"}
+
+            run1 = exp.create_run(name="my_exp", config=config1, source_shards="s1")
+            run2 = exp.create_run(name="my_exp", config=config2, source_shards="s1")
+
+            # Should auto-increment because model config is the same
+            assert run1.name == "my_exp"
+            assert run2.name == "my_exp_run2"
 
     def test_update_run_results(self) -> None:
         """update_run_results updates manifest entry."""

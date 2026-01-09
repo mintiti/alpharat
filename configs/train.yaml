@@ -1,5 +1,7 @@
 # MLP training configuration
-# Usage: uv run python scripts/train.py configs/train.yaml --name mlp_baseline_v1
+# Usage: uv run python scripts/train.py configs/train.yaml
+
+name: <EXPERIMENT_NAME>  # e.g., mlp_5x5_v1
 
 model:
   architecture: mlp
@@ -19,9 +21,8 @@ optim:
   nash_mode: target
 
 data:
-  # Update these paths to your shard directory
-  # Format: experiments/shards/{shard_uuid}/train
-  train_dir: experiments/shards/YOUR_SHARD_UUID/train
-  val_dir: experiments/shards/YOUR_SHARD_UUID/val
+  # Path format: experiments/shards/<GROUP>/<UUID>/train
+  train_dir: experiments/shards/<GROUP>/<UUID>/train
+  val_dir: experiments/shards/<GROUP>/<UUID>/val
 
 seed: 42

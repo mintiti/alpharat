@@ -1,5 +1,7 @@
 # Self-play sampling with NN prior
-# Usage: uv run python scripts/sample.py configs/sample_with_nn.yaml --group nn_guided_v1
+# Usage: uv run python scripts/sample.py configs/sample_with_nn.yaml
+
+group: nn_guided  # Required: batch group name
 
 mcts:
   variant: decoupled_puct
@@ -20,5 +22,4 @@ sampling:
   workers: 4
   device: auto  # Use "auto", "cpu", "cuda", or "mps"
 
-# Note: output_dir is now controlled via --group argument
 checkpoint: experiments/runs/train_20251227_231834/checkpoints/best_model.pt

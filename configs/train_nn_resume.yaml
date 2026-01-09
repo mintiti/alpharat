@@ -2,6 +2,8 @@
 # Data: games sampled using the first trained model
 # Usage: uv run python scripts/train.py configs/train_nn_resume.yaml --device mps
 
+name: <EXPERIMENT_NAME>  # e.g., mlp_nn_guided_v1
+
 model:
   architecture: mlp
   hidden_dim: 256

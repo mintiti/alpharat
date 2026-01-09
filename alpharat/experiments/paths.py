@@ -91,17 +91,18 @@ def get_batch_path(experiments_root: Path, group: str, batch_uuid: str) -> Path:
     return get_batches_dir(experiments_root) / group / batch_uuid
 
 
-def get_shard_path(experiments_root: Path, shard_uuid: str) -> Path:
+def get_shard_path(experiments_root: Path, group: str, shard_uuid: str) -> Path:
     """Get path to a specific shard directory.
 
     Args:
         experiments_root: Root experiments directory.
+        group: Shard group name.
         shard_uuid: UUID of the shard set.
 
     Returns:
-        Path to shard directory: experiments/shards/{uuid}/
+        Path to shard directory: experiments/shards/{group}/{uuid}/
     """
-    return get_shards_dir(experiments_root) / shard_uuid
+    return get_shards_dir(experiments_root) / group / shard_uuid
 
 
 def get_run_path(experiments_root: Path, run_name: str) -> Path:

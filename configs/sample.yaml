@@ -1,5 +1,7 @@
 # Self-play sampling configuration
-# Usage: uv run python scripts/sample.py configs/sample.yaml --group uniform_5x5
+# Usage: uv run python scripts/sample.py configs/sample.yaml
+
+group: uniform_5x5  # Required: batch group name
 
 mcts:
   variant: decoupled_puct

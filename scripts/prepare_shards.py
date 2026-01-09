@@ -5,9 +5,8 @@ Converts raw game batches into shuffled, sharded training data with train/val sp
 Games (not positions) are split to prevent data leakage.
 
 Usage:
-    uv run python scripts/prepare_shards.py --batches uniform_5x5
-    uv run python scripts/prepare_shards.py --batches "uniform_5x5/*" --val-ratio 0.15
-    uv run python scripts/prepare_shards.py --batches uniform_5x5/abc123,uniform_5x5/def456
+    uv run python scripts/prepare_shards.py --group 5x5_uniform --batches uniform_5x5
+    uv run python scripts/prepare_shards.py --group 5x5 --batches "uniform_5x5/*" --val-ratio 0.15
 """
 
 from __future__ import annotations
@@ -29,6 +28,12 @@ logger = logging.getLogger(__name__)
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Prepare training shards from game batches.")
+    parser.add_argument(
+        "--group",
+        type=str,
+        required=True,
+        help="Shard group name (e.g., '5x5_uniform', '7x7_walls')",
+    )
     parser.add_argument(
         "--batches",
         type=str,
@@ -92,12 +97,13 @@ def main() -> None:
     # Create builder
     builder = FlatObservationBuilder(width=width, height=height)
 
-    # Prepare shards (output to experiments/shards/)
+    # Prepare shards (output to experiments/shards/{group}/)
     logger.info("Processing games into shards...")
-    shards_dir = get_shards_dir(exp.root)
+    shards_group_dir = get_shards_dir(exp.root) / args.group
+    shards_group_dir.mkdir(parents=True, exist_ok=True)
     result = prepare_training_set_with_split(
         batch_dirs=batch_dirs,
-        output_dir=shards_dir,
+        output_dir=shards_group_dir,
         builder=builder,
         val_ratio=args.val_ratio,
         positions_per_shard=args.positions_per_shard,
@@ -106,16 +112,18 @@ def main() -> None:
 
     # Register in manifest
     exp.register_shards(
-        shard_id=result.shard_id,
+        group=args.group,
+        shard_uuid=result.shard_id,
         source_batches=batch_ids,
         total_positions=result.total_positions,
         train_positions=result.train_positions,
         val_positions=result.val_positions,
     )
 
+    shard_id = f"{args.group}/{result.shard_id}"
     output_path = Path(result.shard_dir)
     logger.info(f"Training set created: {output_path}")
-    logger.info(f"  Shard ID: {result.shard_id}")
+    logger.info(f"  Shard ID: {shard_id}")
     logger.info(f"  Train dir: {output_path / 'train'}")
     logger.info(f"  Val dir: {output_path / 'val'}")
     logger.info(f"  Total positions: {result.total_positions}")

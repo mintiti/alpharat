@@ -4,6 +4,8 @@
 # SymmetricMLP uses DeepSet architecture for structural P1/P2 symmetry.
 # No player swap augmentation needed - symmetry is guaranteed by weight sharing.
 
+name: <EXPERIMENT_NAME>  # e.g., symmetric_5x5_v1
+
 model:
   architecture: symmetric
   hidden_dim: 256

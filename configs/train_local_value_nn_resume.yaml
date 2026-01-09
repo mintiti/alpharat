@@ -2,6 +2,8 @@
 # Data: games sampled using the first trained model
 # Usage: uv run python scripts/train.py configs/train_local_value_nn_resume.yaml
 
+name: <EXPERIMENT_NAME>  # e.g., localvalue_nn_guided_v1
+
 model:
   architecture: local_value
   hidden_dim: 256
