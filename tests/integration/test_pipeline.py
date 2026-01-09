@@ -13,7 +13,7 @@ import pytest
 from pyrat_engine.core.types import Direction
 
 from alpharat.data.batch import GameParams
-from alpharat.data.loader import load_game_data
+from alpharat.data.loader import is_bundle_file, iter_games_from_bundle, load_game_data
 from alpharat.data.sampling import SamplingConfig, SamplingParams, run_sampling
 from alpharat.data.sharding import load_training_set_manifest, prepare_training_set
 from alpharat.mcts import DecoupledPUCTConfig
@@ -26,6 +26,19 @@ if TYPE_CHECKING:
 
     from alpharat.data.types import GameData, PositionData
     from alpharat.nn.types import ObservationInput, TargetBundle
+
+# =============================================================================
+# Loading Helpers
+# =============================================================================
+
+
+def _load_first_game(game_files: list[Path]) -> GameData:
+    """Load the first game from a list of game files (handles bundles or single-game files)."""
+    game_file = game_files[0]
+    if is_bundle_file(game_file):
+        return next(iter_games_from_bundle(game_file))
+    return load_game_data(game_file)
+
 
 # =============================================================================
 # Verification Helpers
@@ -236,10 +249,10 @@ class TestPipelineIntegrity:
         # === Stage 1: Play and record ===
         batch_dir, _ = run_sampling(config, verbose=False)
         game_files = list((batch_dir / "games").glob("*.npz"))
-        assert len(game_files) == 1, f"Expected 1 game file, got {len(game_files)}"
+        assert len(game_files) >= 1, f"Expected at least 1 game file, got {len(game_files)}"
 
         # === Stage 2: Load game data ===
-        game_data = load_game_data(game_files[0])
+        game_data = _load_first_game(game_files)
 
         # Verify game-level invariants
         assert game_data.width == width
@@ -300,7 +313,7 @@ class TestPipelineIntegrity:
 
         batch_dir, _ = run_sampling(config, verbose=False)
         game_files = list((batch_dir / "games").glob("*.npz"))
-        game_data = load_game_data(game_files[0])
+        game_data = _load_first_game(game_files)
 
         # Verify edges are correctly marked
         _verify_maze_edges(game_data.maze, height, width)
@@ -344,7 +357,7 @@ class TestPipelineIntegrity:
 
         batch_dir, _ = run_sampling(config, verbose=False)
         game_files = list((batch_dir / "games").glob("*.npz"))
-        game_data = load_game_data(game_files[0])
+        game_data = _load_first_game(game_files)
 
         for i, pos in enumerate(game_data.positions):
             # Policies should be non-negative

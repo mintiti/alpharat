@@ -12,7 +12,7 @@ import numpy as np
 from pydantic import BaseModel, Field
 
 from alpharat.data.batch import GameParams, create_batch
-from alpharat.data.recorder import GameRecorder
+from alpharat.data.recorder import GameBundler, GameRecorder
 from alpharat.eval.game import is_terminal
 from alpharat.mcts import MCTSConfig  # noqa: TC001
 from alpharat.mcts.nash import select_action_from_strategy
@@ -25,6 +25,7 @@ if TYPE_CHECKING:
 
     from pyrat_engine.core.game import PyRat
 
+    from alpharat.data.types import GameData
     from alpharat.nn.builders.flat import FlatObservationBuilder
     from alpharat.nn.models import LocalValueMLP, PyRatMLP, SymmetricMLP
 
@@ -352,24 +353,32 @@ def play_and_record_game(
     games_dir: Path,
     seed: int,
     nn_ctx: NNContext | None = None,
-) -> GameStats:
+    *,
+    auto_save: bool = True,
+) -> tuple[GameStats, GameData | None]:
     """Play one game with MCTS and record all positions.
 
     Args:
         config: Sampling configuration.
-        games_dir: Directory to save the game file.
+        games_dir: Directory to save the game file (used even if auto_save=False
+            since GameRecorder requires it for output_dir validation).
         seed: Random seed for game generation.
         nn_ctx: Optional NN context for guided search.
+        auto_save: If True (default), save to disk. If False, return GameData
+            for external handling (e.g., bundling).
 
     Returns:
-        GameStats with position, simulation, and outcome data.
+        Tuple of (GameStats, GameData or None). GameData is only returned if
+        auto_save=False.
     """
     game = create_game(config.game, seed)
     cheese_available = config.game.cheese_count
     positions = 0
     total_simulations = 0
 
-    with GameRecorder(game, games_dir, config.game.width, config.game.height) as recorder:
+    with GameRecorder(
+        game, games_dir, config.game.width, config.game.height, auto_save=auto_save
+    ) as recorder:
         while not is_terminal(game):
             # Create predict_fn if NN context available
             # Note: build_tree deep-copies the game, so we need to create predict_fn
@@ -431,7 +440,7 @@ def play_and_record_game(
     else:
         winner = 0
 
-    return GameStats(
+    game_stats = GameStats(
         positions=positions,
         simulations=total_simulations,
         winner=winner,
@@ -441,6 +450,11 @@ def play_and_record_game(
         cheese_available=cheese_available,
     )
 
+    # Return game data if not auto-saving (for bundling)
+    game_data: GameData | None = recorder.data if not auto_save else None
+
+    return game_stats, game_data
+
 
 def _worker_loop(
     config: SamplingConfig,
@@ -448,6 +462,8 @@ def _worker_loop(
     work_queue: Queue[int | None],
     results_queue: Queue[GameStats],
     device: str = "cpu",
+    *,
+    use_bundler: bool = True,
 ) -> None:
     """Worker process that continuously processes games from the queue.
 
@@ -460,19 +476,38 @@ def _worker_loop(
         work_queue: Queue of seeds to process (None = stop).
         results_queue: Queue to send completed game stats.
         device: Device for NN inference (if checkpoint configured).
+        use_bundler: If True (default), buffer games and write bundles. If False,
+            write individual game files (legacy behavior).
     """
     # Load NN model once per worker if checkpoint configured
     nn_ctx: NNContext | None = None
     if config.checkpoint is not None:
         nn_ctx = load_nn_context(config.checkpoint, device=device)
 
+    # Create bundler for this worker if enabled
+    bundler: GameBundler | None = None
+    if use_bundler:
+        bundler = GameBundler(
+            output_dir=games_dir,
+            width=config.game.width,
+            height=config.game.height,
+        )
+
     while True:
         seed = work_queue.get()
         if seed is None:
-            # Sentinel received, exit
+            # Sentinel received, flush bundler and exit
+            if bundler is not None:
+                bundler.flush()
             break
 
-        game_stats = play_and_record_game(config, games_dir, seed, nn_ctx=nn_ctx)
+        game_stats, game_data = play_and_record_game(
+            config, games_dir, seed, nn_ctx=nn_ctx, auto_save=not use_bundler
+        )
+
+        if bundler is not None and game_data is not None:
+            bundler.add_game(game_data)
+
         results_queue.put(game_stats)
 
 

@@ -17,6 +17,23 @@ from alpharat.data.maze import build_maze_array
 from alpharat.data.types import CheeseOutcome, GameData, PositionData
 
 
+def _cheese_to_mask(cheese_positions: list[tuple[int, int]], height: int, width: int) -> np.ndarray:
+    """Convert cheese position list to bool[H, W] mask.
+
+    Args:
+        cheese_positions: List of (x, y) cheese positions.
+        height: Maze height.
+        width: Maze width.
+
+    Returns:
+        Boolean array of shape (height, width).
+    """
+    mask = np.zeros((height, width), dtype=bool)
+    for x, y in cheese_positions:
+        mask[y, x] = True
+    return mask
+
+
 class GameRecorder:
     """Accumulates game data turn-by-turn for training data generation.
 
@@ -52,6 +69,7 @@ class GameRecorder:
         height: int,
         *,
         compress: bool = True,
+        auto_save: bool = True,
     ) -> None:
         """Initialize recorder.
 
@@ -61,12 +79,15 @@ class GameRecorder:
             width: Maze width.
             height: Maze height.
             compress: If True, use savez_compressed (smaller files).
+            auto_save: If True, save to disk on context exit. If False,
+                finalize but don't save — access self.data after exit.
         """
         self._game = game
         self._output_dir = Path(output_dir)
         self.width = width
         self.height = height
         self._compress = compress
+        self._auto_save = auto_save
         self.data: GameData | None = None
         self.saved_path: Path | None = None
 
@@ -98,7 +119,7 @@ class GameRecorder:
         exc_val: BaseException | None,
         exc_tb: TracebackType | None,
     ) -> None:
-        """Exit context: finalize and save if no exception occurred."""
+        """Exit context: finalize and optionally save if no exception occurred."""
         if exc_type is not None:
             # Exception occurred, don't save incomplete data
             return
@@ -108,7 +129,9 @@ class GameRecorder:
             return
 
         self._finalize()
-        self.saved_path = self._save()
+
+        if self._auto_save:
+            self.saved_path = self._save()
 
     def record_position(
         self,
@@ -355,15 +378,278 @@ class GameRecorder:
         }
 
     def _cheese_to_mask(self, cheese_positions: list[tuple[int, int]]) -> np.ndarray:
-        """Convert cheese position list to bool[H, W] mask.
+        """Convert cheese position list to bool[H, W] mask."""
+        return _cheese_to_mask(cheese_positions, self.height, self.width)
+
+
+class GameBundler:
+    """Buffers completed games and writes them as bundled .npz files.
+
+    Reduces I/O overhead by writing multiple games to a single file.
+    Each bundle contains:
+        - game_lengths: int32[K] — positions per game (for slicing)
+        - Game-level arrays stacked along first axis
+        - Position-level arrays concatenated
+
+    Usage:
+        bundler = GameBundler(output_dir, width=15, height=11)
+        for game in games:
+            with GameRecorder(game, ...) as recorder:
+                # ... play and record ...
+            bundler.add_game(recorder.data)  # Add finalized game
+        bundler.flush()  # Write remaining games
+
+    Thread safety: NOT thread-safe. Use one bundler per worker.
+    """
+
+    # Default threshold: ~50MB estimated buffer size before flush
+    DEFAULT_THRESHOLD_BYTES = 50 * 1024 * 1024
+
+    def __init__(
+        self,
+        output_dir: Path | str,
+        width: int,
+        height: int,
+        *,
+        threshold_bytes: int = DEFAULT_THRESHOLD_BYTES,
+        compress: bool = True,
+    ) -> None:
+        """Initialize bundler.
 
         Args:
-            cheese_positions: List of (x, y) cheese positions.
+            output_dir: Directory to write bundle files.
+            width: Maze width (for validation).
+            height: Maze height (for validation).
+            threshold_bytes: Flush when estimated buffer size exceeds this.
+            compress: If True, use savez_compressed.
+        """
+        self._output_dir = Path(output_dir)
+        if not self._output_dir.exists():
+            raise ValueError(f"Output directory does not exist: {self._output_dir}")
+
+        self.width = width
+        self.height = height
+        self._threshold_bytes = threshold_bytes
+        self._compress = compress
+
+        self._buffer: list[GameData] = []
+        self._buffer_bytes = 0
+        self._saved_paths: list[Path] = []
+
+    def add_game(self, game_data: GameData) -> Path | None:
+        """Add a completed game to the buffer.
+
+        Args:
+            game_data: Finalized GameData (must have cheese_outcomes set).
 
         Returns:
-            Boolean array of shape (height, width).
+            Path to written bundle if a flush occurred, None otherwise.
+
+        Raises:
+            ValueError: If game dimensions don't match or data is incomplete.
         """
-        mask = np.zeros((self.height, self.width), dtype=bool)
-        for x, y in cheese_positions:
-            mask[y, x] = True
-        return mask
+        self._validate_game(game_data)
+
+        self._buffer.append(game_data)
+        self._buffer_bytes += self._estimate_game_bytes(game_data)
+
+        if self._buffer_bytes >= self._threshold_bytes:
+            return self.flush()
+
+        return None
+
+    def flush(self) -> Path | None:
+        """Write buffered games to disk and clear buffer.
+
+        Returns:
+            Path to written bundle file, or None if buffer was empty.
+        """
+        if not self._buffer:
+            return None
+
+        path = self._write_bundle()
+        self._saved_paths.append(path)
+        self._buffer = []
+        self._buffer_bytes = 0
+
+        return path
+
+    @property
+    def saved_paths(self) -> list[Path]:
+        """Paths to all bundle files written by this bundler."""
+        return list(self._saved_paths)
+
+    @property
+    def buffered_games(self) -> int:
+        """Number of games currently in buffer."""
+        return len(self._buffer)
+
+    def _validate_game(self, game_data: GameData) -> None:
+        """Validate game data before adding to buffer."""
+        if game_data.width != self.width or game_data.height != self.height:
+            raise ValueError(
+                f"Game dimensions ({game_data.width}, {game_data.height}) "
+                f"don't match bundler ({self.width}, {self.height})"
+            )
+
+        if game_data.cheese_outcomes is None:
+            raise ValueError("Game must be finalized (cheese_outcomes is None)")
+
+        if not game_data.positions:
+            raise ValueError("Game has no positions")
+
+    def _estimate_game_bytes(self, game_data: GameData) -> int:
+        """Estimate memory footprint of a game in bytes.
+
+        This is a rough estimate for threshold checking, not exact.
+        """
+        n = len(game_data.positions)
+        h, w = self.height, self.width
+
+        # Game-level arrays
+        game_bytes = (
+            h * w * 4  # maze
+            + h * w  # initial_cheese
+            + h * w  # cheese_outcomes
+            + 16  # scalars
+        )
+
+        # Position-level arrays (per position)
+        pos_bytes_per = (
+            2
+            + 2  # p1_pos, p2_pos
+            + 4
+            + 4  # scores
+            + 1
+            + 1  # mud
+            + h * w  # cheese_mask
+            + 2  # turn
+            + 2 * 5 * 5 * 4  # payout_matrix
+            + 5 * 5 * 4  # visit_counts
+            + 5 * 4 * 4  # priors and policies
+            + 1
+            + 1  # actions
+        )
+
+        return game_bytes + n * pos_bytes_per
+
+    def _write_bundle(self) -> Path:
+        """Write buffered games to a single npz file."""
+        filename = f"bundle_{uuid.uuid4()}.npz"
+        path = self._output_dir / filename
+
+        arrays = self._build_bundle_arrays()
+
+        if self._compress:
+            np.savez_compressed(str(path), **arrays)  # type: ignore[arg-type]
+        else:
+            np.savez(str(path), **arrays)  # type: ignore[arg-type]
+
+        return path
+
+    def _build_bundle_arrays(self) -> dict[str, np.ndarray]:
+        """Build arrays for bundle from buffered games.
+
+        Returns:
+            Dictionary of arrays in bundle format.
+        """
+        k = len(self._buffer)  # Number of games
+        h, w = self.height, self.width
+
+        # Compute game lengths and total positions
+        game_lengths = np.array([len(g.positions) for g in self._buffer], dtype=np.int32)
+        n = int(game_lengths.sum())  # Total positions
+
+        # Game-level arrays (stacked)
+        maze = np.zeros((k, h, w, 4), dtype=np.int8)
+        initial_cheese = np.zeros((k, h, w), dtype=bool)
+        cheese_outcomes = np.zeros((k, h, w), dtype=np.int8)
+        max_turns = np.zeros(k, dtype=np.int16)
+        result = np.zeros(k, dtype=np.int8)
+        final_p1_score = np.zeros(k, dtype=np.float32)
+        final_p2_score = np.zeros(k, dtype=np.float32)
+
+        # Position-level arrays (concatenated)
+        p1_pos = np.zeros((n, 2), dtype=np.int8)
+        p2_pos = np.zeros((n, 2), dtype=np.int8)
+        p1_score = np.zeros(n, dtype=np.float32)
+        p2_score = np.zeros(n, dtype=np.float32)
+        p1_mud = np.zeros(n, dtype=np.int8)
+        p2_mud = np.zeros(n, dtype=np.int8)
+        cheese_mask = np.zeros((n, h, w), dtype=bool)
+        turn = np.zeros(n, dtype=np.int16)
+        payout_matrix = np.zeros((n, 2, 5, 5), dtype=np.float32)
+        visit_counts = np.zeros((n, 5, 5), dtype=np.int32)
+        prior_p1 = np.zeros((n, 5), dtype=np.float32)
+        prior_p2 = np.zeros((n, 5), dtype=np.float32)
+        policy_p1 = np.zeros((n, 5), dtype=np.float32)
+        policy_p2 = np.zeros((n, 5), dtype=np.float32)
+        action_p1 = np.zeros(n, dtype=np.int8)
+        action_p2 = np.zeros(n, dtype=np.int8)
+
+        pos_offset = 0
+
+        for gi, game in enumerate(self._buffer):
+            # Game-level
+            maze[gi] = game.maze
+            initial_cheese[gi] = game.initial_cheese
+            assert game.cheese_outcomes is not None  # Validated in _validate_game
+            cheese_outcomes[gi] = game.cheese_outcomes
+            max_turns[gi] = game.max_turns
+            result[gi] = game.result
+            final_p1_score[gi] = game.final_p1_score
+            final_p2_score[gi] = game.final_p2_score
+
+            # Position-level
+            for pos in game.positions:
+                p1_pos[pos_offset] = pos.p1_pos
+                p2_pos[pos_offset] = pos.p2_pos
+                p1_score[pos_offset] = pos.p1_score
+                p2_score[pos_offset] = pos.p2_score
+                p1_mud[pos_offset] = pos.p1_mud
+                p2_mud[pos_offset] = pos.p2_mud
+                cheese_mask[pos_offset] = self._cheese_to_mask(pos.cheese_positions)
+                turn[pos_offset] = pos.turn
+                payout_matrix[pos_offset] = pos.payout_matrix.astype(np.float32)
+                visit_counts[pos_offset] = pos.visit_counts.astype(np.int32)
+                prior_p1[pos_offset] = pos.prior_p1.astype(np.float32)
+                prior_p2[pos_offset] = pos.prior_p2.astype(np.float32)
+                policy_p1[pos_offset] = pos.policy_p1.astype(np.float32)
+                policy_p2[pos_offset] = pos.policy_p2.astype(np.float32)
+                action_p1[pos_offset] = np.int8(pos.action_p1)
+                action_p2[pos_offset] = np.int8(pos.action_p2)
+                pos_offset += 1
+
+        return {
+            # Bundle metadata
+            "game_lengths": game_lengths,
+            # Game-level (stacked)
+            "maze": maze,
+            "initial_cheese": initial_cheese,
+            "cheese_outcomes": cheese_outcomes,
+            "max_turns": max_turns,
+            "result": result,
+            "final_p1_score": final_p1_score,
+            "final_p2_score": final_p2_score,
+            # Position-level (concatenated)
+            "p1_pos": p1_pos,
+            "p2_pos": p2_pos,
+            "p1_score": p1_score,
+            "p2_score": p2_score,
+            "p1_mud": p1_mud,
+            "p2_mud": p2_mud,
+            "cheese_mask": cheese_mask,
+            "turn": turn,
+            "payout_matrix": payout_matrix,
+            "visit_counts": visit_counts,
+            "prior_p1": prior_p1,
+            "prior_p2": prior_p2,
+            "policy_p1": policy_p1,
+            "policy_p2": policy_p2,
+            "action_p1": action_p1,
+            "action_p2": action_p2,
+        }
+
+    def _cheese_to_mask(self, cheese_positions: list[tuple[int, int]]) -> np.ndarray:
+        """Convert cheese position list to bool[H, W] mask."""
+        return _cheese_to_mask(cheese_positions, self.height, self.width)
