@@ -77,8 +77,11 @@ nn/
 │   ├── symmetric.py   # SymmetricMLP
 │   └── local_value.py # LocalValueMLP
 │
-├── losses/            # Shared loss utilities
-│   └── shared.py      # policy_loss(), value_loss(), nash_consistency_loss()
+├── losses/            # Shared loss utilities (imported via __init__)
+│   ├── sparse_payout.py     # sparse_payout_loss()
+│   ├── nash_consistency.py  # nash_consistency_loss()
+│   ├── constant_sum.py      # constant_sum_loss()
+│   └── ownership.py         # compute_ownership_loss()
 │
 ├── builders/          # Observation builders
 │   └── flat.py        # FlatObservationBuilder - 1D encoding
@@ -92,7 +95,7 @@ nn/
 
 ```python
 from typing import Literal
-from alpharat.nn.training.config import BaseModelConfig, BaseOptimConfig
+from alpharat.nn.training.base import BaseModelConfig, BaseOptimConfig
 
 class MyArchModelConfig(BaseModelConfig):
     architecture: Literal["myarch"] = "myarch"  # Discriminator
