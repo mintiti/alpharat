@@ -6,6 +6,8 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+from alpharat.nn.training.keys import ModelOutput
+
 
 class PyRatMLP(nn.Module):
     """MLP with 3 heads for PyRat game.
@@ -83,17 +85,18 @@ class PyRatMLP(nn.Module):
         nn.init.normal_(self.payout_head.weight, std=0.01)
         nn.init.zeros_(self.payout_head.bias)
 
-    def forward(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    def forward(self, x: torch.Tensor, **kwargs: object) -> dict[str, torch.Tensor]:
         """Forward pass returning logits (for use with F.cross_entropy).
 
         Args:
             x: Observation tensor of shape (batch, obs_dim).
+            **kwargs: Ignored (for protocol compatibility).
 
         Returns:
-            Tuple of:
-                - logits_p1: Raw logits for P1, shape (batch, 5).
-                - logits_p2: Raw logits for P2, shape (batch, 5).
-                - payout_matrix: Predicted payout values, shape (batch, 2, 5, 5).
+            Dict with:
+                - ModelOutput.LOGITS_P1: Raw logits for P1, shape (batch, 5).
+                - ModelOutput.LOGITS_P2: Raw logits for P2, shape (batch, 5).
+                - ModelOutput.PAYOUT: Predicted payout values, shape (batch, 2, 5, 5).
         """
         features = self.trunk(x)
 
@@ -103,9 +106,13 @@ class PyRatMLP(nn.Module):
         payout_flat = self.payout_head(features)
         payout_matrix = F.softplus(payout_flat.view(-1, 2, self.num_actions, self.num_actions))
 
-        return logits_p1, logits_p2, payout_matrix
+        return {
+            ModelOutput.LOGITS_P1: logits_p1,
+            ModelOutput.LOGITS_P2: logits_p2,
+            ModelOutput.PAYOUT: payout_matrix,
+        }
 
-    def predict(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    def predict(self, x: torch.Tensor, **kwargs: object) -> dict[str, torch.Tensor]:
         """Inference pass returning actual probabilities.
 
         Use this for MCTS integration where we need proper probability
@@ -113,12 +120,13 @@ class PyRatMLP(nn.Module):
 
         Args:
             x: Observation tensor of shape (batch, obs_dim).
+            **kwargs: Ignored (for protocol compatibility).
 
         Returns:
-            Tuple of:
-                - policy_p1: Probabilities for P1, shape (batch, 5).
-                - policy_p2: Probabilities for P2, shape (batch, 5).
-                - payout_matrix: Predicted payout values, shape (batch, 2, 5, 5).
+            Dict with:
+                - ModelOutput.POLICY_P1: Probabilities for P1, shape (batch, 5).
+                - ModelOutput.POLICY_P2: Probabilities for P2, shape (batch, 5).
+                - ModelOutput.PAYOUT: Predicted payout values, shape (batch, 2, 5, 5).
         """
         features = self.trunk(x)
 
@@ -128,4 +136,8 @@ class PyRatMLP(nn.Module):
         payout_flat = self.payout_head(features)
         payout_matrix = F.softplus(payout_flat.view(-1, 2, self.num_actions, self.num_actions))
 
-        return policy_p1, policy_p2, payout_matrix
+        return {
+            ModelOutput.POLICY_P1: policy_p1,
+            ModelOutput.POLICY_P2: policy_p2,
+            ModelOutput.PAYOUT: payout_matrix,
+        }

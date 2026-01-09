@@ -5,6 +5,7 @@ from __future__ import annotations
 import torch
 
 from alpharat.nn.models import PyRatMLP
+from alpharat.nn.training.keys import ModelOutput
 
 
 class TestPyRatMLPForward:
@@ -17,11 +18,11 @@ class TestPyRatMLPForward:
         model = PyRatMLP(obs_dim=obs_dim)
 
         x = torch.randn(batch_size, obs_dim)
-        log_p1, log_p2, payout = model(x)
+        out = model(x)
 
-        assert log_p1.shape == (batch_size, 5)
-        assert log_p2.shape == (batch_size, 5)
-        assert payout.shape == (batch_size, 2, 5, 5)
+        assert out[ModelOutput.LOGITS_P1].shape == (batch_size, 5)
+        assert out[ModelOutput.LOGITS_P2].shape == (batch_size, 5)
+        assert out[ModelOutput.PAYOUT].shape == (batch_size, 2, 5, 5)
 
     def test_single_sample(self) -> None:
         """Should handle single sample (batch_size=1) in eval mode.
@@ -34,11 +35,11 @@ class TestPyRatMLPForward:
         model.eval()
 
         x = torch.randn(1, obs_dim)
-        log_p1, log_p2, payout = model(x)
+        out = model(x)
 
-        assert log_p1.shape == (1, 5)
-        assert log_p2.shape == (1, 5)
-        assert payout.shape == (1, 2, 5, 5)
+        assert out[ModelOutput.LOGITS_P1].shape == (1, 5)
+        assert out[ModelOutput.LOGITS_P2].shape == (1, 5)
+        assert out[ModelOutput.PAYOUT].shape == (1, 2, 5, 5)
 
     def test_softmax_of_logits_sums_to_one(self) -> None:
         """softmax(logits) should sum to 1."""
@@ -46,10 +47,10 @@ class TestPyRatMLPForward:
         model = PyRatMLP(obs_dim=obs_dim)
 
         x = torch.randn(4, obs_dim)
-        logits_p1, logits_p2, _ = model(x)
+        out = model(x)
 
-        probs_p1 = torch.softmax(logits_p1, dim=-1)
-        probs_p2 = torch.softmax(logits_p2, dim=-1)
+        probs_p1 = torch.softmax(out[ModelOutput.LOGITS_P1], dim=-1)
+        probs_p2 = torch.softmax(out[ModelOutput.LOGITS_P2], dim=-1)
 
         torch.testing.assert_close(probs_p1.sum(dim=-1), torch.ones(4), rtol=1e-5, atol=1e-5)
         torch.testing.assert_close(probs_p2.sum(dim=-1), torch.ones(4), rtol=1e-5, atol=1e-5)
@@ -60,10 +61,10 @@ class TestPyRatMLPForward:
         model = PyRatMLP(obs_dim=obs_dim)
 
         x = torch.randn(4, obs_dim)
-        logits_p1, logits_p2, _ = model(x)
+        out = model(x)
 
-        log_p1 = torch.log_softmax(logits_p1, dim=-1)
-        log_p2 = torch.log_softmax(logits_p2, dim=-1)
+        log_p1 = torch.log_softmax(out[ModelOutput.LOGITS_P1], dim=-1)
+        log_p2 = torch.log_softmax(out[ModelOutput.LOGITS_P2], dim=-1)
 
         assert (log_p1 <= 0).all()
         assert (log_p2 <= 0).all()
@@ -75,11 +76,11 @@ class TestPyRatMLPForward:
         model = PyRatMLP(obs_dim=obs_dim, hidden_dim=hidden_dim)
 
         x = torch.randn(4, obs_dim)
-        log_p1, log_p2, payout = model(x)
+        out = model(x)
 
-        assert log_p1.shape == (4, 5)
-        assert log_p2.shape == (4, 5)
-        assert payout.shape == (4, 2, 5, 5)
+        assert out[ModelOutput.LOGITS_P1].shape == (4, 5)
+        assert out[ModelOutput.LOGITS_P2].shape == (4, 5)
+        assert out[ModelOutput.PAYOUT].shape == (4, 2, 5, 5)
 
     def test_different_obs_dim(self) -> None:
         """Should work with different observation dimensions."""
@@ -87,11 +88,11 @@ class TestPyRatMLPForward:
         model = PyRatMLP(obs_dim=obs_dim)
 
         x = torch.randn(4, obs_dim)
-        log_p1, log_p2, payout = model(x)
+        out = model(x)
 
-        assert log_p1.shape == (4, 5)
-        assert log_p2.shape == (4, 5)
-        assert payout.shape == (4, 2, 5, 5)
+        assert out[ModelOutput.LOGITS_P1].shape == (4, 5)
+        assert out[ModelOutput.LOGITS_P2].shape == (4, 5)
+        assert out[ModelOutput.PAYOUT].shape == (4, 2, 5, 5)
 
 
 class TestPyRatMLPPredict:
@@ -104,11 +105,11 @@ class TestPyRatMLPPredict:
         model = PyRatMLP(obs_dim=obs_dim)
 
         x = torch.randn(batch_size, obs_dim)
-        p1, p2, payout = model.predict(x)
+        out = model.predict(x)
 
-        assert p1.shape == (batch_size, 5)
-        assert p2.shape == (batch_size, 5)
-        assert payout.shape == (batch_size, 2, 5, 5)
+        assert out[ModelOutput.POLICY_P1].shape == (batch_size, 5)
+        assert out[ModelOutput.POLICY_P2].shape == (batch_size, 5)
+        assert out[ModelOutput.PAYOUT].shape == (batch_size, 2, 5, 5)
 
     def test_probs_sum_to_one(self) -> None:
         """Probabilities should sum to 1."""
@@ -116,10 +117,14 @@ class TestPyRatMLPPredict:
         model = PyRatMLP(obs_dim=obs_dim)
 
         x = torch.randn(4, obs_dim)
-        p1, p2, _ = model.predict(x)
+        out = model.predict(x)
 
-        torch.testing.assert_close(p1.sum(dim=-1), torch.ones(4), rtol=1e-5, atol=1e-5)
-        torch.testing.assert_close(p2.sum(dim=-1), torch.ones(4), rtol=1e-5, atol=1e-5)
+        torch.testing.assert_close(
+            out[ModelOutput.POLICY_P1].sum(dim=-1), torch.ones(4), rtol=1e-5, atol=1e-5
+        )
+        torch.testing.assert_close(
+            out[ModelOutput.POLICY_P2].sum(dim=-1), torch.ones(4), rtol=1e-5, atol=1e-5
+        )
 
     def test_probs_are_positive(self) -> None:
         """Probabilities should be >= 0."""
@@ -127,10 +132,10 @@ class TestPyRatMLPPredict:
         model = PyRatMLP(obs_dim=obs_dim)
 
         x = torch.randn(4, obs_dim)
-        p1, p2, _ = model.predict(x)
+        out = model.predict(x)
 
-        assert (p1 >= 0).all()
-        assert (p2 >= 0).all()
+        assert (out[ModelOutput.POLICY_P1] >= 0).all()
+        assert (out[ModelOutput.POLICY_P2] >= 0).all()
 
     def test_probs_at_most_one(self) -> None:
         """Probabilities should be <= 1."""
@@ -138,10 +143,10 @@ class TestPyRatMLPPredict:
         model = PyRatMLP(obs_dim=obs_dim)
 
         x = torch.randn(4, obs_dim)
-        p1, p2, _ = model.predict(x)
+        out = model.predict(x)
 
-        assert (p1 <= 1).all()
-        assert (p2 <= 1).all()
+        assert (out[ModelOutput.POLICY_P1] <= 1).all()
+        assert (out[ModelOutput.POLICY_P2] <= 1).all()
 
     def test_payout_non_negative(self) -> None:
         """Payout matrix should be >= 0 (cheese scores can't be negative)."""
@@ -152,8 +157,9 @@ class TestPyRatMLPPredict:
         # Use large random inputs to stress test
         x = torch.randn(32, obs_dim) * 10
         with torch.no_grad():
-            _, _, payout = model.predict(x)
+            out = model.predict(x)
 
+        payout = out[ModelOutput.PAYOUT]
         assert (payout >= 0).all(), f"Found negative payouts: min={payout.min().item()}"
 
 
@@ -166,10 +172,14 @@ class TestPyRatMLPGradients:
         model = PyRatMLP(obs_dim=obs_dim)
 
         x = torch.randn(4, obs_dim)
-        log_p1, log_p2, payout = model(x)
+        out = model(x)
 
         # Combined loss
-        loss = log_p1.sum() + log_p2.sum() + payout.sum()
+        loss = (
+            out[ModelOutput.LOGITS_P1].sum()
+            + out[ModelOutput.LOGITS_P2].sum()
+            + out[ModelOutput.PAYOUT].sum()
+        )
         loss.backward()
 
         for name, param in model.named_parameters():
@@ -182,10 +192,10 @@ class TestPyRatMLPGradients:
         model = PyRatMLP(obs_dim=obs_dim)
 
         x = torch.randn(4, obs_dim)
-        log_p1, log_p2, _ = model(x)
+        out = model(x)
 
         # Loss only on P1
-        loss = log_p1.sum()
+        loss = out[ModelOutput.LOGITS_P1].sum()
         loss.backward()
 
         # P1 head should have gradient
@@ -204,9 +214,9 @@ class TestPyRatMLPGradients:
         model = PyRatMLP(obs_dim=obs_dim)
 
         x = torch.randn(4, obs_dim)
-        _, _, payout = model(x)
+        out = model(x)
 
-        loss = payout.sum()
+        loss = out[ModelOutput.PAYOUT].sum()
         loss.backward()
 
         assert model.payout_head.weight.grad is not None
@@ -225,12 +235,22 @@ class TestPyRatMLPConsistency:
         x = torch.randn(4, obs_dim)
 
         with torch.no_grad():
-            logits_p1, logits_p2, payout_forward = model(x)
-            p1, p2, payout_predict = model.predict(x)
+            fwd = model(x)
+            pred = model.predict(x)
 
-        torch.testing.assert_close(torch.softmax(logits_p1, dim=-1), p1, rtol=1e-5, atol=1e-5)
-        torch.testing.assert_close(torch.softmax(logits_p2, dim=-1), p2, rtol=1e-5, atol=1e-5)
-        torch.testing.assert_close(payout_forward, payout_predict)
+        torch.testing.assert_close(
+            torch.softmax(fwd[ModelOutput.LOGITS_P1], dim=-1),
+            pred[ModelOutput.POLICY_P1],
+            rtol=1e-5,
+            atol=1e-5,
+        )
+        torch.testing.assert_close(
+            torch.softmax(fwd[ModelOutput.LOGITS_P2], dim=-1),
+            pred[ModelOutput.POLICY_P2],
+            rtol=1e-5,
+            atol=1e-5,
+        )
+        torch.testing.assert_close(fwd[ModelOutput.PAYOUT], pred[ModelOutput.PAYOUT])
 
     def test_deterministic_in_eval_mode(self) -> None:
         """Same input should produce same output in eval mode."""
@@ -244,8 +264,8 @@ class TestPyRatMLPConsistency:
             out1 = model(x)
             out2 = model(x)
 
-        for o1, o2 in zip(out1, out2, strict=True):
-            torch.testing.assert_close(o1, o2)
+        for key in out1:
+            torch.testing.assert_close(out1[key], out2[key])
 
 
 class TestPyRatMLPInitialization:
@@ -262,7 +282,10 @@ class TestPyRatMLPInitialization:
 
         x = torch.randn(32, obs_dim)
         with torch.no_grad():
-            p1, p2, _ = model.predict(x)
+            out = model.predict(x)
+
+        p1 = out[ModelOutput.POLICY_P1]
+        p2 = out[ModelOutput.POLICY_P2]
 
         # Each action should get roughly 1/5 = 0.2 probability
         uniform = 1.0 / 5
@@ -280,7 +303,9 @@ class TestPyRatMLPInitialization:
 
         x = torch.randn(32, obs_dim)
         with torch.no_grad():
-            _, _, payout = model.predict(x)
+            out = model.predict(x)
+
+        payout = out[ModelOutput.PAYOUT]
 
         # Mean payout should be near zero
         assert payout.mean().abs() < 1.0

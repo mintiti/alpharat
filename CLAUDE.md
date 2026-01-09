@@ -67,14 +67,39 @@ tests/              # Mirrors alpharat/ structure
 
 ### alpharat/nn/
 
+**Core types and utilities:**
+
 | File | Purpose |
 |------|---------|
 | `types.py` | `ObservationInput`, `TargetBundle` — source-agnostic data types |
 | `extraction.py` | Build `ObservationInput` from game arrays or live PyRat |
 | `targets.py` | `build_targets()` — Nash policies + value targets |
 | `streaming.py` | `StreamingDataset` — memory-efficient PyTorch dataset |
-| `builders/flat.py` | `FlatObservationBuilder` — 1D encoding for MLPs |
-| `models/mlp.py` | `PyRatMLP` — shared trunk + policy/payout heads |
+
+**Training configuration (`config.py`):** `TrainConfig` — Pydantic discriminated unions
+
+**Training infrastructure (`training/`):**
+
+| File | Purpose |
+|------|---------|
+| `loop.py` | `run_training()` — generic training loop for any architecture |
+| `base.py` | `BaseModelConfig`, `BaseOptimConfig`, `DataConfig` — base classes |
+| `protocols.py` | `TrainableModel`, `LossFunction`, `AugmentationStrategy` protocols |
+| `keys.py` | `ModelOutput`, `LossKey`, `BatchKey` — type-safe dict keys |
+
+**Architectures (`architectures/{mlp,symmetric,local_value}/`):**
+
+Each architecture folder contains `config.py` (ModelConfig, OptimConfig) and `loss.py`.
+
+| Architecture | Description |
+|------|---------|
+| `mlp` | Flat observation → shared trunk → policy/payout heads |
+| `symmetric` | Structural P1/P2 symmetry, no augmentation needed |
+| `local_value` | Per-cell ownership values + global payout |
+
+**Models (`models/`):** `PyRatMLP`, `SymmetricMLP`, `LocalValueMLP`
+
+**Builders (`builders/`):** `FlatObservationBuilder` — 1D encoding for MLPs
 
 ### alpharat/ai/
 

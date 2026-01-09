@@ -1,16 +1,18 @@
 # LocalValueMLP training configuration
-# Usage: uv run python scripts/train_local_value.py configs/train_local_value.yaml
+# Usage: uv run python scripts/train.py configs/train_local_value.yaml
 
 model:
+  architecture: local_value
   hidden_dim: 256
   dropout: 0.0
+  p_augment: 0.5
 
 optim:
+  architecture: local_value
   lr: 1e-3
   policy_weight: 1.0
   value_weight: 1.0
   ownership_weight: 1.0
-  p_augment: 0.5
 
 data:
   train_dir: data/940b6e74-01c1-4a2e-ac6d-9ca2c1ec54c5/train

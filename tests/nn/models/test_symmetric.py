@@ -5,6 +5,7 @@ from __future__ import annotations
 import torch
 
 from alpharat.nn.models import SymmetricMLP
+from alpharat.nn.training.keys import ModelOutput
 
 
 def _swap_players_in_obs(obs: torch.Tensor, width: int, height: int) -> torch.Tensor:
@@ -123,11 +124,11 @@ class TestSymmetricMLPForward:
         model = SymmetricMLP(width=width, height=height)
 
         x = torch.randn(batch_size, obs_dim)
-        logits_p1, logits_p2, payout = model(x)
+        out = model(x)
 
-        assert logits_p1.shape == (batch_size, 5)
-        assert logits_p2.shape == (batch_size, 5)
-        assert payout.shape == (batch_size, 2, 5, 5)
+        assert out[ModelOutput.LOGITS_P1].shape == (batch_size, 5)
+        assert out[ModelOutput.LOGITS_P2].shape == (batch_size, 5)
+        assert out[ModelOutput.PAYOUT].shape == (batch_size, 2, 5, 5)
 
     def test_single_sample_eval_mode(self) -> None:
         """Should handle single sample in eval mode."""
@@ -137,11 +138,11 @@ class TestSymmetricMLPForward:
         model.eval()
 
         x = torch.randn(1, obs_dim)
-        logits_p1, logits_p2, payout = model(x)
+        out = model(x)
 
-        assert logits_p1.shape == (1, 5)
-        assert logits_p2.shape == (1, 5)
-        assert payout.shape == (1, 2, 5, 5)
+        assert out[ModelOutput.LOGITS_P1].shape == (1, 5)
+        assert out[ModelOutput.LOGITS_P2].shape == (1, 5)
+        assert out[ModelOutput.PAYOUT].shape == (1, 2, 5, 5)
 
     def test_custom_hidden_dim(self) -> None:
         """Should work with custom hidden dimension."""
@@ -150,11 +151,11 @@ class TestSymmetricMLPForward:
         model = SymmetricMLP(width=width, height=height, hidden_dim=128)
 
         x = torch.randn(4, obs_dim)
-        logits_p1, logits_p2, payout = model(x)
+        out = model(x)
 
-        assert logits_p1.shape == (4, 5)
-        assert logits_p2.shape == (4, 5)
-        assert payout.shape == (4, 2, 5, 5)
+        assert out[ModelOutput.LOGITS_P1].shape == (4, 5)
+        assert out[ModelOutput.LOGITS_P2].shape == (4, 5)
+        assert out[ModelOutput.PAYOUT].shape == (4, 2, 5, 5)
 
     def test_different_maze_size(self) -> None:
         """Should work with different maze dimensions."""
@@ -163,11 +164,11 @@ class TestSymmetricMLPForward:
         model = SymmetricMLP(width=width, height=height)
 
         x = torch.randn(4, obs_dim)
-        logits_p1, logits_p2, payout = model(x)
+        out = model(x)
 
-        assert logits_p1.shape == (4, 5)
-        assert logits_p2.shape == (4, 5)
-        assert payout.shape == (4, 2, 5, 5)
+        assert out[ModelOutput.LOGITS_P1].shape == (4, 5)
+        assert out[ModelOutput.LOGITS_P2].shape == (4, 5)
+        assert out[ModelOutput.PAYOUT].shape == (4, 2, 5, 5)
 
 
 class TestSymmetricMLPPredict:
@@ -180,11 +181,11 @@ class TestSymmetricMLPPredict:
         model = SymmetricMLP(width=width, height=height)
 
         x = torch.randn(8, obs_dim)
-        p1, p2, payout = model.predict(x)
+        out = model.predict(x)
 
-        assert p1.shape == (8, 5)
-        assert p2.shape == (8, 5)
-        assert payout.shape == (8, 2, 5, 5)
+        assert out[ModelOutput.POLICY_P1].shape == (8, 5)
+        assert out[ModelOutput.POLICY_P2].shape == (8, 5)
+        assert out[ModelOutput.PAYOUT].shape == (8, 2, 5, 5)
 
     def test_probs_sum_to_one(self) -> None:
         """Probabilities should sum to 1."""
@@ -193,10 +194,14 @@ class TestSymmetricMLPPredict:
         model = SymmetricMLP(width=width, height=height)
 
         x = torch.randn(4, obs_dim)
-        p1, p2, _ = model.predict(x)
+        out = model.predict(x)
 
-        torch.testing.assert_close(p1.sum(dim=-1), torch.ones(4), rtol=1e-5, atol=1e-5)
-        torch.testing.assert_close(p2.sum(dim=-1), torch.ones(4), rtol=1e-5, atol=1e-5)
+        torch.testing.assert_close(
+            out[ModelOutput.POLICY_P1].sum(dim=-1), torch.ones(4), rtol=1e-5, atol=1e-5
+        )
+        torch.testing.assert_close(
+            out[ModelOutput.POLICY_P2].sum(dim=-1), torch.ones(4), rtol=1e-5, atol=1e-5
+        )
 
     def test_probs_are_valid(self) -> None:
         """Probabilities should be in [0, 1]."""
@@ -205,12 +210,12 @@ class TestSymmetricMLPPredict:
         model = SymmetricMLP(width=width, height=height)
 
         x = torch.randn(4, obs_dim)
-        p1, p2, _ = model.predict(x)
+        out = model.predict(x)
 
-        assert (p1 >= 0).all()
-        assert (p1 <= 1).all()
-        assert (p2 >= 0).all()
-        assert (p2 <= 1).all()
+        assert (out[ModelOutput.POLICY_P1] >= 0).all()
+        assert (out[ModelOutput.POLICY_P1] <= 1).all()
+        assert (out[ModelOutput.POLICY_P2] >= 0).all()
+        assert (out[ModelOutput.POLICY_P2] <= 1).all()
 
     def test_payout_non_negative(self) -> None:
         """Payout matrix should be >= 0 (cheese scores can't be negative)."""
@@ -221,8 +226,9 @@ class TestSymmetricMLPPredict:
         # Use valid observations (payout bounded by remaining_cheese which is non-negative)
         x = _make_valid_obs(width, height, batch_size=32)
         with torch.no_grad():
-            _, _, payout = model.predict(x)
+            out = model.predict(x)
 
+        payout = out[ModelOutput.PAYOUT]
         assert (payout >= 0).all(), f"Found negative payouts: min={payout.min().item()}"
 
 
@@ -245,12 +251,16 @@ class TestSymmetricMLPSymmetry:
         obs_swapped = _swap_players_in_obs(obs, width, height)
 
         with torch.no_grad():
-            p1, p2, _ = model.predict(obs)
-            p1_swap, p2_swap, _ = model.predict(obs_swapped)
+            out = model.predict(obs)
+            out_swap = model.predict(obs_swapped)
 
         # After swapping: new P1's policy = old P2's policy
-        torch.testing.assert_close(p1, p2_swap, rtol=1e-5, atol=1e-5)
-        torch.testing.assert_close(p2, p1_swap, rtol=1e-5, atol=1e-5)
+        torch.testing.assert_close(
+            out[ModelOutput.POLICY_P1], out_swap[ModelOutput.POLICY_P2], rtol=1e-5, atol=1e-5
+        )
+        torch.testing.assert_close(
+            out[ModelOutput.POLICY_P2], out_swap[ModelOutput.POLICY_P1], rtol=1e-5, atol=1e-5
+        )
 
     def test_swap_equivariance_payout(self) -> None:
         """Swapping players should transform payout matrix correctly.
@@ -268,8 +278,11 @@ class TestSymmetricMLPSymmetry:
         obs_swapped = _swap_players_in_obs(obs, width, height)
 
         with torch.no_grad():
-            _, _, payout = model.predict(obs)
-            _, _, payout_swap = model.predict(obs_swapped)
+            out = model.predict(obs)
+            out_swap = model.predict(obs_swapped)
+
+        payout = out[ModelOutput.PAYOUT]
+        payout_swap = out_swap[ModelOutput.PAYOUT]
 
         # new_payout[0] = old_payout[1].T
         torch.testing.assert_close(
@@ -293,10 +306,12 @@ class TestSymmetricMLPSymmetry:
         obs = _make_symmetric_obs(width, height, batch_size=4)
 
         with torch.no_grad():
-            p1, p2, _ = model.predict(obs)
+            out = model.predict(obs)
 
         # Policies should be identical for symmetric positions
-        torch.testing.assert_close(p1, p2, rtol=1e-5, atol=1e-5)
+        torch.testing.assert_close(
+            out[ModelOutput.POLICY_P1], out[ModelOutput.POLICY_P2], rtol=1e-5, atol=1e-5
+        )
 
     def test_symmetric_position_payout_structure(self) -> None:
         """Symmetric position payouts should have expected structure.
@@ -311,8 +326,9 @@ class TestSymmetricMLPSymmetry:
         obs = _make_symmetric_obs(width, height, batch_size=4)
 
         with torch.no_grad():
-            _, _, payout = model.predict(obs)
+            out = model.predict(obs)
 
+        payout = out[ModelOutput.PAYOUT]
         # payout[0] = payout[1].T for symmetric positions
         torch.testing.assert_close(
             payout[:, 0], payout[:, 1].transpose(-1, -2), rtol=1e-5, atol=1e-5
@@ -330,12 +346,18 @@ class TestSymmetricMLPSymmetry:
         obs_double_swapped = _swap_players_in_obs(obs_swapped, width, height)
 
         with torch.no_grad():
-            p1, p2, payout = model.predict(obs)
-            p1_ds, p2_ds, payout_ds = model.predict(obs_double_swapped)
+            out = model.predict(obs)
+            out_ds = model.predict(obs_double_swapped)
 
-        torch.testing.assert_close(p1, p1_ds, rtol=1e-5, atol=1e-5)
-        torch.testing.assert_close(p2, p2_ds, rtol=1e-5, atol=1e-5)
-        torch.testing.assert_close(payout, payout_ds, rtol=1e-5, atol=1e-5)
+        torch.testing.assert_close(
+            out[ModelOutput.POLICY_P1], out_ds[ModelOutput.POLICY_P1], rtol=1e-5, atol=1e-5
+        )
+        torch.testing.assert_close(
+            out[ModelOutput.POLICY_P2], out_ds[ModelOutput.POLICY_P2], rtol=1e-5, atol=1e-5
+        )
+        torch.testing.assert_close(
+            out[ModelOutput.PAYOUT], out_ds[ModelOutput.PAYOUT], rtol=1e-5, atol=1e-5
+        )
 
 
 class TestSymmetricMLPGradients:
@@ -348,9 +370,13 @@ class TestSymmetricMLPGradients:
         model = SymmetricMLP(width=width, height=height)
 
         x = torch.randn(4, obs_dim)
-        logits_p1, logits_p2, payout = model(x)
+        out = model(x)
 
-        loss = logits_p1.sum() + logits_p2.sum() + payout.sum()
+        loss = (
+            out[ModelOutput.LOGITS_P1].sum()
+            + out[ModelOutput.LOGITS_P2].sum()
+            + out[ModelOutput.PAYOUT].sum()
+        )
         loss.backward()
 
         for name, param in model.named_parameters():
@@ -367,20 +393,20 @@ class TestSymmetricMLPGradients:
         model = SymmetricMLP(width=width, height=height)
 
         x = torch.randn(4, obs_dim)
-        logits_p1, logits_p2, _ = model(x)
+        out = model(x)
 
         # Loss only on P1
-        loss_p1 = logits_p1.sum()
+        loss_p1 = out[ModelOutput.LOGITS_P1].sum()
         loss_p1.backward()
         assert model.policy_head.weight.grad is not None
         grad_from_p1 = model.policy_head.weight.grad.clone()
 
         # Reset
         model.zero_grad()
-        logits_p1, logits_p2, _ = model(x)
+        out = model(x)
 
         # Loss only on P2
-        loss_p2 = logits_p2.sum()
+        loss_p2 = out[ModelOutput.LOGITS_P2].sum()
         loss_p2.backward()
         assert model.policy_head.weight.grad is not None
         grad_from_p2 = model.policy_head.weight.grad.clone()
@@ -401,11 +427,11 @@ class TestSymmetricMLPInitialization:
 
         x = _make_valid_obs(width, height, batch_size=32)
         with torch.no_grad():
-            p1, p2, _ = model.predict(x)
+            out = model.predict(x)
 
         uniform = 1.0 / 5
-        assert (p1.mean(dim=0) - uniform).abs().max() < 0.1
-        assert (p2.mean(dim=0) - uniform).abs().max() < 0.1
+        assert (out[ModelOutput.POLICY_P1].mean(dim=0) - uniform).abs().max() < 0.1
+        assert (out[ModelOutput.POLICY_P2].mean(dim=0) - uniform).abs().max() < 0.1
 
     def test_initial_payout_near_zero(self) -> None:
         """Fresh model should predict small non-negative payouts."""
@@ -415,8 +441,9 @@ class TestSymmetricMLPInitialization:
 
         x = _make_valid_obs(width, height, batch_size=32)
         with torch.no_grad():
-            _, _, payout = model.predict(x)
+            out = model.predict(x)
 
+        payout = out[ModelOutput.PAYOUT]
         # softplus ensures non-negative, small init keeps values small
         assert (payout >= 0).all()
         # With std=0.01 init, softplus(x≈0) ≈ 0.69, should be well under 5
@@ -436,12 +463,22 @@ class TestSymmetricMLPConsistency:
         x = torch.randn(4, obs_dim)
 
         with torch.no_grad():
-            logits_p1, logits_p2, payout_forward = model(x)
-            p1, p2, payout_predict = model.predict(x)
+            fwd = model(x)
+            pred = model.predict(x)
 
-        torch.testing.assert_close(torch.softmax(logits_p1, dim=-1), p1, rtol=1e-5, atol=1e-5)
-        torch.testing.assert_close(torch.softmax(logits_p2, dim=-1), p2, rtol=1e-5, atol=1e-5)
-        torch.testing.assert_close(payout_forward, payout_predict)
+        torch.testing.assert_close(
+            torch.softmax(fwd[ModelOutput.LOGITS_P1], dim=-1),
+            pred[ModelOutput.POLICY_P1],
+            rtol=1e-5,
+            atol=1e-5,
+        )
+        torch.testing.assert_close(
+            torch.softmax(fwd[ModelOutput.LOGITS_P2], dim=-1),
+            pred[ModelOutput.POLICY_P2],
+            rtol=1e-5,
+            atol=1e-5,
+        )
+        torch.testing.assert_close(fwd[ModelOutput.PAYOUT], pred[ModelOutput.PAYOUT])
 
     def test_deterministic_in_eval_mode(self) -> None:
         """Same input should produce same output in eval mode."""
@@ -456,5 +493,5 @@ class TestSymmetricMLPConsistency:
             out1 = model(x)
             out2 = model(x)
 
-        for o1, o2 in zip(out1, out2, strict=True):
-            torch.testing.assert_close(o1, o2)
+        for key in out1:
+            torch.testing.assert_close(out1[key], out2[key])

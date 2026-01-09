@@ -4,8 +4,7 @@ from __future__ import annotations
 
 import torch
 
-from alpharat.nn.symmetric_training import sparse_payout_loss
-from alpharat.nn.training import constant_sum_loss, nash_consistency_loss
+from alpharat.nn.losses import constant_sum_loss, nash_consistency_loss, sparse_payout_loss
 
 
 class TestNashConsistencyLoss:

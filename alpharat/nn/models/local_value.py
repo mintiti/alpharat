@@ -23,6 +23,8 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+from alpharat.nn.training.keys import ModelOutput
+
 
 class LocalValueMLP(nn.Module):
     """MLP with ownership prediction and payout matrix head.
@@ -145,23 +147,24 @@ class LocalValueMLP(nn.Module):
     def forward(
         self,
         x: torch.Tensor,
-        cheese_mask: torch.Tensor | None = None,
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        **kwargs: object,
+    ) -> dict[str, torch.Tensor]:
         """Forward pass returning logits, payout matrix, and ownership predictions.
 
         Args:
             x: Observation tensor of shape (batch, obs_dim).
-            cheese_mask: Optional boolean mask of shape (batch, H, W) indicating
-                which cells have active cheese. Used for ownership-derived value.
+            **kwargs: May include 'cheese_mask' (batch, H, W) boolean tensor
+                indicating which cells have active cheese for ownership value.
 
         Returns:
-            Tuple of:
-                - logits_p1: Raw logits for P1 policy, shape (batch, 5).
-                - logits_p2: Raw logits for P2 policy, shape (batch, 5).
-                - payout_matrix: Predicted payout values, shape (batch, 2, 5, 5).
-                - ownership_logits: Per-cell ownership logits, shape (batch, H, W, 4).
-                - ownership_value: Derived value from ownership, shape (batch,).
+            Dict with:
+                - ModelOutput.LOGITS_P1: Raw logits for P1 policy, shape (batch, 5).
+                - ModelOutput.LOGITS_P2: Raw logits for P2 policy, shape (batch, 5).
+                - ModelOutput.PAYOUT: Predicted payout values, shape (batch, 2, 5, 5).
+                - ModelOutput.OWNERSHIP_LOGITS: Per-cell ownership logits, shape (batch, H, W, 4).
+                - ModelOutput.OWNERSHIP_VALUE: Derived value from ownership, shape (batch,).
         """
+        cheese_mask: torch.Tensor | None = kwargs.get("cheese_mask")  # type: ignore[assignment]
         features = self.trunk(x)
 
         # Policy heads
@@ -189,13 +192,19 @@ class LocalValueMLP(nn.Module):
             # Sum over all cells (useful for inference without mask)
             ownership_value = expected_per_cell.sum(dim=(-1, -2))
 
-        return logits_p1, logits_p2, payout_matrix, ownership_logits, ownership_value
+        return {
+            ModelOutput.LOGITS_P1: logits_p1,
+            ModelOutput.LOGITS_P2: logits_p2,
+            ModelOutput.PAYOUT: payout_matrix,
+            ModelOutput.OWNERSHIP_LOGITS: ownership_logits,
+            ModelOutput.OWNERSHIP_VALUE: ownership_value,
+        }
 
     def predict(
         self,
         x: torch.Tensor,
-        cheese_mask: torch.Tensor | None = None,
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        **kwargs: object,
+    ) -> dict[str, torch.Tensor]:
         """Inference pass returning probabilities.
 
         Use this for MCTS integration where we need proper probability
@@ -203,22 +212,22 @@ class LocalValueMLP(nn.Module):
 
         Args:
             x: Observation tensor of shape (batch, obs_dim).
-            cheese_mask: Optional boolean mask for ownership value computation.
+            **kwargs: May include 'cheese_mask' for ownership value computation.
 
         Returns:
-            Tuple of:
-                - policy_p1: Probabilities for P1, shape (batch, 5).
-                - policy_p2: Probabilities for P2, shape (batch, 5).
-                - payout_matrix: Predicted payout values, shape (batch, 2, 5, 5).
-                - ownership_probs: Per-cell probabilities, shape (batch, H, W, 4).
-                - ownership_value: Derived value from ownership, shape (batch,).
+            Dict with:
+                - ModelOutput.POLICY_P1: Probabilities for P1, shape (batch, 5).
+                - ModelOutput.POLICY_P2: Probabilities for P2, shape (batch, 5).
+                - ModelOutput.PAYOUT: Predicted payout values, shape (batch, 2, 5, 5).
+                - ModelOutput.OWNERSHIP_PROBS: Per-cell probabilities, shape (batch, H, W, 4).
+                - ModelOutput.OWNERSHIP_VALUE: Derived value from ownership, shape (batch,).
         """
-        logits_p1, logits_p2, payout_matrix, ownership_logits, ownership_value = self.forward(
-            x, cheese_mask
-        )
+        output = self.forward(x, **kwargs)
 
-        policy_p1 = F.softmax(logits_p1, dim=-1)
-        policy_p2 = F.softmax(logits_p2, dim=-1)
-        ownership_probs = F.softmax(ownership_logits, dim=-1)
-
-        return policy_p1, policy_p2, payout_matrix, ownership_probs, ownership_value
+        return {
+            ModelOutput.POLICY_P1: F.softmax(output[ModelOutput.LOGITS_P1], dim=-1),
+            ModelOutput.POLICY_P2: F.softmax(output[ModelOutput.LOGITS_P2], dim=-1),
+            ModelOutput.PAYOUT: output[ModelOutput.PAYOUT],
+            ModelOutput.OWNERSHIP_PROBS: F.softmax(output[ModelOutput.OWNERSHIP_LOGITS], dim=-1),
+            ModelOutput.OWNERSHIP_VALUE: output[ModelOutput.OWNERSHIP_VALUE],
+        }

@@ -1,11 +1,14 @@
-# Training configuration
+# MLP training configuration
 # Usage: uv run python scripts/train.py configs/train.yaml
 
 model:
+  architecture: mlp
   hidden_dim: 256
   dropout: 0.0
+  p_augment: 0.5  # probability of player swap augmentation per sample
 
 optim:
+  architecture: mlp
   lr: 1e-3
   policy_weight: 1.0
   value_weight: 1.0
@@ -14,7 +17,6 @@ optim:
   # - nash_mode: "target" uses MCTS policies, "predicted" uses NN's own policies
   nash_weight: 0.0
   nash_mode: target
-  p_augment: 0.5      # probability of player swap augmentation per sample
 
 data:
   train_dir: data/940b6e74-01c1-4a2e-ac6d-9ca2c1ec54c5/train
