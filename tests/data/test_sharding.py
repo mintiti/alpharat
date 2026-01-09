@@ -205,7 +205,9 @@ class TestPrepareTrainingSet:
             manifest = load_training_set_manifest(result_dir)
 
             assert manifest.builder_version == "flat_v2"
-            assert manifest.source_batches == ["batch1"]
+            # source_batches are now in "group/uuid" format (parent_dir/batch_name)
+            assert len(manifest.source_batches) == 1
+            assert manifest.source_batches[0].endswith("/batch1")
             assert manifest.total_positions == 3  # 1 game × 3 positions
             assert manifest.width == 5
             assert manifest.height == 5
@@ -460,7 +462,10 @@ class TestPrepareTrainingSet:
 
             manifest = load_training_set_manifest(result_dir)
             assert manifest.total_positions == 9  # (2 + 1) games × 3 positions
-            assert set(manifest.source_batches) == {"batch1", "batch2"}
+            # source_batches are now in "group/uuid" format (parent_dir/batch_name)
+            assert len(manifest.source_batches) == 2
+            batch_names = {b.split("/")[-1] for b in manifest.source_batches}
+            assert batch_names == {"batch1", "batch2"}
 
 
 # =============================================================================

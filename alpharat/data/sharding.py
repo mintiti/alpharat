@@ -13,6 +13,7 @@ from pydantic import BaseModel
 from tqdm import tqdm
 
 from alpharat.data.loader import is_bundle_file, iter_games_from_bundle, load_game_data
+from alpharat.experiments.paths import batch_id_from_path
 from alpharat.nn.extraction import from_game_arrays
 from alpharat.nn.targets import build_targets
 
@@ -159,7 +160,7 @@ def prepare_training_set(
         training_set_id=training_set_id,
         created_at=datetime.now(UTC),
         builder_version=builder.version,
-        source_batches=[d.name for d in batch_dirs],
+        source_batches=[batch_id_from_path(d) for d in batch_dirs],
         total_positions=total_positions,
         shard_count=shard_count,
         positions_per_shard=positions_per_shard,
@@ -253,7 +254,7 @@ def prepare_training_set_with_split(
         positions_per_shard=positions_per_shard,
         seed=seed,
         training_set_id=f"{training_set_id}_train",
-        source_batches=[d.name for d in batch_dirs],
+        source_batches=[batch_id_from_path(d) for d in batch_dirs],
     )
 
     # Process val split (if any validation games)
@@ -271,7 +272,7 @@ def prepare_training_set_with_split(
             positions_per_shard=positions_per_shard,
             seed=val_seed,
             training_set_id=f"{training_set_id}_val",
-            source_batches=[d.name for d in batch_dirs],
+            source_batches=[batch_id_from_path(d) for d in batch_dirs],
         )
 
     return ShardingResult(

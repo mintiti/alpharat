@@ -118,6 +118,7 @@ def main() -> None:
         total_positions=result.total_positions,
         train_positions=result.train_positions,
         val_positions=result.val_positions,
+        shuffle_seed=args.seed,
     )
 
     shard_id = f"{args.group}/{result.shard_id}"

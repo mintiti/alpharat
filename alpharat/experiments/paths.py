@@ -143,6 +143,18 @@ def batch_id_from_path(batch_path: Path) -> str:
     return f"{batch_path.parent.name}/{batch_path.name}"
 
 
+def shard_id_from_path(shard_path: Path) -> str:
+    """Extract shard ID (group/uuid) from shard path.
+
+    Args:
+        shard_path: Path to shard directory.
+
+    Returns:
+        Shard ID in format "group/uuid".
+    """
+    return f"{shard_path.parent.name}/{shard_path.name}"
+
+
 def parse_batch_id(batch_id: str) -> tuple[str, str]:
     """Parse batch ID into group and uuid.
 

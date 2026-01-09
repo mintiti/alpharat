@@ -124,6 +124,7 @@ class ExperimentManager:
         mcts_config: MCTSConfig,
         game_params: GameParams,
         checkpoint_path: str | None = None,
+        seed_start: int = 0,
     ) -> Path:
         """Create a new batch directory for sampling.
 
@@ -132,6 +133,7 @@ class ExperimentManager:
             mcts_config: MCTS algorithm configuration.
             game_params: Game configuration.
             checkpoint_path: Optional path to parent checkpoint for NN-guided sampling.
+            seed_start: Starting seed for game generation (game N uses seed_start + N).
 
         Returns:
             Path to the created batch directory.
@@ -166,6 +168,7 @@ class ExperimentManager:
             parent_checkpoint=checkpoint_path,
             mcts_config=mcts_config,
             game_params=game_params,
+            seed_start=seed_start,
         )
         manifest = self._load_manifest()
         manifest.batches[batch_id] = entry
@@ -203,6 +206,7 @@ class ExperimentManager:
         total_positions: int,
         train_positions: int,
         val_positions: int,
+        shuffle_seed: int | None = None,
     ) -> Path:
         """Register a new shard set in the manifest.
 
@@ -215,6 +219,7 @@ class ExperimentManager:
             total_positions: Total number of positions.
             train_positions: Number of training positions.
             val_positions: Number of validation positions.
+            shuffle_seed: Seed used for train/val split and position shuffling.
 
         Returns:
             Path to the shard directory.
@@ -239,6 +244,7 @@ class ExperimentManager:
             total_positions=total_positions,
             train_positions=train_positions,
             val_positions=val_positions,
+            shuffle_seed=shuffle_seed,
         )
         manifest = self._load_manifest()
         manifest.shards[shard_id] = entry
@@ -275,6 +281,7 @@ class ExperimentManager:
         total_positions: int,
         train_positions: int,
         val_positions: int,
+        shuffle_seed: int | None = None,
     ) -> None:
         """Register an existing shard set in the manifest.
 
@@ -288,6 +295,7 @@ class ExperimentManager:
             total_positions: Total number of positions.
             train_positions: Number of training positions.
             val_positions: Number of validation positions.
+            shuffle_seed: Seed used for train/val split and position shuffling.
         """
         self._ensure_initialized()
 
@@ -300,6 +308,7 @@ class ExperimentManager:
             total_positions=total_positions,
             train_positions=train_positions,
             val_positions=val_positions,
+            shuffle_seed=shuffle_seed,
         )
         manifest = self._load_manifest()
         manifest.shards[shard_id] = entry

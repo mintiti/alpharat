@@ -533,6 +533,7 @@ def run_sampling(config: SamplingConfig, *, verbose: bool = True) -> tuple[Path,
         mcts_config=config.mcts,
         game_params=config.game,
         checkpoint_path=config.checkpoint,
+        seed_start=0,  # Games use seeds 0, 1, 2, ... N
     )
     games_dir = batch_dir / "games"
 

@@ -17,6 +17,7 @@ from pathlib import Path
 import yaml
 
 from alpharat.experiments import ExperimentManager
+from alpharat.experiments.paths import shard_id_from_path
 from alpharat.nn.config import TrainConfig
 from alpharat.nn.training import run_training
 
@@ -74,12 +75,26 @@ def main() -> None:
     source_shards = args.source_shards
     if source_shards is None:
         # Try to extract shard ID from train_dir path
+        # Expected format: experiments/shards/{group}/{uuid}/train
         train_dir = Path(config.data.train_dir)
-        # Expected format: experiments/shards/{uuid}/train or shards/{uuid}/train
-        if train_dir.name == "train" and train_dir.parent.exists():
-            source_shards = train_dir.parent.name
+        if train_dir.name == "train":
+            shard_dir = train_dir.parent  # {uuid}
+            group_dir = shard_dir.parent  # {group}
+            shards_dir = group_dir.parent  # shards/
+            if shards_dir.name == "shards":
+                source_shards = shard_id_from_path(shard_dir)
+            else:
+                raise ValueError(
+                    f"Cannot auto-detect source shards from '{config.data.train_dir}'. "
+                    f"Expected path like 'experiments/shards/{{group}}/{{uuid}}/train'. "
+                    f"Use --source-shards group/uuid to specify explicitly."
+                )
         else:
-            source_shards = "unknown"
+            raise ValueError(
+                f"Cannot auto-detect source shards from '{config.data.train_dir}'. "
+                f"Expected path ending in '/train'. "
+                f"Use --source-shards group/uuid to specify explicitly."
+            )
 
     # Create run via ExperimentManager (unless resuming)
     if args.resume is None:

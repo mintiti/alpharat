@@ -28,6 +28,7 @@ class BatchEntry(BaseModel):
     parent_checkpoint: str | None
     mcts_config: MCTSConfig = Field(discriminator="variant")
     game_params: GameParams
+    seed_start: int = 0  # First game uses this seed, increments from there
 
 
 class ShardEntry(BaseModel):
@@ -44,6 +45,7 @@ class ShardEntry(BaseModel):
     total_positions: int
     train_positions: int
     val_positions: int
+    shuffle_seed: int | None = None  # Seed used for train/val split and shuffling
 
 
 class RunEntry(BaseModel):
