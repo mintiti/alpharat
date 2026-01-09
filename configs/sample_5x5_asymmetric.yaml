@@ -1,6 +1,7 @@
 # Self-play sampling for 5x5 with asymmetric maze/cheese
 # Usage: uv run python scripts/sample.py configs/sample_5x5_asymmetric.yaml
-# Purpose: Test training with diverse asymmetric positions
+
+group: 5x5_asymmetric  # Required: batch group name
 
 mcts:
   variant: decoupled_puct
@@ -21,5 +22,4 @@ sampling:
   num_games: 50000
   workers: 4
 
-output_dir: batches/5x5_asymmetric/
 checkpoint: null

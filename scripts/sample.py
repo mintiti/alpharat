@@ -4,6 +4,7 @@
 Usage:
     uv run python scripts/sample.py configs/sample.yaml
     uv run python scripts/sample.py configs/sample.yaml --workers 8
+    uv run python scripts/sample.py configs/sample.yaml --group override_name  # Override config
 """
 
 from __future__ import annotations
@@ -21,11 +22,22 @@ def main() -> None:
         description="Generate self-play training data with MCTS agents."
     )
     parser.add_argument("config", type=Path, help="Path to YAML config file")
+    parser.add_argument(
+        "--group",
+        type=str,
+        default=None,
+        help="Override batch group name from config (default: use config.group)",
+    )
     parser.add_argument("--workers", type=int, help="Override number of parallel workers")
     args = parser.parse_args()
 
     # Load config
     config_data = yaml.safe_load(args.config.read_text())
+
+    # CLI --group overrides config
+    if args.group is not None:
+        config_data["group"] = args.group
+
     config = SamplingConfig.model_validate(config_data)
 
     # Apply overrides

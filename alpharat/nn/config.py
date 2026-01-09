@@ -48,6 +48,8 @@ class TrainConfig(BaseModel):
     architecture-specific config classes based on the 'architecture' field.
 
     Example YAML:
+        name: mlp_baseline_v1  # Required: identifies this experiment
+
         model:
           architecture: mlp
           hidden_dim: 256
@@ -65,6 +67,7 @@ class TrainConfig(BaseModel):
         seed: 42
     """
 
+    name: str  # Required: human-chosen experiment name
     model: ModelConfig
     optim: OptimConfig
     data: DataConfig

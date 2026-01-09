@@ -37,11 +37,13 @@ alpharat/
 ├── data/           # Data pipeline: sampling, recording, sharding
 ├── nn/             # Neural network: observation builders, targets, models
 ├── ai/             # Agents: MCTS, random, greedy
-└── eval/           # Evaluation: game execution, tournaments
+├── eval/           # Evaluation: game execution, tournaments
+└── experiments/    # Experiment management: ExperimentManager, manifest
 
 scripts/            # Entry points: sample.py, train_mcts.py
-configs/            # YAML configs for sampling, evaluation, benchmarks
+configs/            # YAML config templates for sampling, training, evaluation
 tests/              # Mirrors alpharat/ structure
+experiments/        # Data folder (NOT in git): batches, shards, runs, benchmarks
 ```
 
 ### alpharat/mcts/
@@ -117,6 +119,57 @@ Each architecture folder contains `config.py` (ModelConfig, OptimConfig) and `lo
 | `game.py` | `play_game()` — execute single game between agents |
 | `runner.py` | `evaluate()` — run N games, compute stats |
 | `tournament.py` | `run_tournament()` — round-robin with thread pool |
+
+### alpharat/experiments/
+
+| File | Purpose |
+|------|---------|
+| `manager.py` | `ExperimentManager` — central API for managing artifacts |
+| `schema.py` | Pydantic schemas for manifest entries |
+| `paths.py` | Path constants and helpers |
+| `templates.py` | Notes and CLAUDE.md templates |
+
+---
+
+## Experiments Folder
+
+The `experiments/` folder (NOT in git) stores all experiment artifacts with automatic lineage tracking.
+
+```
+experiments/
+├── manifest.yaml          # Central index of all artifacts
+├── batches/{group}/{uuid}/ # Raw game recordings
+├── shards/{uuid}/         # Processed train/val splits
+├── runs/{name}/           # Training runs with checkpoints
+└── benchmarks/{name}/     # Tournament results
+```
+
+### Using ExperimentManager
+
+```python
+from alpharat.experiments import ExperimentManager
+
+exp = ExperimentManager()
+
+# Sampling
+batch_dir = exp.create_batch(
+    group="uniform_5x5",
+    mcts_config=mcts_config,
+    game_params=game_params,
+)
+
+# Training
+run_dir = exp.create_run(
+    name="bimatrix_mlp_v1",
+    config=train_config.model_dump(),
+    source_shards="shard_uuid",
+)
+
+# Query
+exp.list_batches()
+exp.list_runs()
+exp.get_run_path("bimatrix_mlp_v1")
+```
 
 ---
 
@@ -371,6 +424,83 @@ DELTA_TO_DIRECTION = {v: k for k, v in DIRECTION_DELTAS.items() if k != Directio
 
 **Don't hardcode** `{Direction.UP: (0, -1)}` — that's wrong and will cause bugs.
 
+### PyRat Game API
+
+```python
+from pyrat_engine.core.game import PyRat, MoveUndo
+
+# Topology queries
+game.wall_entries()              # → list[Wall]
+game.mud_entries()               # → list[Mud]
+game.cheese_positions()          # → list[Coordinates]
+game.get_valid_moves(position)   # → list[int] (0-3: UP, RIGHT, DOWN, LEFT)
+
+# Position properties
+game.player1_position            # → Coordinates
+game.player2_position            # → Coordinates
+
+# Score/turn properties
+game.player1_score, game.player2_score      # float
+game.player1_mud_turns, game.player2_mud_turns  # int
+game.turn, game.max_turns                   # int
+
+# Move/unmove (for MCTS tree navigation)
+undo = game.make_move(p1_action, p2_action)  # → MoveUndo
+game.unmake_move(undo)                       # → None
+```
+
+### GameConfigBuilder
+
+Fluent API for creating custom games (useful in tests):
+
+```python
+from pyrat_engine.core import GameConfigBuilder
+from pyrat_engine.core.types import Coordinates, Wall, Mud
+
+game = (GameConfigBuilder(5, 5)
+    .with_max_turns(100)
+    .with_player1_pos(Coordinates(0, 0))
+    .with_player2_pos(Coordinates(4, 4))
+    .with_cheese([Coordinates(2, 2), Coordinates(2, 3)])
+    .with_walls([Wall((1, 1), (1, 2))])
+    .with_mud([Mud((2, 2), (2, 3), value=3)])
+    .build())
+
+# Or use presets: tiny (11x9), small (15x11), default, large (31x21), huge (41x31)
+game = PyRat.create_preset('small')
+```
+
+### get_observation()
+
+Player-relative view with pre-built numpy matrices:
+
+```python
+obs = game.get_observation(is_player_one=True)
+
+# Positions (player-relative) — Coordinates objects, indexable like tuples
+obs.player_position, obs.opponent_position  # Coordinates
+
+# Scores and state
+obs.player_score, obs.opponent_score        # float
+obs.player_mud_turns, obs.opponent_mud_turns  # int
+obs.current_turn, obs.max_turns             # int
+
+# Pre-built matrices
+obs.cheese_matrix     # uint8[W, H] — 1 where cheese exists
+obs.movement_matrix   # int8[W, H, 4] — traversal info per direction
+```
+
+**Movement matrix values:**
+- `-1` = wall (blocked)
+- `0` = normal passage (1 turn)
+- `≥2` = mud cost (stuck for N turns)
+
+**Indexing is [x, y, direction]** (not [y, x]):
+```python
+can_move_up = obs.movement_matrix[x, y, Direction.UP] >= 0
+has_cheese = obs.cheese_matrix[x, y] == 1
+```
+
 ---
 
 ## Development Tips
@@ -384,6 +514,26 @@ DELTA_TO_DIRECTION = {v: k for k, v in DIRECTION_DELTAS.items() if k != Directio
 4. **Pre-commit is mandatory** — don't use `--no-verify`. If pip issues, set `PIP_INDEX_URL=https://pypi.org/simple/`.
 
 5. **The NN learns blocked actions implicitly** — training targets have 0 for blocked actions. The NN figures out which actions are blocked from the maze layout in the observation.
+
+---
+
+## Experiment Workflow
+
+This repo is for ML experimentation, not just code. The `/exp:*` commands support the experiment lifecycle:
+
+| Command | When to use |
+|---------|-------------|
+| `/exp:plan` | Before — crystallize hypothesis, draft log entry |
+| `/exp:iterate` | During — set up next iteration from checkpoint |
+| `/exp:learn` | After — capture results, update log |
+| `/exp:compare` | Anytime — compare runs side-by-side |
+| `/exp:status` | Anytime — quick dashboard of where we are |
+
+**Context files in `experiments/`:**
+- `LOG.md` — the official record: roadmap, decisions, experiment entries with results
+- `IDEAS.md` — parking lot for fuzzy thinking, unstructured ideas
+
+The commands pull from these files automatically. When helping with experiments, read them first.
 
 ---
 

@@ -217,6 +217,7 @@ __marimo__/
 /batches/
 /checkpoints/
 /data/
+/experiments/
 /results/
 *.prof
 
