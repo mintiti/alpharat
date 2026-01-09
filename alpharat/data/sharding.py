@@ -12,13 +12,14 @@ import numpy as np
 from pydantic import BaseModel
 from tqdm import tqdm
 
-from alpharat.data.loader import load_game_data
+from alpharat.data.loader import is_bundle_file, iter_games_from_bundle, load_game_data
 from alpharat.nn.extraction import from_game_arrays
 from alpharat.nn.targets import build_targets
 
 if TYPE_CHECKING:
     from pathlib import Path
 
+    from alpharat.data.types import GameData
     from alpharat.nn.builders import ObservationBuilder
 
 logger = logging.getLogger(__name__)
@@ -381,8 +382,10 @@ def _load_positions_from_files(
 ]:
     """Load and process positions from game files into stacked arrays.
 
+    Handles both single-game .npz files and bundled .npz files.
+
     Args:
-        game_files: List of game npz files to process.
+        game_files: List of game npz files to process (single or bundled).
         builder: ObservationBuilder to use.
 
     Returns:
@@ -416,8 +419,9 @@ def _load_positions_from_files(
     width: int | None = None
     height: int | None = None
 
-    for game_file in tqdm(game_files, desc="Loading games", unit="game"):
-        game_data = load_game_data(game_file)
+    def process_game(game_data: GameData, source_file: Path) -> None:
+        """Process a single game and append to result lists."""
+        nonlocal width, height
 
         # Validate dimensions
         if width is None:
@@ -426,7 +430,7 @@ def _load_positions_from_files(
         elif game_data.width != width or game_data.height != height:
             raise ValueError(
                 f"Dimension mismatch: expected ({width}, {height}), "
-                f"got ({game_data.width}, {game_data.height}) in {game_file}"
+                f"got ({game_data.width}, {game_data.height}) in {source_file}"
             )
 
         # Process each position
@@ -444,6 +448,16 @@ def _load_positions_from_files(
             all_action_p1.append(targets.action_p1)
             all_action_p2.append(targets.action_p2)
             all_cheese_outcomes.append(targets.cheese_outcomes)
+
+    for game_file in tqdm(game_files, desc="Loading files", unit="file"):
+        if is_bundle_file(game_file):
+            # Bundle file: iterate over all games in the bundle
+            for game_data in iter_games_from_bundle(game_file):
+                process_game(game_data, game_file)
+        else:
+            # Single-game file
+            game_data = load_game_data(game_file)
+            process_game(game_data, game_file)
 
     if width is None or height is None:
         raise ValueError("No positions found in game files")

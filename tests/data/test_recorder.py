@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import tempfile
+from typing import TYPE_CHECKING
 
 import numpy as np
 import pytest
@@ -12,6 +13,11 @@ from alpharat.data.loader import load_game_data
 from alpharat.data.maze import _coords_to_direction, _opposite_direction, build_maze_array
 from alpharat.data.recorder import GameRecorder
 from alpharat.mcts import SearchResult
+
+if TYPE_CHECKING:
+    from pathlib import Path
+
+    from alpharat.data.types import GameData
 
 
 class FakeGame:
@@ -800,3 +806,353 @@ class TestRoundtrip:
         assert loaded.result == 2  # P2 wins
         assert loaded.final_p1_score == 2.0
         assert loaded.final_p2_score == 8.0
+
+
+# =============================================================================
+# GameBundler tests
+# =============================================================================
+
+
+class TestGameBundler:
+    """Tests for GameBundler class."""
+
+    def _create_game_data(
+        self,
+        game: FakeGame,
+        tmpdir: str,
+        n_positions: int = 2,
+        p1_score: float = 5.0,
+        p2_score: float = 3.0,
+    ) -> GameData:
+        """Helper to create a finalized GameData."""
+        game.player1_score = p1_score
+        game.player2_score = p2_score
+
+        with GameRecorder(game, tmpdir, width=5, height=5, auto_save=False) as recorder:
+            for i in range(n_positions):
+                game.turn = i
+                result = make_mock_search_result()
+                recorder.record_position(
+                    game=game,
+                    search_result=result,
+                    prior_p1=np.ones(5) / 5,
+                    prior_p2=np.ones(5) / 5,
+                    visit_counts=np.ones((5, 5), dtype=np.int32) * (i + 1),
+                    action_p1=i % 5,
+                    action_p2=(i + 1) % 5,
+                )
+
+        assert recorder.data is not None
+        return recorder.data
+
+    def test_add_game_buffers(self) -> None:
+        """Adding games should buffer them."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            from alpharat.data.recorder import GameBundler
+
+            bundler = GameBundler(tmpdir, width=5, height=5)
+            assert bundler.buffered_games == 0
+
+            game = FakeGame()
+            game_data = self._create_game_data(game, tmpdir)
+            bundler.add_game(game_data)
+
+            assert bundler.buffered_games == 1
+            assert len(bundler.saved_paths) == 0
+
+    def test_flush_writes_bundle(self) -> None:
+        """Flush should write bundle file and clear buffer."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            from alpharat.data.recorder import GameBundler
+
+            bundler = GameBundler(tmpdir, width=5, height=5)
+
+            # Add two games
+            for _ in range(2):
+                game = FakeGame()
+                game_data = self._create_game_data(game, tmpdir)
+                bundler.add_game(game_data)
+
+            assert bundler.buffered_games == 2
+
+            path = bundler.flush()
+
+            assert path is not None
+            assert path.exists()
+            assert bundler.buffered_games == 0
+            assert len(bundler.saved_paths) == 1
+
+    def test_flush_empty_returns_none(self) -> None:
+        """Flushing empty buffer returns None."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            from alpharat.data.recorder import GameBundler
+
+            bundler = GameBundler(tmpdir, width=5, height=5)
+            assert bundler.flush() is None
+
+    def test_bundle_file_format(self) -> None:
+        """Bundle file should have game_lengths and correct structure."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            from alpharat.data.recorder import GameBundler
+
+            bundler = GameBundler(tmpdir, width=5, height=5)
+
+            # Add games with different position counts
+            game1 = FakeGame()
+            game_data1 = self._create_game_data(game1, tmpdir, n_positions=3)
+            bundler.add_game(game_data1)
+
+            game2 = FakeGame()
+            game_data2 = self._create_game_data(game2, tmpdir, n_positions=2)
+            bundler.add_game(game_data2)
+
+            path = bundler.flush()
+            assert path is not None
+
+            # Check bundle format
+            data = np.load(path)
+            assert "game_lengths" in data.files
+
+            # 2 games, lengths 3 and 2
+            np.testing.assert_array_equal(data["game_lengths"], [3, 2])
+
+            # Game-level arrays should have shape (2, ...)
+            assert data["maze"].shape == (2, 5, 5, 4)
+            assert data["initial_cheese"].shape == (2, 5, 5)
+            assert data["result"].shape == (2,)
+
+            # Position-level arrays should have shape (5, ...) total
+            total_positions = 3 + 2
+            assert data["p1_pos"].shape == (total_positions, 2)
+            assert data["payout_matrix"].shape == (total_positions, 2, 5, 5)
+
+    def test_auto_flush_on_threshold(self) -> None:
+        """Should auto-flush when buffer exceeds threshold."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            from alpharat.data.recorder import GameBundler
+
+            # Very small threshold to trigger auto-flush
+            bundler = GameBundler(tmpdir, width=5, height=5, threshold_bytes=1)
+
+            game = FakeGame()
+            game_data = self._create_game_data(game, tmpdir)
+            path = bundler.add_game(game_data)
+
+            # Should have auto-flushed
+            assert path is not None
+            assert bundler.buffered_games == 0
+            assert len(bundler.saved_paths) == 1
+
+    def test_dimension_mismatch_raises(self) -> None:
+        """Adding game with wrong dimensions should raise."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            from alpharat.data.recorder import GameBundler
+
+            bundler = GameBundler(tmpdir, width=5, height=5)
+
+            # Create game data with wrong dimensions
+            game = FakeGame(width=10, height=10)
+            game.player1_score = 5.0
+            game.player2_score = 3.0
+
+            with GameRecorder(game, tmpdir, width=10, height=10, auto_save=False) as recorder:
+                result = make_mock_search_result()
+                recorder.record_position(
+                    game=game,
+                    search_result=result,
+                    prior_p1=np.ones(5) / 5,
+                    prior_p2=np.ones(5) / 5,
+                    visit_counts=np.ones((5, 5), dtype=np.int32),
+                    action_p1=0,
+                    action_p2=0,
+                )
+
+            assert recorder.data is not None
+
+            with pytest.raises(ValueError, match="dimensions"):
+                bundler.add_game(recorder.data)
+
+
+# =============================================================================
+# Bundle loading tests
+# =============================================================================
+
+
+class TestBundleLoading:
+    """Tests for loading bundled game files."""
+
+    def _create_bundle(self, tmpdir: str, n_games: int = 3) -> Path:
+        """Helper to create a bundle file with multiple games."""
+        from alpharat.data.recorder import GameBundler
+
+        bundler = GameBundler(tmpdir, width=5, height=5)
+
+        for i in range(n_games):
+            game = FakeGame()
+            game.player1_score = float(i * 2)
+            game.player2_score = float(i)
+
+            with GameRecorder(game, tmpdir, width=5, height=5, auto_save=False) as recorder:
+                for j in range(i + 1):  # i+1 positions per game
+                    game.turn = j
+                    game.player1_position = Coordinates(j % 5, j % 5)
+                    result = make_mock_search_result()
+                    recorder.record_position(
+                        game=game,
+                        search_result=result,
+                        prior_p1=np.ones(5) / 5,
+                        prior_p2=np.ones(5) / 5,
+                        visit_counts=np.ones((5, 5), dtype=np.int32) * (j + 1),
+                        action_p1=j % 5,
+                        action_p2=0,
+                    )
+
+            assert recorder.data is not None
+            bundler.add_game(recorder.data)
+
+        path = bundler.flush()
+        assert path is not None
+        return path
+
+    def test_is_bundle_file_detection(self) -> None:
+        """is_bundle_file should correctly identify bundle vs single game files."""
+        from alpharat.data.loader import is_bundle_file
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            # Create a bundle
+            bundle_path = self._create_bundle(tmpdir, n_games=2)
+            assert is_bundle_file(bundle_path) is True
+
+            # Create a single game file
+            game = FakeGame()
+            game.player1_score = 5.0
+            game.player2_score = 3.0
+
+            with GameRecorder(game, tmpdir, width=5, height=5) as recorder:
+                result = make_mock_search_result()
+                recorder.record_position(
+                    game=game,
+                    search_result=result,
+                    prior_p1=np.ones(5) / 5,
+                    prior_p2=np.ones(5) / 5,
+                    visit_counts=np.ones((5, 5), dtype=np.int32),
+                    action_p1=0,
+                    action_p2=0,
+                )
+
+            assert recorder.saved_path is not None
+            assert is_bundle_file(recorder.saved_path) is False
+
+    def test_load_game_bundle_returns_all_games(self) -> None:
+        """load_game_bundle should return all games from bundle."""
+        from alpharat.data.loader import load_game_bundle
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            bundle_path = self._create_bundle(tmpdir, n_games=3)
+
+            games = load_game_bundle(bundle_path)
+
+            assert len(games) == 3
+            # Game 0 has 1 position, game 1 has 2, game 2 has 3
+            assert len(games[0].positions) == 1
+            assert len(games[1].positions) == 2
+            assert len(games[2].positions) == 3
+
+    def test_iter_games_from_bundle_yields_in_order(self) -> None:
+        """iter_games_from_bundle should yield games in order."""
+        from alpharat.data.loader import iter_games_from_bundle
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            bundle_path = self._create_bundle(tmpdir, n_games=3)
+
+            games = list(iter_games_from_bundle(bundle_path))
+
+            # Check final scores match creation order
+            for i, game in enumerate(games):
+                assert game.final_p1_score == float(i * 2)
+                assert game.final_p2_score == float(i)
+
+    def test_bundle_roundtrip_game_data(self) -> None:
+        """Data should survive bundle roundtrip."""
+        from alpharat.data.loader import load_game_bundle
+        from alpharat.data.recorder import GameBundler
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            bundler = GameBundler(tmpdir, width=5, height=5)
+
+            # Create game with specific data
+            game = FakeGame(cheese=[(1, 1), (2, 2)])
+            game.player1_score = 7.5
+            game.player2_score = 2.5
+            game.player1_position = Coordinates(3, 4)
+            game.player2_position = Coordinates(1, 2)
+
+            with GameRecorder(game, tmpdir, width=5, height=5, auto_save=False) as recorder:
+                payout = np.random.rand(2, 5, 5).astype(np.float32)
+                policy_p1 = np.array([0.5, 0.2, 0.1, 0.1, 0.1], dtype=np.float32)
+                policy_p2 = np.array([0.1, 0.1, 0.3, 0.3, 0.2], dtype=np.float32)
+                result = SearchResult(
+                    payout_matrix=payout,
+                    policy_p1=policy_p1,
+                    policy_p2=policy_p2,
+                )
+                recorder.record_position(
+                    game=game,
+                    search_result=result,
+                    prior_p1=np.ones(5) / 5,
+                    prior_p2=np.ones(5) / 5,
+                    visit_counts=np.arange(25).reshape(5, 5).astype(np.int32),
+                    action_p1=2,
+                    action_p2=3,
+                )
+
+            assert recorder.data is not None
+            bundler.add_game(recorder.data)
+            path = bundler.flush()
+            assert path is not None
+
+            # Load and verify
+            games = load_game_bundle(path)
+            assert len(games) == 1
+
+            loaded = games[0]
+            assert loaded.width == 5
+            assert loaded.height == 5
+            assert loaded.final_p1_score == 7.5
+            assert loaded.final_p2_score == 2.5
+            assert loaded.result == 1  # P1 wins
+
+            pos = loaded.positions[0]
+            assert pos.p1_pos == (3, 4)
+            assert pos.p2_pos == (1, 2)
+            assert pos.action_p1 == 2
+            assert pos.action_p2 == 3
+            np.testing.assert_allclose(pos.payout_matrix, payout, rtol=1e-6)
+            np.testing.assert_allclose(pos.policy_p1, policy_p1, rtol=1e-6)
+            np.testing.assert_allclose(pos.policy_p2, policy_p2, rtol=1e-6)
+
+    def test_bundle_not_single_game_raises(self) -> None:
+        """Loading single game file with bundle loader should raise."""
+        from alpharat.data.loader import load_game_bundle
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            game = FakeGame()
+            game.player1_score = 5.0
+            game.player2_score = 3.0
+
+            with GameRecorder(game, tmpdir, width=5, height=5) as recorder:
+                result = make_mock_search_result()
+                recorder.record_position(
+                    game=game,
+                    search_result=result,
+                    prior_p1=np.ones(5) / 5,
+                    prior_p2=np.ones(5) / 5,
+                    visit_counts=np.ones((5, 5), dtype=np.int32),
+                    action_p1=0,
+                    action_p2=0,
+                )
+
+            assert recorder.saved_path is not None
+
+            with pytest.raises(ValueError, match="Not a bundle file"):
+                load_game_bundle(recorder.saved_path)
