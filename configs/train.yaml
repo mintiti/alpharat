@@ -1,7 +1,12 @@
 # MLP training configuration
 # Usage: uv run python scripts/train.py configs/train.yaml
+#
+# Before running:
+#   1. Set `name` to your run name (e.g., mlp_v1)
+#   2. Set `data.train_dir` and `data.val_dir` to your shard paths
+#      (run `ls experiments/shards/` to see available shards)
 
-name: <EXPERIMENT_NAME>  # e.g., mlp_5x5_v1
+name: <EXPERIMENT_NAME>  # e.g., mlp_v1, symmetric_5x5
 
 model:
   architecture: mlp
@@ -21,7 +26,8 @@ optim:
   nash_mode: target
 
 data:
-  # Path format: experiments/shards/<GROUP>/<UUID>/train
+  # Path format: experiments/shards/{group}/{uuid}/train
+  # Example: experiments/shards/5x5_uniform/a1b2c3d4-.../train
   train_dir: experiments/shards/<GROUP>/<UUID>/train
   val_dir: experiments/shards/<GROUP>/<UUID>/val
 

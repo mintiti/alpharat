@@ -40,7 +40,7 @@ alpharat/
 ├── eval/           # Evaluation: game execution, tournaments
 └── experiments/    # Experiment management: ExperimentManager, manifest
 
-scripts/            # Entry points: sample.py, train_mcts.py
+scripts/            # Entry points: sample.py, train.py, benchmark.py
 configs/            # YAML config templates for sampling, training, evaluation
 tests/              # Mirrors alpharat/ structure
 experiments/        # Data folder (NOT in git): batches, shards, runs, benchmarks
@@ -137,11 +137,11 @@ The `experiments/` folder (NOT in git) stores all experiment artifacts with auto
 
 ```
 experiments/
-├── manifest.yaml          # Central index of all artifacts
-├── batches/{group}/{uuid}/ # Raw game recordings
-├── shards/{uuid}/         # Processed train/val splits
-├── runs/{name}/           # Training runs with checkpoints
-└── benchmarks/{name}/     # Tournament results
+├── manifest.yaml           # Central index of all artifacts
+├── batches/{group}/{uuid}/ # Raw game recordings from sampling
+├── shards/{group}/{uuid}/  # Processed train/val splits
+├── runs/{name}/            # Training runs with checkpoints
+└── benchmarks/{name}/      # Tournament results
 ```
 
 ### Using ExperimentManager
@@ -519,7 +519,48 @@ has_cheese = obs.cheese_matrix[x, y] == 1
 
 ## Experiment Workflow
 
-This repo is for ML experimentation, not just code. The `/exp:*` commands support the experiment lifecycle:
+This repo is for ML experimentation, not just code.
+
+### Self-Play Loop
+
+The AlphaZero iteration: sample games → train NN → use NN to sample better games → repeat.
+
+**First iteration (no NN yet):**
+```bash
+# 1. Sample games with pure MCTS (uniform priors)
+uv run python scripts/sample.py configs/sample.yaml --group uniform_5x5
+
+# 2. Convert games to training shards
+uv run python scripts/prepare_shards.py --group 5x5_v1 --batches uniform_5x5
+
+# 3. Train NN and benchmark against baselines (Random, Greedy, MCTS)
+#    (edit configs/train.yaml first: set name and data paths)
+uv run python scripts/train_and_benchmark.py configs/train.yaml --name mlp_v1 --games 50
+```
+
+**Subsequent iterations (with NN):**
+```bash
+# 1. Sample using trained NN as MCTS prior
+#    (edit configs/sample_with_nn.yaml: set checkpoint path)
+uv run python scripts/sample.py configs/sample_with_nn.yaml --group nn_guided_v1
+
+# 2. Create shards from new games
+uv run python scripts/prepare_shards.py --group 5x5_v2 --batches nn_guided_v1
+
+# 3. Train on new data (optionally resume from previous checkpoint)
+uv run python scripts/train.py configs/train.yaml --name mlp_v2
+
+# 4. Benchmark against previous iteration (custom tournament config)
+uv run python scripts/benchmark.py configs/tournament.yaml
+```
+
+**Scripts:**
+- `train_and_benchmark.py` — convenience script: trains then auto-benchmarks vs Random/Greedy/MCTS
+- `train.py` + `benchmark.py` — separate scripts for more control (custom tournament configs)
+
+### Experiment Commands
+
+The `/exp:*` commands support the experiment lifecycle:
 
 | Command | When to use |
 |---------|-------------|

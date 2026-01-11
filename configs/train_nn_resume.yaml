@@ -1,8 +1,13 @@
-# MLP training - resume from NN-sampled checkpoint
-# Data: games sampled using the first trained model
+# MLP training - resume from previous checkpoint
+# Use this template when continuing training on new data
 # Usage: uv run python scripts/train.py configs/train_nn_resume.yaml --device mps
+#
+# Before running:
+#   1. Set `name` to your run name (e.g., mlp_v2)
+#   2. Set `data.train_dir` and `data.val_dir` to your shard paths
+#   3. Set `resume_from` to the checkpoint you're continuing from
 
-name: <EXPERIMENT_NAME>  # e.g., mlp_nn_guided_v1
+name: <EXPERIMENT_NAME>  # e.g., mlp_v2, symmetric_iter3
 
 model:
   architecture: mlp
@@ -17,8 +22,12 @@ optim:
   value_weight: 1.0
 
 data:
-  train_dir: data/nn_guided/7cd10189-3d50-4dc8-8d93-cf1306487a37/train
-  val_dir: data/nn_guided/7cd10189-3d50-4dc8-8d93-cf1306487a37/val
+  # Path format: experiments/shards/{group}/{uuid}/train
+  train_dir: experiments/shards/<GROUP>/<UUID>/train
+  val_dir: experiments/shards/<GROUP>/<UUID>/val
 
 seed: 42
-resume_from: checkpoints/train_20251227_231834/best_model.pt
+
+# Checkpoint to resume from (weights loaded, training continues)
+# Example: experiments/runs/mlp_v1/checkpoints/best_model.pt
+resume_from: <PARENT_CHECKPOINT_PATH>
