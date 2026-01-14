@@ -8,6 +8,7 @@ from alpharat.nn.augmentation import PlayerSwapStrategy
 from alpharat.nn.training.base import BaseModelConfig, BaseOptimConfig
 
 if TYPE_CHECKING:
+    from alpharat.nn.builders import ObservationBuilder
     from alpharat.nn.training.protocols import AugmentationStrategy, LossFunction, TrainableModel
 
 
@@ -58,6 +59,12 @@ class MLPModelConfig(BaseModelConfig):
     def build_augmentation(self) -> AugmentationStrategy:
         """Get player swap augmentation strategy."""
         return PlayerSwapStrategy(p_swap=self.p_augment)
+
+    def build_observation_builder(self, width: int, height: int) -> ObservationBuilder:
+        """Get flat observation builder for MLP input."""
+        from alpharat.nn.builders.flat import FlatObservationBuilder
+
+        return FlatObservationBuilder(width=width, height=height)
 
 
 class MLPOptimConfig(BaseOptimConfig):

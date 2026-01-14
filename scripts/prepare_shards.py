@@ -4,9 +4,12 @@
 Converts raw game batches into shuffled, sharded training data with train/val split.
 Games (not positions) are split to prevent data leakage.
 
+The observation builder is determined by the model config — this ensures the shard
+format matches what the architecture expects during training.
+
 Usage:
-    uv run python scripts/prepare_shards.py --group 5x5_uniform --batches uniform_5x5
-    uv run python scripts/prepare_shards.py --group 5x5 --batches "uniform_5x5/*" --val-ratio 0.15
+    uv run python scripts/prepare_shards.py configs/train.yaml --group 5x5 --batches uniform_5x5
+    uv run python scripts/prepare_shards.py configs/train.yaml --group 5x5 --batches "grp/*"
 """
 
 from __future__ import annotations
@@ -17,10 +20,16 @@ import json
 import logging
 from pathlib import Path
 
+import yaml
+from pydantic import TypeAdapter
+
 from alpharat.data.sharding import prepare_training_set_with_split
 from alpharat.experiments import ExperimentManager
 from alpharat.experiments.paths import get_shards_dir
-from alpharat.nn.builders.flat import FlatObservationBuilder
+from alpharat.nn.config import ModelConfig
+
+# TypeAdapter for validating union types
+_model_config_adapter: TypeAdapter[ModelConfig] = TypeAdapter(ModelConfig)
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
@@ -28,6 +37,11 @@ logger = logging.getLogger(__name__)
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Prepare training shards from game batches.")
+    parser.add_argument(
+        "config",
+        type=Path,
+        help="Path to YAML config file (uses model.architecture to select observation builder)",
+    )
     parser.add_argument(
         "--group",
         type=str,
@@ -71,6 +85,14 @@ def main() -> None:
     )
     args = parser.parse_args()
 
+    # Load model config to get the observation builder
+    config_data = yaml.safe_load(args.config.read_text())
+    if "model" not in config_data:
+        logger.error(f"Config file {args.config} must have a 'model' section")
+        return
+    model_config = _model_config_adapter.validate_python(config_data["model"])
+    logger.info(f"Using architecture: {model_config.architecture}")
+
     exp = ExperimentManager(args.experiments_dir)
 
     # Resolve batch IDs from pattern
@@ -94,8 +116,9 @@ def main() -> None:
     )
     logger.info(f"Total games to process: {total_games}")
 
-    # Create builder
-    builder = FlatObservationBuilder(width=width, height=height)
+    # Create builder from model config
+    builder = model_config.build_observation_builder(width, height)
+    logger.info(f"Using observation builder: {builder.version}")
 
     # Prepare shards (output to experiments/shards/{group}/)
     logger.info("Processing games into shards...")
