@@ -23,6 +23,34 @@ from alpharat.mcts.equivalence import reduce_matrix
 logger = logging.getLogger(__name__)
 
 
+def aggregate_equilibria(
+    equilibria: list[tuple[np.ndarray, np.ndarray]],
+) -> tuple[np.ndarray, np.ndarray]:
+    """Aggregate multiple Nash equilibria into a single policy pair.
+
+    Computes the centroid (arithmetic mean) of each player's equilibrium
+    strategies independently. For constant-sum games like PyRat, this is
+    guaranteed to be a valid equilibrium due to interchangeability.
+
+    Args:
+        equilibria: List of (p1_strategy, p2_strategy) Nash equilibria.
+                    Must be non-empty.
+
+    Returns:
+        (p1_policy, p2_policy) — the aggregated policy for each player
+
+    Raises:
+        ValueError: If equilibria is empty
+    """
+    if not equilibria:
+        raise ValueError("Cannot aggregate empty equilibria list")
+
+    p1_strategies = np.array([eq[0] for eq in equilibria])
+    p2_strategies = np.array([eq[1] for eq in equilibria])
+
+    return p1_strategies.mean(axis=0), p2_strategies.mean(axis=0)
+
+
 def _reduce_visits(
     visits: np.ndarray,
     p1_actions: list[int],
@@ -145,7 +173,8 @@ def compute_nash_equilibrium(
         over actions (sums to 1.0). Blocked and under-explored actions have probability 0.
 
     Note:
-        - For games with multiple Nash equilibria, returns a random one
+        - For games with multiple Nash equilibria, returns the centroid (mean)
+          of each player's strategies. This is valid for constant-sum games.
         - Uses support enumeration from nashpy library
         - Strategies are returned as numpy arrays of shape [num_actions]
         - With equivalence, computation is on reduced matrix for efficiency/uniqueness
@@ -270,13 +299,11 @@ def _compute_nash_raw(
         )
         return np.ones(num_p1) / num_p1, np.ones(num_p2) / num_p2
 
-    # Return a random equilibrium
-    # Note: For general-sum games, centroid of equilibria is NOT guaranteed to be
-    # an equilibrium itself. Random selection avoids arbitrary bias while ensuring
-    # we always return a valid Nash equilibrium.
-    idx = np.random.randint(len(equilibria))
-    p1_strat, p2_strat = equilibria[idx]
-    return np.asarray(p1_strat), np.asarray(p2_strat)
+    # Aggregate equilibria via centroid
+    # For constant-sum games like PyRat, the centroid is guaranteed to be a valid
+    # equilibrium due to interchangeability: any convex combination of equilibrium
+    # strategies is also an equilibrium.
+    return aggregate_equilibria(equilibria)
 
 
 def compute_nash_value(
