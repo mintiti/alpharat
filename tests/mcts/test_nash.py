@@ -4,6 +4,7 @@ import numpy as np
 import pytest
 
 from alpharat.mcts.nash import (
+    aggregate_equilibria,
     compute_nash_equilibrium,
     compute_nash_value,
     select_action_from_strategy,
@@ -421,3 +422,143 @@ class TestNashWithEquivalence:
 
         # Nash value should be computable (strategies are valid)
         compute_nash_value(p1_payout, p1_strategy, p2_strategy)
+
+
+class TestAggregateEquilibria:
+    """Tests for aggregate_equilibria function — mathematical properties of centroid."""
+
+    # --- Centroid Properties ---
+
+    def test_centroid_is_arithmetic_mean(self) -> None:
+        """Centroid should be the arithmetic mean of input vectors."""
+        v1 = np.array([0.2, 0.3, 0.5])
+        v2 = np.array([0.4, 0.4, 0.2])
+        v3 = np.array([0.1, 0.6, 0.3])
+
+        equilibria = [(v1, v1), (v2, v2), (v3, v3)]
+        p1_result, p2_result = aggregate_equilibria(equilibria)
+
+        expected = (v1 + v2 + v3) / 3
+        np.testing.assert_array_almost_equal(p1_result, expected)
+        np.testing.assert_array_almost_equal(p2_result, expected)
+
+    def test_centroid_of_single_vector(self) -> None:
+        """Centroid of a single vector is that vector."""
+        v = np.array([0.1, 0.2, 0.7])
+        u = np.array([0.5, 0.5])
+
+        p1_result, p2_result = aggregate_equilibria([(v, u)])
+
+        np.testing.assert_array_almost_equal(p1_result, v)
+        np.testing.assert_array_almost_equal(p2_result, u)
+
+    def test_centroid_preserves_probability_sum(self) -> None:
+        """If all inputs sum to 1, output sums to 1."""
+        equilibria = [
+            (np.array([0.3, 0.7]), np.array([0.2, 0.8])),
+            (np.array([0.6, 0.4]), np.array([0.5, 0.5])),
+            (np.array([0.1, 0.9]), np.array([0.9, 0.1])),
+        ]
+
+        p1_result, p2_result = aggregate_equilibria(equilibria)
+
+        assert abs(p1_result.sum() - 1.0) < 1e-10
+        assert abs(p2_result.sum() - 1.0) < 1e-10
+
+    def test_centroid_preserves_nonnegativity(self) -> None:
+        """If all inputs are non-negative, output is non-negative."""
+        equilibria = [
+            (np.array([0.0, 0.5, 0.5]), np.array([1.0, 0.0])),
+            (np.array([0.5, 0.0, 0.5]), np.array([0.0, 1.0])),
+            (np.array([0.5, 0.5, 0.0]), np.array([0.5, 0.5])),
+        ]
+
+        p1_result, p2_result = aggregate_equilibria(equilibria)
+
+        assert np.all(p1_result >= 0)
+        assert np.all(p2_result >= 0)
+
+    def test_centroid_in_convex_hull(self) -> None:
+        """Centroid is a convex combination of inputs (equal weights)."""
+        v1 = np.array([1.0, 0.0, 0.0])
+        v2 = np.array([0.0, 1.0, 0.0])
+        v3 = np.array([0.0, 0.0, 1.0])
+
+        equilibria = [(v1, v1), (v2, v2), (v3, v3)]
+        p1_result, _ = aggregate_equilibria(equilibria)
+
+        # Centroid of three corners of simplex is the center
+        expected = np.array([1 / 3, 1 / 3, 1 / 3])
+        np.testing.assert_array_almost_equal(p1_result, expected)
+
+    def test_centroid_idempotent_on_identical(self) -> None:
+        """Centroid of identical vectors is that vector."""
+        v = np.array([0.25, 0.25, 0.5])
+        u = np.array([0.4, 0.6])
+
+        equilibria = [(v, u), (v, u), (v, u)]
+        p1_result, p2_result = aggregate_equilibria(equilibria)
+
+        np.testing.assert_array_almost_equal(p1_result, v)
+        np.testing.assert_array_almost_equal(p2_result, u)
+
+    # --- Policy Aggregation Properties ---
+
+    def test_aggregate_independent_per_player(self) -> None:
+        """P1's result depends only on P1 strategies, not P2's."""
+        p1_a = np.array([0.3, 0.7])
+        p1_b = np.array([0.5, 0.5])
+        p2_x = np.array([0.1, 0.9])
+        p2_y = np.array([0.8, 0.2])
+
+        # Different P2 strategies should not affect P1 result
+        result1, _ = aggregate_equilibria([(p1_a, p2_x), (p1_b, p2_x)])
+        result2, _ = aggregate_equilibria([(p1_a, p2_y), (p1_b, p2_y)])
+
+        np.testing.assert_array_almost_equal(result1, result2)
+
+    def test_aggregate_returns_valid_distributions(self) -> None:
+        """Both outputs are valid probability distributions."""
+        equilibria = [
+            (np.array([0.2, 0.3, 0.5]), np.array([0.6, 0.4])),
+            (np.array([0.4, 0.4, 0.2]), np.array([0.3, 0.7])),
+        ]
+
+        p1_result, p2_result = aggregate_equilibria(equilibria)
+
+        # Sum to 1
+        assert abs(p1_result.sum() - 1.0) < 1e-10
+        assert abs(p2_result.sum() - 1.0) < 1e-10
+        # Non-negative
+        assert np.all(p1_result >= 0)
+        assert np.all(p2_result >= 0)
+
+    def test_aggregate_handles_different_action_counts(self) -> None:
+        """Works when P1 and P2 have different numbers of actions."""
+        p1_strat = np.array([0.5, 0.3, 0.2])  # 3 actions
+        p2_strat = np.array([0.2, 0.2, 0.2, 0.2, 0.2])  # 5 actions
+
+        equilibria = [(p1_strat, p2_strat)]
+        p1_result, p2_result = aggregate_equilibria(equilibria)
+
+        assert len(p1_result) == 3
+        assert len(p2_result) == 5
+
+    # --- Edge Cases ---
+
+    def test_aggregate_empty_raises(self) -> None:
+        """Empty list raises ValueError."""
+        with pytest.raises(ValueError, match="Cannot aggregate empty"):
+            aggregate_equilibria([])
+
+    def test_aggregate_pure_strategies(self) -> None:
+        """Pure strategies average to mixed correctly."""
+        # Two pure strategies: (1,0) and (0,1)
+        eq1 = (np.array([1.0, 0.0]), np.array([1.0, 0.0]))
+        eq2 = (np.array([0.0, 1.0]), np.array([0.0, 1.0]))
+
+        p1_result, p2_result = aggregate_equilibria([eq1, eq2])
+
+        # Should average to (0.5, 0.5)
+        np.testing.assert_array_almost_equal(p1_result, [0.5, 0.5])
+        np.testing.assert_array_almost_equal(p2_result, [0.5, 0.5])
