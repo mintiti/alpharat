@@ -26,7 +26,11 @@ from alpharat.nn.architectures.symmetric.config import (
 )
 from alpharat.nn.training.base import DataConfig  # noqa: TC001
 
-__all__ = ["TrainConfig", "ModelConfig", "OptimConfig"]
+__all__ = ["TrainConfig", "ModelConfig", "OptimConfig", "ARCHITECTURES"]
+
+# Valid architecture names — single source of truth for CLI validation etc.
+# Must match the Literal discriminator values in the configs below.
+ARCHITECTURES: list[str] = ["mlp", "symmetric", "local_value"]
 
 # Discriminated unions — Pydantic auto-dispatches based on 'architecture' field
 
@@ -48,6 +52,8 @@ class TrainConfig(BaseModel):
     architecture-specific config classes based on the 'architecture' field.
 
     Example YAML:
+        name: mlp_baseline_v1  # Required: identifies this experiment
+
         model:
           architecture: mlp
           hidden_dim: 256
@@ -65,6 +71,7 @@ class TrainConfig(BaseModel):
         seed: 42
     """
 
+    name: str  # Required: human-chosen experiment name
     model: ModelConfig
     optim: OptimConfig
     data: DataConfig

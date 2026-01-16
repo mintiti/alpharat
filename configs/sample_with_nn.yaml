@@ -1,5 +1,11 @@
 # Self-play sampling with NN prior
-# Checkpoint: train_20251227_231834/best_model.pt
+# Usage: uv run python scripts/sample.py configs/sample_with_nn.yaml --checkpoint PATH
+#
+# CLI overrides (merged into saved batch metadata):
+#   --group NAME       Override batch group name
+#   --checkpoint PATH  Override checkpoint path (e.g., 'experiments/runs/mlp_v1/checkpoints/best_model.pt')
+
+group: nn_guided  # Override with --group
 
 mcts:
   variant: decoupled_puct
@@ -20,5 +26,5 @@ sampling:
   workers: 4
   device: auto  # Use "auto", "cpu", "cuda", or "mps"
 
-output_dir: batches/
-checkpoint: checkpoints/train_20260105_160105/best_model.pt
+# Override with --checkpoint:
+checkpoint: null

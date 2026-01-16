@@ -205,7 +205,9 @@ class TestPrepareTrainingSet:
             manifest = load_training_set_manifest(result_dir)
 
             assert manifest.builder_version == "flat_v2"
-            assert manifest.source_batches == ["batch1"]
+            # source_batches are now in "group/uuid" format (parent_dir/batch_name)
+            assert len(manifest.source_batches) == 1
+            assert manifest.source_batches[0].endswith("/batch1")
             assert manifest.total_positions == 3  # 1 game × 3 positions
             assert manifest.width == 5
             assert manifest.height == 5
@@ -460,7 +462,10 @@ class TestPrepareTrainingSet:
 
             manifest = load_training_set_manifest(result_dir)
             assert manifest.total_positions == 9  # (2 + 1) games × 3 positions
-            assert set(manifest.source_batches) == {"batch1", "batch2"}
+            # source_batches are now in "group/uuid" format (parent_dir/batch_name)
+            assert len(manifest.source_batches) == 2
+            batch_names = {b.split("/")[-1] for b in manifest.source_batches}
+            assert batch_names == {"batch1", "batch2"}
 
 
 # =============================================================================
@@ -614,7 +619,7 @@ class TestPrepareTrainingSetWithSplit:
             output_dir.mkdir()
 
             builder = FlatObservationBuilder(width=5, height=5)
-            result_dir = prepare_training_set_with_split(
+            result = prepare_training_set_with_split(
                 batch_dirs=[batch_dir],
                 output_dir=output_dir,
                 builder=builder,
@@ -622,6 +627,7 @@ class TestPrepareTrainingSetWithSplit:
                 positions_per_shard=100,
                 seed=42,
             )
+            result_dir = Path(result.shard_dir)
 
             assert result_dir.exists()
             assert (result_dir / "train").exists()
@@ -642,7 +648,7 @@ class TestPrepareTrainingSetWithSplit:
             output_dir.mkdir()
 
             builder = FlatObservationBuilder(width=5, height=5)
-            result_dir = prepare_training_set_with_split(
+            result = prepare_training_set_with_split(
                 batch_dirs=[batch_dir],
                 output_dir=output_dir,
                 builder=builder,
@@ -650,6 +656,7 @@ class TestPrepareTrainingSetWithSplit:
                 positions_per_shard=100,
                 seed=42,
             )
+            result_dir = Path(result.shard_dir)
 
             train_manifest = load_training_set_manifest(result_dir / "train")
             val_manifest = load_training_set_manifest(result_dir / "val")
@@ -661,6 +668,11 @@ class TestPrepareTrainingSetWithSplit:
             # Val should have roughly 20% (2 games = 6 positions)
             assert val_manifest.total_positions == 6
 
+            # Also verify ShardingResult has correct counts
+            assert result.total_positions == 30
+            assert result.train_positions == 24
+            assert result.val_positions == 6
+
     def test_deterministic_with_seed(self) -> None:
         """Same seed should produce same split."""
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -671,23 +683,25 @@ class TestPrepareTrainingSetWithSplit:
 
             output_dir1 = tmp_path / "training_sets1"
             output_dir1.mkdir()
-            result_dir1 = prepare_training_set_with_split(
+            result1 = prepare_training_set_with_split(
                 batch_dirs=[batch_dir],
                 output_dir=output_dir1,
                 builder=builder,
                 val_ratio=0.2,
                 seed=42,
             )
+            result_dir1 = Path(result1.shard_dir)
 
             output_dir2 = tmp_path / "training_sets2"
             output_dir2.mkdir()
-            result_dir2 = prepare_training_set_with_split(
+            result2 = prepare_training_set_with_split(
                 batch_dirs=[batch_dir],
                 output_dir=output_dir2,
                 builder=builder,
                 val_ratio=0.2,
                 seed=42,
             )
+            result_dir2 = Path(result2.shard_dir)
 
             # Both should have same position counts
             train1 = load_training_set_manifest(result_dir1 / "train")
@@ -698,6 +712,10 @@ class TestPrepareTrainingSetWithSplit:
             val2 = load_training_set_manifest(result_dir2 / "val")
             assert val1.total_positions == val2.total_positions
 
+            # Also check ShardingResult consistency
+            assert result1.train_positions == result2.train_positions
+            assert result1.val_positions == result2.val_positions
+
     def test_val_ratio_zero_creates_only_train(self) -> None:
         """val_ratio=0.0 should create only train/, no val/."""
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -707,7 +725,7 @@ class TestPrepareTrainingSetWithSplit:
             output_dir.mkdir()
 
             builder = FlatObservationBuilder(width=5, height=5)
-            result_dir = prepare_training_set_with_split(
+            result = prepare_training_set_with_split(
                 batch_dirs=[batch_dir],
                 output_dir=output_dir,
                 builder=builder,
@@ -715,12 +733,18 @@ class TestPrepareTrainingSetWithSplit:
                 positions_per_shard=100,
                 seed=42,
             )
+            result_dir = Path(result.shard_dir)
 
             assert (result_dir / "train").exists()
             assert not (result_dir / "val").exists()
 
             train_manifest = load_training_set_manifest(result_dir / "train")
             assert train_manifest.total_positions == 15  # 5 games × 3 positions
+
+            # ShardingResult should reflect zero val
+            assert result.train_positions == 15
+            assert result.val_positions == 0
+            assert result.total_positions == 15
 
     def test_invalid_val_ratio_raises(self) -> None:
         """val_ratio >= 1.0 should raise ValueError."""

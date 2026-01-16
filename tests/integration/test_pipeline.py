@@ -243,7 +243,8 @@ class TestPipelineIntegrity:
                 max_turns=50,
             ),
             sampling=SamplingParams(num_games=1, workers=1),
-            output_dir=str(tmp_path / "batches"),
+            group="test_group",
+            experiments_dir=str(tmp_path),
         )
 
         # === Stage 1: Play and record ===
@@ -308,7 +309,8 @@ class TestPipelineIntegrity:
                 max_turns=30,
             ),
             sampling=SamplingParams(num_games=1, workers=1),
-            output_dir=str(tmp_path / "batches"),
+            group="test_topology",
+            experiments_dir=str(tmp_path),
         )
 
         batch_dir, _ = run_sampling(config, verbose=False)
@@ -352,7 +354,8 @@ class TestPipelineIntegrity:
                 max_turns=25,
             ),
             sampling=SamplingParams(num_games=1, workers=1),
-            output_dir=str(tmp_path / "batches"),
+            group="test_policies",
+            experiments_dir=str(tmp_path),
         )
 
         batch_dir, _ = run_sampling(config, verbose=False)

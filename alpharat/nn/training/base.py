@@ -11,6 +11,7 @@ from typing import TYPE_CHECKING
 from pydantic import BaseModel
 
 if TYPE_CHECKING:
+    from alpharat.nn.builders import ObservationBuilder
     from alpharat.nn.training.protocols import (
         AugmentationStrategy,
         LossFunction,
@@ -56,3 +57,19 @@ class BaseModelConfig(BaseModel):
     def build_augmentation(self) -> AugmentationStrategy:
         """Get the augmentation strategy (or NoAugmentation)."""
         raise NotImplementedError("Subclasses must implement build_augmentation()")
+
+    def build_observation_builder(self, width: int, height: int) -> ObservationBuilder:
+        """Get the observation builder for this architecture.
+
+        Called during sharding to tensorize game data into the format
+        this architecture expects. Different architectures may need different
+        input formats (flat vectors for MLPs, graphs for GNNs, etc.).
+
+        Args:
+            width: Maze width.
+            height: Maze height.
+
+        Returns:
+            ObservationBuilder configured for this architecture.
+        """
+        raise NotImplementedError("Subclasses must implement build_observation_builder()")

@@ -209,6 +209,7 @@ __marimo__/
 
 # Personal documents folder
 .mt/
+DOGFOOD.md
 
 # macOS
 .DS_Store
@@ -217,6 +218,7 @@ __marimo__/
 /batches/
 /checkpoints/
 /data/
+/experiments/
 /results/
 *.prof
 

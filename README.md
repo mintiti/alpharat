@@ -22,6 +22,64 @@ uv run pytest
 uv run python scripts/sample.py configs/sample.yaml
 ```
 
+## Self-play workflow
+
+The AlphaZero loop: sample games → train NN → use NN to sample better games → repeat.
+
+### First iteration (no NN yet)
+
+```bash
+# 1. Sample games with pure MCTS (uniform priors)
+uv run python scripts/sample.py configs/sample.yaml --group uniform_5x5
+
+# 2. Convert games to training shards
+uv run python scripts/prepare_shards.py --group 5x5_v1 --batches uniform_5x5
+
+# 3. Train NN and benchmark against baselines (Random, Greedy, MCTS)
+#    Edit configs/train.yaml: set name and data paths, then:
+uv run python scripts/train_and_benchmark.py configs/train.yaml --name mlp_v1 --games 50
+```
+
+### Subsequent iterations (with NN)
+
+```bash
+# 1. Sample using trained NN as MCTS prior
+#    Edit configs/sample_with_nn.yaml: set checkpoint path, then:
+uv run python scripts/sample.py configs/sample_with_nn.yaml --group nn_guided_v1
+
+# 2. Create shards from new games
+uv run python scripts/prepare_shards.py --group 5x5_v2 --batches nn_guided_v1
+
+# 3. Train on new data (optionally resuming from previous checkpoint)
+uv run python scripts/train.py configs/train.yaml --name mlp_v2
+
+# 4. Benchmark against previous iteration
+#    Edit tournament config to include previous checkpoint, then:
+uv run python scripts/benchmark.py configs/tournament.yaml
+```
+
+### Scripts
+
+| Script | Purpose |
+|--------|---------|
+| `sample.py` | Generate self-play games with MCTS (with or without NN prior) |
+| `prepare_shards.py` | Convert game batches to shuffled train/val shards |
+| `train.py` | Train NN on shards |
+| `benchmark.py` | Run tournament between agents (custom matchups) |
+| `train_and_benchmark.py` | Convenience: train + auto-benchmark vs baselines |
+
+### Where things go
+
+```
+experiments/
+├── batches/{group}/{uuid}/   # Raw game recordings from sampling
+├── shards/{group}/{uuid}/    # Processed train/val splits
+├── runs/{name}/              # Training runs with checkpoints
+└── benchmarks/{name}/        # Tournament results
+```
+
+The `experiments/manifest.yaml` tracks lineage (which shards came from which batches, etc.).
+
 ## What's here
 
 - `alpharat/mcts/` — Tree search with 5×5 payout matrices per node, handles action equivalence, computes Nash at root
@@ -52,7 +110,7 @@ See [CLAUDE.md](CLAUDE.md) for implementation details.
 
 Current best: 1106 Elo (MCTS+NN after 2 iterations), undefeated in 300 games.
 
-See [.mt/experiment-log.md](.mt/experiment-log.md) for full results and roadmap.
+See [experiments/LOG.md](experiments/LOG.md) for full results and roadmap.
 
 ## License
 
