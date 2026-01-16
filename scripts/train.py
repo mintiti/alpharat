@@ -2,16 +2,19 @@
 """Training script for PyRat neural network.
 
 Usage:
-    uv run python scripts/train.py configs/train.yaml
+    uv run python scripts/train.py configs/train.yaml --name mlp_v1 --shards mygroup/abc123
     uv run python scripts/train.py configs/train.yaml --epochs 200
     uv run python scripts/train.py configs/train.yaml --amp  # Force AMP
-    uv run python scripts/train.py configs/train.yaml --name override_name  # Override config name
+
+CLI overrides (--name, --shards) are merged into the config before saving,
+so the frozen config in experiments/runs/{name}/config.yaml has actual values.
 """
 
 from __future__ import annotations
 
 import argparse
 import logging
+import sys
 from pathlib import Path
 
 import yaml
@@ -32,7 +35,13 @@ def main() -> None:
         "--name",
         type=str,
         default=None,
-        help="Override run name from config (default: use config.name)",
+        help="Override run name (merged into frozen config)",
+    )
+    parser.add_argument(
+        "--shards",
+        type=str,
+        default=None,
+        help="Shard ID as GROUP/UUID (e.g., 'mygroup/abc123'). Overrides data paths in config.",
     )
     parser.add_argument("--epochs", type=int, default=100, help="Number of epochs")
     parser.add_argument("--checkpoint-every", type=int, default=10, help="Save every N epochs")
@@ -44,12 +53,6 @@ def main() -> None:
         default=Path("experiments"),
         help="Experiments directory (default: experiments)",
     )
-    parser.add_argument(
-        "--source-shards",
-        type=str,
-        default=None,
-        help="Shard ID used for training (auto-detected from config if not specified)",
-    )
     parser.add_argument("--resume", type=Path, default=None, help="Checkpoint to resume from")
 
     # AMP flags (mutually exclusive: auto-detect by default)
@@ -59,23 +62,38 @@ def main() -> None:
 
     args = parser.parse_args()
 
-    # Load config
+    exp = ExperimentManager(args.experiments_dir)
+
+    # Load config as dict first (for merging CLI overrides)
     config_data = yaml.safe_load(args.config.read_text())
+
+    # Merge CLI overrides BEFORE validation (so frozen config has actual values)
+    if args.shards:
+        # Validate format
+        if "/" not in args.shards:
+            parser.error("--shards requires 'GROUP/UUID' format (e.g., 'mygroup/abc123')")
+        shard_path = exp.get_shard_path(args.shards)
+        if not shard_path.exists():
+            parser.error(f"Shard not found: {args.shards} (looked in {shard_path})")
+        # Merge into config
+        config_data.setdefault("data", {})
+        config_data["data"]["train_dir"] = str(shard_path / "train")
+        config_data["data"]["val_dir"] = str(shard_path / "val")
+
+    if args.name:
+        config_data["name"] = args.name
+
+    # Now validate the merged config
     config = TrainConfig.model_validate(config_data)
 
     # Tri-state AMP: True (force on), False (force off), None (auto-detect)
     use_amp = True if args.amp else (False if args.no_amp else None)
 
-    # Run name: CLI override or config.name
-    run_name = args.name if args.name else config.name
-
-    exp = ExperimentManager(args.experiments_dir)
-
-    # Auto-detect source shards from data path if not specified
-    source_shards = args.source_shards
-    if source_shards is None:
-        # Try to extract shard ID from train_dir path
-        # Expected format: experiments/shards/{group}/{uuid}/train
+    # Derive source_shards for manifest (from --shards or from config paths)
+    if args.shards:
+        source_shards = args.shards
+    else:
+        # Auto-detect from data path
         train_dir = Path(config.data.train_dir)
         if train_dir.name == "train":
             shard_dir = train_dir.parent  # {uuid}
@@ -84,39 +102,42 @@ def main() -> None:
             if shards_dir.name == "shards":
                 source_shards = shard_id_from_path(shard_dir)
             else:
-                raise ValueError(
+                logger.error(
                     f"Cannot auto-detect source shards from '{config.data.train_dir}'. "
-                    f"Expected path like 'experiments/shards/{{group}}/{{uuid}}/train'. "
-                    f"Use --source-shards group/uuid to specify explicitly."
+                    f"Expected path like 'experiments/shards/GROUP/UUID/train'. "
+                    f"Use --shards GROUP/UUID to specify explicitly."
                 )
+                sys.exit(1)
         else:
-            raise ValueError(
+            logger.error(
                 f"Cannot auto-detect source shards from '{config.data.train_dir}'. "
                 f"Expected path ending in '/train'. "
-                f"Use --source-shards group/uuid to specify explicitly."
+                f"Use --shards GROUP/UUID to specify explicitly."
             )
+            sys.exit(1)
 
     # Create run via ExperimentManager (unless resuming)
+    # Note: config.name has the merged value (from --name if provided, else from YAML)
     if args.resume is None:
         run_dir = exp.create_run(
-            name=run_name,
+            name=config.name,
             config=config.model_dump(),
             source_shards=source_shards,
             parent_checkpoint=None,
         )
         # Name might have been auto-incremented if same config exists
         actual_name = run_dir.name
-        if actual_name != run_name:
-            logger.info(f"Run '{run_name}' exists with same config, using '{actual_name}'")
+        if actual_name != config.name:
+            logger.info(f"Run '{config.name}' exists with same config, using '{actual_name}'")
         logger.info(f"Created run: {actual_name}")
         logger.info(f"  Run directory: {run_dir}")
     else:
         # Resuming - use existing run directory and set resume_from in config
-        run_dir = exp.get_run_path(run_name)
+        run_dir = exp.get_run_path(config.name)
         if not run_dir.exists():
-            logger.error(f"Run '{run_name}' not found at {run_dir}")
+            logger.error(f"Run '{config.name}' not found at {run_dir}")
             return
-        actual_name = run_name
+        actual_name = config.name
         # Update config with resume path (TrainConfig handles resume via resume_from field)
         config = config.model_copy(update={"resume_from": str(args.resume)})
         logger.info(f"Resuming run: {actual_name}")

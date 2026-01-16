@@ -2,9 +2,12 @@
 """Self-play sampling script for training data generation.
 
 Usage:
-    uv run python scripts/sample.py configs/sample.yaml
+    uv run python scripts/sample.py configs/sample.yaml --group mygroup
+    uv run python scripts/sample.py configs/sample.yaml --checkpoint path/to/model.pt
     uv run python scripts/sample.py configs/sample.yaml --workers 8
-    uv run python scripts/sample.py configs/sample.yaml --group override_name  # Override config
+
+CLI overrides (--group, --checkpoint) are merged into the config before saving,
+so the batch metadata has actual values.
 """
 
 from __future__ import annotations
@@ -26,21 +29,30 @@ def main() -> None:
         "--group",
         type=str,
         default=None,
-        help="Override batch group name from config (default: use config.group)",
+        help="Override batch group name (merged into saved metadata)",
+    )
+    parser.add_argument(
+        "--checkpoint",
+        type=str,
+        default=None,
+        help="Override checkpoint path for NN-guided MCTS (merged into saved metadata)",
     )
     parser.add_argument("--workers", type=int, help="Override number of parallel workers")
     args = parser.parse_args()
 
-    # Load config
+    # Load config as dict first (for merging CLI overrides)
     config_data = yaml.safe_load(args.config.read_text())
 
-    # CLI --group overrides config
+    # Merge CLI overrides BEFORE validation (so saved metadata has actual values)
     if args.group is not None:
         config_data["group"] = args.group
 
+    if args.checkpoint is not None:
+        config_data["checkpoint"] = args.checkpoint
+
     config = SamplingConfig.model_validate(config_data)
 
-    # Apply overrides
+    # Apply runtime overrides (not saved to metadata)
     if args.workers is not None:
         config.sampling.workers = args.workers
 

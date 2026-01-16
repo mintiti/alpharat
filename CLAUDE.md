@@ -2,6 +2,16 @@
 
 Guidance for coding agents working in this repository.
 
+## Design Philosophy
+
+This repo was built around the idea that experimentation should be fast to iterate on.
+
+The pain with most ML pipelines: everything is coupled. Change training params? Re-sample everything. Try a different architecture? Start from scratch. Hours wasted redoing work you already did.
+
+Here, each stage — sampling, sharding, training — produces reusable artifacts. Same samples, different architectures. Same checkpoint, different MCTS params. You only redo what actually changed.
+
+Reproducibility falls out naturally: when artifacts are saved and stages are decoupled, you always know exactly what went into each run.
+
 ## Project Overview
 
 **alpharat** is a game-theoretic MCTS implementation for simultaneous two-player games, targeting PyRat (a maze game where both players move at the same time). Standard MCTS doesn't work for simultaneous moves — this project uses payout matrices and Nash equilibrium computation instead of single Q-values.
@@ -528,29 +538,28 @@ The AlphaZero iteration: sample games → train NN → use NN to sample better g
 **First iteration (no NN yet):**
 ```bash
 # 1. Sample games with pure MCTS (uniform priors)
-uv run python scripts/sample.py configs/sample.yaml --group uniform_5x5
+uv run python scripts/sample.py configs/sample.yaml --group iteration_0
 
 # 2. Convert games to training shards
-uv run python scripts/prepare_shards.py --group 5x5_v1 --batches uniform_5x5
+uv run python scripts/prepare_shards.py --architecture mlp --group iter0_shards --batches iteration_0
 
-# 3. Train NN and benchmark against baselines (Random, Greedy, MCTS)
-#    (edit configs/train.yaml first: set name and data paths)
-uv run python scripts/train_and_benchmark.py configs/train.yaml --name mlp_v1 --games 50
+# 3. Train NN and benchmark against baselines
+uv run python scripts/train_and_benchmark.py configs/train.yaml --name mlp_v1 --shards iter0_shards/UUID --games 50
 ```
 
 **Subsequent iterations (with NN):**
 ```bash
 # 1. Sample using trained NN as MCTS prior
-#    (edit configs/sample_with_nn.yaml: set checkpoint path)
-uv run python scripts/sample.py configs/sample_with_nn.yaml --group nn_guided_v1
+uv run python scripts/sample.py configs/sample_with_nn.yaml --group iteration_1 \
+    --checkpoint experiments/runs/mlp_v1/checkpoints/best_model.pt
 
 # 2. Create shards from new games
-uv run python scripts/prepare_shards.py --group 5x5_v2 --batches nn_guided_v1
+uv run python scripts/prepare_shards.py --architecture mlp --group iter1_shards --batches iteration_1
 
-# 3. Train on new data (optionally resume from previous checkpoint)
-uv run python scripts/train.py configs/train.yaml --name mlp_v2
+# 3. Train on new data
+uv run python scripts/train.py configs/train.yaml --name mlp_v2 --shards iter1_shards/UUID
 
-# 4. Benchmark against previous iteration (custom tournament config)
+# 4. Benchmark against previous iteration
 uv run python scripts/benchmark.py configs/tournament.yaml
 ```
 

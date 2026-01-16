@@ -4,12 +4,15 @@
 Converts raw game batches into shuffled, sharded training data with train/val split.
 Games (not positions) are split to prevent data leakage.
 
-The observation builder is determined by the model config — this ensures the shard
-format matches what the architecture expects during training.
+The observation builder is determined by the architecture — this ensures the shard
+format matches what the model expects during training.
 
 Usage:
-    uv run python scripts/prepare_shards.py configs/train.yaml --group 5x5 --batches uniform_5x5
-    uv run python scripts/prepare_shards.py configs/train.yaml --group 5x5 --batches "grp/*"
+    # Using --architecture directly (simpler)
+    uv run python scripts/prepare_shards.py --architecture mlp --group myshards --batches mybatches
+
+    # Using config file (alternative)
+    uv run python scripts/prepare_shards.py configs/train.yaml --group myshards --batches mybatches
 """
 
 from __future__ import annotations
@@ -26,7 +29,7 @@ from pydantic import TypeAdapter
 from alpharat.data.sharding import prepare_training_set_with_split
 from alpharat.experiments import ExperimentManager
 from alpharat.experiments.paths import get_shards_dir
-from alpharat.nn.config import ModelConfig
+from alpharat.nn.config import ARCHITECTURES, ModelConfig
 
 # TypeAdapter for validating union types
 _model_config_adapter: TypeAdapter[ModelConfig] = TypeAdapter(ModelConfig)
@@ -40,13 +43,20 @@ def main() -> None:
     parser.add_argument(
         "config",
         type=Path,
-        help="Path to YAML config file (uses model.architecture to select observation builder)",
+        nargs="?",
+        help="Path to YAML config file (optional if --architecture is specified)",
+    )
+    parser.add_argument(
+        "--architecture",
+        type=str,
+        choices=ARCHITECTURES,
+        help=f"Architecture for observation builder. One of: {', '.join(ARCHITECTURES)}",
     )
     parser.add_argument(
         "--group",
         type=str,
         required=True,
-        help="Shard group name (e.g., '5x5_uniform', '7x7_walls')",
+        help="Shard group name (e.g., 'mygroup', 'iteration2')",
     )
     parser.add_argument(
         "--batches",
@@ -85,13 +95,21 @@ def main() -> None:
     )
     args = parser.parse_args()
 
-    # Load model config to get the observation builder
-    config_data = yaml.safe_load(args.config.read_text())
-    if "model" not in config_data:
-        logger.error(f"Config file {args.config} must have a 'model' section")
-        return
-    model_config = _model_config_adapter.validate_python(config_data["model"])
-    logger.info(f"Using architecture: {model_config.architecture}")
+    # Get architecture from --architecture or from config file
+    if args.architecture:
+        # Use --architecture directly
+        model_config = _model_config_adapter.validate_python({"architecture": args.architecture})
+        logger.info(f"Using architecture: {args.architecture}")
+    elif args.config:
+        # Load from config file
+        config_data = yaml.safe_load(args.config.read_text())
+        if "model" not in config_data:
+            logger.error(f"Config file {args.config} must have a 'model' section")
+            return
+        model_config = _model_config_adapter.validate_python(config_data["model"])
+        logger.info(f"Using architecture: {model_config.architecture}")
+    else:
+        parser.error("Either config file or --architecture is required")
 
     exp = ExperimentManager(args.experiments_dir)
 

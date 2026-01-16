@@ -1,9 +1,11 @@
 # Self-play sampling with NN prior
-# Usage: uv run python scripts/sample.py configs/sample_with_nn.yaml
+# Usage: uv run python scripts/sample.py configs/sample_with_nn.yaml --checkpoint PATH
 #
-# Before running: set `checkpoint` to your trained model path
+# CLI overrides (merged into saved batch metadata):
+#   --group NAME       Override batch group name
+#   --checkpoint PATH  Override checkpoint path (e.g., 'experiments/runs/mlp_v1/checkpoints/best_model.pt')
 
-group: nn_guided  # Required: batch group name (consider: nn_guided_v2, iter2, etc.)
+group: nn_guided  # Override with --group
 
 mcts:
   variant: decoupled_puct
@@ -24,6 +26,5 @@ sampling:
   workers: 4
   device: auto  # Use "auto", "cpu", "cuda", or "mps"
 
-# Path to trained model checkpoint for NN-guided MCTS
-# Example: experiments/runs/mlp_v1/checkpoints/best_model.pt
-checkpoint: <YOUR_CHECKPOINT_PATH>
+# Override with --checkpoint:
+checkpoint: null

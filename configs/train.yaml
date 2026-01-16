@@ -1,12 +1,13 @@
 # MLP training configuration
-# Usage: uv run python scripts/train.py configs/train.yaml
+# Usage: uv run python scripts/train.py configs/train.yaml --name mlp_v1 --shards GROUP/UUID
 #
-# Before running:
-#   1. Set `name` to your run name (e.g., mlp_v1)
-#   2. Set `data.train_dir` and `data.val_dir` to your shard paths
-#      (run `ls experiments/shards/` to see available shards)
+# CLI overrides (merged into frozen config for reproducibility):
+#   --name NAME         Override experiment name
+#   --shards GROUP/UUID Override data paths (e.g., 'mygroup/abc123')
+#
+# To find shard IDs: ls experiments/shards/
 
-name: <EXPERIMENT_NAME>  # e.g., mlp_v1, symmetric_5x5
+name: default  # Override with --name
 
 model:
   architecture: mlp
@@ -26,9 +27,8 @@ optim:
   nash_mode: target
 
 data:
-  # Path format: experiments/shards/{group}/{uuid}/train
-  # Example: experiments/shards/5x5_uniform/a1b2c3d4-.../train
-  train_dir: experiments/shards/<GROUP>/<UUID>/train
-  val_dir: experiments/shards/<GROUP>/<UUID>/val
+  # Override with --shards, or set explicitly:
+  train_dir: experiments/shards/GROUP/UUID/train
+  val_dir: experiments/shards/GROUP/UUID/val
 
 seed: 42

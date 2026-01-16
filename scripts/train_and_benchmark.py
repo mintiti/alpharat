@@ -7,16 +7,19 @@ This convenience script chains training with evaluation:
 3. Saves benchmark results as {run_name}_benchmark
 
 Usage:
-    uv run python scripts/train_and_benchmark.py configs/train.yaml
+    uv run python scripts/train_and_benchmark.py configs/train.yaml --name mlp_v1 --shards grp/uuid
     uv run python scripts/train_and_benchmark.py configs/train.yaml --games 100 --device mps
     uv run python scripts/train_and_benchmark.py configs/train.yaml --epochs 50 --workers 8
-    uv run python scripts/train_and_benchmark.py configs/train.yaml --name override_name
+
+CLI overrides (--name, --shards) are merged into the config before saving,
+so the frozen config in experiments/runs/{name}/config.yaml has actual values.
 """
 
 from __future__ import annotations
 
 import argparse
 import logging
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -33,6 +36,7 @@ from alpharat.data.batch import GameParams
 from alpharat.eval.elo import compute_elo, from_tournament_result
 from alpharat.eval.tournament import TournamentConfig, run_tournament
 from alpharat.experiments import ExperimentManager
+from alpharat.experiments.paths import shard_id_from_path
 from alpharat.nn.config import TrainConfig
 from alpharat.nn.training import run_training
 
@@ -135,7 +139,13 @@ def main() -> None:
         "--name",
         type=str,
         default=None,
-        help="Override run name from config (default: use config.name)",
+        help="Override run name (merged into frozen config)",
+    )
+    parser.add_argument(
+        "--shards",
+        type=str,
+        default=None,
+        help="Shard ID as GROUP/UUID (e.g., 'mygroup/abc123'). Overrides data paths in config.",
     )
     parser.add_argument("--epochs", type=int, default=100, help="Training epochs")
     parser.add_argument("--checkpoint-every", type=int, default=10, help="Checkpoint frequency")
@@ -144,12 +154,6 @@ def main() -> None:
         type=Path,
         default=Path("experiments"),
         help="Experiments directory (default: experiments)",
-    )
-    parser.add_argument(
-        "--source-shards",
-        type=str,
-        default=None,
-        help="Shard ID used for training (auto-detected from config if not specified)",
     )
 
     # Benchmark args
@@ -173,47 +177,80 @@ def main() -> None:
 
     args = parser.parse_args()
 
-    # Parse config (needed for resume_from even when skipping training)
+    exp = ExperimentManager(args.experiments_dir)
+
+    # Load config as dict first (for merging CLI overrides)
     config_data = yaml.safe_load(args.config.read_text())
+
+    # Merge CLI overrides BEFORE validation (so frozen config has actual values)
+    if args.shards:
+        # Validate format
+        if "/" not in args.shards:
+            parser.error("--shards requires 'GROUP/UUID' format (e.g., 'mygroup/abc123')")
+        shard_path = exp.get_shard_path(args.shards)
+        if not shard_path.exists():
+            parser.error(f"Shard not found: {args.shards} (looked in {shard_path})")
+        # Merge into config
+        config_data.setdefault("data", {})
+        config_data["data"]["train_dir"] = str(shard_path / "train")
+        config_data["data"]["val_dir"] = str(shard_path / "val")
+
+    if args.name:
+        config_data["name"] = args.name
+
+    # Now validate the merged config
     config = TrainConfig.model_validate(config_data)
 
     # Tri-state AMP: True (force on), False (force off), None (auto-detect)
     use_amp = True if args.amp else (False if args.no_amp else None)
 
-    # Run name: CLI override or config.name
-    run_name = args.name if args.name else config.name
-
-    exp = ExperimentManager(args.experiments_dir)
-
-    # Auto-detect source shards from data path if not specified
-    source_shards = args.source_shards
-    if source_shards is None:
+    # Derive source_shards for manifest (from --shards or from config paths)
+    if args.shards:
+        source_shards = args.shards
+    else:
+        # Auto-detect from data path
         train_dir = Path(config.data.train_dir)
-        # Expected format: experiments/shards/{group}/{uuid}/train
-        if train_dir.name == "train" and train_dir.parent.exists():
-            source_shards = train_dir.parent.name
+        if train_dir.name == "train":
+            shard_dir = train_dir.parent  # {uuid}
+            group_dir = shard_dir.parent  # {group}
+            shards_dir = group_dir.parent  # shards/
+            if shards_dir.name == "shards":
+                source_shards = shard_id_from_path(shard_dir)
+            else:
+                logger.error(
+                    f"Cannot auto-detect source shards from '{config.data.train_dir}'. "
+                    f"Expected path like 'experiments/shards/GROUP/UUID/train'. "
+                    f"Use --shards GROUP/UUID to specify explicitly."
+                )
+                sys.exit(1)
         else:
-            source_shards = "unknown"
+            logger.error(
+                f"Cannot auto-detect source shards from '{config.data.train_dir}'. "
+                f"Expected path ending in '/train'. "
+                f"Use --shards GROUP/UUID to specify explicitly."
+            )
+            sys.exit(1)
 
     # Phase 1: Training
+    # Note: config.name has the merged value (from --name if provided, else from YAML)
     if args.skip_training:
         if args.checkpoint is None:
             parser.error("--skip-training requires --checkpoint")
         checkpoint_path = args.checkpoint
-        actual_run_name = run_name  # Use provided name when skipping
+        actual_run_name = config.name  # Use merged name when skipping
         logger.info(f"Skipping training, using checkpoint: {checkpoint_path}")
     else:
         # Create run via ExperimentManager
         run_dir = exp.create_run(
-            name=run_name,
+            name=config.name,
             config=config.model_dump(),
             source_shards=source_shards,
             parent_checkpoint=None,
         )
         # Name might have been auto-incremented if same config exists
         actual_run_name = run_dir.name
-        if actual_run_name != run_name:
-            logger.info(f"Run '{run_name}' exists with same config, using '{actual_run_name}'")
+        if actual_run_name != config.name:
+            logger.info(f"Run '{config.name}' exists with same config, using '{actual_run_name}'")
 
         logger.info("=" * 60)
         logger.info("Phase 1: Training")
