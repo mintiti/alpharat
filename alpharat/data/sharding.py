@@ -5,6 +5,8 @@ from __future__ import annotations
 import json
 import logging
 import uuid
+from collections import defaultdict
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
@@ -18,10 +20,23 @@ from alpharat.nn.extraction import from_game_arrays
 from alpharat.nn.targets import build_targets
 
 if TYPE_CHECKING:
+    from collections.abc import Iterator
     from pathlib import Path
 
     from alpharat.data.types import GameData
     from alpharat.nn.builders import ObservationBuilder
+
+
+@dataclass(frozen=True)
+class GameRef:
+    """Reference to a game, either single-file or within a bundle.
+
+    Allows game-level operations (shuffling, splitting) without loading data.
+    """
+
+    file_path: Path
+    bundle_index: int | None = None  # None for single-game files, index for bundles
+
 
 logger = logging.getLogger(__name__)
 
@@ -216,27 +231,24 @@ def prepare_training_set_with_split(
     if not 0.0 <= val_ratio < 1.0:
         raise ValueError(f"val_ratio must be in [0.0, 1.0), got {val_ratio}")
 
-    # Collect all game files
-    game_files: list[Path] = []
-    for batch_dir in batch_dirs:
-        games_dir = batch_dir / "games"
-        if games_dir.exists():
-            game_files.extend(games_dir.glob("*.npz"))
-
-    if not game_files:
-        raise ValueError("No game files found in batch directories")
+    # Collect all game refs (individual games, not files)
+    game_refs = _collect_game_refs(batch_dirs)
+    total_games = len(game_refs)
+    logger.info(f"Found {total_games} games across batch directories")
 
     # Shuffle and split at game level
     rng = np.random.default_rng(seed)
-    indices = rng.permutation(len(game_files))
-    shuffled_files = [game_files[i] for i in indices]
+    indices = rng.permutation(total_games)
+    shuffled_refs = [game_refs[i] for i in indices]
 
-    n_val = int(len(shuffled_files) * val_ratio)
-    val_files = shuffled_files[:n_val]
-    train_files = shuffled_files[n_val:]
+    n_val = int(total_games * val_ratio)
+    val_refs = shuffled_refs[:n_val]
+    train_refs = shuffled_refs[n_val:]
 
-    if not train_files:
+    if not train_refs:
         raise ValueError("No games left for training after split")
+
+    logger.info(f"Split: {len(train_refs)} train games, {len(val_refs)} val games")
 
     # Create parent directory
     training_set_id = str(uuid.uuid4())
@@ -244,11 +256,11 @@ def prepare_training_set_with_split(
     training_set_dir.mkdir(parents=True, exist_ok=False)
 
     # Process train split
-    logger.info(f"Processing train split: {len(train_files)} games")
+    logger.info(f"Processing train split: {len(train_refs)} games")
     train_dir = training_set_dir / "train"
     train_dir.mkdir()
-    train_positions = _process_game_files_to_shards(
-        game_files=train_files,
+    train_positions = _process_game_refs_to_shards(
+        game_refs=train_refs,
         output_dir=train_dir,
         builder=builder,
         positions_per_shard=positions_per_shard,
@@ -259,14 +271,14 @@ def prepare_training_set_with_split(
 
     # Process val split (if any validation games)
     val_positions = 0
-    if val_files:
-        logger.info(f"Processing val split: {len(val_files)} games")
+    if val_refs:
+        logger.info(f"Processing val split: {len(val_refs)} games")
         val_dir = training_set_dir / "val"
         val_dir.mkdir()
         # Use different seed for val shuffle
         val_seed = seed + 1 if seed is not None else None
-        val_positions = _process_game_files_to_shards(
-            game_files=val_files,
+        val_positions = _process_game_refs_to_shards(
+            game_refs=val_refs,
             output_dir=val_dir,
             builder=builder,
             positions_per_shard=positions_per_shard,
@@ -370,6 +382,94 @@ def _process_game_files_to_shards(
     return total_positions
 
 
+def _process_game_refs_to_shards(
+    game_refs: list[GameRef],
+    output_dir: Path,
+    builder: ObservationBuilder,
+    positions_per_shard: int,
+    seed: int | None,
+    training_set_id: str,
+    source_batches: list[str],
+) -> int:
+    """Process game refs into shards for a single split.
+
+    Like _process_game_files_to_shards but takes GameRef list for game-level splitting.
+
+    Args:
+        game_refs: List of GameRef objects specifying which games to process.
+        output_dir: Directory to write shards to.
+        builder: ObservationBuilder to use.
+        positions_per_shard: Maximum positions per shard.
+        seed: Random seed for shuffling positions.
+        training_set_id: ID for the manifest.
+        source_batches: Batch names for the manifest.
+
+    Returns:
+        Number of positions written.
+    """
+    # Load and process all positions from game refs
+    (
+        obs_array,
+        policy_p1_array,
+        policy_p2_array,
+        p1_values_array,
+        p2_values_array,
+        payout_array,
+        action_p1_array,
+        action_p2_array,
+        cheese_outcomes_array,
+        width,
+        height,
+    ) = _load_positions_from_refs(game_refs, builder)
+
+    total_positions = len(p1_values_array)
+
+    # Shuffle positions within this split
+    rng = np.random.default_rng(seed)
+    indices = rng.permutation(total_positions)
+
+    obs_array = obs_array[indices]
+    policy_p1_array = policy_p1_array[indices]
+    policy_p2_array = policy_p2_array[indices]
+    p1_values_array = p1_values_array[indices]
+    p2_values_array = p2_values_array[indices]
+    payout_array = payout_array[indices]
+    action_p1_array = action_p1_array[indices]
+    action_p2_array = action_p2_array[indices]
+    cheese_outcomes_array = cheese_outcomes_array[indices]
+
+    # Write shards
+    shard_count = _write_shards(
+        output_dir,
+        obs_array,
+        policy_p1_array,
+        policy_p2_array,
+        p1_values_array,
+        p2_values_array,
+        payout_array,
+        action_p1_array,
+        action_p2_array,
+        cheese_outcomes_array,
+        positions_per_shard,
+    )
+
+    # Write manifest
+    manifest = TrainingSetManifest(
+        training_set_id=training_set_id,
+        created_at=datetime.now(UTC),
+        builder_version=builder.version,
+        source_batches=source_batches,
+        total_positions=total_positions,
+        shard_count=shard_count,
+        positions_per_shard=positions_per_shard,
+        width=width,
+        height=height,
+    )
+    _save_manifest(output_dir, manifest)
+
+    return total_positions
+
+
 def load_training_set_manifest(training_set_dir: Path) -> TrainingSetManifest:
     """Load manifest from training set directory.
 
@@ -385,6 +485,181 @@ def load_training_set_manifest(training_set_dir: Path) -> TrainingSetManifest:
     manifest_path = training_set_dir / "manifest.json"
     data = json.loads(manifest_path.read_text())
     return TrainingSetManifest.model_validate(data)
+
+
+def _collect_game_refs(batch_dirs: list[Path]) -> list[GameRef]:
+    """Collect references to all games in batch directories.
+
+    Enumerates games at the individual game level, not file level.
+    For bundle files, creates one GameRef per game in the bundle.
+
+    Args:
+        batch_dirs: List of batch directories to scan.
+
+    Returns:
+        List of GameRef objects, one per game.
+
+    Raises:
+        ValueError: If no games found.
+    """
+
+    game_refs: list[GameRef] = []
+
+    for batch_dir in batch_dirs:
+        games_dir = batch_dir / "games"
+        if not games_dir.exists():
+            continue
+
+        for game_file in games_dir.glob("*.npz"):
+            if is_bundle_file(game_file):
+                # Count games in bundle without loading full data
+                with np.load(game_file) as data:
+                    n_games = len(data["game_lengths"])
+                for i in range(n_games):
+                    game_refs.append(GameRef(game_file, bundle_index=i))
+            else:
+                game_refs.append(GameRef(game_file, bundle_index=None))
+
+    if not game_refs:
+        raise ValueError("No games found in batch directories")
+
+    return game_refs
+
+
+def _iter_games_from_refs(
+    refs: list[GameRef],
+    desc: str = "Loading games",
+) -> Iterator[GameData]:
+    """Iterate over games from GameRef list, grouping by file for efficiency.
+
+    Groups refs by file path and loads each file only once, yielding games
+    in the order specified by refs.
+
+    Args:
+        refs: List of GameRef objects specifying which games to load.
+        desc: Description for progress bar.
+
+    Yields:
+        GameData objects in the order specified by refs.
+    """
+    # Group refs by file to minimize I/O
+    refs_by_file: dict[Path, list[tuple[int, int | None]]] = defaultdict(list)
+    for idx, ref in enumerate(refs):
+        refs_by_file[ref.file_path].append((idx, ref.bundle_index))
+
+    # Load games, tracking original order
+    games_by_idx: dict[int, GameData] = {}
+
+    for file_path in tqdm(refs_by_file.keys(), desc=desc, unit="file"):
+        indices_and_bundle_idxs = refs_by_file[file_path]
+
+        if indices_and_bundle_idxs[0][1] is None:
+            # Single-game file
+            game = load_game_data(file_path)
+            for idx, _ in indices_and_bundle_idxs:
+                games_by_idx[idx] = game
+        else:
+            # Bundle file: load once, extract requested games
+            # In this branch, bundle_idx is guaranteed to be int (not None)
+            needed_bundle_idxs: set[int] = {
+                bundle_idx for _, bundle_idx in indices_and_bundle_idxs if bundle_idx is not None
+            }
+            idx_by_bundle: dict[int, int] = {
+                bundle_idx: idx
+                for idx, bundle_idx in indices_and_bundle_idxs
+                if bundle_idx is not None
+            }
+
+            for bundle_idx, game in enumerate(iter_games_from_bundle(file_path)):
+                if bundle_idx in needed_bundle_idxs:
+                    games_by_idx[idx_by_bundle[bundle_idx]] = game
+
+    # Yield in original order
+    for idx in range(len(refs)):
+        yield games_by_idx[idx]
+
+
+def _load_positions_from_refs(
+    refs: list[GameRef],
+    builder: ObservationBuilder,
+) -> tuple[
+    np.ndarray,
+    np.ndarray,
+    np.ndarray,
+    np.ndarray,
+    np.ndarray,
+    np.ndarray,
+    np.ndarray,
+    np.ndarray,
+    np.ndarray,
+    int,
+    int,
+]:
+    """Load and process positions from game refs into stacked arrays.
+
+    Args:
+        refs: List of GameRef objects specifying which games to load.
+        builder: ObservationBuilder to use.
+
+    Returns:
+        Same tuple as _load_positions_from_files.
+    """
+    all_observations: list[np.ndarray] = []
+    all_policy_p1: list[np.ndarray] = []
+    all_policy_p2: list[np.ndarray] = []
+    all_p1_values: list[float] = []
+    all_p2_values: list[float] = []
+    all_payout_matrices: list[np.ndarray] = []
+    all_action_p1: list[int] = []
+    all_action_p2: list[int] = []
+    all_cheese_outcomes: list[np.ndarray] = []
+
+    width: int | None = None
+    height: int | None = None
+
+    for game_data in _iter_games_from_refs(refs):
+        # Validate dimensions
+        if width is None:
+            width = game_data.width
+            height = game_data.height
+        elif game_data.width != width or game_data.height != height:
+            raise ValueError(
+                f"Dimension mismatch: expected ({width}, {height}), "
+                f"got ({game_data.width}, {game_data.height})"
+            )
+
+        # Process each position in the game
+        for position in game_data.positions:
+            obs_input = from_game_arrays(game_data, position)
+            obs = builder.build(obs_input)
+            targets = build_targets(game_data, position)
+
+            all_observations.append(obs)
+            all_policy_p1.append(targets.policy_p1)
+            all_policy_p2.append(targets.policy_p2)
+            all_p1_values.append(targets.p1_value)
+            all_p2_values.append(targets.p2_value)
+            all_payout_matrices.append(targets.payout_matrix)
+            all_action_p1.append(targets.action_p1)
+            all_action_p2.append(targets.action_p2)
+            all_cheese_outcomes.append(targets.cheese_outcomes)
+
+    if width is None or height is None:
+        raise ValueError("No positions found in game refs")
+
+    return (
+        np.stack(all_observations),
+        np.stack(all_policy_p1),
+        np.stack(all_policy_p2),
+        np.array(all_p1_values, dtype=np.float32),
+        np.array(all_p2_values, dtype=np.float32),
+        np.stack(all_payout_matrices),
+        np.array(all_action_p1, dtype=np.int8),
+        np.array(all_action_p2, dtype=np.int8),
+        np.stack(all_cheese_outcomes),
+        width,
+        height,
+    )
 
 
 def _load_positions_from_files(

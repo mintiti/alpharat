@@ -167,7 +167,7 @@ def load_nn_context(checkpoint_path: str, device: str = "cpu") -> NNContext:
     """
     from alpharat.config.checkpoint import load_model_from_checkpoint
 
-    model, builder, width, height = load_model_from_checkpoint(
+model, builder, width, height = load_model_from_checkpoint(
         checkpoint_path,
         device=device,
         compile_model=True,
