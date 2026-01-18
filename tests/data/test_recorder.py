@@ -179,6 +179,7 @@ def make_mock_search_result() -> SearchResult:
         payout_matrix=np.zeros((2, 5, 5), dtype=np.float64),
         policy_p1=np.ones(5, dtype=np.float64) / 5,
         policy_p2=np.ones(5, dtype=np.float64) / 5,
+        action_visits=np.zeros((5, 5), dtype=np.int32),
     )
 
 
@@ -688,6 +689,7 @@ class TestRoundtrip:
             payout_matrix=payout,
             policy_p1=policy_p1,
             policy_p2=policy_p2,
+            action_visits=visits,
         )
 
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -1168,17 +1170,19 @@ class TestBundleLoading:
                 payout = np.random.rand(2, 5, 5).astype(np.float32)
                 policy_p1 = np.array([0.5, 0.2, 0.1, 0.1, 0.1], dtype=np.float32)
                 policy_p2 = np.array([0.1, 0.1, 0.3, 0.3, 0.2], dtype=np.float32)
+                visits = np.arange(25).reshape(5, 5).astype(np.int32)
                 result = SearchResult(
                     payout_matrix=payout,
                     policy_p1=policy_p1,
                     policy_p2=policy_p2,
+                    action_visits=visits,
                 )
                 recorder.record_position(
                     game=game,
                     search_result=result,
                     prior_p1=np.ones(5) / 5,
                     prior_p2=np.ones(5) / 5,
-                    visit_counts=np.arange(25).reshape(5, 5).astype(np.int32),
+                    visit_counts=visits,
                     action_p1=2,
                     action_p2=3,
                 )

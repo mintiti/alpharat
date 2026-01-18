@@ -19,6 +19,7 @@ import nashpy as nash  # type: ignore[import-untyped]
 import numpy as np
 
 from alpharat.mcts.equivalence import reduce_matrix
+from alpharat.mcts.reduction import reduce_prior
 
 logger = logging.getLogger(__name__)
 
@@ -198,28 +199,45 @@ def compute_nash_equilibrium(
         payout_matrix, p1_effective, p2_effective
     )
 
-    # Step 2: Filter by visits (if provided)
+    # Step 2: Reduce priors to match effective actions
+    reduced_p1_prior = reduce_prior(prior_p1, p1_effective) if prior_p1 is not None else None
+    reduced_p2_prior = reduce_prior(prior_p2, p2_effective) if prior_p2 is not None else None
+
+    # Step 3: Filter by visits (if provided)
     if action_visits is not None:
         reduced_visits = _reduce_visits(action_visits, p1_eff_actions, p2_eff_actions)
         nash_matrix, p1_nash_actions, p2_nash_actions = _filter_by_visits(
             reduced_matrix, reduced_visits, p1_eff_actions, p2_eff_actions, min_visits
         )
+        # Also filter priors to match the visit-filtered actions
+        if reduced_p1_prior is not None:
+            # Map effective actions to indices in reduced prior
+            eff_to_idx = {a: i for i, a in enumerate(p1_eff_actions)}
+            nash_p1_prior = np.array([reduced_p1_prior[eff_to_idx[a]] for a in p1_nash_actions])
+        else:
+            nash_p1_prior = None
+        if reduced_p2_prior is not None:
+            eff_to_idx = {a: i for i, a in enumerate(p2_eff_actions)}
+            nash_p2_prior = np.array([reduced_p2_prior[eff_to_idx[a]] for a in p2_nash_actions])
+        else:
+            nash_p2_prior = None
     else:
         nash_matrix = reduced_matrix
         p1_nash_actions, p2_nash_actions = p1_eff_actions, p2_eff_actions
+        nash_p1_prior, nash_p2_prior = reduced_p1_prior, reduced_p2_prior
 
-    # Step 3: Compute Nash
+    # Step 4: Compute Nash
     p1_strat, p2_strat = _compute_nash_raw(
         nash_matrix,
-        prior_p1=prior_p1,
-        prior_p2=prior_p2,
+        prior_p1=nash_p1_prior,
+        prior_p2=nash_p2_prior,
         p1_effective=p1_effective,
         p2_effective=p2_effective,
         action_visits=action_visits,
         original_payout_matrix=payout_matrix,
     )
 
-    # Step 4: Expand to full action space
+    # Step 5: Expand to full action space
     full_p1 = _expand_strategy(p1_strat, p1_nash_actions, num_actions)
     full_p2 = _expand_strategy(p2_strat, p2_nash_actions, num_actions)
 
@@ -254,10 +272,14 @@ def _compute_nash_raw(
     num_p1, num_p2 = p1_payoffs.shape
 
     # Optimization: if both matrices are constant, any strategy is Nash
-    # Skip computing equilibria - return uniform directly
+    # Use NN prior if available (it's what we started with, MCTS couldn't find better)
     p1_constant = np.allclose(p1_payoffs, p1_payoffs.flat[0])
     p2_constant = np.allclose(p2_payoffs, p2_payoffs.flat[0])
     if p1_constant and p2_constant:
+        if prior_p1 is not None and prior_p2 is not None:
+            # Normalize priors (should already sum to 1, but defensive)
+            return prior_p1 / prior_p1.sum(), prior_p2 / prior_p2.sum()
+        # No priors available (e.g., no NN) - fall back to uniform
         return np.ones(num_p1) / num_p1, np.ones(num_p2) / num_p2
 
     # Create bimatrix game
@@ -281,14 +303,16 @@ def _compute_nash_raw(
 
     if len(equilibria) == 0:
         # No equilibrium found (shouldn't happen for valid games)
-        # Log in original (non-reduced) format for consistency
+        # Use NN prior if available, otherwise uniform
         log_matrix = original_payout_matrix if original_payout_matrix is not None else payout_matrix
+        fallback_type = "prior" if (prior_p1 is not None and prior_p2 is not None) else "uniform"
         logger.warning(
-            "No Nash equilibrium found, falling back to uniform.\n"
+            "No Nash equilibrium found, falling back to %s.\n"
             "P1 payoffs:\n%s\nP2 payoffs:\n%s\n"
             "P1 prior: %s\nP2 prior: %s\n"
             "P1 effective: %s\nP2 effective: %s\n"
             "Action visits:\n%s",
+            fallback_type,
             log_matrix[0],
             log_matrix[1],
             prior_p1,
@@ -297,6 +321,8 @@ def _compute_nash_raw(
             p2_effective,
             action_visits,
         )
+        if prior_p1 is not None and prior_p2 is not None:
+            return prior_p1 / prior_p1.sum(), prior_p2 / prior_p2.sum()
         return np.ones(num_p1) / num_p1, np.ones(num_p2) / num_p2
 
     # Aggregate equilibria via centroid

@@ -12,6 +12,7 @@ from typing import TYPE_CHECKING
 from alpharat.config.base import StrictBaseModel
 from alpharat.mcts.nash import compute_nash_equilibrium
 from alpharat.mcts.numba_ops import compute_puct_scores, select_max_with_tiebreak
+from alpharat.mcts.payout_filter import filter_low_visit_payout
 
 if TYPE_CHECKING:
     import numpy as np
@@ -27,6 +28,7 @@ class SearchResult:
     policy_p1: np.ndarray
     policy_p2: np.ndarray
     payout_matrix: np.ndarray
+    action_visits: np.ndarray
 
 
 class DecoupledPUCTConfig(StrictBaseModel):
@@ -80,23 +82,37 @@ class DecoupledPUCTSearch:
             policy_p1=root.prior_policy_p1.copy(),
             policy_p2=root.prior_policy_p2.copy(),
             payout_matrix=root.payout_matrix.copy(),
+            action_visits=root.action_visits.copy(),
         )
 
     def _make_result(self) -> SearchResult:
-        """Compute Nash equilibrium from root statistics."""
+        """Compute Nash equilibrium from root statistics.
+
+        Filters low-visit cells to 0 before Nash computation — pessimistic estimate
+        for unexplored action pairs. This ensures Nash and training data use only
+        trustworthy values.
+        """
         root = self.tree.root
-        payout_matrix = root.payout_matrix
+
+        # Filter unreliable cells before Nash and recording
+        filtered_payout = filter_low_visit_payout(
+            root.payout_matrix, root.action_visits, min_visits=2
+        )
 
         policy_p1, policy_p2 = compute_nash_equilibrium(
-            payout_matrix,
+            filtered_payout,
             root.p1_effective,
             root.p2_effective,
+            prior_p1=root.prior_policy_p1,
+            prior_p2=root.prior_policy_p2,
+            action_visits=root.action_visits,
         )
 
         return SearchResult(
             policy_p1=policy_p1,
             policy_p2=policy_p2,
-            payout_matrix=payout_matrix.copy(),
+            payout_matrix=filtered_payout,
+            action_visits=root.action_visits.copy(),
         )
 
     def _simulate(self) -> None:
