@@ -36,7 +36,6 @@ from alpharat.data.batch import GameParams
 from alpharat.eval.elo import compute_elo, from_tournament_result
 from alpharat.eval.tournament import TournamentConfig, run_tournament
 from alpharat.experiments import ExperimentManager
-from alpharat.experiments.paths import shard_id_from_path
 from alpharat.nn.config import TrainConfig
 from alpharat.nn.training import run_training
 
@@ -208,25 +207,11 @@ def main() -> None:
     if args.shards:
         source_shards = args.shards
     else:
-        # Auto-detect from data path
-        train_dir = Path(config.data.train_dir)
-        if train_dir.name == "train":
-            shard_dir = train_dir.parent  # {uuid}
-            group_dir = shard_dir.parent  # {group}
-            shards_dir = group_dir.parent  # shards/
-            if shards_dir.name == "shards":
-                source_shards = shard_id_from_path(shard_dir)
-            else:
-                logger.error(
-                    f"Cannot auto-detect source shards from '{config.data.train_dir}'. "
-                    f"Expected path like 'experiments/shards/GROUP/UUID/train'. "
-                    f"Use --shards GROUP/UUID to specify explicitly."
-                )
-                sys.exit(1)
-        else:
+        source_shards = exp.shard_id_from_data_path(config.data.train_dir)
+        if source_shards is None:
             logger.error(
                 f"Cannot auto-detect source shards from '{config.data.train_dir}'. "
-                f"Expected path ending in '/train'. "
+                f"Expected path like 'experiments/shards/GROUP/UUID/train'. "
                 f"Use --shards GROUP/UUID to specify explicitly."
             )
             sys.exit(1)

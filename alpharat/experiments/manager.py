@@ -199,6 +199,32 @@ class ExperimentManager:
 
     # --- Shard Operations ---
 
+    def _register_shard_entry(
+        self,
+        group: str,
+        shard_uuid: str,
+        source_batches: list[str],
+        total_positions: int,
+        train_positions: int,
+        val_positions: int,
+        shuffle_seed: int | None = None,
+    ) -> None:
+        """Add shard entry to manifest (internal helper)."""
+        shard_id = f"{group}/{shard_uuid}"
+        entry = ShardEntry(
+            group=group,
+            uuid=shard_uuid,
+            created_at=datetime.now(UTC),
+            source_batches=source_batches,
+            total_positions=total_positions,
+            train_positions=train_positions,
+            val_positions=val_positions,
+            shuffle_seed=shuffle_seed,
+        )
+        manifest = self._load_manifest()
+        manifest.shards[shard_id] = entry
+        self._save_manifest(manifest)
+
     def create_shards(
         self,
         group: str,
@@ -208,10 +234,7 @@ class ExperimentManager:
         val_positions: int,
         shuffle_seed: int | None = None,
     ) -> Path:
-        """Register a new shard set in the manifest.
-
-        Note: This method registers the shard in the manifest. The actual shard
-        files should be created by the sharding code, which then calls this method.
+        """Create a new shard directory and register it in the manifest.
 
         Args:
             group: Shard group name (e.g., "5x5_uniform", "7x7_walls").
@@ -234,22 +257,15 @@ class ExperimentManager:
         (shard_dir / paths.TRAIN_DIR).mkdir()
         (shard_dir / paths.VAL_DIR).mkdir()
 
-        # Update manifest
-        shard_id = f"{group}/{shard_uuid}"
-        entry = ShardEntry(
-            group=group,
-            uuid=shard_uuid,
-            created_at=datetime.now(UTC),
-            source_batches=source_batches,
-            total_positions=total_positions,
-            train_positions=train_positions,
-            val_positions=val_positions,
-            shuffle_seed=shuffle_seed,
+        self._register_shard_entry(
+            group,
+            shard_uuid,
+            source_batches,
+            total_positions,
+            train_positions,
+            val_positions,
+            shuffle_seed,
         )
-        manifest = self._load_manifest()
-        manifest.shards[shard_id] = entry
-        self._save_manifest(manifest)
-
         return shard_dir
 
     def get_shard_path(self, shard_id: str) -> Path:
@@ -272,6 +288,36 @@ class ExperimentManager:
         """
         manifest = self.load_manifest()
         return list(manifest.shards.keys())
+
+    def shard_id_from_data_path(self, data_path: Path | str) -> str | None:
+        """Extract shard ID from a data path.
+
+        Handles paths like:
+        - experiments/shards/group/uuid/train
+        - experiments/shards/group/uuid/val
+        - experiments/shards/group/uuid
+
+        Args:
+            data_path: Path to a shard directory or its train/val subdirectory.
+
+        Returns:
+            Shard ID in "group/uuid" format, or None if path doesn't match.
+        """
+        path = Path(data_path)
+
+        # Walk up from train/ or val/ if needed
+        if path.name in ("train", "val"):
+            path = path.parent
+
+        # Now at uuid level: uuid_dir / group_dir / shards_dir
+        uuid_dir = path
+        group_dir = uuid_dir.parent
+        shards_dir = group_dir.parent
+
+        if shards_dir.name != "shards":
+            return None
+
+        return f"{group_dir.name}/{uuid_dir.name}"
 
     def register_shards(
         self,
@@ -298,21 +344,15 @@ class ExperimentManager:
             shuffle_seed: Seed used for train/val split and position shuffling.
         """
         self._ensure_initialized()
-
-        shard_id = f"{group}/{shard_uuid}"
-        entry = ShardEntry(
-            group=group,
-            uuid=shard_uuid,
-            created_at=datetime.now(UTC),
-            source_batches=source_batches,
-            total_positions=total_positions,
-            train_positions=train_positions,
-            val_positions=val_positions,
-            shuffle_seed=shuffle_seed,
+        self._register_shard_entry(
+            group,
+            shard_uuid,
+            source_batches,
+            total_positions,
+            train_positions,
+            val_positions,
+            shuffle_seed,
         )
-        manifest = self._load_manifest()
-        manifest.shards[shard_id] = entry
-        self._save_manifest(manifest)
 
     # --- Run Operations ---
 
@@ -553,3 +593,59 @@ class ExperimentManager:
         """
         manifest = self.load_manifest()
         return list(manifest.benchmarks.keys())
+
+    # --- Query Helpers ---
+
+    def list_batches_with_info(self) -> list[dict[str, Any]]:
+        """List batches with metadata for display.
+
+        Returns:
+            List of dicts with batch info: id, created, parent_checkpoint, game_params.
+        """
+        manifest = self.load_manifest()
+        return [
+            {
+                "id": batch_id,
+                "created": entry.created_at.strftime("%Y-%m-%d %H:%M"),
+                "parent": entry.parent_checkpoint or "-",
+                "size": f"{entry.game_params.width}x{entry.game_params.height}",
+                "simulations": entry.mcts_config.simulations,
+            }
+            for batch_id, entry in manifest.batches.items()
+        ]
+
+    def list_shards_with_info(self) -> list[dict[str, Any]]:
+        """List shards with lineage info for display.
+
+        Returns:
+            List of dicts with shard info: id, created, source_batches, positions.
+        """
+        manifest = self.load_manifest()
+        return [
+            {
+                "id": shard_id,
+                "created": entry.created_at.strftime("%Y-%m-%d %H:%M"),
+                "source_batches": entry.source_batches,
+                "train": entry.train_positions,
+                "val": entry.val_positions,
+            }
+            for shard_id, entry in manifest.shards.items()
+        ]
+
+    def list_runs_with_info(self) -> list[dict[str, Any]]:
+        """List runs with metadata for display.
+
+        Returns:
+            List of dicts with run info: name, created, source_shards, results.
+        """
+        manifest = self.load_manifest()
+        return [
+            {
+                "name": name,
+                "created": entry.created_at.strftime("%Y-%m-%d %H:%M"),
+                "source_shards": entry.source_shards,
+                "best_val_loss": entry.best_val_loss,
+                "final_epoch": entry.final_epoch,
+            }
+            for name, entry in manifest.runs.items()
+        ]

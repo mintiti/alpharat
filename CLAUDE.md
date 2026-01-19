@@ -50,7 +50,7 @@ alpharat/
 ├── eval/           # Evaluation: game execution, tournaments
 └── experiments/    # Experiment management: ExperimentManager, manifest
 
-scripts/            # Entry points: sample.py, train.py, benchmark.py
+scripts/            # Entry points: sample.py, train.py, benchmark.py, manifest.py
 configs/            # YAML config templates for sampling, training, evaluation
 tests/              # Mirrors alpharat/ structure
 experiments/        # Data folder (NOT in git): batches, shards, runs, benchmarks
@@ -179,6 +179,24 @@ run_dir = exp.create_run(
 exp.list_batches()
 exp.list_runs()
 exp.get_run_path("bimatrix_mlp_v1")
+```
+
+### Querying Artifacts
+
+Use `manifest.py` to see what's in the experiments folder:
+
+```bash
+uv run python scripts/manifest.py batches   # List all batches
+uv run python scripts/manifest.py shards    # List shards with lineage
+uv run python scripts/manifest.py runs      # List training runs
+```
+
+Example output:
+```
+GROUP                UUID       CREATED           SIZE   SIMS   PARENT
+-------------------------------------------------------------------------------------
+iteration_0          d84065d8   2026-01-15 18:05  5x5    50     -
+iteration_1          cbb835c6   2026-01-15 18:08  5x5    30     runs/mlp_v1
 ```
 
 ---

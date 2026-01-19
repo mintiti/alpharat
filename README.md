@@ -67,6 +67,7 @@ uv run python scripts/benchmark.py configs/tournament.yaml
 | `train.py` | Train NN on shards |
 | `benchmark.py` | Run tournament between agents (custom matchups) |
 | `train_and_benchmark.py` | Convenience: train + auto-benchmark vs baselines |
+| `manifest.py` | Query artifacts: list batches, shards, runs with lineage |
 
 ### Where things go
 
@@ -79,6 +80,13 @@ experiments/
 ```
 
 The `experiments/manifest.yaml` tracks lineage (which shards came from which batches, etc.).
+
+Quick scan of what exists:
+```bash
+uv run python scripts/manifest.py batches  # See all batch groups
+uv run python scripts/manifest.py shards   # See shards + which batches they came from
+uv run python scripts/manifest.py runs     # See training runs + which shards they used
+```
 
 ## What's here
 

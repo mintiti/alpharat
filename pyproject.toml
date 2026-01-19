@@ -1,6 +1,6 @@
 [project]
 name = "alpharat"
-version = "0.1.0"
+version = "0.2.0"
 description = "Experimental AlphaZero adaptation: game-theoretic MCTS for simultaneous two-player games"
 readme = "README.md"
 requires-python = ">=3.11"
