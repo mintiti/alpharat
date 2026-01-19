@@ -1,0 +1,37 @@
+# Tournament configuration
+# Usage: alpharat-benchmark configs/tournament.yaml
+
+name: my_tournament  # Required: benchmark name
+
+agents:
+  greedy:
+    variant: greedy
+
+  mcts_100:
+    variant: decoupled_puct
+    simulations: 100
+    c_puct: 1.5
+
+  mcts_500:
+    variant: decoupled_puct
+    simulations: 500
+    c_puct: 1.5
+
+  # Example: MCTS with NN prior
+  # mcts_nn:
+  #   variant: decoupled_puct
+  #   simulations: 200
+  #   c_puct: 1.5
+  #   checkpoint: experiments/runs/mlp_v1/checkpoints/best_model.pt
+
+games_per_matchup: 50
+
+game:
+  width: 5
+  height: 5
+  max_turns: 30
+  cheese_count: 5
+  wall_density: 0.0
+  mud_density: 0.0
+
+workers: 4

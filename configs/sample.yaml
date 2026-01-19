@@ -1,5 +1,5 @@
 # Self-play sampling configuration
-# Usage: uv run python scripts/sample.py configs/sample.yaml
+# Usage: alpharat-sample configs/sample.yaml
 
 group: uniform_5x5  # Required: batch group name
 

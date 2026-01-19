@@ -1,5 +1,5 @@
 # MLP training configuration
-# Usage: uv run python scripts/train.py configs/train.yaml --name mlp_v1 --shards GROUP/UUID
+# Usage: alpharat-train configs/train.yaml --name mlp_v1 --shards GROUP/UUID
 #
 # CLI overrides (merged into frozen config for reproducibility):
 #   --name NAME         Override experiment name

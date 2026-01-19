@@ -224,3 +224,9 @@ DOGFOOD.md
 
 # Git worktrees for parallel Claude agents
 .worktrees/
+
+# Local configs (only templates tracked)
+/configs/*
+!/configs/sample.yaml
+!/configs/train.yaml
+!/configs/tournament.yaml
