@@ -1,6 +1,6 @@
 [project]
 name = "alpharat"
-version = "0.1.0"
+version = "0.2.0"
 description = "Experimental AlphaZero adaptation: game-theoretic MCTS for simultaneous two-player games"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -38,12 +38,23 @@ train = [
     "tqdm>=4.66",
 ]
 
+[project.scripts]
+alpharat-sample = "scripts.sample:main"
+alpharat-train = "scripts.train:main"
+alpharat-train-and-benchmark = "scripts.train_and_benchmark:main"
+alpharat-prepare-shards = "scripts.prepare_shards:main"
+alpharat-benchmark = "scripts.benchmark:main"
+alpharat-manifest = "scripts.manifest:main"
+
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [tool.hatch.metadata]
 allow-direct-references = true
+
+[tool.hatch.build.targets.wheel]
+packages = ["alpharat", "scripts"]
 
 [tool.ruff]
 line-length = 100

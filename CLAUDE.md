@@ -2,6 +2,16 @@
 
 Guidance for coding agents working in this repository.
 
+## Design Philosophy
+
+This repo was built around the idea that experimentation should be fast to iterate on.
+
+The pain with most ML pipelines: everything is coupled. Change training params? Re-sample everything. Try a different architecture? Start from scratch. Hours wasted redoing work you already did.
+
+Here, each stage — sampling, sharding, training — produces reusable artifacts. Same samples, different architectures. Same checkpoint, different MCTS params. You only redo what actually changed.
+
+Reproducibility falls out naturally: when artifacts are saved and stages are decoupled, you always know exactly what went into each run.
+
 ## Project Overview
 
 **alpharat** is a game-theoretic MCTS implementation for simultaneous two-player games, targeting PyRat (a maze game where both players move at the same time). Standard MCTS doesn't work for simultaneous moves — this project uses payout matrices and Nash equilibrium computation instead of single Q-values.
@@ -37,11 +47,13 @@ alpharat/
 ├── data/           # Data pipeline: sampling, recording, sharding
 ├── nn/             # Neural network: observation builders, targets, models
 ├── ai/             # Agents: MCTS, random, greedy
-└── eval/           # Evaluation: game execution, tournaments
+├── eval/           # Evaluation: game execution, tournaments
+└── experiments/    # Experiment management: ExperimentManager, manifest
 
-scripts/            # Entry points: sample.py, train_mcts.py
-configs/            # YAML configs for sampling, evaluation, benchmarks
+scripts/            # Entry points: sample.py, train.py, benchmark.py, manifest.py
+configs/            # YAML config templates for sampling, training, evaluation
 tests/              # Mirrors alpharat/ structure
+experiments/        # Data folder (NOT in git): batches, shards, runs, benchmarks
 ```
 
 ### alpharat/mcts/
@@ -117,6 +129,75 @@ Each architecture folder contains `config.py` (ModelConfig, OptimConfig) and `lo
 | `game.py` | `play_game()` — execute single game between agents |
 | `runner.py` | `evaluate()` — run N games, compute stats |
 | `tournament.py` | `run_tournament()` — round-robin with thread pool |
+
+### alpharat/experiments/
+
+| File | Purpose |
+|------|---------|
+| `manager.py` | `ExperimentManager` — central API for managing artifacts |
+| `schema.py` | Pydantic schemas for manifest entries |
+| `paths.py` | Path constants and helpers |
+| `templates.py` | Notes and CLAUDE.md templates |
+
+---
+
+## Experiments Folder
+
+The `experiments/` folder (NOT in git) stores all experiment artifacts with automatic lineage tracking.
+
+```
+experiments/
+├── manifest.yaml           # Central index of all artifacts
+├── batches/{group}/{uuid}/ # Raw game recordings from sampling
+├── shards/{group}/{uuid}/  # Processed train/val splits
+├── runs/{name}/            # Training runs with checkpoints
+└── benchmarks/{name}/      # Tournament results
+```
+
+### Using ExperimentManager
+
+```python
+from alpharat.experiments import ExperimentManager
+
+exp = ExperimentManager()
+
+# Sampling
+batch_dir = exp.create_batch(
+    group="uniform_5x5",
+    mcts_config=mcts_config,
+    game_params=game_params,
+)
+
+# Training
+run_dir = exp.create_run(
+    name="bimatrix_mlp_v1",
+    config=train_config.model_dump(),
+    source_shards="shard_uuid",
+)
+
+# Query
+exp.list_batches()
+exp.list_runs()
+exp.get_run_path("bimatrix_mlp_v1")
+```
+
+### Querying Artifacts
+
+Use `alpharat-manifest` to see what's in the experiments folder:
+
+```bash
+alpharat-manifest batches   # List all batches
+alpharat-manifest shards    # List shards with lineage
+alpharat-manifest runs      # List training runs
+```
+
+Example output:
+```
+GROUP                UUID       CREATED           SIZE   SIMS   PARENT
+-------------------------------------------------------------------------------------
+iteration_0          d84065d8   2026-01-15 18:05  5x5    50     -
+iteration_1          cbb835c6   2026-01-15 18:08  5x5    30     runs/mlp_v1
+```
 
 ---
 
@@ -371,6 +452,83 @@ DELTA_TO_DIRECTION = {v: k for k, v in DIRECTION_DELTAS.items() if k != Directio
 
 **Don't hardcode** `{Direction.UP: (0, -1)}` — that's wrong and will cause bugs.
 
+### PyRat Game API
+
+```python
+from pyrat_engine.core.game import PyRat, MoveUndo
+
+# Topology queries
+game.wall_entries()              # → list[Wall]
+game.mud_entries()               # → list[Mud]
+game.cheese_positions()          # → list[Coordinates]
+game.get_valid_moves(position)   # → list[int] (0-3: UP, RIGHT, DOWN, LEFT)
+
+# Position properties
+game.player1_position            # → Coordinates
+game.player2_position            # → Coordinates
+
+# Score/turn properties
+game.player1_score, game.player2_score      # float
+game.player1_mud_turns, game.player2_mud_turns  # int
+game.turn, game.max_turns                   # int
+
+# Move/unmove (for MCTS tree navigation)
+undo = game.make_move(p1_action, p2_action)  # → MoveUndo
+game.unmake_move(undo)                       # → None
+```
+
+### GameConfigBuilder
+
+Fluent API for creating custom games (useful in tests):
+
+```python
+from pyrat_engine.core import GameConfigBuilder
+from pyrat_engine.core.types import Coordinates, Wall, Mud
+
+game = (GameConfigBuilder(5, 5)
+    .with_max_turns(100)
+    .with_player1_pos(Coordinates(0, 0))
+    .with_player2_pos(Coordinates(4, 4))
+    .with_cheese([Coordinates(2, 2), Coordinates(2, 3)])
+    .with_walls([Wall((1, 1), (1, 2))])
+    .with_mud([Mud((2, 2), (2, 3), value=3)])
+    .build())
+
+# Or use presets: tiny (11x9), small (15x11), default, large (31x21), huge (41x31)
+game = PyRat.create_preset('small')
+```
+
+### get_observation()
+
+Player-relative view with pre-built numpy matrices:
+
+```python
+obs = game.get_observation(is_player_one=True)
+
+# Positions (player-relative) — Coordinates objects, indexable like tuples
+obs.player_position, obs.opponent_position  # Coordinates
+
+# Scores and state
+obs.player_score, obs.opponent_score        # float
+obs.player_mud_turns, obs.opponent_mud_turns  # int
+obs.current_turn, obs.max_turns             # int
+
+# Pre-built matrices
+obs.cheese_matrix     # uint8[W, H] — 1 where cheese exists
+obs.movement_matrix   # int8[W, H, 4] — traversal info per direction
+```
+
+**Movement matrix values:**
+- `-1` = wall (blocked)
+- `0` = normal passage (1 turn)
+- `≥2` = mud cost (stuck for N turns)
+
+**Indexing is [x, y, direction]** (not [y, x]):
+```python
+can_move_up = obs.movement_matrix[x, y, Direction.UP] >= 0
+has_cheese = obs.cheese_matrix[x, y] == 1
+```
+
 ---
 
 ## Development Tips
@@ -384,6 +542,66 @@ DELTA_TO_DIRECTION = {v: k for k, v in DIRECTION_DELTAS.items() if k != Directio
 4. **Pre-commit is mandatory** — don't use `--no-verify`. If pip issues, set `PIP_INDEX_URL=https://pypi.org/simple/`.
 
 5. **The NN learns blocked actions implicitly** — training targets have 0 for blocked actions. The NN figures out which actions are blocked from the maze layout in the observation.
+
+---
+
+## Experiment Workflow
+
+This repo is for ML experimentation, not just code.
+
+### Self-Play Loop
+
+The AlphaZero iteration: sample games → train NN → use NN to sample better games → repeat.
+
+**First iteration (no NN yet):**
+```bash
+# 1. Sample games with pure MCTS (uniform priors)
+alpharat-sample configs/sample.yaml --group iteration_0
+
+# 2. Convert games to training shards
+alpharat-prepare-shards --architecture mlp --group iter0_shards --batches iteration_0
+
+# 3. Train NN and benchmark against baselines
+alpharat-train-and-benchmark configs/train.yaml --name mlp_v1 --shards iter0_shards/UUID --games 50
+```
+
+**Subsequent iterations (with NN):**
+```bash
+# 1. Sample using trained NN as MCTS prior
+alpharat-sample configs/sample_with_nn.yaml --group iteration_1 \
+    --checkpoint experiments/runs/mlp_v1/checkpoints/best_model.pt
+
+# 2. Create shards from new games
+alpharat-prepare-shards --architecture mlp --group iter1_shards --batches iteration_1
+
+# 3. Train on new data
+alpharat-train configs/train.yaml --name mlp_v2 --shards iter1_shards/UUID
+
+# 4. Benchmark against previous iteration
+alpharat-benchmark configs/tournament.yaml
+```
+
+**Scripts:**
+- `train_and_benchmark.py` — convenience script: trains then auto-benchmarks vs Random/Greedy/MCTS
+- `train.py` + `benchmark.py` — separate scripts for more control (custom tournament configs)
+
+### Experiment Commands
+
+The `/exp:*` commands support the experiment lifecycle:
+
+| Command | When to use |
+|---------|-------------|
+| `/exp:plan` | Before — crystallize hypothesis, draft log entry |
+| `/exp:iterate` | During — set up next iteration from checkpoint |
+| `/exp:learn` | After — capture results, update log |
+| `/exp:compare` | Anytime — compare runs side-by-side |
+| `/exp:status` | Anytime — quick dashboard of where we are |
+
+**Context files in `experiments/`:**
+- `LOG.md` — the official record: roadmap, decisions, experiment entries with results
+- `IDEAS.md` — parking lot for fuzzy thinking, unstructured ideas
+
+The commands pull from these files automatically. When helping with experiments, read them first.
 
 ---
 

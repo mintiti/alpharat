@@ -209,6 +209,7 @@ __marimo__/
 
 # Personal documents folder
 .mt/
+DOGFOOD.md
 
 # macOS
 .DS_Store
@@ -217,8 +218,15 @@ __marimo__/
 /batches/
 /checkpoints/
 /data/
+/experiments/
 /results/
 *.prof
 
 # Git worktrees for parallel Claude agents
 .worktrees/
+
+# Local configs (only templates tracked)
+/configs/*
+!/configs/sample.yaml
+!/configs/train.yaml
+!/configs/tournament.yaml

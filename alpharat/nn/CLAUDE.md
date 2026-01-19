@@ -89,6 +89,29 @@ nn/
 └── augmentation.py    # PlayerSwapStrategy, NoAugmentation
 ```
 
+## Data Pipeline: Batches → Shards
+
+The data pipeline has two stages:
+
+1. **Batches** (`experiments/batches/`) — Raw game recordings from sampling. Contains game state arrays, MCTS policies, outcomes. Architecture-agnostic.
+
+2. **Shards** (`experiments/shards/`) — Pre-tensorized data ready for training. The goal is maximum training speed: load shards → train, no per-sample transformation.
+
+**Currently:** `FlatObservationBuilder` converts batches to shards with a 1D flat encoding:
+```
+[maze H×W×4] [p1_pos H×W] [p2_pos H×W] [cheese H×W] [score_diff, progress, p1_mud, p2_mud, p1_score, p2_score]
+```
+
+All current architectures (MLP, Symmetric, LocalValue) consume this flat format. The model parses the flat vector internally.
+
+**When you need a new observation builder:**
+
+- **GNN architecture** — needs graph structure (adjacency, node features), not flat vectors
+- **Transformer** — might want sequence tokenization or different spatial encoding
+- **CNN** — needs 2D/3D tensor layout `[C, H, W]` instead of flat
+
+If your architecture can parse a flat vector, use `FlatObservationBuilder`. If it needs fundamentally different input structure, create a new builder in `builders/` and a corresponding sharding pipeline.
+
 ## Adding a New Architecture
 
 1. Create `architectures/myarch/config.py`:
@@ -115,6 +138,13 @@ class MyArchModelConfig(BaseModelConfig):
 
     def build_augmentation(self) -> AugmentationStrategy:
         return PlayerSwapStrategy(p_swap=self.p_augment)
+
+    def build_observation_builder(self, width: int, height: int) -> ObservationBuilder:
+        # Return builder for this architecture's input format.
+        # Use FlatObservationBuilder if your model can parse flat vectors.
+        # Create a new builder if you need different structure (graphs, 2D, etc).
+        from alpharat.nn.builders.flat import FlatObservationBuilder
+        return FlatObservationBuilder(width=width, height=height)
 
 class MyArchOptimConfig(BaseOptimConfig):
     architecture: Literal["myarch"] = "myarch"

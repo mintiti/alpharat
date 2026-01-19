@@ -1,5 +1,13 @@
 # MLP training configuration
-# Usage: uv run python scripts/train.py configs/train.yaml
+# Usage: alpharat-train configs/train.yaml --name mlp_v1 --shards GROUP/UUID
+#
+# CLI overrides (merged into frozen config for reproducibility):
+#   --name NAME         Override experiment name
+#   --shards GROUP/UUID Override data paths (e.g., 'mygroup/abc123')
+#
+# To find shard IDs: ls experiments/shards/
+
+name: default  # Override with --name
 
 model:
   architecture: mlp
@@ -19,7 +27,8 @@ optim:
   nash_mode: target
 
 data:
-  train_dir: data/940b6e74-01c1-4a2e-ac6d-9ca2c1ec54c5/train
-  val_dir: data/940b6e74-01c1-4a2e-ac6d-9ca2c1ec54c5/val
+  # Override with --shards, or set explicitly:
+  train_dir: experiments/shards/GROUP/UUID/train
+  val_dir: experiments/shards/GROUP/UUID/val
 
 seed: 42

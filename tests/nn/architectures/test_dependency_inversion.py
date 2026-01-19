@@ -386,3 +386,37 @@ class TestArchitectureSpecificBehavior:
         losses = loss_fn(output, batch, optim_config)
 
         assert LossKey.OWNERSHIP in losses, "LocalValueMLP loss missing ownership component"
+
+
+class TestBuildObservationBuilder:
+    """Tests for build_observation_builder() returning ObservationBuilder."""
+
+    @pytest.mark.parametrize(
+        "arch_type,config_factory,optim_cls,batch_factory", ARCHITECTURE_CONFIGS
+    )
+    def test_build_observation_builder_returns_builder(
+        self, arch_type: Any, config_factory: Any, optim_cls: Any, batch_factory: Any
+    ) -> None:
+        """build_observation_builder() should return an ObservationBuilder."""
+
+        config = config_factory()
+        builder = config.build_observation_builder(width=5, height=5)
+
+        # Check protocol compliance
+        assert hasattr(builder, "version"), f"{arch_type}: builder missing version property"
+        assert hasattr(builder, "build"), f"{arch_type}: builder missing build method"
+        assert callable(builder.build), f"{arch_type}: build is not callable"
+
+    @pytest.mark.parametrize(
+        "arch_type,config_factory,optim_cls,batch_factory", ARCHITECTURE_CONFIGS
+    )
+    def test_builder_has_correct_dimensions(
+        self, arch_type: Any, config_factory: Any, optim_cls: Any, batch_factory: Any
+    ) -> None:
+        """Builder should be configured with the given dimensions."""
+        config = config_factory()
+        builder = config.build_observation_builder(width=7, height=9)
+
+        # FlatObservationBuilder stores width/height
+        assert builder.width == 7, f"{arch_type}: builder has wrong width"
+        assert builder.height == 9, f"{arch_type}: builder has wrong height"

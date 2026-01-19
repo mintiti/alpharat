@@ -11,7 +11,7 @@ from typing import TYPE_CHECKING, Any
 import numpy as np
 from pydantic import BaseModel, Field
 
-from alpharat.data.batch import GameParams, create_batch
+from alpharat.data.batch import GameParams  # noqa: TC001
 from alpharat.data.recorder import GameBundler, GameRecorder
 from alpharat.eval.game import is_terminal
 from alpharat.mcts import MCTSConfig  # noqa: TC001
@@ -61,7 +61,8 @@ class SamplingConfig(BaseModel):
     mcts: MCTSConfig = Field(discriminator="variant")
     game: GameParams
     sampling: SamplingParams
-    output_dir: str
+    group: str  # Required: human-readable grouping name (e.g., "uniform_5x5")
+    experiments_dir: str = "experiments"  # Root directory for experiments
     checkpoint: str | None = None
 
 
@@ -524,16 +525,21 @@ def run_sampling(config: SamplingConfig, *, verbose: bool = True) -> tuple[Path,
     Returns:
         Tuple of (batch_dir, metrics) with path and throughput statistics.
     """
-    batch_dir = create_batch(
-        parent_dir=config.output_dir,
-        checkpoint_path=config.checkpoint,
+    from alpharat.experiments import ExperimentManager
+
+    exp = ExperimentManager(config.experiments_dir)
+    batch_dir = exp.create_batch(
+        group=config.group,
         mcts_config=config.mcts,
         game_params=config.game,
+        checkpoint_path=config.checkpoint,
+        seed_start=0,  # Games use seeds 0, 1, 2, ... N
     )
     games_dir = batch_dir / "games"
 
     if verbose:
         print(f"Sampling {config.sampling.num_games} games")
+        print(f"  Group: {config.group}")
         print(f"  MCTS: {config.mcts.variant}, {config.mcts.simulations} sims")
         print(
             f"  Game: {config.game.width}x{config.game.height}, {config.game.cheese_count} cheese"

@@ -2,10 +2,13 @@
 """Run round-robin tournament from YAML config.
 
 Usage:
-    uv run python scripts/benchmark.py configs/tournament.yaml
-    uv run python scripts/benchmark.py configs/tournament.yaml --workers 8
+    alpharat-benchmark configs/tournament.yaml
+    alpharat-benchmark configs/tournament.yaml --name override  # Override config
+    alpharat-benchmark configs/tournament.yaml --workers 8
 
 Example YAML config:
+    name: tournament_v1  # Required: benchmark name
+
     agents:
       puct_100:
         variant: decoupled_puct
@@ -28,18 +31,35 @@ Example YAML config:
 """
 
 import argparse
+import logging
 from pathlib import Path
 
 import yaml
 
 from alpharat.eval.elo import compute_elo, from_tournament_result
 from alpharat.eval.tournament import TournamentConfig, run_tournament
+from alpharat.experiments import ExperimentManager
+
+logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
+logger = logging.getLogger(__name__)
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Run round-robin MCTS tournament")
     parser.add_argument("config", type=Path, help="Tournament YAML config file")
+    parser.add_argument(
+        "--name",
+        type=str,
+        default=None,
+        help="Override benchmark name from config (default: use config.name)",
+    )
     parser.add_argument("--workers", type=int, help="Override worker count from config")
+    parser.add_argument(
+        "--experiments-dir",
+        type=Path,
+        default=Path("experiments"),
+        help="Experiments directory (default: experiments)",
+    )
     args = parser.parse_args()
 
     # Load and parse config
@@ -52,10 +72,54 @@ def main() -> None:
     if args.workers:
         config = config.model_copy(update={"workers": args.workers})
 
+    # CLI --name overrides config
+    benchmark_name = args.name if args.name else config.name
+
+    exp = ExperimentManager(args.experiments_dir)
+
+    # Extract checkpoint names from agent configs (for lineage tracking)
+    checkpoints = []
+    for agent_name, agent_config in config.agents.items():
+        if hasattr(agent_config, "checkpoint") and agent_config.checkpoint:
+            checkpoints.append(agent_config.checkpoint)
+        else:
+            checkpoints.append(agent_name)  # Use agent name if no checkpoint
+
+    # Create benchmark via ExperimentManager
+    bench_dir = exp.create_benchmark(
+        name=benchmark_name,
+        config=data,  # Save original config
+        checkpoints=checkpoints,
+    )
+    logger.info(f"Created benchmark: {benchmark_name}")
+    logger.info(f"  Benchmark directory: {bench_dir}")
+
     # Run tournament
+    logger.info("Running tournament...")
     result = run_tournament(config)
 
+    # Save results
+    results_dict = {
+        "standings": result.standings(),
+        "wdl_matrix": {
+            agent: {
+                opp: {"wins": wdl[0], "draws": wdl[1], "losses": wdl[2]}
+                for opp, wdl in opps.items()
+            }
+            for agent, opps in result.wdl_matrix().items()
+        },
+        "cheese_stats": {
+            agent: {
+                opp: {"scored": cheese[0], "conceded": cheese[1]} for opp, cheese in opps.items()
+            }
+            for agent, opps in result.cheese_matrix().items()
+        },
+    }
+    exp.save_benchmark_results(benchmark_name, results_dict)
+    logger.info(f"Results saved to {bench_dir / 'results.json'}")
+
     # Print results
+    print()
     print(result.standings_table())
     print()
     print(result.wdl_table())
