@@ -225,6 +225,99 @@ class TestShardOperations:
             assert any("5x5_uniform/" in s for s in shards)
             assert any("7x7_walls/" in s for s in shards)
 
+    def test_get_shard_path(self) -> None:
+        """get_shard_path returns correct path for valid shard_id."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            exp = ExperimentManager(tmpdir)
+            shard_dir = exp.create_shards("my_group", ["b1"], 100, 90, 10)
+
+            shard_id = f"my_group/{shard_dir.name}"
+            retrieved_path = exp.get_shard_path(shard_id)
+            assert retrieved_path == shard_dir
+
+    def test_get_shard_path_invalid_format(self) -> None:
+        """get_shard_path raises ValueError for malformed shard_id."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            exp = ExperimentManager(tmpdir)
+            exp.init()
+
+            with pytest.raises(ValueError, match="Invalid shard_id format"):
+                exp.get_shard_path("no_slash_here")
+
+    def test_shard_id_from_data_path_from_shard_dir(self) -> None:
+        """shard_id_from_data_path extracts ID from shard directory."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            exp = ExperimentManager(tmpdir)
+            shard_dir = exp.create_shards("test_group", ["b1"], 100, 90, 10)
+
+            shard_id = exp.shard_id_from_data_path(shard_dir)
+            assert shard_id == f"test_group/{shard_dir.name}"
+
+    def test_shard_id_from_data_path_from_train_subdir(self) -> None:
+        """shard_id_from_data_path extracts ID from train/ subdirectory."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            exp = ExperimentManager(tmpdir)
+            shard_dir = exp.create_shards("test_group", ["b1"], 100, 90, 10)
+
+            train_path = shard_dir / TRAIN_DIR
+            shard_id = exp.shard_id_from_data_path(train_path)
+            assert shard_id == f"test_group/{shard_dir.name}"
+
+    def test_shard_id_from_data_path_from_val_subdir(self) -> None:
+        """shard_id_from_data_path extracts ID from val/ subdirectory."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            exp = ExperimentManager(tmpdir)
+            shard_dir = exp.create_shards("test_group", ["b1"], 100, 90, 10)
+
+            val_path = shard_dir / VAL_DIR
+            shard_id = exp.shard_id_from_data_path(val_path)
+            assert shard_id == f"test_group/{shard_dir.name}"
+
+    def test_shard_id_from_data_path_invalid(self) -> None:
+        """shard_id_from_data_path returns None for non-shard paths."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            exp = ExperimentManager(tmpdir)
+            exp.init()
+
+            # Path not under shards/
+            result = exp.shard_id_from_data_path(Path(tmpdir) / "runs" / "some_run")
+            assert result is None
+
+    def test_register_shards(self) -> None:
+        """register_shards registers existing shard in manifest."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            exp = ExperimentManager(tmpdir)
+            exp.init()
+
+            # Manually create shard directory structure
+            shard_uuid = "manual-uuid-123"
+            shard_dir = Path(tmpdir) / SHARDS_DIR / "external_group" / shard_uuid
+            shard_dir.mkdir(parents=True)
+            (shard_dir / TRAIN_DIR).mkdir()
+            (shard_dir / VAL_DIR).mkdir()
+
+            # Register it
+            exp.register_shards(
+                group="external_group",
+                shard_uuid=shard_uuid,
+                source_batches=["batch1", "batch2"],
+                total_positions=500,
+                train_positions=450,
+                val_positions=50,
+                shuffle_seed=42,
+            )
+
+            # Verify manifest entry
+            manifest = exp.load_manifest()
+            shard_id = f"external_group/{shard_uuid}"
+            assert shard_id in manifest.shards
+
+            entry = manifest.shards[shard_id]
+            assert entry.group == "external_group"
+            assert entry.source_batches == ["batch1", "batch2"]
+            assert entry.total_positions == 500
+            assert entry.shuffle_seed == 42
+
 
 class TestRunOperations:
     """Tests for training run operations."""

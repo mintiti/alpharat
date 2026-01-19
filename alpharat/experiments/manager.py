@@ -90,6 +90,18 @@ class ExperimentManager:
         if not path.exists():
             path.write_text(content)
 
+    def _dump_yaml(self, data: dict[str, Any]) -> str:
+        """Serialize data to YAML with consistent formatting."""
+        return yaml.dump(data, default_flow_style=False, sort_keys=False)
+
+    def _setup_config_and_notes(self, artifact_dir: Path, config: dict[str, Any]) -> None:
+        """Write config.yaml and notes.txt template to artifact directory."""
+        config_path = artifact_dir / paths.CONFIG_FILE
+        config_path.write_text(self._dump_yaml(config))
+
+        notes_path = artifact_dir / paths.NOTES_FILE
+        notes_path.write_text(templates.NOTES_TEMPLATE)
+
     # --- Manifest Operations ---
 
     def _load_manifest(self) -> Manifest:
@@ -105,7 +117,7 @@ class ExperimentManager:
         manifest_path = paths.get_manifest_path(self.root)
         # Use model_dump with mode="json" for datetime serialization
         data = manifest.model_dump(mode="json")
-        manifest_path.write_text(yaml.dump(data, default_flow_style=False, sort_keys=False))
+        manifest_path.write_text(self._dump_yaml(data))
 
     def load_manifest(self) -> Manifest:
         """Load the manifest.
@@ -277,7 +289,7 @@ class ExperimentManager:
         Returns:
             Path to shard directory.
         """
-        group, shard_uuid = shard_id.split("/", 1)
+        group, shard_uuid = paths.parse_shard_id(shard_id)
         return paths.get_shard_path(self.root, group, shard_uuid)
 
     def list_shards(self) -> list[str]:
@@ -306,7 +318,7 @@ class ExperimentManager:
         path = Path(data_path)
 
         # Walk up from train/ or val/ if needed
-        if path.name in ("train", "val"):
+        if path.name in (paths.TRAIN_DIR, paths.VAL_DIR):
             path = path.parent
 
         # Now at uuid level: uuid_dir / group_dir / shards_dir
@@ -314,7 +326,7 @@ class ExperimentManager:
         group_dir = uuid_dir.parent
         shards_dir = group_dir.parent
 
-        if shards_dir.name != "shards":
+        if shards_dir.name != paths.SHARDS_DIR:
             return None
 
         return f"{group_dir.name}/{uuid_dir.name}"
@@ -429,13 +441,8 @@ class ExperimentManager:
         run_dir.mkdir(parents=True, exist_ok=False)
         (run_dir / paths.CHECKPOINTS_DIR).mkdir()
 
-        # Save config.yaml
-        config_path = run_dir / paths.CONFIG_FILE
-        config_path.write_text(yaml.dump(config, default_flow_style=False, sort_keys=False))
-
-        # Create notes.txt with template
-        notes_path = run_dir / paths.NOTES_FILE
-        notes_path.write_text(templates.NOTES_TEMPLATE)
+        # Save config.yaml and notes.txt
+        self._setup_config_and_notes(run_dir, config)
 
         # Update manifest
         entry = RunEntry(
@@ -537,13 +544,8 @@ class ExperimentManager:
         # Create directory
         bench_dir.mkdir(parents=True, exist_ok=False)
 
-        # Save config.yaml
-        config_path = bench_dir / paths.CONFIG_FILE
-        config_path.write_text(yaml.dump(config, default_flow_style=False, sort_keys=False))
-
-        # Create notes.txt with template
-        notes_path = bench_dir / paths.NOTES_FILE
-        notes_path.write_text(templates.NOTES_TEMPLATE)
+        # Save config.yaml and notes.txt
+        self._setup_config_and_notes(bench_dir, config)
 
         # Update manifest
         entry = BenchmarkEntry(

@@ -171,3 +171,21 @@ def parse_batch_id(batch_id: str) -> tuple[str, str]:
     if len(parts) != 2:
         raise ValueError(f"Invalid batch_id format: {batch_id!r}. Expected 'group/uuid'.")
     return parts[0], parts[1]
+
+
+def parse_shard_id(shard_id: str) -> tuple[str, str]:
+    """Parse shard ID into group and uuid.
+
+    Args:
+        shard_id: Shard ID in format "group/uuid".
+
+    Returns:
+        Tuple of (group, uuid).
+
+    Raises:
+        ValueError: If shard_id is not in expected format.
+    """
+    parts = shard_id.split("/")
+    if len(parts) != 2:
+        raise ValueError(f"Invalid shard_id format: {shard_id!r}. Expected 'group/uuid'.")
+    return parts[0], parts[1]
