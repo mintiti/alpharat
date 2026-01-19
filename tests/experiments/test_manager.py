@@ -280,7 +280,7 @@ class TestShardOperations:
             exp.init()
 
             # Path not under shards/
-            result = exp.shard_id_from_data_path(Path(tmpdir) / "runs" / "some_run")
+            result = exp.shard_id_from_data_path(Path(tmpdir) / RUNS_DIR / "some_run")
             assert result is None
 
     def test_register_shards(self) -> None:

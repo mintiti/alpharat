@@ -13,6 +13,7 @@ import argparse
 from pathlib import Path
 
 from alpharat.experiments import ExperimentManager
+from alpharat.experiments.paths import BATCHES_DIR, RUNS_DIR, SHARDS_DIR
 
 
 def print_batches(exp: ExperimentManager) -> None:
@@ -90,7 +91,7 @@ Examples:
     )
     parser.add_argument(
         "artifact",
-        choices=["batches", "shards", "runs"],
+        choices=[BATCHES_DIR, SHARDS_DIR, RUNS_DIR],
         help="Artifact type to list",
     )
     parser.add_argument(
@@ -103,11 +104,11 @@ Examples:
 
     exp = ExperimentManager(args.experiments_dir)
 
-    if args.artifact == "batches":
+    if args.artifact == BATCHES_DIR:
         print_batches(exp)
-    elif args.artifact == "shards":
+    elif args.artifact == SHARDS_DIR:
         print_shards(exp)
-    elif args.artifact == "runs":
+    elif args.artifact == RUNS_DIR:
         print_runs(exp)
 
 

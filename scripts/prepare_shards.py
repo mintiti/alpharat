@@ -28,7 +28,7 @@ from pydantic import TypeAdapter
 
 from alpharat.data.sharding import prepare_training_set_with_split
 from alpharat.experiments import ExperimentManager
-from alpharat.experiments.paths import get_shards_dir
+from alpharat.experiments.paths import METADATA_FILE, TRAIN_DIR, VAL_DIR, get_shards_dir
 from alpharat.nn.config import ARCHITECTURES, ModelConfig
 
 # TypeAdapter for validating union types
@@ -204,7 +204,7 @@ def _resolve_batch_pattern(exp: ExperimentManager, pattern: str) -> list[str]:
 
 def _get_dimensions_from_batch(batch_dir: Path) -> tuple[int, int]:
     """Extract width/height from batch metadata."""
-    metadata_path = batch_dir / "metadata.json"
+    metadata_path = batch_dir / METADATA_FILE
     if not metadata_path.exists():
         raise ValueError(f"No metadata.json in {batch_dir}")
 
@@ -215,7 +215,7 @@ def _get_dimensions_from_batch(batch_dir: Path) -> tuple[int, int]:
 
 def _print_summary(output_path: Path) -> None:
     """Print summary of created training set."""
-    for split in ["train", "val"]:
+    for split in [TRAIN_DIR, VAL_DIR]:
         split_dir = output_path / split
         if not split_dir.exists():
             continue
