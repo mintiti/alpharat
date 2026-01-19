@@ -13,9 +13,10 @@ from __future__ import annotations
 
 from typing import Annotated, Self
 
-from pydantic import Discriminator, model_validator
+from pydantic import ConfigDict, Discriminator, model_validator
 
 from alpharat.config.base import StrictBaseModel
+from alpharat.config.game import GameConfig  # noqa: TC001
 from alpharat.nn.architectures.local_value.config import (
     LocalValueModelConfig,
     LocalValueOptimConfig,
@@ -72,10 +73,13 @@ class TrainConfig(StrictBaseModel):
         seed: 42
     """
 
+    model_config = ConfigDict(extra="forbid")
+
     name: str  # Required: human-chosen experiment name
     model: ModelConfig
     optim: OptimConfig
     data: DataConfig
+    game: GameConfig | None = None  # Game params for benchmark (must match sampling)
     seed: int = 42
     resume_from: str | None = None
 
