@@ -2,9 +2,9 @@
 """Self-play sampling script for training data generation.
 
 Usage:
-    uv run python scripts/sample.py configs/sample.yaml --group mygroup
-    uv run python scripts/sample.py configs/sample.yaml --checkpoint path/to/model.pt
-    uv run python scripts/sample.py configs/sample.yaml --workers 8
+    alpharat-sample configs/sample.yaml --group mygroup
+    alpharat-sample configs/sample.yaml --checkpoint path/to/model.pt
+    alpharat-sample configs/sample.yaml --workers 8
 
 CLI overrides (--group, --checkpoint) are merged into the config before saving,
 so the batch metadata has actual values.

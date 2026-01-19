@@ -183,12 +183,12 @@ exp.get_run_path("bimatrix_mlp_v1")
 
 ### Querying Artifacts
 
-Use `manifest.py` to see what's in the experiments folder:
+Use `alpharat-manifest` to see what's in the experiments folder:
 
 ```bash
-uv run python scripts/manifest.py batches   # List all batches
-uv run python scripts/manifest.py shards    # List shards with lineage
-uv run python scripts/manifest.py runs      # List training runs
+alpharat-manifest batches   # List all batches
+alpharat-manifest shards    # List shards with lineage
+alpharat-manifest runs      # List training runs
 ```
 
 Example output:
@@ -556,29 +556,29 @@ The AlphaZero iteration: sample games → train NN → use NN to sample better g
 **First iteration (no NN yet):**
 ```bash
 # 1. Sample games with pure MCTS (uniform priors)
-uv run python scripts/sample.py configs/sample.yaml --group iteration_0
+alpharat-sample configs/sample.yaml --group iteration_0
 
 # 2. Convert games to training shards
-uv run python scripts/prepare_shards.py --architecture mlp --group iter0_shards --batches iteration_0
+alpharat-prepare-shards --architecture mlp --group iter0_shards --batches iteration_0
 
 # 3. Train NN and benchmark against baselines
-uv run python scripts/train_and_benchmark.py configs/train.yaml --name mlp_v1 --shards iter0_shards/UUID --games 50
+alpharat-train-and-benchmark configs/train.yaml --name mlp_v1 --shards iter0_shards/UUID --games 50
 ```
 
 **Subsequent iterations (with NN):**
 ```bash
 # 1. Sample using trained NN as MCTS prior
-uv run python scripts/sample.py configs/sample_with_nn.yaml --group iteration_1 \
+alpharat-sample configs/sample_with_nn.yaml --group iteration_1 \
     --checkpoint experiments/runs/mlp_v1/checkpoints/best_model.pt
 
 # 2. Create shards from new games
-uv run python scripts/prepare_shards.py --architecture mlp --group iter1_shards --batches iteration_1
+alpharat-prepare-shards --architecture mlp --group iter1_shards --batches iteration_1
 
 # 3. Train on new data
-uv run python scripts/train.py configs/train.yaml --name mlp_v2 --shards iter1_shards/UUID
+alpharat-train configs/train.yaml --name mlp_v2 --shards iter1_shards/UUID
 
 # 4. Benchmark against previous iteration
-uv run python scripts/benchmark.py configs/tournament.yaml
+alpharat-benchmark configs/tournament.yaml
 ```
 
 **Scripts:**

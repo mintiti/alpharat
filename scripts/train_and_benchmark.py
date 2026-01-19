@@ -7,9 +7,9 @@ This convenience script chains training with evaluation:
 3. Saves benchmark results as {run_name}_benchmark
 
 Usage:
-    uv run python scripts/train_and_benchmark.py configs/train.yaml --name mlp_v1 --shards grp/uuid
-    uv run python scripts/train_and_benchmark.py configs/train.yaml --games 100 --device mps
-    uv run python scripts/train_and_benchmark.py configs/train.yaml --epochs 50 --workers 8
+    alpharat-train-and-benchmark configs/train.yaml --name mlp_v1 --shards grp/uuid
+    alpharat-train-and-benchmark configs/train.yaml --games 100 --device mps
+    alpharat-train-and-benchmark configs/train.yaml --epochs 50 --workers 8
 
 CLI overrides (--name, --shards) are merged into the config before saving,
 so the frozen config in experiments/runs/{name}/config.yaml has actual values.

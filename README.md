@@ -19,7 +19,7 @@ uv pip install torch --torch-backend=cpu --reinstall
 uv run pytest
 
 # Generate training data
-uv run python scripts/sample.py configs/sample.yaml
+alpharat-sample configs/sample.yaml
 ```
 
 ## Self-play workflow
@@ -30,14 +30,14 @@ The AlphaZero loop: sample games → train NN → use NN to sample better games 
 
 ```bash
 # 1. Sample games with pure MCTS (uniform priors)
-uv run python scripts/sample.py configs/sample.yaml --group uniform_5x5
+alpharat-sample configs/sample.yaml --group uniform_5x5
 
 # 2. Convert games to training shards
-uv run python scripts/prepare_shards.py --group 5x5_v1 --batches uniform_5x5
+alpharat-prepare-shards --group 5x5_v1 --batches uniform_5x5
 
 # 3. Train NN and benchmark against baselines (Random, Greedy, MCTS)
 #    Edit configs/train.yaml: set name and data paths, then:
-uv run python scripts/train_and_benchmark.py configs/train.yaml --name mlp_v1 --games 50
+alpharat-train-and-benchmark configs/train.yaml --name mlp_v1 --games 50
 ```
 
 ### Subsequent iterations (with NN)
@@ -45,29 +45,29 @@ uv run python scripts/train_and_benchmark.py configs/train.yaml --name mlp_v1 --
 ```bash
 # 1. Sample using trained NN as MCTS prior
 #    Edit configs/sample_with_nn.yaml: set checkpoint path, then:
-uv run python scripts/sample.py configs/sample_with_nn.yaml --group nn_guided_v1
+alpharat-sample configs/sample_with_nn.yaml --group nn_guided_v1
 
 # 2. Create shards from new games
-uv run python scripts/prepare_shards.py --group 5x5_v2 --batches nn_guided_v1
+alpharat-prepare-shards --group 5x5_v2 --batches nn_guided_v1
 
 # 3. Train on new data (optionally resuming from previous checkpoint)
-uv run python scripts/train.py configs/train.yaml --name mlp_v2
+alpharat-train configs/train.yaml --name mlp_v2
 
 # 4. Benchmark against previous iteration
 #    Edit tournament config to include previous checkpoint, then:
-uv run python scripts/benchmark.py configs/tournament.yaml
+alpharat-benchmark configs/tournament.yaml
 ```
 
-### Scripts
+### CLI commands
 
-| Script | Purpose |
-|--------|---------|
-| `sample.py` | Generate self-play games with MCTS (with or without NN prior) |
-| `prepare_shards.py` | Convert game batches to shuffled train/val shards |
-| `train.py` | Train NN on shards |
-| `benchmark.py` | Run tournament between agents (custom matchups) |
-| `train_and_benchmark.py` | Convenience: train + auto-benchmark vs baselines |
-| `manifest.py` | Query artifacts: list batches, shards, runs with lineage |
+| Command | Purpose |
+|---------|---------|
+| `alpharat-sample` | Generate self-play games with MCTS (with or without NN prior) |
+| `alpharat-prepare-shards` | Convert game batches to shuffled train/val shards |
+| `alpharat-train` | Train NN on shards |
+| `alpharat-benchmark` | Run tournament between agents (custom matchups) |
+| `alpharat-train-and-benchmark` | Convenience: train + auto-benchmark vs baselines |
+| `alpharat-manifest` | Query artifacts: list batches, shards, runs with lineage |
 
 ### Where things go
 
@@ -83,9 +83,9 @@ The `experiments/manifest.yaml` tracks lineage (which shards came from which bat
 
 Quick scan of what exists:
 ```bash
-uv run python scripts/manifest.py batches  # See all batch groups
-uv run python scripts/manifest.py shards   # See shards + which batches they came from
-uv run python scripts/manifest.py runs     # See training runs + which shards they used
+alpharat-manifest batches  # See all batch groups
+alpharat-manifest shards   # See shards + which batches they came from
+alpharat-manifest runs     # See training runs + which shards they used
 ```
 
 ## What's here

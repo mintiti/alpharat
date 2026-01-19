@@ -2,9 +2,9 @@
 """Query experiment artifacts.
 
 Usage:
-    uv run python scripts/manifest.py batches
-    uv run python scripts/manifest.py shards
-    uv run python scripts/manifest.py runs
+    alpharat-manifest batches
+    alpharat-manifest shards
+    alpharat-manifest runs
 """
 
 from __future__ import annotations

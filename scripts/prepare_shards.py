@@ -9,10 +9,10 @@ format matches what the model expects during training.
 
 Usage:
     # Using --architecture directly (simpler)
-    uv run python scripts/prepare_shards.py --architecture mlp --group myshards --batches mybatches
+    alpharat-prepare-shards --architecture mlp --group myshards --batches mybatches
 
     # Using config file (alternative)
-    uv run python scripts/prepare_shards.py configs/train.yaml --group myshards --batches mybatches
+    alpharat-prepare-shards configs/train.yaml --group myshards --batches mybatches
 """
 
 from __future__ import annotations

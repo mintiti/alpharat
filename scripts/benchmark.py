@@ -2,9 +2,9 @@
 """Run round-robin tournament from YAML config.
 
 Usage:
-    uv run python scripts/benchmark.py configs/tournament.yaml
-    uv run python scripts/benchmark.py configs/tournament.yaml --name override  # Override config
-    uv run python scripts/benchmark.py configs/tournament.yaml --workers 8
+    alpharat-benchmark configs/tournament.yaml
+    alpharat-benchmark configs/tournament.yaml --name override  # Override config
+    alpharat-benchmark configs/tournament.yaml --workers 8
 
 Example YAML config:
     name: tournament_v1  # Required: benchmark name

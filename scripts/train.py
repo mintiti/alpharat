@@ -2,9 +2,9 @@
 """Training script for PyRat neural network.
 
 Usage:
-    uv run python scripts/train.py configs/train.yaml --name mlp_v1 --shards mygroup/abc123
-    uv run python scripts/train.py configs/train.yaml --epochs 200
-    uv run python scripts/train.py configs/train.yaml --amp  # Force AMP
+    alpharat-train configs/train.yaml --name mlp_v1 --shards mygroup/abc123
+    alpharat-train configs/train.yaml --epochs 200
+    alpharat-train configs/train.yaml --amp  # Force AMP
 
 CLI overrides (--name, --shards) are merged into the config before saving,
 so the frozen config in experiments/runs/{name}/config.yaml has actual values.
