@@ -219,6 +219,8 @@ DOGFOOD.md
 /checkpoints/
 /data/
 /experiments/
+!/experiments/LOG.md
+!/experiments/IDEAS.md
 /results/
 *.prof
 
