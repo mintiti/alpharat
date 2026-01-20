@@ -156,7 +156,8 @@ class SamplingMetrics:
 def load_nn_context(checkpoint_path: str, device: str = "cpu") -> NNContext:
     """Load NN model for use in sampling using ModelConfig.build_model().
 
-    Called once per worker process at startup.
+    Called once per worker process at startup. Uses Pydantic config from checkpoint
+    to build the correct model and observation builder automatically.
 
     Args:
         checkpoint_path: Path to model checkpoint.
@@ -178,7 +179,7 @@ model, builder, width, height = load_model_from_checkpoint(
         builder=builder,
         width=width,
         height=height,
-        device=device,
+device=device,
     )
 
 

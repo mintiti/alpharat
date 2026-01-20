@@ -115,3 +115,94 @@ nn              50/0/0     2/26/22      9/36/5           -     0/36/14
 1. **Always match train/test distributions** — wall density, mud density, cheese count, max turns all matter
 2. **Check sampling metadata** when debugging — the answer was in `batches/7x7/.../metadata.json`
 3. **Observations should be comparable** — when NN fails catastrophically, compare live obs stats with training obs stats
+
+---
+
+## 2026-01-20: Iteration 2 — Self-Play with NN Priors
+
+### Setup
+
+**Sampling:**
+- Used iter1 checkpoint as MCTS prior
+- Games: 50,000 → 584,185 positions (vs 884k in iter1)
+- W/D/L: 2126/45657/2217 (91.3% draws — up from 73%)
+- Cheese collected: 99.9%
+- Avg game length: 11.7 turns (vs 17.7 in iter1)
+
+Shorter games + higher draw rate = NN-guided MCTS plays more symmetrically.
+
+**Training:**
+- Same architecture (SymmetricMLP, 291k params)
+- Resumed from iter1 checkpoint
+- Trained 100 epochs on iter2 data
+
+### Results
+
+| Agent | Elo | Notes |
+|-------|-----|-------|
+| mcts+nn | 1026.2 | +0.7 vs iter1 |
+| mcts+nn-prev | 1025.0 | iter1 checkpoint |
+| greedy | 1000.0 | anchor |
+| nn | 973.8 | +93.3 vs iter1 |
+| mcts | 884.2 | -10.1 vs iter1 |
+| nn-prev | 880.5 | iter1 checkpoint |
+| random | 169.5 | |
+
+**Head-to-head (W/D/L):**
+```
+              mcts+nn  mcts+nn-prev  greedy    nn
+mcts+nn           -       5/39/6     8/38/4   11/38/1
+mcts+nn-prev   6/39/5        -       6/37/7    9/36/5
+nn             1/38/11   5/36/9    3/40/7       -
+```
+
+### Observations
+
+1. **NN improved a lot** (+93 Elo). The self-play loop is working — learning from stronger data makes a stronger NN.
+
+2. **MCTS+NN barely moved** (+1 Elo). The combined agent didn't improve despite the NN improving.
+
+3. **Search contributes less:**
+   - Iter1: mcts+nn - nn ≈ 125 Elo gap
+   - Iter2: mcts+nn - nn ≈ 52 Elo gap
+
+   Search is adding half as much value now.
+
+4. **Many Nash equilibrium failures** during benchmark. Lots of "No Nash equilibrium found, falling back to prior" warnings.
+
+5. **91% draw rate** — games are very symmetric. Both agents learned to play the "correct" response, leading to mirror matches.
+
+### Interpretation
+
+The NN keeps learning (policy improves), but search is hitting a ceiling.
+
+**Leading hypothesis: NN payout matrix predictions are garbage.**
+
+The NN outputs two things: policy priors and payout matrices. The policy is clearly improving (raw NN went +93 Elo). But the payout matrix might not be learning anything useful. If the predicted payout matrices are nonsense:
+- Nash computation on garbage → garbage mixed strategy
+- MCTS backup uses garbage values → tree statistics are unreliable
+- Search can't improve on the prior because it's reasoning over bad payouts
+
+This would explain why:
+- Raw NN improves (policy head learns)
+- MCTS+NN plateaus (payout head doesn't learn, search can't help)
+- Nash failures increase (degenerate/nonsense matrices)
+
+### Diagnostic Signal
+
+Compared NN predictions vs MCTS-computed targets:
+
+| Target | Correlation | Explained Variance |
+|--------|-------------|-------------------|
+| Value (scalar) | 0.99 | 0.97 |
+| Payout matrix (5×5) | 0.10 | <<< -1 |
+
+The NN learns **value** perfectly but **payout matrix** is garbage.
+
+Why: MCTS only explores a subset of action pairs deeply. Explored pairs have good signal, unexplored pairs are noise/zeros in training data. The NN can't learn what it never sees.
+
+### Next Steps (prioritized)
+
+1. **Confidence-weighted payout loss** — Learn full 5×5 matrices, but weight by how confident we are in each entry. MCTS gives signal for all pairs (not just played), it's just noisier than value from actual rollout. Weight by visit counts or similar.
+
+2. **Spatial architectures** — GNN/CNN/Transformer that learns game-relevant spatial features. Construct payout matrix from (H, W, feat_size) encoding rather than flat MLP. Auxiliary task: predict which cheese gets taken by whom. (See IDEAS.md for details)
