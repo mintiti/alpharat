@@ -4,7 +4,7 @@ Usage:
     from alpharat.experiments import ExperimentManager
 
     exp = ExperimentManager()
-    batch_dir = exp.create_batch(group="uniform_5x5", mcts_config=..., game_params=...)
+    batch_dir = exp.create_batch(group="uniform_5x5", mcts_config=..., game_config=...)
 """
 
 from __future__ import annotations
@@ -26,7 +26,7 @@ from alpharat.experiments.schema import (
 )
 
 if TYPE_CHECKING:
-    from alpharat.data.batch import GameParams
+    from alpharat.config.game import GameConfig
     from alpharat.mcts import MCTSConfig
 
 
@@ -134,7 +134,7 @@ class ExperimentManager:
         self,
         group: str,
         mcts_config: MCTSConfig,
-        game_params: GameParams,
+        game: GameConfig,
         checkpoint_path: str | None = None,
         seed_start: int = 0,
     ) -> Path:
@@ -143,7 +143,7 @@ class ExperimentManager:
         Args:
             group: Human-readable grouping name (e.g., "uniform_5x5").
             mcts_config: MCTS algorithm configuration.
-            game_params: Game configuration.
+            game: Game configuration (GameConfig).
             checkpoint_path: Optional path to parent checkpoint for NN-guided sampling.
             seed_start: Starting seed for game generation (game N uses seed_start + N).
 
@@ -167,7 +167,7 @@ class ExperimentManager:
             created_at=datetime.now(UTC),
             checkpoint_path=checkpoint_path,
             mcts_config=mcts_config,
-            game_params=game_params,
+            game=game,
         )
         save_batch_metadata(batch_dir, metadata)
 
@@ -179,7 +179,7 @@ class ExperimentManager:
             created_at=metadata.created_at,
             parent_checkpoint=checkpoint_path,
             mcts_config=mcts_config,
-            game_params=game_params,
+            game=game,
             seed_start=seed_start,
         )
         manifest = self._load_manifest()
@@ -602,7 +602,7 @@ class ExperimentManager:
         """List batches with metadata for display.
 
         Returns:
-            List of dicts with batch info: id, created, parent_checkpoint, game_params.
+            List of dicts with batch info: id, created, parent_checkpoint, game.
         """
         manifest = self.load_manifest()
         return [
@@ -610,7 +610,7 @@ class ExperimentManager:
                 "id": batch_id,
                 "created": entry.created_at.strftime("%Y-%m-%d %H:%M"),
                 "parent": entry.parent_checkpoint or "-",
-                "size": f"{entry.game_params.width}x{entry.game_params.height}",
+                "size": f"{entry.game.width}x{entry.game.height}",
                 "simulations": entry.mcts_config.simulations,
             }
             for batch_id, entry in manifest.batches.items()

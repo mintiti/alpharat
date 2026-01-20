@@ -34,8 +34,7 @@ import argparse
 import logging
 from pathlib import Path
 
-import yaml
-
+from alpharat.config.loader import load_config
 from alpharat.eval.elo import compute_elo, from_tournament_result
 from alpharat.eval.tournament import TournamentConfig, run_tournament
 from alpharat.experiments import ExperimentManager
@@ -46,7 +45,11 @@ logger = logging.getLogger(__name__)
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Run round-robin MCTS tournament")
-    parser.add_argument("config", type=Path, help="Tournament YAML config file")
+    parser.add_argument(
+        "config",
+        type=str,
+        help="Config path: 'configs/tournament.yaml' (with or without .yaml)",
+    )
     parser.add_argument(
         "--name",
         type=str,
@@ -62,15 +65,28 @@ def main() -> None:
     )
     args = parser.parse_args()
 
-    # Load and parse config
-    if not args.config.exists():
+    # Parse config path: extract configs directory and config name
+    config_path = Path(args.config)
+    if not config_path.exists() and not config_path.with_suffix(".yaml").exists():
         parser.error(f"Config file not found: {args.config}")
 
-    data = yaml.safe_load(args.config.read_text())
-    config = TournamentConfig.model_validate(data)
+    config_name = str(config_path.with_suffix(""))  # Remove .yaml if present
+    if config_name.startswith("configs/"):
+        config_dir = "configs"
+        config_name = config_name[len("configs/") :]
+    else:
+        config_dir = str(config_path.parent) if config_path.parent.name else "."
+        config_name = config_path.stem
 
+    # Build Hydra overrides from CLI args
+    overrides: list[str] = []
+    if args.name:
+        overrides.append(f"name={args.name}")
     if args.workers:
-        config = config.model_copy(update={"workers": args.workers})
+        overrides.append(f"workers={args.workers}")
+
+    # Load config using Hydra (resolves defaults) + Pydantic (validates)
+    config = load_config(TournamentConfig, config_dir, config_name, overrides=overrides or None)
 
     # CLI --name overrides config
     benchmark_name = args.name if args.name else config.name
@@ -88,7 +104,7 @@ def main() -> None:
     # Create benchmark via ExperimentManager
     bench_dir = exp.create_benchmark(
         name=benchmark_name,
-        config=data,  # Save original config
+        config=config.model_dump(),  # Save merged config
         checkpoints=checkpoints,
     )
     logger.info(f"Created benchmark: {benchmark_name}")

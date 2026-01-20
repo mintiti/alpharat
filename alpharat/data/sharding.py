@@ -9,9 +9,9 @@ from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
 import numpy as np
-from pydantic import BaseModel
 from tqdm import tqdm
 
+from alpharat.config.base import StrictBaseModel
 from alpharat.data.loader import is_bundle_file, iter_games_from_bundle, load_game_data
 from alpharat.experiments.paths import batch_id_from_path
 from alpharat.nn.extraction import from_game_arrays
@@ -26,7 +26,7 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
-class TrainingSetManifest(BaseModel):
+class TrainingSetManifest(StrictBaseModel):
     """Manifest for a prepared training set.
 
     Stored as manifest.json in the training set directory.
@@ -43,7 +43,7 @@ class TrainingSetManifest(BaseModel):
     height: int
 
 
-class ShardingResult(BaseModel):
+class ShardingResult(StrictBaseModel):
     """Result from preparing a training set with split."""
 
     shard_id: str

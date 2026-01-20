@@ -9,9 +9,10 @@ from multiprocessing import Process, Queue
 from typing import TYPE_CHECKING, Any
 
 import numpy as np
-from pydantic import BaseModel, Field
+from pydantic import Field
 
-from alpharat.data.batch import GameParams  # noqa: TC001
+from alpharat.config.base import StrictBaseModel
+from alpharat.config.game import GameConfig  # noqa: TC001
 from alpharat.data.recorder import GameBundler, GameRecorder
 from alpharat.eval.game import is_terminal
 from alpharat.mcts import MCTSConfig  # noqa: TC001
@@ -26,8 +27,6 @@ if TYPE_CHECKING:
     from pyrat_engine.core.game import PyRat
 
     from alpharat.data.types import GameData
-    from alpharat.nn.builders.flat import FlatObservationBuilder
-    from alpharat.nn.models import LocalValueMLP, PyRatMLP, SymmetricMLP
 
 
 # --- Config Models ---
@@ -40,14 +39,14 @@ class NNContext:
     Loaded once per worker process and reused across all games.
     """
 
-    model: PyRatMLP | LocalValueMLP | SymmetricMLP
-    builder: FlatObservationBuilder
+    model: Any  # TrainableModel (nn.Module with predict method)
+    builder: Any  # ObservationBuilder
     width: int
     height: int
     device: str
 
 
-class SamplingParams(BaseModel):
+class SamplingParams(StrictBaseModel):
     """Parameters for the sampling process."""
 
     num_games: int
@@ -55,11 +54,11 @@ class SamplingParams(BaseModel):
     device: str = "cpu"
 
 
-class SamplingConfig(BaseModel):
+class SamplingConfig(StrictBaseModel):
     """Full configuration for a sampling run."""
 
     mcts: MCTSConfig = Field(discriminator="variant")
-    game: GameParams
+    game: GameConfig
     sampling: SamplingParams
     group: str  # Required: human-readable grouping name (e.g., "uniform_5x5")
     experiments_dir: str = "experiments"  # Root directory for experiments
@@ -155,7 +154,7 @@ class SamplingMetrics:
 
 
 def load_nn_context(checkpoint_path: str, device: str = "cpu") -> NNContext:
-    """Load NN model for use in sampling.
+    """Load NN model for use in sampling using ModelConfig.build_model().
 
     Called once per worker process at startup.
 
@@ -166,61 +165,13 @@ def load_nn_context(checkpoint_path: str, device: str = "cpu") -> NNContext:
     Returns:
         NNContext with loaded model and builder.
     """
-    import torch
+    from alpharat.config.checkpoint import load_model_from_checkpoint
 
-    from alpharat.nn.builders.flat import FlatObservationBuilder
-
-    torch_device = torch.device(device)
-    ckpt = torch.load(checkpoint_path, map_location=torch_device, weights_only=False)
-
-    width = ckpt.get("width", 5)
-    height = ckpt.get("height", 5)
-    builder = FlatObservationBuilder(width=width, height=height)
-
-    config = ckpt.get("config", {})
-    model_config = config.get("model", {})
-    hidden_dim = model_config.get("hidden_dim", 256)
-    dropout = model_config.get("dropout", 0.0)
-    model_type = ckpt.get("model_type", "mlp")
-
-    obs_dim = width * height * 7 + 6
-
-    optim_config = config.get("optim", {})
-    if model_type == "symmetric":
-        from alpharat.nn.models import SymmetricMLP
-
-        model: SymmetricMLP | LocalValueMLP | PyRatMLP = SymmetricMLP(
-            width=width,
-            height=height,
-            hidden_dim=hidden_dim,
-            dropout=dropout,
-        )
-    elif "ownership_weight" in optim_config:
-        from alpharat.nn.models import LocalValueMLP
-
-        model = LocalValueMLP(
-            obs_dim=obs_dim,
-            width=width,
-            height=height,
-            hidden_dim=hidden_dim,
-            dropout=dropout,
-        )
-    else:
-        from alpharat.nn.models import PyRatMLP
-
-        model = PyRatMLP(
-            obs_dim=obs_dim,
-            hidden_dim=hidden_dim,
-            dropout=dropout,
-        )
-
-    model.load_state_dict(ckpt["model_state_dict"])
-    model.to(torch_device)
-    model.eval()
-
-    # Compile model for faster inference (CUDA only - MPS has issues)
-    if torch_device.type == "cuda":
-        model = torch.compile(model, mode="reduce-overhead")  # type: ignore[assignment]
+    model, builder, width, height = load_model_from_checkpoint(
+        checkpoint_path,
+        device=device,
+        compile_model=True,
+    )
 
     return NNContext(
         model=model,
@@ -318,32 +269,17 @@ def build_tree(
     return MCTSTree(game=simulator, root=root, gamma=gamma, predict_fn=predict_fn)
 
 
-def create_game(params: GameParams, seed: int) -> PyRat:
-    """Create a new game from parameters.
+def create_game(config: GameConfig, seed: int) -> PyRat:
+    """Create a new game from configuration.
 
     Args:
-        params: Game configuration.
+        config: Game configuration.
         seed: Random seed for maze generation.
 
     Returns:
         Configured PyRat game instance.
     """
-    from pyrat_engine.core.game import PyRat
-
-    kwargs: dict[str, int | float | bool] = {
-        "width": params.width,
-        "height": params.height,
-        "cheese_count": params.cheese_count,
-        "max_turns": params.max_turns,
-        "seed": seed,
-        "symmetric": params.symmetric,
-    }
-    if params.wall_density is not None:
-        kwargs["wall_density"] = params.wall_density
-    if params.mud_density is not None:
-        kwargs["mud_density"] = params.mud_density
-
-    return PyRat(**kwargs)  # type: ignore[arg-type]
+    return config.build(seed)
 
 
 # --- Core Sampling ---
@@ -531,7 +467,7 @@ def run_sampling(config: SamplingConfig, *, verbose: bool = True) -> tuple[Path,
     batch_dir = exp.create_batch(
         group=config.group,
         mcts_config=config.mcts,
-        game_params=config.game,
+        game=config.game,
         checkpoint_path=config.checkpoint,
         seed_start=0,  # Games use seeds 0, 1, 2, ... N
     )

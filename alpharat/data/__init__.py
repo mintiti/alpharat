@@ -1,9 +1,9 @@
 """Game data recording and persistence for MCTS training."""
 
+from alpharat.config.game import GameConfig
 from alpharat.data.batch import (
     BatchMetadata,
     BatchStats,
-    GameParams,
     create_batch,
     get_batch_stats,
     load_batch_metadata,
@@ -25,10 +25,14 @@ from alpharat.data.sharding import (
     prepare_training_set,
 )
 
+# Backward compatibility alias (deprecated, use GameConfig)
+GameParams = GameConfig
+
 __all__ = [
     "BatchMetadata",
     "BatchStats",
-    "GameParams",
+    "GameConfig",
+    "GameParams",  # Deprecated alias for GameConfig
     "GameRecorder",
     "GameStats",
     "SamplingConfig",

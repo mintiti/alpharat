@@ -66,65 +66,19 @@ class MCTSAgent(Agent):
             self._load_model(checkpoint)
 
     def _load_model(self, checkpoint_path: str) -> None:
-        """Load NN model from checkpoint."""
-        import torch
+        """Load NN model from checkpoint using ModelConfig.build_model()."""
+        from alpharat.config.checkpoint import load_model_from_checkpoint
 
-        from alpharat.nn.builders.flat import FlatObservationBuilder
+        model, builder, width, height = load_model_from_checkpoint(
+            checkpoint_path,
+            device=self._device,
+            compile_model=True,
+        )
 
-        device = torch.device(self._device)
-        ckpt = torch.load(checkpoint_path, map_location=device, weights_only=False)
-
-        self._width = ckpt.get("width", 5)
-        self._height = ckpt.get("height", 5)
-        self._builder = FlatObservationBuilder(width=self._width, height=self._height)
-
-        config = ckpt.get("config", {})
-        model_config = config.get("model", {})
-        hidden_dim = model_config.get("hidden_dim", 256)
-        dropout = model_config.get("dropout", 0.0)
-
-        obs_dim = self._width * self._height * 7 + 6
-
-        # Detect model type from checkpoint
-        model_type = ckpt.get("model_type", None)
-        optim_config = config.get("optim", {})
-
-        if model_type == "symmetric":
-            from alpharat.nn.models import SymmetricMLP
-
-            self._model = SymmetricMLP(
-                width=self._width,
-                height=self._height,
-                hidden_dim=hidden_dim,
-                dropout=dropout,
-            )
-        elif "ownership_weight" in optim_config:
-            from alpharat.nn.models import LocalValueMLP
-
-            self._model = LocalValueMLP(
-                obs_dim=obs_dim,
-                width=self._width,
-                height=self._height,
-                hidden_dim=hidden_dim,
-                dropout=dropout,
-            )
-        else:
-            from alpharat.nn.models import PyRatMLP
-
-            self._model = PyRatMLP(
-                obs_dim=obs_dim,
-                hidden_dim=hidden_dim,
-                dropout=dropout,
-            )
-
-        self._model.load_state_dict(ckpt["model_state_dict"])
-        self._model.to(device)
-        self._model.eval()
-
-        # Compile model for faster inference (CUDA only - MPS has issues)
-        if device.type == "cuda":
-            self._model = torch.compile(self._model, mode="reduce-overhead")  # type: ignore[assignment]
-
+        self._model = model  # type: ignore[assignment]
+        self._builder = builder  # type: ignore[assignment]
+        self._width = width
+        self._height = height
         self._model_loaded = True
 
     def _validate_dimensions(self, game: PyRat) -> None:

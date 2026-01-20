@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from alpharat.data.batch import GameParams
+from alpharat.config.game import GameConfig
 from alpharat.data.sampling import create_game
 
 
@@ -11,7 +11,7 @@ class TestCreateGame:
 
     def test_respects_wall_density_zero(self) -> None:
         """Verify wall_density=0.0 creates game with no walls."""
-        params = GameParams(
+        params = GameConfig(
             width=5,
             height=5,
             max_turns=30,
@@ -24,7 +24,7 @@ class TestCreateGame:
 
     def test_respects_mud_density_zero(self) -> None:
         """Verify mud_density=0.0 creates game with no mud."""
-        params = GameParams(
+        params = GameConfig(
             width=5,
             height=5,
             max_turns=30,
@@ -37,7 +37,7 @@ class TestCreateGame:
 
     def test_none_density_uses_pyrat_defaults(self) -> None:
         """Verify None density uses PyRat defaults (non-zero walls/mud)."""
-        params = GameParams(
+        params = GameConfig(
             width=5,
             height=5,
             max_turns=30,
@@ -53,7 +53,7 @@ class TestCreateGame:
 
     def test_basic_game_params_applied(self) -> None:
         """Verify basic params (width, height, etc.) are applied."""
-        params = GameParams(
+        params = GameConfig(
             width=7,
             height=9,
             max_turns=50,

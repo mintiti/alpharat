@@ -8,39 +8,26 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 import numpy as np
-from pydantic import BaseModel, Field
+from pydantic import Field
 
+from alpharat.config.base import StrictBaseModel
+from alpharat.config.game import GameConfig  # noqa: TC001
 from alpharat.mcts import MCTSConfig  # noqa: TC001
-
-# --- Game Parameters ---
-
-
-class GameParams(BaseModel):
-    """Game configuration for sampling."""
-
-    width: int
-    height: int
-    max_turns: int
-    cheese_count: int
-    wall_density: float | None = None  # None = use pyrat default (0.7)
-    mud_density: float | None = None  # None = use pyrat default (0.1)
-    symmetric: bool = True  # False = asymmetric maze/cheese generation
-
 
 # --- Batch Metadata ---
 
 
-class BatchMetadata(BaseModel):
+class BatchMetadata(StrictBaseModel):
     """Metadata for a batch of sampled games."""
 
     batch_id: str
     created_at: datetime
     checkpoint_path: str | None
     mcts_config: MCTSConfig = Field(discriminator="variant")
-    game_params: GameParams
+    game: GameConfig
 
 
-class BatchStats(BaseModel):
+class BatchStats(StrictBaseModel):
     """Statistics computed from game files in a batch."""
 
     game_count: int
@@ -54,7 +41,7 @@ def create_batch(
     parent_dir: Path | str,
     checkpoint_path: str | None,
     mcts_config: MCTSConfig,
-    game_params: GameParams,
+    game: GameConfig,
 ) -> Path:
     """Create a new batch directory with metadata.
 
@@ -67,7 +54,7 @@ def create_batch(
         parent_dir: Parent directory for batches
         checkpoint_path: Path to model checkpoint, or None for random policy
         mcts_config: MCTS algorithm configuration
-        game_params: Game configuration
+        game: Game configuration
 
     Returns:
         Path to the created batch directory
@@ -84,7 +71,7 @@ def create_batch(
         created_at=datetime.now(UTC),
         checkpoint_path=checkpoint_path,
         mcts_config=mcts_config,
-        game_params=game_params,
+        game=game,
     )
 
     save_batch_metadata(batch_dir, metadata)

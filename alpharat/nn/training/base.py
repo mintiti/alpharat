@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from pydantic import BaseModel
+from alpharat.config.base import StrictBaseModel
 
 if TYPE_CHECKING:
     from alpharat.nn.builders import ObservationBuilder
@@ -19,7 +19,7 @@ if TYPE_CHECKING:
     )
 
 
-class BaseOptimConfig(BaseModel):
+class BaseOptimConfig(StrictBaseModel):
     """Base optimization parameters shared across architectures."""
 
     lr: float = 1e-3
@@ -28,14 +28,14 @@ class BaseOptimConfig(BaseModel):
     batch_size: int = 4096
 
 
-class DataConfig(BaseModel):
+class DataConfig(StrictBaseModel):
     """Data paths configuration."""
 
     train_dir: str
     val_dir: str
 
 
-class BaseModelConfig(BaseModel):
+class BaseModelConfig(StrictBaseModel):
     """Base config that knows how to build everything the trainer needs.
 
     Subclasses must implement the build_* methods to provide model-specific

@@ -12,7 +12,7 @@ import numpy as np
 import pytest
 from pyrat_engine.core.types import Direction
 
-from alpharat.data.batch import GameParams
+from alpharat.config.game import GameConfig
 from alpharat.data.loader import is_bundle_file, iter_games_from_bundle, load_game_data
 from alpharat.data.sampling import SamplingConfig, SamplingParams, run_sampling
 from alpharat.data.sharding import load_training_set_manifest, prepare_training_set
@@ -236,7 +236,7 @@ class TestPipelineIntegrity:
         # === Config: Real game, fast MCTS ===
         config = SamplingConfig(
             mcts=DecoupledPUCTConfig(simulations=30, gamma=1.0, c_puct=1.5),
-            game=GameParams(
+            game=GameConfig(
                 width=width,
                 height=height,
                 cheese_count=5,
@@ -302,7 +302,7 @@ class TestPipelineIntegrity:
 
         config = SamplingConfig(
             mcts=DecoupledPUCTConfig(simulations=20, gamma=1.0, c_puct=1.5),
-            game=GameParams(
+            game=GameConfig(
                 width=width,
                 height=height,
                 cheese_count=3,
@@ -347,7 +347,7 @@ class TestPipelineIntegrity:
 
         config = SamplingConfig(
             mcts=DecoupledPUCTConfig(simulations=25, gamma=1.0, c_puct=1.5),
-            game=GameParams(
+            game=GameConfig(
                 width=width,
                 height=height,
                 cheese_count=3,

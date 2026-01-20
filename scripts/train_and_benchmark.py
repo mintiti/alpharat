@@ -32,7 +32,7 @@ from alpharat.ai.config import (
     NNAgentConfig,
     RandomAgentConfig,
 )
-from alpharat.data.batch import GameParams
+from alpharat.config.game import GameConfig
 from alpharat.eval.elo import compute_elo, from_tournament_result
 from alpharat.eval.tournament import TournamentConfig, run_tournament
 from alpharat.experiments import ExperimentManager
@@ -54,7 +54,7 @@ class BenchmarkSettings:
     baseline_checkpoint: Path | None = None
 
 
-def get_game_params_from_checkpoint(checkpoint_path: Path) -> GameParams:
+def get_game_params_from_checkpoint(checkpoint_path: Path) -> GameConfig:
     """Extract game dimensions from checkpoint."""
     import torch
 
@@ -64,7 +64,7 @@ def get_game_params_from_checkpoint(checkpoint_path: Path) -> GameParams:
     height = checkpoint.get("height", 5)
 
     # Use defaults for other params, matching training data
-    return GameParams(
+    return GameConfig(
         width=width,
         height=height,
         max_turns=30,
