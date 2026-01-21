@@ -9,7 +9,7 @@ This module provides:
 from __future__ import annotations
 
 from alpharat.config.base import StrictBaseModel
-from alpharat.config.checkpoint import load_model_from_checkpoint
+from alpharat.config.checkpoint import load_model_from_checkpoint, make_predict_fn
 from alpharat.config.game import GameConfig
 from alpharat.config.loader import load_config, load_raw_config
 
@@ -19,4 +19,5 @@ __all__ = [
     "load_config",
     "load_raw_config",
     "load_model_from_checkpoint",
+    "make_predict_fn",
 ]

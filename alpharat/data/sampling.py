@@ -12,6 +12,7 @@ import numpy as np
 from pydantic import Field
 
 from alpharat.config.base import StrictBaseModel
+from alpharat.config.checkpoint import make_predict_fn
 from alpharat.config.game import GameConfig  # noqa: TC001
 from alpharat.data.recorder import GameBundler, GameRecorder
 from alpharat.eval.game import is_terminal
@@ -182,52 +183,6 @@ def load_nn_context(checkpoint_path: str, device: str = "cpu") -> NNContext:
     )
 
 
-def make_predict_fn(
-    ctx: NNContext, simulator: PyRat
-) -> Callable[[Any], tuple[np.ndarray, np.ndarray, np.ndarray]]:
-    """Create predict_fn closure for MCTS that reads from simulator.
-
-    The closure captures the simulator reference. The tree mutates the simulator
-    during search, and the predict_fn reads its current state.
-
-    Args:
-        ctx: NN context with loaded model.
-        simulator: Game simulator (will be mutated by tree).
-
-    Returns:
-        Function that returns (policy_p1, policy_p2, payout) predictions.
-    """
-    import torch
-
-    from alpharat.data.maze import build_maze_array
-    from alpharat.nn.extraction import from_pyrat_game
-
-    maze = build_maze_array(simulator, ctx.width, ctx.height)
-    max_turns = simulator.max_turns
-
-    model = ctx.model
-    builder = ctx.builder
-    device = ctx.device
-
-    def predict_fn(_observation: Any) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-        """Run NN inference on current simulator state."""
-        obs_input = from_pyrat_game(simulator, maze, max_turns)
-        obs = builder.build(obs_input)
-
-        obs_tensor = torch.from_numpy(obs).unsqueeze(0).to(device)
-
-        with torch.inference_mode():
-            result = model.predict(obs_tensor)
-            # Dict interface - all models now return dicts
-            policy_p1 = result["policy_p1"].squeeze(0).cpu().numpy()
-            policy_p2 = result["policy_p2"].squeeze(0).cpu().numpy()
-            payout = result["payout"].squeeze(0).cpu().numpy()
-
-        return policy_p1, policy_p2, payout
-
-    return predict_fn
-
-
 # --- Helper Functions ---
 
 
@@ -328,7 +283,14 @@ def play_and_record_game(
                 # We need the simulator from inside build_tree, so we'll inline
                 # the tree creation here to capture the simulator reference
                 simulator = copy.deepcopy(game)
-                predict_fn = make_predict_fn(nn_ctx, simulator)
+                predict_fn = make_predict_fn(
+                    nn_ctx.model,
+                    nn_ctx.builder,
+                    simulator,
+                    nn_ctx.width,
+                    nn_ctx.height,
+                    nn_ctx.device,
+                )
                 dummy = np.ones(5) / 5
                 root = MCTSNode(
                     game_state=None,
