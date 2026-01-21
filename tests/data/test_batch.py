@@ -8,9 +8,9 @@ from pathlib import Path
 
 import numpy as np
 
+from alpharat.config.game import GameConfig
 from alpharat.data.batch import (
     BatchMetadata,
-    GameParams,
     create_batch,
     get_batch_stats,
     load_batch_metadata,
@@ -51,7 +51,7 @@ class TestMCTSConfig:
             "created_at": "2024-01-01T00:00:00Z",
             "checkpoint_path": "/path/to/model.pt",
             "mcts_config": {"variant": "decoupled_puct", "simulations": 400, "c_puct": 2.5},
-            "game_params": {"width": 10, "height": 10, "max_turns": 200, "cheese_count": 21},
+            "game": {"width": 10, "height": 10, "max_turns": 200, "cheese_count": 21},
         }
         metadata = BatchMetadata.model_validate(data)
 
@@ -69,7 +69,7 @@ class TestBatchMetadata:
             created_at=datetime.now(UTC),
             checkpoint_path=None,
             mcts_config=DecoupledPUCTConfig(simulations=100),
-            game_params=GameParams(width=10, height=10, max_turns=200, cheese_count=21),
+            game=GameConfig(width=10, height=10, max_turns=200, cheese_count=21),
         )
 
         assert metadata.checkpoint_path is None
@@ -81,7 +81,7 @@ class TestBatchMetadata:
             created_at=datetime.now(UTC),
             checkpoint_path="/models/checkpoint_100.pt",
             mcts_config=DecoupledPUCTConfig(simulations=100),
-            game_params=GameParams(width=10, height=10, max_turns=200, cheese_count=21),
+            game=GameConfig(width=10, height=10, max_turns=200, cheese_count=21),
         )
 
         assert metadata.checkpoint_path == "/models/checkpoint_100.pt"
@@ -97,7 +97,7 @@ class TestCreateBatch:
                 parent_dir=tmpdir,
                 checkpoint_path=None,
                 mcts_config=DecoupledPUCTConfig(simulations=100),
-                game_params=GameParams(width=10, height=10, max_turns=200, cheese_count=21),
+                game=GameConfig(width=10, height=10, max_turns=200, cheese_count=21),
             )
 
             assert batch_dir.exists()
@@ -111,7 +111,7 @@ class TestCreateBatch:
                 parent_dir=tmpdir,
                 checkpoint_path="/test/checkpoint.pt",
                 mcts_config=DecoupledPUCTConfig(simulations=400, c_puct=2.0),
-                game_params=GameParams(width=15, height=12, max_turns=300, cheese_count=21),
+                game=GameConfig(width=15, height=12, max_turns=300, cheese_count=21),
             )
 
             metadata = load_batch_metadata(batch_dir)
@@ -120,9 +120,9 @@ class TestCreateBatch:
             assert isinstance(metadata.mcts_config, DecoupledPUCTConfig)
             assert metadata.mcts_config.simulations == 400
             assert metadata.mcts_config.c_puct == 2.0
-            assert metadata.game_params.width == 15
-            assert metadata.game_params.height == 12
-            assert metadata.game_params.max_turns == 300
+            assert metadata.game.width == 15
+            assert metadata.game.height == 12
+            assert metadata.game.max_turns == 300
 
     def test_batch_id_is_uuid(self) -> None:
         """create_batch generates UUID batch_id."""
@@ -131,7 +131,7 @@ class TestCreateBatch:
                 parent_dir=tmpdir,
                 checkpoint_path=None,
                 mcts_config=DecoupledPUCTConfig(simulations=100),
-                game_params=GameParams(width=10, height=10, max_turns=200, cheese_count=21),
+                game=GameConfig(width=10, height=10, max_turns=200, cheese_count=21),
             )
 
             metadata = load_batch_metadata(batch_dir)
@@ -152,7 +152,7 @@ class TestCreateBatch:
                 parent_dir=tmpdir,
                 checkpoint_path=None,
                 mcts_config=DecoupledPUCTConfig(simulations=100),
-                game_params=GameParams(width=10, height=10, max_turns=200, cheese_count=21),
+                game=GameConfig(width=10, height=10, max_turns=200, cheese_count=21),
             )
 
             assert batch_dir.parent == Path(tmpdir)
@@ -174,7 +174,7 @@ class TestSaveLoadRoundtrip:
                 created_at=datetime(2024, 6, 15, 12, 30, 0, tzinfo=UTC),
                 checkpoint_path="/models/best.pt",
                 mcts_config=DecoupledPUCTConfig(simulations=400, gamma=0.98, c_puct=2.5),
-                game_params=GameParams(width=10, height=10, max_turns=200, cheese_count=21),
+                game=GameConfig(width=10, height=10, max_turns=200, cheese_count=21),
             )
 
             save_batch_metadata(batch_dir, original)
@@ -185,7 +185,7 @@ class TestSaveLoadRoundtrip:
             assert loaded.mcts_config.simulations == 400
             assert loaded.mcts_config.gamma == 0.98
             assert loaded.mcts_config.c_puct == 2.5
-            assert loaded.game_params.width == 10
+            assert loaded.game.width == 10
 
 
 class TestGetBatchStats:

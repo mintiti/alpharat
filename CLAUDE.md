@@ -165,7 +165,7 @@ exp = ExperimentManager()
 batch_dir = exp.create_batch(
     group="uniform_5x5",
     mcts_config=mcts_config,
-    game_params=game_params,
+    game=game_config,
 )
 
 # Training

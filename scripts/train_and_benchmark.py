@@ -32,7 +32,7 @@ from alpharat.ai.config import (
     NNAgentConfig,
     RandomAgentConfig,
 )
-from alpharat.data.batch import GameParams
+from alpharat.config.game import GameConfig
 from alpharat.eval.elo import compute_elo, from_tournament_result
 from alpharat.eval.tournament import TournamentConfig, run_tournament
 from alpharat.experiments import ExperimentManager
@@ -54,7 +54,7 @@ class BenchmarkSettings:
     baseline_checkpoint: Path | None = None
 
 
-def get_game_params_from_checkpoint(checkpoint_path: Path) -> GameParams:
+def get_game_config_from_checkpoint(checkpoint_path: Path) -> GameConfig:
     """Extract game dimensions from checkpoint."""
     import torch
 
@@ -64,7 +64,7 @@ def get_game_params_from_checkpoint(checkpoint_path: Path) -> GameParams:
     height = checkpoint.get("height", 5)
 
     # Use defaults for other params, matching training data
-    return GameParams(
+    return GameConfig(
         width=width,
         height=height,
         max_turns=30,
@@ -82,7 +82,7 @@ def build_benchmark_config(
     """Build tournament config for benchmarking a trained model."""
     from alpharat.mcts.decoupled_puct import DecoupledPUCTConfig
 
-    game_params = get_game_params_from_checkpoint(checkpoint_path)
+    game_config = get_game_config_from_checkpoint(checkpoint_path)
 
     checkpoint_str = str(checkpoint_path)
 
@@ -121,7 +121,7 @@ def build_benchmark_config(
         name=benchmark_name,
         agents=agents,  # type: ignore[arg-type]  # AgentConfigBase is compatible
         games_per_matchup=settings.games_per_matchup,
-        game=game_params,
+        game=game_config,
         workers=settings.workers,
         device=settings.device,
     )
@@ -283,13 +283,13 @@ def main() -> None:
     )
 
     tournament_config = build_benchmark_config(benchmark_name, checkpoint_path, settings)
-    game_params = tournament_config.game
+    game_config = tournament_config.game
     logger.info(
         "Game settings: %dx%d, %d cheese, %d max turns",
-        game_params.width,
-        game_params.height,
-        game_params.cheese_count,
-        game_params.max_turns,
+        game_config.width,
+        game_config.height,
+        game_config.cheese_count,
+        game_config.max_turns,
     )
     logger.info("")
 

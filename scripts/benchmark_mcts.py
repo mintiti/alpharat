@@ -13,7 +13,7 @@ import cProfile
 import statistics
 import time
 
-from alpharat.data.batch import GameParams
+from alpharat.config.game import GameConfig
 from alpharat.data.sampling import build_tree, create_game
 from alpharat.mcts import DecoupledPUCTConfig, DecoupledPUCTSearch
 
@@ -25,7 +25,7 @@ def benchmark_sims_per_second(
     cheese_count: int = 5,
 ) -> tuple[float, float, int]:
     """Run benchmark and return simulations per second."""
-    params = GameParams(
+    params = GameConfig(
         width=width,
         height=height,
         cheese_count=cheese_count,
@@ -46,7 +46,7 @@ def benchmark_sims_per_second(
 
 def run_for_profile(n_sims: int = 5000) -> None:
     """Run search in a way that's easy to profile."""
-    params = GameParams(width=5, height=5, cheese_count=5, max_turns=100)
+    params = GameConfig(width=5, height=5, cheese_count=5, max_turns=100)
     game = create_game(params, seed=42)
     tree = build_tree(game, gamma=1.0)
     config = DecoupledPUCTConfig(simulations=n_sims)

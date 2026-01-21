@@ -89,7 +89,7 @@ Contains:
 - `created_at`: Timestamp
 - `checkpoint_path`: Parent checkpoint (null for uniform prior)
 - `mcts_config`: MCTS algorithm configuration
-- `game_params`: Game dimensions, cheese count, etc.
+- `game`: Game dimensions, cheese count, etc.
 
 ## Creating Batches
 
@@ -98,7 +98,7 @@ exp = ExperimentManager()
 batch_dir = exp.create_batch(
     group="uniform_5x5",
     mcts_config=mcts_config,
-    game_params=game_params,
+    game=game_config,
     checkpoint_path=None,  # or path to parent checkpoint
 )
 ```

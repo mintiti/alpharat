@@ -10,7 +10,7 @@ Usage:
     from alpharat.experiments import ExperimentManager
 
     exp = ExperimentManager()
-    batch_dir = exp.create_batch(group="uniform_5x5", mcts_config=..., game_params=...)
+    batch_dir = exp.create_batch(group="uniform_5x5", mcts_config=..., game=...)
 
 The experiments folder (not in git) has the structure:
     experiments/

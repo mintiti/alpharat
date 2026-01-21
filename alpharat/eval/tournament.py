@@ -7,18 +7,18 @@ import multiprocessing as mp
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from dataclasses import dataclass
 
-from pydantic import BaseModel
 from tqdm import tqdm
 
 from alpharat.ai.config import AgentConfig  # noqa: TC001
-from alpharat.data.batch import GameParams  # noqa: TC001
+from alpharat.config.base import StrictBaseModel
+from alpharat.config.game import GameConfig  # noqa: TC001
 from alpharat.eval.game import play_game
 
 # Games per batch - balances parallelism vs agent loading overhead
 _BATCH_SIZE = 10
 
 
-class TournamentConfig(BaseModel):
+class TournamentConfig(StrictBaseModel):
     """Round-robin tournament configuration.
 
     Example YAML:
@@ -50,7 +50,7 @@ class TournamentConfig(BaseModel):
     name: str  # Required: human-chosen benchmark name
     agents: dict[str, AgentConfig]
     games_per_matchup: int
-    game: GameParams
+    game: GameConfig
     workers: int = 4
     device: str = "cpu"
 
@@ -285,7 +285,7 @@ class _MatchupBatch:
     agent_a_config: AgentConfig
     agent_b_config: AgentConfig
     games: list[_GameSpec]
-    game_params: GameParams
+    game_config: GameConfig
     device: str = "cpu"
 
 
@@ -317,12 +317,12 @@ def _run_matchup_batch(batch: _MatchupBatch) -> list[_GameResult]:
             p1_agent,
             p2_agent,
             seed=game.seed,
-            width=batch.game_params.width,
-            height=batch.game_params.height,
-            cheese_count=batch.game_params.cheese_count,
-            max_turns=batch.game_params.max_turns,
-            wall_density=batch.game_params.wall_density,
-            mud_density=batch.game_params.mud_density,
+            width=batch.game_config.width,
+            height=batch.game_config.height,
+            cheese_count=batch.game_config.cheese_count,
+            max_turns=batch.game_config.max_turns,
+            wall_density=batch.game_config.wall_density,
+            mud_density=batch.game_config.mud_density,
         )
 
         # Convert to agent_a/agent_b perspective
@@ -388,7 +388,7 @@ def run_tournament(config: TournamentConfig, *, verbose: bool = True) -> Tournam
                     agent_a_config=config.agents[agent_a_name],
                     agent_b_config=config.agents[agent_b_name],
                     games=chunk,
-                    game_params=config.game,
+                    game_config=config.game,
                     device=config.device,
                 )
             )

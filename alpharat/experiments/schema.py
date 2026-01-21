@@ -9,13 +9,14 @@ from __future__ import annotations
 from datetime import datetime  # noqa: TC003
 from typing import Any
 
-from pydantic import BaseModel, Field
+from pydantic import Field
 
-from alpharat.data.batch import GameParams  # noqa: TC001
+from alpharat.config.base import StrictBaseModel
+from alpharat.config.game import GameConfig  # noqa: TC001
 from alpharat.mcts import MCTSConfig  # noqa: TC001
 
 
-class BatchEntry(BaseModel):
+class BatchEntry(StrictBaseModel):
     """Manifest entry for a sampling batch.
 
     Tracks the provenance of sampled game data, including the MCTS configuration
@@ -27,11 +28,11 @@ class BatchEntry(BaseModel):
     created_at: datetime
     parent_checkpoint: str | None
     mcts_config: MCTSConfig = Field(discriminator="variant")
-    game_params: GameParams
+    game: GameConfig
     seed_start: int = 0  # First game uses this seed, increments from there
 
 
-class ShardEntry(BaseModel):
+class ShardEntry(StrictBaseModel):
     """Manifest entry for a processed shard set.
 
     Tracks processed training data derived from one or more batches,
@@ -48,7 +49,7 @@ class ShardEntry(BaseModel):
     shuffle_seed: int | None = None  # Seed used for train/val split and shuffling
 
 
-class RunEntry(BaseModel):
+class RunEntry(StrictBaseModel):
     """Manifest entry for a training run.
 
     Tracks a training run's configuration, data source, and results.
@@ -64,7 +65,7 @@ class RunEntry(BaseModel):
     final_epoch: int | None = None
 
 
-class BenchmarkEntry(BaseModel):
+class BenchmarkEntry(StrictBaseModel):
     """Manifest entry for a benchmark or tournament.
 
     Tracks benchmark configuration and which checkpoints were evaluated.
@@ -76,7 +77,7 @@ class BenchmarkEntry(BaseModel):
     config: dict[str, Any]
 
 
-class Manifest(BaseModel):
+class Manifest(StrictBaseModel):
     """Full experiments manifest tracking all artifacts and their lineage.
 
     The manifest is the central index for the experiments folder,

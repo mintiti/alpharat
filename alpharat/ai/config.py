@@ -32,15 +32,16 @@ from __future__ import annotations
 from abc import abstractmethod
 from typing import TYPE_CHECKING, Annotated, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import Field
 
+from alpharat.config.base import StrictBaseModel
 from alpharat.mcts import MCTSConfig  # noqa: TC001
 
 if TYPE_CHECKING:
     from alpharat.ai.base import Agent
 
 
-class AgentConfigBase(BaseModel):
+class AgentConfigBase(StrictBaseModel):
     """Base class for agent configurations.
 
     All agent configs must implement the `build()` method that constructs

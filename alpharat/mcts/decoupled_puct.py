@@ -10,8 +10,8 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Literal
 
 import numpy as np
-from pydantic import BaseModel
 
+from alpharat.config.base import StrictBaseModel
 from alpharat.mcts.nash import compute_nash_equilibrium
 from alpharat.mcts.selection import compute_forced_threshold
 
@@ -35,7 +35,7 @@ class SearchResult:
     policy_p2: np.ndarray
 
 
-class DecoupledPUCTConfig(BaseModel):
+class DecoupledPUCTConfig(StrictBaseModel):
     """Config for decoupled PUCT MCTS search."""
 
     variant: Literal["decoupled_puct"] = "decoupled_puct"

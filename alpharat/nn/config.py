@@ -13,8 +13,9 @@ from __future__ import annotations
 
 from typing import Annotated, Self
 
-from pydantic import BaseModel, Discriminator, model_validator
+from pydantic import Discriminator, model_validator
 
+from alpharat.config.base import StrictBaseModel
 from alpharat.nn.architectures.local_value.config import (
     LocalValueModelConfig,
     LocalValueOptimConfig,
@@ -45,7 +46,7 @@ OptimConfig = Annotated[
 ]
 
 
-class TrainConfig(BaseModel):
+class TrainConfig(StrictBaseModel):
     """Top-level training configuration.
 
     Uses Pydantic discriminated unions to automatically dispatch to the correct

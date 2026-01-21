@@ -8,7 +8,7 @@ from pathlib import Path
 import pytest
 import yaml
 
-from alpharat.data.batch import GameParams
+from alpharat.config.game import GameConfig
 from alpharat.experiments import ExperimentManager
 from alpharat.experiments.paths import (
     BATCHES_DIR,
@@ -98,7 +98,7 @@ class TestBatchOperations:
             batch_dir = exp.create_batch(
                 group="test_group",
                 mcts_config=DecoupledPUCTConfig(simulations=100),
-                game_params=GameParams(width=5, height=5, max_turns=30, cheese_count=5),
+                game=GameConfig(width=5, height=5, max_turns=30, cheese_count=5),
             )
 
             assert batch_dir.exists()
@@ -112,7 +112,7 @@ class TestBatchOperations:
             batch_dir = exp.create_batch(
                 group="test_group",
                 mcts_config=DecoupledPUCTConfig(simulations=100),
-                game_params=GameParams(width=5, height=5, max_turns=30, cheese_count=5),
+                game=GameConfig(width=5, height=5, max_turns=30, cheese_count=5),
             )
 
             manifest = exp.load_manifest()
@@ -130,7 +130,7 @@ class TestBatchOperations:
             exp.create_batch(
                 group="nn_guided",
                 mcts_config=DecoupledPUCTConfig(simulations=200, c_puct=2.0),
-                game_params=GameParams(width=5, height=5, max_turns=30, cheese_count=5),
+                game=GameConfig(width=5, height=5, max_turns=30, cheese_count=5),
                 checkpoint_path="/path/to/model.pt",
             )
 
@@ -142,11 +142,11 @@ class TestBatchOperations:
         """list_batches returns all batch IDs."""
         with tempfile.TemporaryDirectory() as tmpdir:
             exp = ExperimentManager(tmpdir)
-            game_params = GameParams(width=5, height=5, max_turns=30, cheese_count=5)
+            game = GameConfig(width=5, height=5, max_turns=30, cheese_count=5)
             mcts_config = DecoupledPUCTConfig(simulations=100)
 
-            exp.create_batch(group="group_a", mcts_config=mcts_config, game_params=game_params)
-            exp.create_batch(group="group_b", mcts_config=mcts_config, game_params=game_params)
+            exp.create_batch(group="group_a", mcts_config=mcts_config, game=game)
+            exp.create_batch(group="group_b", mcts_config=mcts_config, game=game)
 
             batches = exp.list_batches()
             assert len(batches) == 2
@@ -160,7 +160,7 @@ class TestBatchOperations:
             batch_dir = exp.create_batch(
                 group="test_group",
                 mcts_config=DecoupledPUCTConfig(simulations=100),
-                game_params=GameParams(width=5, height=5, max_turns=30, cheese_count=5),
+                game=GameConfig(width=5, height=5, max_turns=30, cheese_count=5),
             )
 
             batch_id = f"test_group/{batch_dir.name}"
@@ -523,7 +523,7 @@ class TestManifestPersistence:
             exp1.create_batch(
                 group="group1",
                 mcts_config=DecoupledPUCTConfig(simulations=100),
-                game_params=GameParams(width=5, height=5, max_turns=30, cheese_count=5),
+                game=GameConfig(width=5, height=5, max_turns=30, cheese_count=5),
             )
             exp1.create_run(name="run1", config={"lr": 0.001}, source_shards="s1")
 

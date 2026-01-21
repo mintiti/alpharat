@@ -209,8 +209,8 @@ def _get_dimensions_from_batch(batch_dir: Path) -> tuple[int, int]:
         raise ValueError(f"No metadata.json in {batch_dir}")
 
     metadata = json.loads(metadata_path.read_text())
-    game_params = metadata["game_params"]
-    return game_params["width"], game_params["height"]
+    game_config = metadata["game"]
+    return game_config["width"], game_config["height"]
 
 
 def _print_summary(output_path: Path) -> None:
