@@ -13,6 +13,7 @@ from alpharat.config.base import StrictBaseModel
 from alpharat.mcts.nash import compute_nash_equilibrium
 from alpharat.mcts.numba_ops import compute_puct_scores, select_max_with_tiebreak
 from alpharat.mcts.payout_filter import filter_low_visit_payout
+from alpharat.mcts.selection import compute_pruning_adjustment, prune_visit_counts
 
 if TYPE_CHECKING:
     import numpy as np
@@ -88,15 +89,24 @@ class DecoupledPUCTSearch:
     def _make_result(self) -> SearchResult:
         """Compute Nash equilibrium from root statistics.
 
+        When forced playouts are enabled (force_k > 0), prunes artificial visits
+        before filtering. This gives cleaner training targets by removing visits
+        that were forced for exploration rather than naturally selected by PUCT.
+
         Filters low-visit cells to 0 before Nash computation — pessimistic estimate
         for unexplored action pairs. This ensures Nash and training data use only
         trustworthy values.
         """
         root = self.tree.root
+        visits_for_filtering = root.action_visits
+
+        # Prune forced visits if forced playouts were used
+        if self._force_k > 0:
+            visits_for_filtering = self._prune_forced_visits(root)
 
         # Filter unreliable cells before Nash and recording
         filtered_payout = filter_low_visit_payout(
-            root.payout_matrix, root.action_visits, min_visits=2
+            root.payout_matrix, visits_for_filtering, min_visits=2
         )
 
         policy_p1, policy_p2 = compute_nash_equilibrium(
@@ -105,14 +115,16 @@ class DecoupledPUCTSearch:
             root.p2_effective,
             prior_p1=root.prior_policy_p1,
             prior_p2=root.prior_policy_p2,
-            action_visits=root.action_visits,
+            action_visits=visits_for_filtering,
         )
 
         return SearchResult(
             policy_p1=policy_p1,
             policy_p2=policy_p2,
             payout_matrix=filtered_payout,
-            action_visits=root.action_visits.copy(),
+            action_visits=visits_for_filtering.copy()
+            if visits_for_filtering is not root.action_visits
+            else root.action_visits.copy(),
         )
 
     def _simulate(self) -> None:
@@ -201,3 +213,38 @@ class DecoupledPUCTSearch:
         a2 = node.p2_outcomes[idx2]
 
         return a1, a2
+
+    def _prune_forced_visits(self, node: MCTSNode) -> np.ndarray:
+        """Prune forced playout visits from the visit counts.
+
+        Computes how many visits were "forced" (exceeded PUCT-justified amount)
+        and subtracts them, distributing the adjustment across pairs using
+        opponent's prior as weights.
+
+        Args:
+            node: Node to prune visits for (typically root).
+
+        Returns:
+            Pruned visit counts [5, 5]. Can be fractional.
+        """
+        # Marginal Q-values (expanded space)
+        q1 = node.payout_matrix[0] @ node.prior_policy_p2
+        q2 = node.payout_matrix[1].T @ node.prior_policy_p1
+
+        # Marginal visit counts
+        n1 = node.action_visits.sum(axis=1)
+        n2 = node.action_visits.sum(axis=0)
+        n_total = node.total_visits
+
+        # Compute adjustments for each player
+        delta_p1 = compute_pruning_adjustment(
+            q1, node.prior_policy_p1, n1, n_total, self._c_puct, node.p1_effective
+        )
+        delta_p2 = compute_pruning_adjustment(
+            q2, node.prior_policy_p2, n2, n_total, self._c_puct, node.p2_effective
+        )
+
+        # Apply to pair visits
+        return prune_visit_counts(
+            node.action_visits, delta_p1, delta_p2, node.prior_policy_p1, node.prior_policy_p2
+        )
