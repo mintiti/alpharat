@@ -14,63 +14,11 @@ if TYPE_CHECKING:
 
 
 class TestLoadModelFromCheckpoint:
-    """Tests for load_model_from_checkpoint function."""
+    """Tests for load_model_from_checkpoint function.
 
-    @pytest.fixture
-    def mlp_checkpoint(self, tmp_path: Path) -> Path:
-        """Create a minimal MLP checkpoint for testing."""
-        from alpharat.nn.models.mlp import PyRatMLP
-
-        width, height = 5, 5
-        obs_dim = width * height * 7 + 6
-
-        model = PyRatMLP(obs_dim=obs_dim, hidden_dim=128, dropout=0.0)
-
-        checkpoint = {
-            "model_state_dict": model.state_dict(),
-            "width": width,
-            "height": height,
-            "config": {
-                "model": {
-                    "architecture": "mlp",
-                    "hidden_dim": 128,
-                    "dropout": 0.0,
-                    "p_augment": 0.5,
-                },
-                "optim": {"lr": 0.001},
-            },
-        }
-
-        checkpoint_path = tmp_path / "mlp_model.pt"
-        torch.save(checkpoint, checkpoint_path)
-        return checkpoint_path
-
-    @pytest.fixture
-    def symmetric_checkpoint(self, tmp_path: Path) -> Path:
-        """Create a minimal Symmetric checkpoint for testing."""
-        from alpharat.nn.models.symmetric import SymmetricMLP
-
-        width, height = 5, 5
-
-        model = SymmetricMLP(width=width, height=height, hidden_dim=128, dropout=0.0)
-
-        checkpoint = {
-            "model_state_dict": model.state_dict(),
-            "width": width,
-            "height": height,
-            "config": {
-                "model": {
-                    "architecture": "symmetric",
-                    "hidden_dim": 128,
-                    "dropout": 0.0,
-                },
-                "optim": {"lr": 0.001},
-            },
-        }
-
-        checkpoint_path = tmp_path / "symmetric_model.pt"
-        torch.save(checkpoint, checkpoint_path)
-        return checkpoint_path
+    Fixtures (mlp_checkpoint, symmetric_checkpoint, local_value_checkpoint)
+    are defined in tests/config/conftest.py.
+    """
 
     def test_loads_mlp_model(self, mlp_checkpoint: Path) -> None:
         """load_model_from_checkpoint loads MLP model."""
@@ -93,6 +41,18 @@ class TestLoadModelFromCheckpoint:
         assert width == 5
         assert height == 5
         assert model is not None
+
+    def test_loads_local_value_model(self, local_value_checkpoint: Path) -> None:
+        """load_model_from_checkpoint loads LocalValue model."""
+        model, builder, width, height = load_model_from_checkpoint(
+            local_value_checkpoint, device="cpu", compile_model=False
+        )
+
+        assert width == 5
+        assert height == 5
+        assert model is not None
+        # LocalValueMLP should have ownership head
+        assert hasattr(model, "ownership_head")
 
     def test_returns_observation_builder(self, mlp_checkpoint: Path) -> None:
         """load_model_from_checkpoint returns observation builder."""
@@ -158,20 +118,40 @@ class TestLoadModelFromCheckpoint:
         with pytest.raises(ValueError, match="missing config.model.architecture"):
             load_model_from_checkpoint(checkpoint_path)
 
+    def test_raises_on_unknown_architecture(self, tmp_path: Path) -> None:
+        """load_model_from_checkpoint raises on unknown architecture."""
+        from pydantic import ValidationError
 
-class TestLoadModelInference:
-    """Tests that loaded models can run inference."""
+        checkpoint = {
+            "model_state_dict": {},
+            "width": 5,
+            "height": 5,
+            "config": {
+                "model": {
+                    "architecture": "nonexistent_arch",
+                    "hidden_dim": 128,
+                },
+            },
+        }
+        checkpoint_path = tmp_path / "bad_checkpoint.pt"
+        torch.save(checkpoint, checkpoint_path)
 
-    @pytest.fixture
-    def mlp_checkpoint(self, tmp_path: Path) -> Path:
-        """Create MLP checkpoint for inference tests."""
+        # Pydantic discriminated union raises ValidationError for unknown discriminator
+        with pytest.raises(ValidationError) as exc_info:
+            load_model_from_checkpoint(checkpoint_path)
+        assert "nonexistent_arch" in str(exc_info.value)
+
+    def test_raises_on_state_dict_mismatch(self, tmp_path: Path) -> None:
+        """load_model_from_checkpoint raises when state dict doesn't match config."""
         from alpharat.nn.models.mlp import PyRatMLP
 
         width, height = 5, 5
         obs_dim = width * height * 7 + 6
 
+        # Create model with hidden_dim=64
         model = PyRatMLP(obs_dim=obs_dim, hidden_dim=64, dropout=0.0)
 
+        # But config says hidden_dim=256 (mismatch!)
         checkpoint = {
             "model_state_dict": model.state_dict(),
             "width": width,
@@ -179,16 +159,25 @@ class TestLoadModelInference:
             "config": {
                 "model": {
                     "architecture": "mlp",
-                    "hidden_dim": 64,
+                    "hidden_dim": 256,  # Different from actual model
                     "dropout": 0.0,
                     "p_augment": 0.5,
                 },
             },
         }
-
-        checkpoint_path = tmp_path / "inference_model.pt"
+        checkpoint_path = tmp_path / "mismatched_checkpoint.pt"
         torch.save(checkpoint, checkpoint_path)
-        return checkpoint_path
+
+        # PyTorch raises RuntimeError on state dict size mismatch
+        with pytest.raises(RuntimeError, match="size mismatch"):
+            load_model_from_checkpoint(checkpoint_path)
+
+
+class TestLoadModelInference:
+    """Tests that loaded models can run inference.
+
+    Uses mlp_checkpoint fixture from tests/config/conftest.py.
+    """
 
     def test_model_can_forward(self, mlp_checkpoint: Path) -> None:
         """Loaded model can run forward pass."""

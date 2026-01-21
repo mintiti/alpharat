@@ -40,41 +40,24 @@ class TestGameConfigValidation:
         assert config.mud_density == 0.1
         assert config.symmetric is False
 
-    def test_rejects_zero_width(self) -> None:
-        """GameConfig rejects width <= 0."""
+    @pytest.mark.parametrize(
+        ("field", "value", "valid_config"),
+        [
+            ("width", 0, {"height": 5, "max_turns": 30, "cheese_count": 5}),
+            ("height", -1, {"width": 5, "max_turns": 30, "cheese_count": 5}),
+            ("width", 51, {"height": 5, "max_turns": 30, "cheese_count": 5}),
+            ("cheese_count", 0, {"width": 5, "height": 5, "max_turns": 30}),
+            ("wall_density", 1.5, {"width": 5, "height": 5, "max_turns": 30, "cheese_count": 5}),
+            ("mud_density", -0.1, {"width": 5, "height": 5, "max_turns": 30, "cheese_count": 5}),
+        ],
+    )
+    def test_rejects_invalid_field_value(
+        self, field: str, value: int | float, valid_config: dict
+    ) -> None:
+        """GameConfig rejects invalid field values."""
         with pytest.raises(ValidationError) as exc_info:
-            GameConfig(width=0, height=5, max_turns=30, cheese_count=5)
-        assert "width" in str(exc_info.value)
-
-    def test_rejects_negative_height(self) -> None:
-        """GameConfig rejects negative height."""
-        with pytest.raises(ValidationError) as exc_info:
-            GameConfig(width=5, height=-1, max_turns=30, cheese_count=5)
-        assert "height" in str(exc_info.value)
-
-    def test_rejects_width_over_50(self) -> None:
-        """GameConfig rejects width > 50."""
-        with pytest.raises(ValidationError) as exc_info:
-            GameConfig(width=51, height=5, max_turns=30, cheese_count=5)
-        assert "width" in str(exc_info.value)
-
-    def test_rejects_zero_cheese(self) -> None:
-        """GameConfig rejects cheese_count <= 0."""
-        with pytest.raises(ValidationError) as exc_info:
-            GameConfig(width=5, height=5, max_turns=30, cheese_count=0)
-        assert "cheese_count" in str(exc_info.value)
-
-    def test_rejects_wall_density_over_1(self) -> None:
-        """GameConfig rejects wall_density > 1.0."""
-        with pytest.raises(ValidationError) as exc_info:
-            GameConfig(width=5, height=5, max_turns=30, cheese_count=5, wall_density=1.5)
-        assert "wall_density" in str(exc_info.value)
-
-    def test_rejects_negative_mud_density(self) -> None:
-        """GameConfig rejects negative mud_density."""
-        with pytest.raises(ValidationError) as exc_info:
-            GameConfig(width=5, height=5, max_turns=30, cheese_count=5, mud_density=-0.1)
-        assert "mud_density" in str(exc_info.value)
+            GameConfig(**{field: value, **valid_config})
+        assert field in str(exc_info.value)
 
     def test_rejects_unknown_fields(self) -> None:
         """GameConfig rejects unknown fields (inherits from StrictBaseModel)."""

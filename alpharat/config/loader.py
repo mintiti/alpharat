@@ -58,7 +58,9 @@ def load_config(
     """
     config_path = Path(config_path).resolve()
 
-    # Clear any existing Hydra state (allows multiple calls)
+    # Clear any existing Hydra state (allows multiple calls).
+    # Note: This function clears global Hydra state. Not thread-safe.
+    # Do not call concurrently or from pytest fixtures that run in parallel.
     GlobalHydra.instance().clear()
 
     try:

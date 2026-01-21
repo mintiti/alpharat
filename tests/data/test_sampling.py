@@ -51,8 +51,8 @@ class TestCreateGame:
         assert len(game.wall_entries()) > 0
         assert len(game.mud_entries()) > 0
 
-    def test_basic_game_params_applied(self) -> None:
-        """Verify basic params (width, height, etc.) are applied."""
+    def test_basic_game_config_applied(self) -> None:
+        """Verify basic config (width, height, etc.) is applied."""
         params = GameConfig(
             width=7,
             height=9,

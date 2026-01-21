@@ -55,6 +55,8 @@ def load_model_from_checkpoint(
     checkpoint_path = Path(checkpoint_path)
     torch_device = torch.device(device)
 
+    # weights_only=False required to load full config dict, not just weights.
+    # Only load checkpoints from trusted sources.
     ckpt = torch.load(checkpoint_path, map_location=torch_device, weights_only=False)
 
     # Extract dimensions
