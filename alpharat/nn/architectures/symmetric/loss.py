@@ -37,7 +37,7 @@ def compute_symmetric_losses(
     loss_p1 = F.cross_entropy(logits_p1, batch[BatchKey.POLICY_P1])
     loss_p2 = F.cross_entropy(logits_p2, batch[BatchKey.POLICY_P2])
 
-    # Sparse payout loss
+    # Sparse payout loss (ground truth for played pair only)
     loss_value = sparse_payout_loss(
         pred_payout,
         batch[BatchKey.ACTION_P1],
@@ -45,6 +45,13 @@ def compute_symmetric_losses(
         batch[BatchKey.P1_VALUE],
         batch[BatchKey.P2_VALUE],
     )
+
+    # Full matrix loss (NN vs targets with ground truth at played cell)
+    # Payout matrix is pre-patched during sharding — no clone needed here.
+    if config.matrix_loss_weight > 0:
+        loss_matrix = F.mse_loss(pred_payout, batch[BatchKey.PAYOUT_MATRIX])
+    else:
+        loss_matrix = torch.tensor(0.0, device=pred_payout.device)
 
     # Nash consistency loss (optional)
     if config.nash_weight > 0:
@@ -70,6 +77,7 @@ def compute_symmetric_losses(
     loss = (
         config.policy_weight * (loss_p1 + loss_p2)
         + config.value_weight * loss_value
+        + config.matrix_loss_weight * loss_matrix
         + config.nash_weight * loss_nash
         + config.constant_sum_weight * loss_csum
     )
@@ -79,6 +87,7 @@ def compute_symmetric_losses(
         LossKey.POLICY_P1: loss_p1,
         LossKey.POLICY_P2: loss_p2,
         LossKey.VALUE: loss_value,
+        LossKey.MATRIX: loss_matrix,
         LossKey.NASH: loss_nash,
         LossKey.NASH_INDIFF: loss_indiff,
         LossKey.NASH_DEV: loss_dev,

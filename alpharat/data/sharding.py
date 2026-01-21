@@ -634,6 +634,13 @@ def _load_positions_from_refs(
             obs = builder.build(obs_input)
             targets = build_targets(game_data, position)
 
+            # Patch played cell with ground truth game outcome.
+            # The MCTS payout matrix has estimates for all action pairs. For the
+            # actually-played pair, we have the real outcome. Patching here avoids
+            # per-batch cloning during training.
+            targets.payout_matrix[0, targets.action_p1, targets.action_p2] = targets.p1_value
+            targets.payout_matrix[1, targets.action_p1, targets.action_p2] = targets.p2_value
+
             all_observations.append(obs)
             all_policy_p1.append(targets.policy_p1)
             all_policy_p2.append(targets.policy_p2)
@@ -736,6 +743,13 @@ def _load_positions_from_files(
             obs_input = from_game_arrays(game_data, position)
             obs = builder.build(obs_input)
             targets = build_targets(game_data, position)
+
+            # Patch played cell with ground truth game outcome.
+            # The MCTS payout matrix has estimates for all action pairs. For the
+            # actually-played pair, we have the real outcome. Patching here avoids
+            # per-batch cloning during training.
+            targets.payout_matrix[0, targets.action_p1, targets.action_p2] = targets.p1_value
+            targets.payout_matrix[1, targets.action_p1, targets.action_p2] = targets.p2_value
 
             all_observations.append(obs)
             all_policy_p1.append(targets.policy_p1)

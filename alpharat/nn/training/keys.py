@@ -42,6 +42,7 @@ class LossKey(StrEnum):
     # Value/payout losses
     VALUE = "loss_value"
     PAYOUT = "loss_payout"
+    MATRIX = "loss_matrix"
 
     # Auxiliary losses
     NASH = "loss_nash"
