@@ -73,8 +73,6 @@ class TrainConfig(StrictBaseModel):
         seed: 42
     """
 
-    model_config = ConfigDict(extra="forbid")
-
     name: str  # Required: human-chosen experiment name
     model: ModelConfig
     optim: OptimConfig

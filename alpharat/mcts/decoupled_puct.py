@@ -9,10 +9,13 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
+from pydantic import Field
+
 from alpharat.config.base import StrictBaseModel
 from alpharat.mcts.nash import compute_nash_equilibrium
 from alpharat.mcts.numba_ops import compute_puct_scores, select_max_with_tiebreak
 from alpharat.mcts.payout_filter import filter_low_visit_payout
+from alpharat.mcts.policy_strategy import NashPolicyConfig, PolicyConfig, PolicyStrategy
 from alpharat.mcts.selection import compute_pruning_adjustment, prune_visit_counts
 
 if TYPE_CHECKING:
@@ -24,11 +27,22 @@ if TYPE_CHECKING:
 
 @dataclass
 class SearchResult:
-    """Result of MCTS search containing policy and value information."""
+    """Result of MCTS search containing policy and value information.
 
+    Attributes:
+        payout_matrix: Root's payout matrix after search (filtered for low visits).
+        policy_p1: Acting policy for player 1 (agent samples from this).
+        policy_p2: Acting policy for player 2 (agent samples from this).
+        learning_policy_p1: Learning target for player 1 (NN trained on this).
+        learning_policy_p2: Learning target for player 2 (NN trained on this).
+        action_visits: Visit counts per action pair [5, 5].
+    """
+
+    payout_matrix: np.ndarray
     policy_p1: np.ndarray
     policy_p2: np.ndarray
-    payout_matrix: np.ndarray
+    learning_policy_p1: np.ndarray
+    learning_policy_p2: np.ndarray
     action_visits: np.ndarray
 
 
@@ -39,6 +53,15 @@ class DecoupledPUCTConfig(StrictBaseModel):
     gamma: float = 1.0
     c_puct: float = 1.5
     force_k: float = 2.0
+    policy: PolicyConfig = Field(
+        default_factory=NashPolicyConfig,
+        description=(
+            "Strategy for deriving policies from search results. "
+            "Configures BOTH acting and learning policies (coupled for simplicity). "
+            "'nash' = Nash equilibrium (default). "
+            "'visits' = marginal visit counts with temperature."
+        ),
+    )
 
     def build(self, tree: MCTSTree) -> DecoupledPUCTSearch:
         """Construct a search instance with these settings."""
@@ -56,11 +79,16 @@ class DecoupledPUCTSearch:
         config: Search configuration
     """
 
-    def __init__(self, tree: MCTSTree, config: DecoupledPUCTConfig):
+    def __init__(self, tree: MCTSTree, config: DecoupledPUCTConfig) -> None:
         self.tree = tree
         self._n_sims = config.simulations
         self._c_puct = config.c_puct
         self._force_k = config.force_k
+
+        # Two separate slots, but same instance when config couples them
+        strategy: PolicyStrategy = config.policy.build()
+        self._acting_strategy = strategy
+        self._learning_strategy = strategy
 
     def search(self) -> SearchResult:
         """Run MCTS search and return the result.
@@ -80,14 +108,16 @@ class DecoupledPUCTSearch:
         """Return NN priors directly without tree search."""
         root = self.tree.root
         return SearchResult(
+            payout_matrix=root.payout_matrix.copy(),
             policy_p1=root.prior_policy_p1.copy(),
             policy_p2=root.prior_policy_p2.copy(),
-            payout_matrix=root.payout_matrix.copy(),
+            learning_policy_p1=root.prior_policy_p1.copy(),
+            learning_policy_p2=root.prior_policy_p2.copy(),
             action_visits=root.action_visits.copy(),
         )
 
     def _make_result(self) -> SearchResult:
-        """Compute Nash equilibrium from root statistics.
+        """Compute policies from root statistics.
 
         When forced playouts are enabled (force_k > 0), prunes artificial visits
         before filtering. This gives cleaner training targets by removing visits
@@ -109,7 +139,7 @@ class DecoupledPUCTSearch:
             root.payout_matrix, visits_for_filtering, min_visits=2
         )
 
-        policy_p1, policy_p2 = compute_nash_equilibrium(
+        nash_p1, nash_p2 = compute_nash_equilibrium(
             filtered_payout,
             root.p1_effective,
             root.p2_effective,
@@ -118,10 +148,24 @@ class DecoupledPUCTSearch:
             action_visits=visits_for_filtering,
         )
 
+        # Compute marginal visits for policy derivation
+        marginal_p1 = visits_for_filtering.sum(axis=1)
+        marginal_p2 = visits_for_filtering.sum(axis=0)
+
+        # Acting policies (agent samples from these)
+        acting_p1 = self._acting_strategy.derive_policy(marginal_p1, nash_p1)
+        acting_p2 = self._acting_strategy.derive_policy(marginal_p2, nash_p2)
+
+        # Learning policies (recorded for NN training)
+        learning_p1 = self._learning_strategy.derive_policy(marginal_p1, nash_p1)
+        learning_p2 = self._learning_strategy.derive_policy(marginal_p2, nash_p2)
+
         return SearchResult(
-            policy_p1=policy_p1,
-            policy_p2=policy_p2,
             payout_matrix=filtered_payout,
+            policy_p1=acting_p1,
+            policy_p2=acting_p2,
+            learning_policy_p1=learning_p1,
+            learning_policy_p2=learning_p2,
             action_visits=visits_for_filtering.copy()
             if visits_for_filtering is not root.action_visits
             else root.action_visits.copy(),

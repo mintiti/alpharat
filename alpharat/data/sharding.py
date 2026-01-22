@@ -81,6 +81,9 @@ def prepare_training_set(
     Loads all positions from batches, builds observations and targets,
     shuffles globally, and writes to sharded npz files.
 
+    Policy targets come directly from recorded games (already the learning policy
+    chosen at MCTS time).
+
     Directory structure created:
         {output_dir}/{training_set_id}/
             manifest.json
@@ -200,6 +203,9 @@ def prepare_training_set_with_split(
 
     Splits games (not positions) into train and validation sets to prevent
     data leakage between positions in the same game.
+
+    Policy targets come directly from recorded games (already the learning policy
+    chosen at MCTS time).
 
     Directory structure created:
         {output_dir}/{training_set_id}/

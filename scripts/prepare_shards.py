@@ -139,6 +139,7 @@ def main() -> None:
     logger.info(f"Using observation builder: {builder.version}")
 
     # Prepare shards (output to experiments/shards/{group}/)
+    # Policy targets come from recorded games (chosen at MCTS time via policy strategy)
     logger.info("Processing games into shards...")
     shards_group_dir = get_shards_dir(exp.root) / args.group
     shards_group_dir.mkdir(parents=True, exist_ok=True)

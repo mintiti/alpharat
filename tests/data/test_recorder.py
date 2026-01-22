@@ -175,10 +175,13 @@ class TestDirectionHelpers:
 
 def make_mock_search_result() -> SearchResult:
     """Create a mock SearchResult for testing."""
+    uniform = np.ones(5, dtype=np.float64) / 5
     return SearchResult(
         payout_matrix=np.zeros((2, 5, 5), dtype=np.float64),
-        policy_p1=np.ones(5, dtype=np.float64) / 5,
-        policy_p2=np.ones(5, dtype=np.float64) / 5,
+        policy_p1=uniform.copy(),
+        policy_p2=uniform.copy(),
+        learning_policy_p1=uniform.copy(),
+        learning_policy_p2=uniform.copy(),
         action_visits=np.zeros((5, 5), dtype=np.int32),
     )
 
@@ -689,6 +692,8 @@ class TestRoundtrip:
             payout_matrix=payout,
             policy_p1=policy_p1,
             policy_p2=policy_p2,
+            learning_policy_p1=policy_p1.copy(),
+            learning_policy_p2=policy_p2.copy(),
             action_visits=visits,
         )
 
@@ -1175,6 +1180,8 @@ class TestBundleLoading:
                     payout_matrix=payout,
                     policy_p1=policy_p1,
                     policy_p2=policy_p2,
+                    learning_policy_p1=policy_p1.copy(),
+                    learning_policy_p2=policy_p2.copy(),
                     action_visits=visits,
                 )
                 recorder.record_position(

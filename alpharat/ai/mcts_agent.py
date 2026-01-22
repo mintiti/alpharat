@@ -67,7 +67,7 @@ class MCTSAgent(Agent):
         """Load NN model from checkpoint using ModelConfig.build_model()."""
         from alpharat.config.checkpoint import load_model_from_checkpoint
 
-model, builder, width, height = load_model_from_checkpoint(
+        model, builder, width, height = load_model_from_checkpoint(
             checkpoint_path,
             device=self._device,
             compile_model=True,

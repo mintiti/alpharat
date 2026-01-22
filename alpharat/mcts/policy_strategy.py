@@ -1,0 +1,241 @@
+"""Policy strategies for deriving SearchResult policies from MCTS outputs.
+
+Policy strategies determine how final policies are derived from MCTS search.
+They apply to both acting (move selection) and learning (NN training).
+The strategy is configured at MCTS search time, not at sharding time.
+"""
+
+from __future__ import annotations
+
+from typing import Annotated, Literal, Protocol
+
+import numpy as np
+from pydantic import Discriminator, Field
+
+from alpharat.config.base import StrictBaseModel
+
+
+class PolicyStrategy(Protocol):
+    """Derives policy from MCTS search outputs.
+
+    Applied inside _make_result() to determine SearchResult policies.
+    """
+
+    def derive_policy(
+        self,
+        marginal_visits: np.ndarray,  # (5,) marginal visit counts for one player
+        nash_policy: np.ndarray,  # (5,) Nash equilibrium for same player
+    ) -> np.ndarray:
+        """Return final policy (5,) for this player."""
+        ...
+
+
+class NashPolicyStrategy:
+    """Use Nash equilibrium directly (default behavior).
+
+    Returns the Nash equilibrium policy computed by MCTS.
+    Game-theoretically optimal but can be sharp/overconfident.
+    """
+
+    def derive_policy(
+        self,
+        marginal_visits: np.ndarray,
+        nash_policy: np.ndarray,
+    ) -> np.ndarray:
+        """Return Nash equilibrium policy."""
+        return nash_policy.copy()
+
+
+class VisitPolicyStrategy:
+    """KataGo-style visit-based policy with temperature.
+
+    Derives policy from marginal visit counts instead of Nash.
+    Preserves MCTS uncertainty and avoids sharp distributions.
+    """
+
+    def __init__(
+        self,
+        temperature: float,
+        temperature_only_below_prob: float,
+        prune_threshold: float,
+        subtract_visits: float,
+    ) -> None:
+        self.temperature = temperature
+        self.temperature_only_below_prob = temperature_only_below_prob
+        self.prune_threshold = prune_threshold
+        self.subtract_visits = subtract_visits
+
+    def derive_policy(
+        self,
+        marginal_visits: np.ndarray,
+        nash_policy: np.ndarray,
+    ) -> np.ndarray:
+        """Return visit-based policy with KataGo temperature."""
+        return apply_katago_temperature(
+            marginal_visits,
+            self.temperature,
+            self.temperature_only_below_prob,
+            self.prune_threshold,
+            self.subtract_visits,
+        )
+
+
+def apply_katago_temperature(
+    visits: np.ndarray,
+    temperature: float,
+    only_below_prob: float,
+    prune_threshold: float,
+    subtract_visits: float,
+) -> np.ndarray:
+    """KataGo's piecewise log-linear temperature with pruning/subtraction.
+
+    Based on KataGo's searchhelpers.cpp:chooseIndexWithTemperature.
+
+    Args:
+        visits: Raw visit counts (5,).
+        temperature: Temperature for softening. 1.0 = proportional to visits.
+        only_below_prob: Only apply temperature to moves below this prob threshold.
+            1.0 = apply to all moves. 0.1 = only dampen moves with <10% probability.
+        prune_threshold: Zero out moves with fewer than this many visits.
+        subtract_visits: Subtract this constant from all visits before temperature.
+
+    Returns:
+        Normalized policy (5,) as float32.
+    """
+    visits = visits.astype(float).copy()
+
+    # 1. Prune low-visit moves
+    if prune_threshold > 0:
+        visits[visits < prune_threshold] = 0
+
+    # 2. Subtract constant (capped at max/64 like KataGo)
+    if subtract_visits > 0:
+        max_v = visits.max()
+        if max_v > 0:
+            amount = min(subtract_visits, max_v / 64)
+            visits = np.maximum(visits - amount, 0)
+
+    # 3. Handle edge cases
+    max_v = visits.max()
+    sum_v = visits.sum()
+
+    if max_v <= 0:
+        # No visits — uniform fallback
+        return np.ones(len(visits), dtype=np.float32) / len(visits)
+
+    # 4. Near-zero temp = argmax
+    if temperature <= 1e-4:
+        result = np.zeros(len(visits), dtype=np.float32)
+        result[np.argmax(visits)] = 1.0
+        return result
+
+    # 5. KataGo's piecewise log-linear transform
+    log_max = np.log(max_v)
+    log_sum = np.log(sum_v)
+    log_threshold = np.log(max(1e-50, only_below_prob))
+    threshold = min(0.0, log_threshold + log_sum - log_max)
+
+    result = np.zeros(len(visits), dtype=np.float64)
+    for i, v in enumerate(visits):
+        if v <= 0:
+            result[i] = 0
+        else:
+            log_v = np.log(v) - log_max
+            if log_v > threshold:
+                # Top actions: no dampening
+                new_log_v = log_v
+            else:
+                # Lower actions: apply temperature
+                new_log_v = (log_v - threshold) / temperature + threshold
+            result[i] = np.exp(new_log_v)
+
+    total = result.sum()
+    if total > 0:
+        result /= total
+
+    return result.astype(np.float32)
+
+
+# --- Config Classes with Validation ---
+
+
+class NashPolicyConfig(StrictBaseModel):
+    """Config for Nash equilibrium policy (default behavior).
+
+    Uses the Nash equilibrium computed from the payout matrix.
+    Game-theoretically optimal but may be overconfident when
+    payout estimates are noisy.
+    """
+
+    strategy: Literal["nash"] = "nash"
+
+    def build(self) -> PolicyStrategy:
+        """Build the Nash policy strategy."""
+        return NashPolicyStrategy()
+
+
+class VisitPolicyConfig(StrictBaseModel):
+    """Config for visit-based policy with KataGo-style temperature.
+
+    Derives policy from marginal visit counts instead of Nash equilibrium.
+    Preserves MCTS uncertainty and avoids the sharp distributions that
+    Nash produces from noisy payout estimates.
+    """
+
+    strategy: Literal["visits"] = "visits"
+
+    temperature: float = Field(
+        default=1.0,
+        gt=0.0,
+        description=(
+            "Temperature for visit-based policy. "
+            "1.0 = proportional to visits. "
+            "<1.0 = sharper (approaches argmax). "
+            ">1.0 = flatter (approaches uniform)."
+        ),
+    )
+
+    temperature_only_below_prob: float = Field(
+        default=1.0,
+        gt=0.0,
+        le=1.0,
+        description=(
+            "Only apply temperature to moves below this probability threshold. "
+            "1.0 = apply to all moves (simple mode). "
+            "0.1 = only dampen moves with <10% probability, preserving top moves."
+        ),
+    )
+
+    prune_threshold: float = Field(
+        default=0.0,
+        ge=0.0,
+        description=(
+            "Zero out moves with fewer than this many visits before temperature. "
+            "0.0 = no pruning. 1.0 = ignore moves with <1 visit."
+        ),
+    )
+
+    subtract_visits: float = Field(
+        default=0.0,
+        ge=0.0,
+        description=(
+            "Subtract this constant from all visit counts before temperature. "
+            "Reduces temptation to play rarely-visited moves. 0.0 = no subtraction."
+        ),
+    )
+
+    def build(self) -> VisitPolicyStrategy:
+        """Build the visit policy strategy."""
+        return VisitPolicyStrategy(
+            temperature=self.temperature,
+            temperature_only_below_prob=self.temperature_only_below_prob,
+            prune_threshold=self.prune_threshold,
+            subtract_visits=self.subtract_visits,
+        )
+
+
+# Discriminated union
+PolicyConfig = Annotated[
+    NashPolicyConfig | VisitPolicyConfig,
+    Discriminator("strategy"),
+]

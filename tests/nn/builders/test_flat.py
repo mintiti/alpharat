@@ -301,7 +301,7 @@ def _create_game_npz(
 
     turn = np.arange(n, dtype=np.int16)
 
-    payout_matrix = np.zeros((n, 5, 5), dtype=np.float32)
+    payout_matrix = np.zeros((n, 2, 5, 5), dtype=np.float32)
     visit_counts = np.ones((n, 5, 5), dtype=np.int32) * 10
 
     prior_p1 = np.ones((n, 5), dtype=np.float32) / 5
