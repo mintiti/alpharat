@@ -12,6 +12,10 @@ from typing import TYPE_CHECKING, Literal
 import numpy as np
 
 from alpharat.config.base import StrictBaseModel
+from alpharat.mcts.equivalence import (
+    compute_effective_marginals,
+    compute_effective_total_visits,
+)
 from alpharat.mcts.nash import compute_nash_equilibrium
 from alpharat.mcts.selection import compute_forced_threshold
 
@@ -164,11 +168,13 @@ class DecoupledPUCTSearch:
         # P2 maximizes payout_matrix[1], expects P1 to play prior_p1
         q2 = node.payout_matrix[1].T @ node.prior_policy_p1
 
-        # Marginal visit counts
-        n1 = node.action_visits.sum(axis=1)  # sum over P2 actions
-        n2 = node.action_visits.sum(axis=0)  # sum over P1 actions
-
-        n_total = node.total_visits
+        # Marginal visit counts (correctly handles action equivalence)
+        n1, n2 = compute_effective_marginals(
+            node.action_visits, node.p1_effective, node.p2_effective
+        )
+        n_total = compute_effective_total_visits(
+            node.action_visits, node.p1_effective, node.p2_effective
+        )
 
         # PUCT scores
         puct1 = self._compute_puct_scores(q1, node.prior_policy_p1, n1, n_total)

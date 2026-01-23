@@ -4,6 +4,8 @@ import numpy as np
 import pytest
 
 from alpharat.mcts.equivalence import (
+    compute_effective_marginals,
+    compute_effective_total_visits,
     expand_strategy,
     get_effective_actions,
     get_equivalence_classes,
@@ -235,3 +237,124 @@ class TestReduceAndExpandNash:
         # Blocked actions must be 0
         assert p1_strat[0] == pytest.approx(0.0)  # P1's blocked action
         assert p2_strat[1] == pytest.approx(0.0)  # P2's blocked action
+
+
+class TestComputeEffectiveMarginals:
+    """Tests for compute_effective_marginals."""
+
+    def test_no_equivalence(self) -> None:
+        """No equivalence — marginals equal raw sums."""
+        p1_eff = [0, 1, 2, 3, 4]
+        p2_eff = [0, 1, 2, 3, 4]
+
+        visits = np.array(
+            [
+                [1, 0, 0, 0, 0],
+                [0, 2, 0, 0, 0],
+                [0, 0, 3, 0, 0],
+                [0, 0, 0, 4, 0],
+                [0, 0, 0, 0, 5],
+            ],
+            dtype=np.int32,
+        )
+
+        n1, n2 = compute_effective_marginals(visits, p1_eff, p2_eff)
+
+        # Row sums
+        np.testing.assert_array_equal(n1, [1, 2, 3, 4, 5])
+        # Column sums
+        np.testing.assert_array_equal(n2, [1, 2, 3, 4, 5])
+
+    def test_with_equivalence_does_not_double_count(self) -> None:
+        """Marginals should not double-count equivalent actions."""
+        # P1 action 0 blocked (maps to STAY/4)
+        p1_eff = [4, 1, 2, 3, 4]
+        p2_eff = [0, 1, 2, 3, 4]  # P2 has no walls
+
+        # Simulate: 1 visit to effective pair (STAY, UP).
+        # Backup writes to [0,0] and [4,0] (equivalent rows).
+        visits = np.zeros((5, 5), dtype=np.int32)
+        visits[0, 0] = 1
+        visits[4, 0] = 1
+
+        n1, n2 = compute_effective_marginals(visits, p1_eff, p2_eff)
+
+        # P1's marginals: actions 0 and 4 both map to effective=4
+        # so they should both show the marginal of effective action 4
+        assert n1[0] == 1
+        assert n1[4] == 1
+        assert n1[1] == 0
+        assert n1[2] == 0
+        assert n1[3] == 0
+
+        # P2's marginal for action 0: should be 1, not 2
+        assert n2[0] == 1  # This is the fix!
+        assert n2[1] == 0
+        assert n2[2] == 0
+        assert n2[3] == 0
+        assert n2[4] == 0
+
+    def test_both_players_have_equivalence(self) -> None:
+        """Both players have blocked actions."""
+        # P1: action 0 blocked (maps to 4)
+        # P2: action 1 blocked (maps to 4)
+        p1_eff = [4, 1, 2, 3, 4]
+        p2_eff = [0, 4, 2, 3, 4]
+
+        # Simulate: 1 visit to effective pair (STAY, STAY).
+        # Backup writes to all 4 equivalent cells: [0,1], [0,4], [4,1], [4,4]
+        visits = np.zeros((5, 5), dtype=np.int32)
+        visits[0, 1] = 1
+        visits[0, 4] = 1
+        visits[4, 1] = 1
+        visits[4, 4] = 1
+
+        n1, n2 = compute_effective_marginals(visits, p1_eff, p2_eff)
+
+        # P1: actions 0,4 → effective 4, should both be 1
+        assert n1[0] == 1
+        assert n1[4] == 1
+
+        # P2: actions 1,4 → effective 4, should both be 1
+        assert n2[1] == 1
+        assert n2[4] == 1
+
+
+class TestComputeEffectiveTotalVisits:
+    """Tests for compute_effective_total_visits."""
+
+    def test_no_equivalence(self) -> None:
+        """No equivalence — total equals raw sum."""
+        p1_eff = [0, 1, 2, 3, 4]
+        p2_eff = [0, 1, 2, 3, 4]
+
+        visits = np.ones((5, 5), dtype=np.int32)
+        total = compute_effective_total_visits(visits, p1_eff, p2_eff)
+        assert total == 25
+
+    def test_with_equivalence_does_not_double_count(self) -> None:
+        """Total visits should count each simulation once."""
+        p1_eff = [4, 1, 2, 3, 4]
+        p2_eff = [0, 1, 2, 3, 4]
+
+        # 1 simulation to effective (STAY, UP), written to 2 cells
+        visits = np.zeros((5, 5), dtype=np.int32)
+        visits[0, 0] = 1
+        visits[4, 0] = 1
+
+        total = compute_effective_total_visits(visits, p1_eff, p2_eff)
+        assert total == 1  # Not 2!
+
+    def test_both_players_have_equivalence(self) -> None:
+        """Both players blocked — 4 cells but 1 visit."""
+        p1_eff = [4, 1, 2, 3, 4]
+        p2_eff = [0, 4, 2, 3, 4]
+
+        visits = np.zeros((5, 5), dtype=np.int32)
+        visits[0, 1] = 1
+        visits[0, 4] = 1
+        visits[4, 1] = 1
+        visits[4, 4] = 1
+
+        total = compute_effective_total_visits(visits, p1_eff, p2_eff)
+        assert total == 1  # Not 4!
