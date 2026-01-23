@@ -11,6 +11,8 @@ from typing import Any
 
 import numpy as np
 
+from alpharat.mcts.equivalence import compute_effective_total_visits
+
 
 class MCTSNode:
     """MCTS node for simultaneous-move games.
@@ -114,8 +116,10 @@ class MCTSNode:
 
     @property
     def total_visits(self) -> int:
-        """Total number of visits to this node across all action pairs."""
-        return int(np.sum(self.action_visits))
+        """Total number of simulations through this node (equivalence-aware)."""
+        return compute_effective_total_visits(
+            self.action_visits, self.p1_effective, self.p2_effective
+        )
 
     @property
     def is_expanded(self) -> bool:

@@ -311,12 +311,13 @@ class TestNodeProperties:
         assert simple_node.total_visits == 3
 
     def test_total_visits_with_mud(self, node_p1_in_mud: MCTSNode) -> None:
-        """Test that total_visits counts correctly with mud updates."""
-        # P1 in mud, so backing up column [:, 0] increments 3 entries
+        """Test that total_visits counts simulations, not matrix cells."""
+        # P1 in mud: all P1 actions equivalent, so backup writes to entire column
+        # But total_visits should count actual simulations, not inflated cell count
         node_p1_in_mud.backup(action_p1=0, action_p2=0, value=(5.0, 2.0))
 
-        # 3 entries in column, each visited once = 3 total
-        assert node_p1_in_mud.total_visits == 3
+        # 1 simulation, even though 3 cells were updated
+        assert node_p1_in_mud.total_visits == 1
 
     def test_is_expanded_false_initially(self, simple_node: MCTSNode) -> None:
         """Test that is_expanded is False for a node with no children."""
