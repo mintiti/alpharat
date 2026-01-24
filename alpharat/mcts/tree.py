@@ -378,10 +378,16 @@ class MCTSTree:
         """
         # Only update if root has default identity mapping (no walls detected)
         # This preserves any mud-based mapping already applied
+        p1_eff = None
+        p2_eff = None
+
         if self.root.p1_mud_turns_remaining == 0:
-            self.root.p1_effective = self._compute_effective_actions(self.game.player1_position)
+            p1_eff = self._compute_effective_actions(self.game.player1_position)
         if self.root.p2_mud_turns_remaining == 0:
-            self.root.p2_effective = self._compute_effective_actions(self.game.player2_position)
+            p2_eff = self._compute_effective_actions(self.game.player2_position)
+
+        if p1_eff is not None or p2_eff is not None:
+            self.root.update_effective_actions(p1_eff, p2_eff)
 
     def _compute_effective_actions(self, position: Any) -> list[int]:
         """Compute effective action mapping for a player at given position.
