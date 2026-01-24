@@ -94,7 +94,7 @@ def enqueue_seed_trials(study: optuna.Study, csv_path: str, top_n: int) -> None:
 def main() -> None:
     parser = argparse.ArgumentParser(description="PUCT parameter sweep with Optuna")
     parser.add_argument("--n-jobs", type=int, default=1, help="Parallel workers")
-    parser.add_argument("--study-name", default="centroid_7x7_mo", help="Study name")
+    parser.add_argument("--study-name", default="visits_fix_7x7_mo", help="Study name")
     parser.add_argument("--seed-from", type=str, help="CSV file to seed trials from")
     parser.add_argument("--seed-top", type=int, default=20, help="Number of top configs to seed")
     args = parser.parse_args()
@@ -102,7 +102,8 @@ def main() -> None:
     # Ensure results directory exists
     Path("results").mkdir(exist_ok=True)
 
-    storage = "sqlite:///results/centroid_7x7_mo.db"
+    db_path = f"results/{args.study_name}.db"
+    storage = f"sqlite:///{db_path}"
 
     study = optuna.create_study(
         study_name=args.study_name,
@@ -110,6 +111,7 @@ def main() -> None:
         directions=["maximize", "minimize"],  # win_rate up, n_sims down
         load_if_exists=True,
     )
+    print(f"Study: {args.study_name}, DB: {db_path}")
 
     # Seed with known-good configs
     for cfg in SEED_CONFIGS:
@@ -123,19 +125,22 @@ def main() -> None:
     n_trials = 20000  # TPE sampler explores the space
     study.optimize(objective, n_trials=n_trials, n_jobs=args.n_jobs)
 
-    # Visualizations
-    fig = optuna.visualization.plot_contour(study, params=["n_sims", "c_puct"])
-    fig.write_image("results/puct_contour.png")
+    # Visualizations (MO-compatible)
+    fig = optuna.visualization.plot_pareto_front(study, target_names=["win_rate", "n_sims"])
+    fig.write_image(f"results/{args.study_name}_pareto.png")
 
-    fig = optuna.visualization.plot_param_importances(study)
-    fig.write_image("results/puct_importance.png")
+    fig = optuna.visualization.plot_param_importances(
+        study,
+        target=lambda t: t.values[0],  # importance for win_rate
+    )
+    fig.write_image(f"results/{args.study_name}_importance.png")
 
     # Summary — Pareto front
     print("\nPareto front:")
     for trial in study.best_trials:
         win_rate, n_sims = trial.values
         print(f"  win_rate={win_rate:.2%}, n_sims={n_sims} — {trial.params}")
-    print("\nVisualizations saved to results/")
+    print(f"\nVisualizations saved to results/{args.study_name}_*.png")
 
 
 if __name__ == "__main__":
