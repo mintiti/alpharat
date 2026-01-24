@@ -99,18 +99,20 @@ class MCTSTree:
         p1_mud = move_undo.p1_mud
         p2_mud = move_undo.p2_mud
 
-        # Use effective action pair for child lookup (equivalent actions share children)
+        # Get effective actions and outcome indices
         effective_a1 = node.p1_effective[action_p1]
         effective_a2 = node.p2_effective[action_p2]
-        effective_pair = (effective_a1, effective_a2)
+        outcome_i = node.action_to_outcome(1, action_p1)
+        outcome_j = node.action_to_outcome(2, action_p2)
+        outcome_pair = (outcome_i, outcome_j)
 
-        # Check if child already exists for this effective action pair
-        if effective_pair in node.children:
+        # Check if child already exists for this outcome pair
+        if outcome_pair in node.children:
             # Child exists, just navigate to it and refresh metadata
-            child = node.children[effective_pair]
+            child = node.children[outcome_pair]
             child.move_undo = move_undo
-            # Keep the effective action as parent_action for navigation consistency
-            child.parent_action = effective_pair
+            # Keep effective actions as parent_action for navigation consistency
+            child.parent_action = (effective_a1, effective_a2)
         else:
             # Create new child (expansion)
             child = self._create_child(
@@ -121,7 +123,7 @@ class MCTSTree:
                 p1_mud=p1_mud,
                 p2_mud=p2_mud,
             )
-            node.children[effective_pair] = child
+            node.children[outcome_pair] = child
 
         # Calculate separate rewards for each player
         p1_score_after, p2_score_after = self.game.player1_score, self.game.player2_score
@@ -169,14 +171,14 @@ class MCTSTree:
             action_p1: Player 1's action (0-4)
             action_p2: Player 2's action (0-4)
         """
-        # Map to effective actions for child lookup
-        effective_a1 = self.root.p1_effective[action_p1]
-        effective_a2 = self.root.p2_effective[action_p2]
-        effective_pair = (effective_a1, effective_a2)
+        # Map to outcome indices for child lookup
+        outcome_i = self.root.action_to_outcome(1, action_p1)
+        outcome_j = self.root.action_to_outcome(2, action_p2)
+        outcome_pair = (outcome_i, outcome_j)
 
         # Get or create child
-        if effective_pair in self.root.children:
-            new_root = self.root.children[effective_pair]
+        if outcome_pair in self.root.children:
+            new_root = self.root.children[outcome_pair]
             # If simulator is at current root, advance game state to stay in sync
             if self.simulator_node == self.root:
                 move_undo = self.game.make_move(Direction(action_p1), Direction(action_p2))

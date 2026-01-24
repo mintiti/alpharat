@@ -60,10 +60,11 @@ experiments/        # Data folder (NOT in git): batches, shards, runs, benchmark
 
 | File | Purpose |
 |------|---------|
-| `node.py` | `MCTSNode` — payout matrices `[5,5]` instead of Q-values, action equivalence |
+| `node.py` | `MCTSNode` — outcome-indexed storage for O(1) backup, action equivalence |
 | `tree.py` | `MCTSTree` — efficient navigation via `make_move/unmake_move` |
 | `decoupled_puct.py` | `DecoupledPUCTSearch` — each player picks via PUCT formula, returns Nash at root |
 | `equivalence.py` | Action equivalence utilities (walls/edges/mud → same outcome) |
+| `reduction.py` | Boundary translation between 5-action and outcome-indexed space |
 | `nash.py` | Nash equilibrium computation via nashpy |
 
 ### alpharat/data/

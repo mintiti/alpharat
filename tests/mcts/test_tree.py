@@ -180,11 +180,11 @@ class TestMakeMoveFrom:
         # Make move from root
         child, reward = tree.make_move_from(tree.root, action_p1=1, action_p2=1)
 
-        # Child should be created under effective action pair
-        effective_a1 = tree.root.p1_effective[1]
-        effective_a2 = tree.root.p2_effective[1]
-        assert (effective_a1, effective_a2) in tree.root.children
-        assert tree.root.children[(effective_a1, effective_a2)] == child
+        # Child should be created under outcome index pair
+        outcome_i = tree.root.action_to_outcome(1, 1)  # P1's action 1 -> outcome index
+        outcome_j = tree.root.action_to_outcome(2, 1)  # P2's action 1 -> outcome index
+        assert (outcome_i, outcome_j) in tree.root.children
+        assert tree.root.children[(outcome_i, outcome_j)] == child
 
         # Child should have correct properties
         assert child.parent == tree.root
@@ -237,11 +237,11 @@ class TestMakeMoveFrom:
         # This requires navigating back to root
         child2, _ = tree.make_move_from(tree.root, action_p1=1, action_p2=1)
 
-        # Should have two children of root (under effective action pairs)
-        effective_00 = (tree.root.p1_effective[0], tree.root.p2_effective[0])
-        effective_11 = (tree.root.p1_effective[1], tree.root.p2_effective[1])
-        assert effective_00 in tree.root.children
-        assert effective_11 in tree.root.children
+        # Should have two children of root (under outcome index pairs)
+        outcome_00 = (tree.root.action_to_outcome(1, 0), tree.root.action_to_outcome(2, 0))
+        outcome_11 = (tree.root.action_to_outcome(1, 1), tree.root.action_to_outcome(2, 1))
+        assert outcome_00 in tree.root.children
+        assert outcome_11 in tree.root.children
 
         # Simulator should be at child2
         assert tree.simulator_node == child2

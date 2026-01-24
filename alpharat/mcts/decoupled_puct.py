@@ -121,8 +121,11 @@ class DecoupledPUCTSearch:
             a1, a2 = self._select_actions(current)
 
             # Check if this action pair leads to a new node (expansion)
-            effective_pair = (current.p1_effective[a1], current.p2_effective[a2])
-            is_expansion = effective_pair not in current.children
+            # Children are keyed by outcome indices
+            outcome_i = current.action_to_outcome(1, a1)
+            outcome_j = current.action_to_outcome(2, a2)
+            outcome_pair = (outcome_i, outcome_j)
+            is_expansion = outcome_pair not in current.children
 
             # Make move (creates child if needed)
             child, reward = self.tree.make_move_from(current, a1, a2)

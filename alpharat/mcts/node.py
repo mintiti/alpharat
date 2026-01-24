@@ -11,6 +11,14 @@ from typing import Any
 
 import numpy as np
 
+from alpharat.mcts.reduction import (
+    expand_payout,
+    expand_prior,
+    expand_visits,
+    reduce_payout,
+    reduce_prior,
+)
+
 
 class MCTSNode:
     """MCTS node for simultaneous-move games with O(1) backup.
@@ -18,16 +26,15 @@ class MCTSNode:
     Maintains statistics indexed by unique effective outcomes rather than
     raw actions. This makes backup O(1) instead of O(k²) for k equivalent actions.
 
-    The node stores reduced matrices sized [n1 x n2] where n1, n2 are the counts
-    of unique effective actions for each player. Mappings convert between action
-    indices (0-4) and outcome indices (0 to n-1).
+    The node stores:
+    - Reduced priors [n1], [n2] where n = count of unique outcomes
+    - Reduced payout matrices [n1, n2] for each player
+    - Reduced visit counts [n1, n2]
+    - Children keyed by outcome index pairs (i, j)
 
     Attributes:
         game_state: The game state this node represents
         is_terminal: Whether this is a terminal game state
-        prior_policy_p1: Neural network policy prior for player 1
-        prior_policy_p2: Neural network policy prior for player 2
-        children: Dictionary mapping effective action pairs to child nodes
         parent: Parent node in the search tree
         move_undo: MoveUndo object to reach this node from parent (None for root)
         depth: Depth of this node in the tree (0 for root)
@@ -55,14 +62,14 @@ class MCTSNode:
 
         Args:
             game_state: The game state this node represents
-            prior_policy_p1: Policy prior for player 1 [num_actions_p1]
-            prior_policy_p2: Policy prior for player 2 [num_actions_p2]
-            nn_payout_prediction: Initial payout matrix from NN [2, num_actions_p1, num_actions_p2]
+            prior_policy_p1: Policy prior for player 1 [5] (will be reduced)
+            prior_policy_p2: Policy prior for player 2 [5] (will be reduced)
+            nn_payout_prediction: Initial payout matrix from NN [2, 5, 5] (will be reduced)
             parent: Parent node (None for root)
             p1_mud_turns_remaining: Turns P1 is stuck in mud
             p2_mud_turns_remaining: Turns P2 is stuck in mud
             move_undo: MoveUndo object to reach this node from parent (None for root)
-            parent_action: Action pair taken from parent to reach this node
+            parent_action: Outcome index pair taken from parent to reach this node
             p1_effective: Maps each P1 action to its effective action (blocked -> STAY)
             p2_effective: Maps each P2 action to its effective action (blocked -> STAY)
         """
@@ -103,7 +110,7 @@ class MCTSNode:
         self._n1 = len(self._p1_outcomes)
         self._n2 = len(self._p2_outcomes)
 
-        # Action index -> outcome index mappings
+        # Effective action -> outcome index mappings
         self._p1_outcome_idx = {eff: i for i, eff in enumerate(self._p1_outcomes)}
         self._p2_outcome_idx = {eff: i for i, eff in enumerate(self._p2_outcomes)}
 
@@ -115,23 +122,63 @@ class MCTSNode:
             self._p2_outcome_idx[self.p2_effective[a]] for a in range(num_actions)
         ]
 
-        # Neural network priors
-        self.prior_policy_p1 = prior_policy_p1
-        self.prior_policy_p2 = prior_policy_p2
+        # Store priors as reduced [n1], [n2]
+        self._prior_p1 = reduce_prior(prior_policy_p1, self.p1_effective)
+        self._prior_p2 = reduce_prior(prior_policy_p2, self.p2_effective)
 
         # Initialize reduced statistics with NN predictions
+        reduced_payout = reduce_payout(nn_payout_prediction, self.p1_effective, self.p2_effective)
         self._payout_p1: list[list[float]] = [
-            [float(nn_payout_prediction[0, o1, o2]) for o2 in self._p2_outcomes]
-            for o1 in self._p1_outcomes
+            [float(reduced_payout[0, i, j]) for j in range(self._n2)] for i in range(self._n1)
         ]
         self._payout_p2: list[list[float]] = [
-            [float(nn_payout_prediction[1, o1, o2]) for o2 in self._p2_outcomes]
-            for o1 in self._p1_outcomes
+            [float(reduced_payout[1, i, j]) for j in range(self._n2)] for i in range(self._n1)
         ]
         self._visits: list[list[int]] = [[0] * self._n2 for _ in range(self._n1)]
 
-        # Tree structure
+        # Cached total visits for O(1) access
+        self._total_visits: int = 0
+
+        # Tree structure - children keyed by outcome index pairs (i, j)
         self.children: dict[tuple[int, int], MCTSNode] = {}
+
+    @property
+    def n1(self) -> int:
+        """Number of unique outcomes for player 1."""
+        return self._n1
+
+    @property
+    def n2(self) -> int:
+        """Number of unique outcomes for player 2."""
+        return self._n2
+
+    def outcome_to_effective(self, player: int, outcome_idx: int) -> int:
+        """Convert outcome index to effective action value.
+
+        Args:
+            player: 1 for P1, 2 for P2
+            outcome_idx: Outcome index (0 to n-1)
+
+        Returns:
+            Effective action value (0-4)
+        """
+        if player == 1:
+            return self._p1_outcomes[outcome_idx]
+        return self._p2_outcomes[outcome_idx]
+
+    def action_to_outcome(self, player: int, action: int) -> int:
+        """Convert action index to outcome index.
+
+        Args:
+            player: 1 for P1, 2 for P2
+            action: Action index (0-4)
+
+        Returns:
+            Outcome index (0 to n-1)
+        """
+        if player == 1:
+            return self._p1_action_to_idx[action]
+        return self._p2_action_to_idx[action]
 
     def update_effective_actions(
         self, p1_effective: list[int] | None = None, p2_effective: list[int] | None = None
@@ -167,24 +214,48 @@ class MCTSNode:
             self._p2_outcome_idx[self.p2_effective[a]] for a in range(num_actions)
         ]
 
+        # Re-reduce priors with new effective mappings
+        # Expand current priors first to get [5] arrays, then reduce
+        expanded_p1 = expand_prior(self._prior_p1, self.p1_effective)
+        expanded_p2 = expand_prior(self._prior_p2, self.p2_effective)
+        self._prior_p1 = reduce_prior(expanded_p1, self.p1_effective)
+        self._prior_p2 = reduce_prior(expanded_p2, self.p2_effective)
+
         # Reinitialize reduced statistics to match new structure
         self._payout_p1 = [[0.0] * self._n2 for _ in range(self._n1)]
         self._payout_p2 = [[0.0] * self._n2 for _ in range(self._n1)]
         self._visits = [[0] * self._n2 for _ in range(self._n1)]
+        self._total_visits = 0
 
     @property
     def total_visits(self) -> int:
-        """Total number of simulations through this node."""
-        total = 0
-        for row in self._visits:
-            for v in row:
-                total += v
-        return total
+        """Total number of simulations through this node (O(1))."""
+        return self._total_visits
 
     @property
     def is_expanded(self) -> bool:
         """Whether this node has been expanded (has children)."""
         return len(self.children) > 0
+
+    @property
+    def prior_policy_p1(self) -> np.ndarray:
+        """Get expanded prior policy for P1 [5] (for compatibility)."""
+        return expand_prior(self._prior_p1, self.p1_effective)
+
+    @prior_policy_p1.setter
+    def prior_policy_p1(self, value: np.ndarray) -> None:
+        """Set prior policy for P1 from [5] array."""
+        self._prior_p1 = reduce_prior(value, self.p1_effective)
+
+    @property
+    def prior_policy_p2(self) -> np.ndarray:
+        """Get expanded prior policy for P2 [5] (for compatibility)."""
+        return expand_prior(self._prior_p2, self.p2_effective)
+
+    @prior_policy_p2.setter
+    def prior_policy_p2(self, value: np.ndarray) -> None:
+        """Set prior policy for P2 from [5] array."""
+        self._prior_p2 = reduce_prior(value, self.p2_effective)
 
     @property
     def payout_matrix(self) -> np.ndarray:
@@ -202,11 +273,12 @@ class MCTSNode:
         This reinitializes the reduced payout matrices from the full matrix.
         Used by MCTSTree._init_root_priors() to set NN predictions.
         """
+        reduced = reduce_payout(value, self.p1_effective, self.p2_effective)
         self._payout_p1 = [
-            [float(value[0, o1, o2]) for o2 in self._p2_outcomes] for o1 in self._p1_outcomes
+            [float(reduced[0, i, j]) for j in range(self._n2)] for i in range(self._n1)
         ]
         self._payout_p2 = [
-            [float(value[1, o1, o2]) for o2 in self._p2_outcomes] for o1 in self._p1_outcomes
+            [float(reduced[1, i, j]) for j in range(self._n2)] for i in range(self._n1)
         ]
 
     @property
@@ -224,8 +296,8 @@ class MCTSNode:
         O(1) operation - directly indexes into reduced matrices.
 
         Args:
-            action_p1: Player 1's action that led to child
-            action_p2: Player 2's action that led to child
+            action_p1: Player 1's action that led to child (0-4)
+            action_p2: Player 2's action that led to child (0-4)
             value: Tuple of (p1_value, p2_value) representing returns for each player
         """
         idx1 = self._p1_action_to_idx[action_p1]
@@ -241,6 +313,9 @@ class MCTSNode:
         self._payout_p2[idx1][idx2] += (p2_value - self._payout_p2[idx1][idx2]) / n_plus_1
         self._visits[idx1][idx2] = n_plus_1
 
+        # Update cached total
+        self._total_visits += 1
+
     def get_expanded_payout_matrix(self) -> np.ndarray:
         """Expand reduced payout matrices to full [2, 5, 5] shape.
 
@@ -250,17 +325,14 @@ class MCTSNode:
         Returns:
             Payout matrix with shape [2, 5, 5].
         """
-        num_actions = len(self.p1_effective)
-        result = np.zeros((2, num_actions, num_actions), dtype=np.float64)
+        # Build reduced numpy array first
+        reduced = np.zeros((2, self._n1, self._n2), dtype=np.float64)
+        for i in range(self._n1):
+            for j in range(self._n2):
+                reduced[0, i, j] = self._payout_p1[i][j]
+                reduced[1, i, j] = self._payout_p2[i][j]
 
-        for a1 in range(num_actions):
-            idx1 = self._p1_action_to_idx[a1]
-            for a2 in range(num_actions):
-                idx2 = self._p2_action_to_idx[a2]
-                result[0, a1, a2] = self._payout_p1[idx1][idx2]
-                result[1, a1, a2] = self._payout_p2[idx1][idx2]
-
-        return result
+        return expand_payout(reduced, self.p1_effective, self.p2_effective)
 
     def get_expanded_visits(self) -> np.ndarray:
         """Expand reduced visit counts to full [5, 5] shape.
@@ -271,16 +343,42 @@ class MCTSNode:
         Returns:
             Visit count matrix with shape [5, 5].
         """
-        num_actions = len(self.p1_effective)
-        result = np.zeros((num_actions, num_actions), dtype=np.int32)
+        # Build reduced numpy array first
+        reduced = np.zeros((self._n1, self._n2), dtype=np.int32)
+        for i in range(self._n1):
+            for j in range(self._n2):
+                reduced[i, j] = self._visits[i][j]
 
-        for a1 in range(num_actions):
-            idx1 = self._p1_action_to_idx[a1]
-            for a2 in range(num_actions):
-                idx2 = self._p2_action_to_idx[a2]
-                result[a1, a2] = self._visits[idx1][idx2]
+        return expand_visits(reduced, self.p1_effective, self.p2_effective)
 
-        return result
+    def get_reduced_payout(self) -> np.ndarray:
+        """Get reduced payout matrix [2, n1, n2].
+
+        Returns the internal reduced representation without expansion.
+
+        Returns:
+            Payout matrix with shape [2, n1, n2].
+        """
+        reduced = np.zeros((2, self._n1, self._n2), dtype=np.float64)
+        for i in range(self._n1):
+            for j in range(self._n2):
+                reduced[0, i, j] = self._payout_p1[i][j]
+                reduced[1, i, j] = self._payout_p2[i][j]
+        return reduced
+
+    def get_reduced_visits(self) -> np.ndarray:
+        """Get reduced visit counts [n1, n2].
+
+        Returns the internal reduced representation without expansion.
+
+        Returns:
+            Visit counts with shape [n1, n2].
+        """
+        reduced = np.zeros((self._n1, self._n2), dtype=np.int32)
+        for i in range(self._n1):
+            for j in range(self._n2):
+                reduced[i, j] = self._visits[i][j]
+        return reduced
 
     def compute_marginal_q_values(self) -> tuple[np.ndarray, np.ndarray]:
         """Compute marginalized Q-values for PUCT selection.
@@ -290,7 +388,11 @@ class MCTSNode:
         Returns:
             Tuple of (q1, q2) where q1[a] is P1's Q-value for action a.
         """
-        num_actions = len(self.prior_policy_p1)
+        num_actions = len(self.p1_effective)
+
+        # Get expanded priors for weighting
+        prior_p1 = self.prior_policy_p1
+        prior_p2 = self.prior_policy_p2
 
         # P1's Q-values: Q1[a1] = sum over a2 of payout[0, a1, a2] * prior_p2[a2]
         q1 = np.zeros(num_actions)
@@ -299,7 +401,7 @@ class MCTSNode:
             total = 0.0
             for a2 in range(num_actions):
                 idx2 = self._p2_action_to_idx[a2]
-                total += self._payout_p1[idx1][idx2] * self.prior_policy_p2[a2]
+                total += self._payout_p1[idx1][idx2] * prior_p2[a2]
             q1[a1] = total
 
         # P2's Q-values: Q2[a2] = sum over a1 of payout[1, a1, a2] * prior_p1[a1]
@@ -309,7 +411,7 @@ class MCTSNode:
             total = 0.0
             for a1 in range(num_actions):
                 idx1 = self._p1_action_to_idx[a1]
-                total += self._payout_p2[idx1][idx2] * self.prior_policy_p1[a1]
+                total += self._payout_p2[idx1][idx2] * prior_p1[a1]
             q2[a2] = total
 
         return q1, q2
@@ -345,14 +447,18 @@ class MCTSNode:
         """
         v1 = 0.0
         v2 = 0.0
-        num_actions = len(self.prior_policy_p1)
+        num_actions = len(self.p1_effective)
+
+        # Get expanded priors
+        prior_p1 = self.prior_policy_p1
+        prior_p2 = self.prior_policy_p2
 
         for a1 in range(num_actions):
             idx1 = self._p1_action_to_idx[a1]
-            p1_prior = self.prior_policy_p1[a1]
+            p1_prior = prior_p1[a1]
             for a2 in range(num_actions):
                 idx2 = self._p2_action_to_idx[a2]
-                p2_prior = self.prior_policy_p2[a2]
+                p2_prior = prior_p2[a2]
                 weight = p1_prior * p2_prior
                 v1 += weight * self._payout_p1[idx1][idx2]
                 v2 += weight * self._payout_p2[idx1][idx2]
