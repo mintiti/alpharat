@@ -37,7 +37,6 @@ class DecoupledPUCTConfig(StrictBaseModel):
     gamma: float = 1.0
     c_puct: float = 1.5
     force_k: float = 2.0
-    mode: Literal["mcts", "pure_nn"] = "mcts"
 
     def build(self, tree: MCTSTree) -> DecoupledPUCTSearch:
         """Construct a search instance with these settings."""
@@ -60,7 +59,6 @@ class DecoupledPUCTSearch:
         self._n_sims = config.simulations
         self._c_puct = config.c_puct
         self._force_k = config.force_k
-        self._mode = config.mode
 
     def search(self) -> SearchResult:
         """Run MCTS search and return the result.
@@ -68,7 +66,7 @@ class DecoupledPUCTSearch:
         Returns:
             SearchResult with Nash policies and payout matrix.
         """
-        if self._mode == "pure_nn" or self._n_sims == 0:
+        if self._n_sims == 0:
             return self._pure_nn_result()
 
         for _ in range(self._n_sims):
