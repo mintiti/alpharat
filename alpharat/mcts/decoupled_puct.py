@@ -159,62 +159,18 @@ class DecoupledPUCTSearch:
         Returns:
             Tuple of (action_p1, action_p2) selected via PUCT formula.
         """
-        # Get marginal Q-values and visit counts
         q1, q2 = node.compute_marginal_q_values()
         n1, n2 = node.compute_marginal_visits()
         n_total = node.total_visits
+        is_root = node == self.tree.root
 
-        # Forced playouts at root: select among undervisited actions
-        if node == self.tree.root and self._force_k > 0:
-            thresh1 = compute_forced_threshold(node.prior_policy_p1, n_total, self._force_k)
-            thresh2 = compute_forced_threshold(node.prior_policy_p2, n_total, self._force_k)
-            forced1 = n1 < thresh1
-            forced2 = n2 < thresh2
+        puct1 = self._compute_puct_scores(q1, node.prior_policy_p1, n1, n_total, is_root)
+        puct2 = self._compute_puct_scores(q2, node.prior_policy_p2, n2, n_total, is_root)
 
-            # If any actions need forcing, select among them
-            if forced1.any():
-                a1 = self._select_forced(forced1, node.p1_effective, node.prior_policy_p1)
-            else:
-                puct1 = self._compute_puct_scores(q1, node.prior_policy_p1, n1, n_total)
-                a1 = self._select_with_tiebreak(puct1, node.p1_effective, node.prior_policy_p1)
-
-            if forced2.any():
-                a2 = self._select_forced(forced2, node.p2_effective, node.prior_policy_p2)
-            else:
-                puct2 = self._compute_puct_scores(q2, node.prior_policy_p2, n2, n_total)
-                a2 = self._select_with_tiebreak(puct2, node.p2_effective, node.prior_policy_p2)
-        else:
-            # Standard PUCT selection
-            puct1 = self._compute_puct_scores(q1, node.prior_policy_p1, n1, n_total)
-            puct2 = self._compute_puct_scores(q2, node.prior_policy_p2, n2, n_total)
-            a1 = self._select_with_tiebreak(puct1, node.p1_effective, node.prior_policy_p1)
-            a2 = self._select_with_tiebreak(puct2, node.p2_effective, node.prior_policy_p2)
+        a1 = self._select_with_tiebreak(puct1, node.p1_effective, node.prior_policy_p1)
+        a2 = self._select_with_tiebreak(puct2, node.p2_effective, node.prior_policy_p2)
 
         return a1, a2
-
-    def _select_forced(
-        self, forced_mask: np.ndarray, effective: list[int], prior: np.ndarray
-    ) -> int:
-        """Select among forced actions using prior-weighted sampling.
-
-        Args:
-            forced_mask: Boolean mask of actions that need forcing.
-            effective: Effective action mapping.
-            prior: Prior distribution over actions.
-
-        Returns:
-            Selected action index.
-        """
-        # Weight forced actions by their prior
-        weights = prior * forced_mask
-        total = weights.sum()
-
-        if total < 1e-9:
-            # Fallback: uniform over forced actions
-            return int(np.random.choice(np.where(forced_mask)[0]))
-
-        weights /= total
-        return int(np.random.choice(len(prior), p=weights))
 
     def _select_with_tiebreak(
         self, puct_scores: np.ndarray, effective: list[int], prior: np.ndarray
@@ -264,20 +220,32 @@ class DecoupledPUCTSearch:
         prior: np.ndarray,
         visit_counts: np.ndarray,
         total_visits: int,
+        is_root: bool = False,
     ) -> np.ndarray:
         """Compute PUCT scores for action selection.
 
         PUCT = Q + c * prior * sqrt(N) / (1 + n)
+
+        At root with force_k > 0, undervisited actions get a large score boost
+        to ensure exploration proportional to prior (KataGo-style forced playouts).
 
         Args:
             q_values: Q-values for each action.
             prior: Prior policy.
             visit_counts: Visit count for each action.
             total_visits: Total visits at this node.
+            is_root: Whether this is the root node.
 
         Returns:
             PUCT score for each action.
         """
         exploration = self._c_puct * prior * np.sqrt(total_visits) / (1 + visit_counts)
-        result: np.ndarray = q_values + exploration
-        return result
+        scores: np.ndarray = q_values + exploration
+
+        # Forced playouts at root: boost undervisited actions
+        if is_root and self._force_k > 0:
+            threshold = compute_forced_threshold(prior, total_visits, self._force_k)
+            forced = (visit_counts < threshold) & (prior > 0)
+            scores[forced] = 1e20
+
+        return scores
