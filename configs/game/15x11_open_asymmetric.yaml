@@ -1,4 +1,4 @@
-# 15x11 game with asymmetric (random) cheese placement
+# 15x11 open maze (no walls/mud), asymmetric cheese placement
 width: 15
 height: 11
 max_turns: 120

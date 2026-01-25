@@ -2,15 +2,15 @@
 # Usage: alpharat-sample configs/sample.yaml
 #
 # Composes from sub-configs:
-#   - /game: 5x5, 7x7, 5x5_asymmetric, etc.
-#   - /mcts: 5x5_tuned, fast
+#   - /game: 5x5_open, 7x7_open, 5x5_open_asymmetric, etc.
+#   - /mcts: 5x5_tuned
 
 defaults:
   - /game: 5x5_open
   - /mcts: 5x5_tuned
   - _self_
 
-group: uniform_5x5  # Required: batch group name
+group: 5x5_open  # Required: batch group name
 
 sampling:
   num_games: 50000

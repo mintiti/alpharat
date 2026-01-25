@@ -1,4 +1,4 @@
-# 7x7 game with asymmetric (random) starting positions
+# 7x7 open maze (no walls/mud), asymmetric cheese placement
 width: 7
 height: 7
 max_turns: 50
