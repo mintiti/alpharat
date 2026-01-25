@@ -48,6 +48,7 @@ alpharat-train-and-benchmark = "scripts.train_and_benchmark:main"
 alpharat-prepare-shards = "scripts.prepare_shards:main"
 alpharat-benchmark = "scripts.benchmark:main"
 alpharat-manifest = "scripts.manifest:main"
+alpharat-iterate = "scripts.iterate:main"
 
 [build-system]
 requires = ["hatchling"]

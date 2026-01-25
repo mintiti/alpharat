@@ -20,111 +20,20 @@ from __future__ import annotations
 import argparse
 import logging
 import sys
-from dataclasses import dataclass
 from pathlib import Path
 
 import yaml
 
-from alpharat.ai.config import (
-    AgentConfigBase,
-    GreedyAgentConfig,
-    MCTSAgentConfig,
-    NNAgentConfig,
-    RandomAgentConfig,
-)
-from alpharat.config.game import GameConfig
+from alpharat.eval.benchmark import BenchmarkConfig, build_benchmark_tournament
 from alpharat.eval.elo import compute_elo, from_tournament_result
-from alpharat.eval.tournament import TournamentConfig, run_tournament
+from alpharat.eval.tournament import run_tournament
 from alpharat.experiments import ExperimentManager
+from alpharat.mcts.decoupled_puct import DecoupledPUCTConfig
 from alpharat.nn.config import TrainConfig
 from alpharat.nn.training import run_training
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
-
-
-@dataclass
-class BenchmarkSettings:
-    """Settings for the benchmark phase."""
-
-    games_per_matchup: int
-    workers: int
-    device: str
-    mcts_simulations: int
-    baseline_checkpoint: Path | None = None
-
-
-def get_game_config_from_checkpoint(checkpoint_path: Path) -> GameConfig:
-    """Extract game dimensions from checkpoint."""
-    import torch
-
-    checkpoint = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
-
-    width = checkpoint.get("width", 5)
-    height = checkpoint.get("height", 5)
-
-    # Use defaults for other params, matching training data
-    return GameConfig(
-        width=width,
-        height=height,
-        max_turns=30,
-        cheese_count=5,
-        wall_density=0.0,
-        mud_density=0.0,
-    )
-
-
-def build_benchmark_config(
-    benchmark_name: str,
-    checkpoint_path: Path,
-    settings: BenchmarkSettings,
-) -> TournamentConfig:
-    """Build tournament config for benchmarking a trained model."""
-    from alpharat.mcts.decoupled_puct import DecoupledPUCTConfig
-
-    game_config = get_game_config_from_checkpoint(checkpoint_path)
-
-    checkpoint_str = str(checkpoint_path)
-
-    # Default MCTS config for benchmarking (matches sampling defaults)
-    mcts_config = DecoupledPUCTConfig(
-        simulations=settings.mcts_simulations,
-        c_puct=8.34,
-        force_k=0.88,
-    )
-
-    agents: dict[str, AgentConfigBase] = {
-        "random": RandomAgentConfig(),
-        "greedy": GreedyAgentConfig(),
-        "mcts": MCTSAgentConfig(
-            mcts=mcts_config,
-        ),
-        "nn": NNAgentConfig(
-            checkpoint=checkpoint_str,
-            temperature=1.0,
-        ),
-        "mcts+nn": MCTSAgentConfig(
-            mcts=mcts_config,
-            checkpoint=checkpoint_str,
-        ),
-    }
-
-    if settings.baseline_checkpoint:
-        baseline_str = str(settings.baseline_checkpoint)
-        agents["nn-prev"] = NNAgentConfig(checkpoint=baseline_str, temperature=1.0)
-        agents["mcts+nn-prev"] = MCTSAgentConfig(
-            mcts=mcts_config,
-            checkpoint=baseline_str,
-        )
-
-    return TournamentConfig(
-        name=benchmark_name,
-        agents=agents,  # type: ignore[arg-type]  # AgentConfigBase is compatible
-        games_per_matchup=settings.games_per_matchup,
-        game=game_config,
-        workers=settings.workers,
-        device=settings.device,
-    )
 
 
 def main() -> None:
@@ -274,15 +183,26 @@ def main() -> None:
         logger.info("  → Used by: nn-prev, mcts+nn-prev")
     logger.info("")
 
-    settings = BenchmarkSettings(
+    # Build MCTS config for benchmark agents
+    mcts_config = DecoupledPUCTConfig(
+        simulations=args.mcts_sims,
+        c_puct=8.34,
+        force_k=0.88,
+    )
+
+    benchmark_config = BenchmarkConfig(
         games_per_matchup=args.games,
         workers=args.workers,
         device=args.device,
-        mcts_simulations=args.mcts_sims,
-        baseline_checkpoint=baseline,
+        mcts=mcts_config,
     )
 
-    tournament_config = build_benchmark_config(benchmark_name, checkpoint_path, settings)
+    tournament_config = build_benchmark_tournament(
+        benchmark_name,
+        checkpoint_path,
+        benchmark_config,
+        baseline_checkpoint=baseline,
+    )
     game_config = tournament_config.game
     logger.info(
         "Game settings: %dx%d, %d cheese, %d max turns",

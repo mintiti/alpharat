@@ -1,5 +1,11 @@
 """Evaluation utilities for PyRat agents."""
 
+from alpharat.eval.benchmark import (
+    BenchmarkConfig,
+    build_benchmark_tournament,
+    build_standard_agents,
+    get_game_config_from_checkpoint,
+)
 from alpharat.eval.elo import (
     EloRating,
     EloResult,
@@ -19,6 +25,11 @@ from alpharat.eval.tournament import (
 )
 
 __all__ = [
+    # Benchmark utilities
+    "BenchmarkConfig",
+    "build_benchmark_tournament",
+    "build_standard_agents",
+    "get_game_config_from_checkpoint",
     # Elo rating
     "EloRating",
     "EloResult",

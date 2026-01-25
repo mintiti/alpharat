@@ -14,6 +14,7 @@ git add -f configs/path/to/file.yaml
 
 ```
 configs/
+├── iterate.yaml         # Auto-iteration loop entry point (recommended)
 ├── sample.yaml          # Main sampling entry point
 ├── train.yaml           # Main training entry point
 ├── tournament.yaml      # Main benchmark entry point
@@ -67,6 +68,13 @@ Named after architecture: `mlp.yaml`, `symmetric.yaml`
 Main entry points compose from sub-configs:
 
 ```bash
+# Auto-iteration (recommended) — uses /game, /mcts, /model defaults
+alpharat-iterate configs/iterate.yaml --prefix sym_5x5
+alpharat-iterate configs/iterate.yaml --prefix sym_5x5 --iterations 3
+
+# Override defaults for iteration
+alpharat-iterate configs/iterate.yaml --prefix mlp_7x7 game=7x7_open model=mlp
+
 # Sampling — uses /game and /mcts defaults
 alpharat-sample configs/sample.yaml --group my_batch
 

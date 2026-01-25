@@ -50,7 +50,7 @@ alpharat/
 ├── eval/           # Evaluation: game execution, tournaments
 └── experiments/    # Experiment management: ExperimentManager, manifest
 
-scripts/            # Entry points: sample.py, train.py, benchmark.py, manifest.py
+scripts/            # Entry points: sample.py, train.py, iterate.py, benchmark.py, manifest.py
 configs/            # YAML config templates for sampling, training, evaluation
 tests/              # Mirrors alpharat/ structure
 experiments/        # Data folder (NOT in git): batches, shards, runs, benchmarks
@@ -130,6 +130,8 @@ Each architecture folder contains `config.py` (ModelConfig, OptimConfig) and `lo
 | `game.py` | `play_game()` — execute single game between agents |
 | `runner.py` | `evaluate()` — run N games, compute stats |
 | `tournament.py` | `run_tournament()` — round-robin with thread pool |
+| `benchmark.py` | `build_benchmark_config()` — standard benchmark against baselines |
+| `elo.py` | `compute_elo()` — Elo rating computation from tournament results |
 
 ### alpharat/experiments/
 
@@ -555,6 +557,42 @@ This repo is for ML experimentation, not just code.
 
 The AlphaZero iteration: sample games → train NN → use NN to sample better games → repeat.
 
+### Auto-Iteration (Recommended)
+
+Use `alpharat-iterate` to run the full loop automatically:
+
+```bash
+# Run forever (Ctrl+C to stop)
+alpharat-iterate configs/iterate.yaml --prefix sym_5x5
+
+# Run exactly 3 iterations
+alpharat-iterate configs/iterate.yaml --prefix sym_5x5 --iterations 3
+
+# Start with an existing checkpoint
+alpharat-iterate configs/iterate.yaml --prefix sym_5x5 --start-checkpoint path/to/model.pt
+
+# Resume from iteration 2 (skips completed phases)
+alpharat-iterate configs/iterate.yaml --prefix sym_5x5 --start-iteration 2
+
+# Benchmark every 2nd iteration (or --no-benchmark to skip)
+alpharat-iterate configs/iterate.yaml --prefix sym_5x5 --benchmark-every 2
+```
+
+The script chains: **Sample → Shard → Train → (Benchmark) → repeat**, with automatic lineage tracking via ExperimentManager. Each phase checks for existing artifacts and skips if already done.
+
+**Artifact naming convention:**
+
+| Artifact | Pattern | Example |
+|----------|---------|---------|
+| Batch | `{prefix}_iter{N}` | `sym_5x5_iter0` |
+| Shard | `{prefix}_iter{N}_shards` | `sym_5x5_iter0_shards` |
+| Run | `{prefix}_iter{N}` | `sym_5x5_iter0` |
+| Benchmark | `{prefix}_iter{N}_benchmark` | `sym_5x5_iter0_benchmark` |
+
+### Manual Iteration
+
+For more control, run each step separately:
+
 **First iteration (no NN yet):**
 ```bash
 # 1. Sample games with pure MCTS (uniform priors)
@@ -570,7 +608,7 @@ alpharat-train-and-benchmark configs/train.yaml --name mlp_v1 --shards iter0_sha
 **Subsequent iterations (with NN):**
 ```bash
 # 1. Sample using trained NN as MCTS prior
-alpharat-sample configs/sample_with_nn.yaml --group iteration_1 \
+alpharat-sample configs/sample.yaml --group iteration_1 \
     --checkpoint experiments/runs/mlp_v1/checkpoints/best_model.pt
 
 # 2. Create shards from new games
@@ -584,8 +622,9 @@ alpharat-benchmark configs/tournament.yaml
 ```
 
 **Scripts:**
-- `train_and_benchmark.py` — convenience script: trains then auto-benchmarks vs Random/Greedy/MCTS
-- `train.py` + `benchmark.py` — separate scripts for more control (custom tournament configs)
+- `iterate.py` — full auto-iteration loop (recommended for most experiments)
+- `train_and_benchmark.py` — single iteration: trains then auto-benchmarks
+- `train.py` + `benchmark.py` — separate scripts for fine-grained control
 
 ### Experiment Commands
 

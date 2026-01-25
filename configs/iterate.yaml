@@ -1,0 +1,34 @@
+# AlphaZero iteration configuration
+# Usage: alpharat-iterate configs/iterate.yaml --prefix sym_5x5
+#
+# Composes from sub-configs:
+#   - /game: 5x5_open, 7x7_open, etc.
+#   - /mcts: 5x5_tuned
+#   - /model: mlp, symmetric
+
+defaults:
+  - /game: 5x5_open
+  - /mcts: 5x5_tuned
+  - /model: symmetric
+  - _self_
+
+# Per-iteration settings
+iteration:
+  games: 10000         # games per iteration
+  epochs: 100          # training epochs
+  checkpoint_every: 10
+
+# Sampling settings
+sampling:
+  workers: 4
+
+# Sharding settings
+sharding:
+  val_ratio: 0.1
+  positions_per_shard: 3000000
+
+# Benchmark settings (when enabled)
+# Note: MCTS config is inherited from the top-level `mcts` field
+benchmark:
+  games_per_matchup: 50
+  workers: 4
