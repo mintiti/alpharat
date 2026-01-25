@@ -1,0 +1,8 @@
+# 7x7 open maze (no walls/mud), ~20% cheese density
+width: 7
+height: 7
+max_turns: 50
+cheese_count: 10
+wall_density: 0.0
+mud_density: 0.0
+symmetric: true

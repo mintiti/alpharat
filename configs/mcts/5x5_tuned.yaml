@@ -1,0 +1,6 @@
+# MCTS params tuned via Optuna on 5x5 open maze (no walls/mud)
+# See scripts/optuna_sweep.py for sweep details
+variant: decoupled_puct
+simulations: 554
+c_puct: 8.342921588471766
+force_k: 0.8834383744890093

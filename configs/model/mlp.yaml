@@ -1,0 +1,15 @@
+# @package _global_
+# MLP model configuration
+model:
+  architecture: mlp
+  hidden_dim: 256
+  dropout: 0.0
+  p_augment: 0.5  # probability of player swap augmentation per sample
+
+optim:
+  architecture: mlp
+  lr: 1e-3
+  policy_weight: 1.0
+  value_weight: 1.0
+  nash_weight: 0.0
+  nash_mode: target

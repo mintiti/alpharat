@@ -1,25 +1,19 @@
 # Self-play sampling configuration
 # Usage: alpharat-sample configs/sample.yaml
+#
+# Composes from sub-configs:
+#   - /game: 5x5_open, 7x7_open, 5x5_open_asymmetric, etc.
+#   - /mcts: 5x5_tuned
 
-group: uniform_5x5  # Required: batch group name
+defaults:
+  - /game: 5x5_open
+  - /mcts: 5x5_tuned
+  - _self_
 
-mcts:
-  variant: decoupled_puct
-  simulations: 554
-  c_puct: 8.342921588471766
-  force_k: 0.8834383744890093
-
-game:
-  width: 5
-  height: 5
-  max_turns: 30
-  cheese_count: 5
-  wall_density: 0.0
-  mud_density: 0.0
+group: 5x5_open  # Required: batch group name
 
 sampling:
   num_games: 50000
   workers: 4
 
-# experiments_dir: experiments  # Default, override if needed
-checkpoint: null               # Path to model checkpoint, or null for uniform prior
+checkpoint: null  # Path to model checkpoint, or null for uniform prior

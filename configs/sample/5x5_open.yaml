@@ -1,0 +1,17 @@
+# @package _global_
+
+# Self-play sampling: 5x5 open maze
+# Usage: alpharat-sample configs/sample/5x5_open.yaml
+
+defaults:
+  - /game: 5x5_open
+  - /mcts: 5x5_tuned
+  - _self_
+
+group: 5x5_open
+
+sampling:
+  num_games: 50000
+  workers: 4
+
+checkpoint: null  # Path to model checkpoint, or null for uniform prior
