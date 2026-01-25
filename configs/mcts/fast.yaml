@@ -1,5 +1,0 @@
-# Fast MCTS configuration for quick experiments
-variant: decoupled_puct
-simulations: 100
-c_puct: 1.5
-force_k: 0.0

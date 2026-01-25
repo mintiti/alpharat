@@ -1,14 +1,14 @@
 # @package _global_
 
-# Self-play sampling: 5x5 with tuned MCTS params
-# Usage: alpharat-sample configs/sample/5x5_tuned.yaml
+# Self-play sampling: 7x7 open maze
+# Usage: alpharat-sample configs/sample/7x7_open.yaml
 
 defaults:
-  - /game: 5x5_open
+  - /game: 7x7_open
   - /mcts: 5x5_tuned
   - _self_
 
-group: uniform_5x5_tuned
+group: 7x7_open
 
 sampling:
   num_games: 50000
