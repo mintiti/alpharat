@@ -189,18 +189,28 @@ class DecoupledPUCTSearch:
         Returns:
             Selected action index.
         """
-        max_puct = puct_scores.max()
-        is_tied = np.abs(puct_scores - max_puct) < 1e-9
+        max_idx = int(np.argmax(puct_scores))
+        max_val = puct_scores[max_idx]
 
-        # Find effective actions among tied candidates
-        unique_effective_tied = set()
+        # Fast path: check if any other score is tied (avoid full sum)
+        has_tie = False
+        for i in range(len(puct_scores)):
+            if i != max_idx and abs(puct_scores[i] - max_val) < 1e-9:
+                has_tie = True
+                break
+
+        if not has_tie:
+            return max_idx
+
+        # Slow path: find tied actions and their effective outcomes
+        is_tied = np.abs(puct_scores - max_val) < 1e-9
+        unique_effective_tied: set[int] = set()
         for a in range(len(puct_scores)):
             if is_tied[a]:
                 unique_effective_tied.add(effective[a])
 
         if len(unique_effective_tied) == 1:
-            # Single best effective action - return any action that maps to it
-            return int(np.argmax(puct_scores))
+            return max_idx
 
         # Multiple tied effective actions - sample from prior among them
         tied_mask = np.array([effective[a] in unique_effective_tied for a in range(len(prior))])
@@ -208,7 +218,6 @@ class DecoupledPUCTSearch:
         prior_sum = prior_masked.sum()
 
         if prior_sum < 1e-9:
-            # Fallback to uniform over tied effective actions
             return int(np.random.choice(np.where(is_tied)[0]))
 
         prior_masked /= prior_sum
