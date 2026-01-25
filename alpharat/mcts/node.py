@@ -11,10 +11,16 @@ from typing import Any
 
 import numpy as np
 
+from alpharat.mcts.numba_ops import (
+    backup_node,
+    build_expanded_payout,
+    build_expanded_visits,
+    compute_expected_value_numba,
+    compute_marginal_q_numba,
+    compute_marginal_visits_numba,
+)
 from alpharat.mcts.reduction import (
-    expand_payout,
     expand_prior,
-    expand_visits,
     reduce_payout,
     reduce_prior,
 )
@@ -114,27 +120,29 @@ class MCTSNode:
         self._p1_outcome_idx = {eff: i for i, eff in enumerate(self._p1_outcomes)}
         self._p2_outcome_idx = {eff: i for i, eff in enumerate(self._p2_outcomes)}
 
-        # Pre-computed action -> outcome index for fast backup
-        self._p1_action_to_idx = [
-            self._p1_outcome_idx[self.p1_effective[a]] for a in range(num_actions)
-        ]
-        self._p2_action_to_idx = [
-            self._p2_outcome_idx[self.p2_effective[a]] for a in range(num_actions)
-        ]
+        # Pre-computed action -> outcome index as numpy arrays for Numba
+        self._p1_action_to_idx = np.array(
+            [self._p1_outcome_idx[self.p1_effective[a]] for a in range(num_actions)],
+            dtype=np.int64,
+        )
+        self._p2_action_to_idx = np.array(
+            [self._p2_outcome_idx[self.p2_effective[a]] for a in range(num_actions)],
+            dtype=np.int64,
+        )
 
         # Store priors as reduced [n1], [n2]
         self._prior_p1 = reduce_prior(prior_policy_p1, self.p1_effective)
         self._prior_p2 = reduce_prior(prior_policy_p2, self.p2_effective)
 
-        # Initialize reduced statistics with NN predictions
+        # Cache expanded priors for hot path (computed once, reused)
+        self._expanded_prior_p1 = expand_prior(self._prior_p1, self.p1_effective)
+        self._expanded_prior_p2 = expand_prior(self._prior_p2, self.p2_effective)
+
+        # Initialize reduced statistics with NN predictions as numpy arrays
         reduced_payout = reduce_payout(nn_payout_prediction, self.p1_effective, self.p2_effective)
-        self._payout_p1: list[list[float]] = [
-            [float(reduced_payout[0, i, j]) for j in range(self._n2)] for i in range(self._n1)
-        ]
-        self._payout_p2: list[list[float]] = [
-            [float(reduced_payout[1, i, j]) for j in range(self._n2)] for i in range(self._n1)
-        ]
-        self._visits: list[list[int]] = [[0] * self._n2 for _ in range(self._n1)]
+        self._payout_p1 = np.ascontiguousarray(reduced_payout[0], dtype=np.float64)
+        self._payout_p2 = np.ascontiguousarray(reduced_payout[1], dtype=np.float64)
+        self._visits = np.zeros((self._n1, self._n2), dtype=np.float64)
 
         # Cached total visits for O(1) access
         self._total_visits: int = 0
@@ -177,8 +185,8 @@ class MCTSNode:
             Outcome index (0 to n-1)
         """
         if player == 1:
-            return self._p1_action_to_idx[action]
-        return self._p2_action_to_idx[action]
+            return int(self._p1_action_to_idx[action])
+        return int(self._p2_action_to_idx[action])
 
     def update_effective_actions(
         self, p1_effective: list[int] | None = None, p2_effective: list[int] | None = None
@@ -207,12 +215,14 @@ class MCTSNode:
         self._p2_outcome_idx = {eff: i for i, eff in enumerate(self._p2_outcomes)}
 
         num_actions = len(self.p1_effective)
-        self._p1_action_to_idx = [
-            self._p1_outcome_idx[self.p1_effective[a]] for a in range(num_actions)
-        ]
-        self._p2_action_to_idx = [
-            self._p2_outcome_idx[self.p2_effective[a]] for a in range(num_actions)
-        ]
+        self._p1_action_to_idx = np.array(
+            [self._p1_outcome_idx[self.p1_effective[a]] for a in range(num_actions)],
+            dtype=np.int64,
+        )
+        self._p2_action_to_idx = np.array(
+            [self._p2_outcome_idx[self.p2_effective[a]] for a in range(num_actions)],
+            dtype=np.int64,
+        )
 
         # Re-reduce priors with new effective mappings
         # Expand current priors first to get [5] arrays, then reduce
@@ -221,10 +231,14 @@ class MCTSNode:
         self._prior_p1 = reduce_prior(expanded_p1, self.p1_effective)
         self._prior_p2 = reduce_prior(expanded_p2, self.p2_effective)
 
+        # Update cached expanded priors
+        self._expanded_prior_p1 = expand_prior(self._prior_p1, self.p1_effective)
+        self._expanded_prior_p2 = expand_prior(self._prior_p2, self.p2_effective)
+
         # Reinitialize reduced statistics to match new structure
-        self._payout_p1 = [[0.0] * self._n2 for _ in range(self._n1)]
-        self._payout_p2 = [[0.0] * self._n2 for _ in range(self._n1)]
-        self._visits = [[0] * self._n2 for _ in range(self._n1)]
+        self._payout_p1 = np.zeros((self._n1, self._n2), dtype=np.float64)
+        self._payout_p2 = np.zeros((self._n1, self._n2), dtype=np.float64)
+        self._visits = np.zeros((self._n1, self._n2), dtype=np.float64)
         self._total_visits = 0
 
     @property
@@ -239,23 +253,25 @@ class MCTSNode:
 
     @property
     def prior_policy_p1(self) -> np.ndarray:
-        """Get expanded prior policy for P1 [5] (for compatibility)."""
-        return expand_prior(self._prior_p1, self.p1_effective)
+        """Get expanded prior policy for P1 [5] (cached)."""
+        return self._expanded_prior_p1
 
     @prior_policy_p1.setter
     def prior_policy_p1(self, value: np.ndarray) -> None:
         """Set prior policy for P1 from [5] array."""
         self._prior_p1 = reduce_prior(value, self.p1_effective)
+        self._expanded_prior_p1 = expand_prior(self._prior_p1, self.p1_effective)
 
     @property
     def prior_policy_p2(self) -> np.ndarray:
-        """Get expanded prior policy for P2 [5] (for compatibility)."""
-        return expand_prior(self._prior_p2, self.p2_effective)
+        """Get expanded prior policy for P2 [5] (cached)."""
+        return self._expanded_prior_p2
 
     @prior_policy_p2.setter
     def prior_policy_p2(self, value: np.ndarray) -> None:
         """Set prior policy for P2 from [5] array."""
         self._prior_p2 = reduce_prior(value, self.p2_effective)
+        self._expanded_prior_p2 = expand_prior(self._prior_p2, self.p2_effective)
 
     @property
     def payout_matrix(self) -> np.ndarray:
@@ -274,12 +290,8 @@ class MCTSNode:
         Used by MCTSTree._init_root_priors() to set NN predictions.
         """
         reduced = reduce_payout(value, self.p1_effective, self.p2_effective)
-        self._payout_p1 = [
-            [float(reduced[0, i, j]) for j in range(self._n2)] for i in range(self._n1)
-        ]
-        self._payout_p2 = [
-            [float(reduced[1, i, j]) for j in range(self._n2)] for i in range(self._n1)
-        ]
+        self._payout_p1 = np.ascontiguousarray(reduced[0], dtype=np.float64)
+        self._payout_p2 = np.ascontiguousarray(reduced[1], dtype=np.float64)
 
     @property
     def action_visits(self) -> np.ndarray:
@@ -293,28 +305,26 @@ class MCTSNode:
     def backup(self, action_p1: int, action_p2: int, value: tuple[float, float]) -> None:
         """Update statistics after visiting a child node.
 
-        O(1) operation - directly indexes into reduced matrices.
+        O(1) operation - directly indexes into reduced matrices via Numba JIT.
 
         Args:
             action_p1: Player 1's action that led to child (0-4)
             action_p2: Player 2's action that led to child (0-4)
             value: Tuple of (p1_value, p2_value) representing returns for each player
         """
-        idx1 = self._p1_action_to_idx[action_p1]
-        idx2 = self._p2_action_to_idx[action_p2]
-
-        n = self._visits[idx1][idx2]
-        n_plus_1 = n + 1
-
+        idx1 = int(self._p1_action_to_idx[action_p1])
+        idx2 = int(self._p2_action_to_idx[action_p2])
         p1_value, p2_value = value
 
-        # Incremental mean update
-        self._payout_p1[idx1][idx2] += (p1_value - self._payout_p1[idx1][idx2]) / n_plus_1
-        self._payout_p2[idx1][idx2] += (p2_value - self._payout_p2[idx1][idx2]) / n_plus_1
-        self._visits[idx1][idx2] = n_plus_1
-
-        # Update cached total
-        self._total_visits += 1
+        self._total_visits = backup_node(
+            self._payout_p1,
+            self._payout_p2,
+            self._visits,
+            idx1,
+            idx2,
+            p1_value,
+            p2_value,
+        )
 
     def get_expanded_payout_matrix(self) -> np.ndarray:
         """Expand reduced payout matrices to full [2, 5, 5] shape.
@@ -325,14 +335,13 @@ class MCTSNode:
         Returns:
             Payout matrix with shape [2, 5, 5].
         """
-        # Build reduced numpy array first
-        reduced = np.zeros((2, self._n1, self._n2), dtype=np.float64)
-        for i in range(self._n1):
-            for j in range(self._n2):
-                reduced[0, i, j] = self._payout_p1[i][j]
-                reduced[1, i, j] = self._payout_p2[i][j]
-
-        return expand_payout(reduced, self.p1_effective, self.p2_effective)
+        result: np.ndarray = build_expanded_payout(
+            self._payout_p1,
+            self._payout_p2,
+            self._p1_action_to_idx,
+            self._p2_action_to_idx,
+        )
+        return result
 
     def get_expanded_visits(self) -> np.ndarray:
         """Expand reduced visit counts to full [5, 5] shape.
@@ -343,13 +352,12 @@ class MCTSNode:
         Returns:
             Visit count matrix with shape [5, 5].
         """
-        # Build reduced numpy array first
-        reduced = np.zeros((self._n1, self._n2), dtype=np.int32)
-        for i in range(self._n1):
-            for j in range(self._n2):
-                reduced[i, j] = self._visits[i][j]
-
-        return expand_visits(reduced, self.p1_effective, self.p2_effective)
+        result: np.ndarray = build_expanded_visits(
+            self._visits,
+            self._p1_action_to_idx,
+            self._p2_action_to_idx,
+        )
+        return result
 
     def get_reduced_payout(self) -> np.ndarray:
         """Get reduced payout matrix [2, n1, n2].
@@ -360,10 +368,8 @@ class MCTSNode:
             Payout matrix with shape [2, n1, n2].
         """
         reduced = np.zeros((2, self._n1, self._n2), dtype=np.float64)
-        for i in range(self._n1):
-            for j in range(self._n2):
-                reduced[0, i, j] = self._payout_p1[i][j]
-                reduced[1, i, j] = self._payout_p2[i][j]
+        reduced[0] = self._payout_p1
+        reduced[1] = self._payout_p2
         return reduced
 
     def get_reduced_visits(self) -> np.ndarray:
@@ -374,11 +380,7 @@ class MCTSNode:
         Returns:
             Visit counts with shape [n1, n2].
         """
-        reduced = np.zeros((self._n1, self._n2), dtype=np.int32)
-        for i in range(self._n1):
-            for j in range(self._n2):
-                reduced[i, j] = self._visits[i][j]
-        return reduced
+        return self._visits.astype(np.int32)
 
     def compute_marginal_q_values(self) -> tuple[np.ndarray, np.ndarray]:
         """Compute marginalized Q-values for PUCT selection.
@@ -388,33 +390,15 @@ class MCTSNode:
         Returns:
             Tuple of (q1, q2) where q1[a] is P1's Q-value for action a.
         """
-        num_actions = len(self.p1_effective)
-
-        # Get expanded priors for weighting
-        prior_p1 = self.prior_policy_p1
-        prior_p2 = self.prior_policy_p2
-
-        # P1's Q-values: Q1[a1] = sum over a2 of payout[0, a1, a2] * prior_p2[a2]
-        q1 = np.zeros(num_actions)
-        for a1 in range(num_actions):
-            idx1 = self._p1_action_to_idx[a1]
-            total = 0.0
-            for a2 in range(num_actions):
-                idx2 = self._p2_action_to_idx[a2]
-                total += self._payout_p1[idx1][idx2] * prior_p2[a2]
-            q1[a1] = total
-
-        # P2's Q-values: Q2[a2] = sum over a1 of payout[1, a1, a2] * prior_p1[a1]
-        q2 = np.zeros(num_actions)
-        for a2 in range(num_actions):
-            idx2 = self._p2_action_to_idx[a2]
-            total = 0.0
-            for a1 in range(num_actions):
-                idx1 = self._p1_action_to_idx[a1]
-                total += self._payout_p2[idx1][idx2] * prior_p1[a1]
-            q2[a2] = total
-
-        return q1, q2
+        result: tuple[np.ndarray, np.ndarray] = compute_marginal_q_numba(
+            self._payout_p1,
+            self._payout_p2,
+            self._expanded_prior_p1,
+            self._expanded_prior_p2,
+            self._p1_action_to_idx,
+            self._p2_action_to_idx,
+        )
+        return result
 
     def compute_marginal_visits(self) -> tuple[np.ndarray, np.ndarray]:
         """Compute marginal visit counts for PUCT selection.
@@ -425,17 +409,12 @@ class MCTSNode:
         Returns:
             Tuple of (n1, n2) where n1[a] is visit count for P1's action a.
         """
-        num_actions = len(self.p1_effective)
-
-        # Sum over reduced indices, then expand
-        reduced_n1 = [sum(self._visits[i]) for i in range(self._n1)]
-        reduced_n2 = [sum(self._visits[i][j] for i in range(self._n1)) for j in range(self._n2)]
-
-        # Expand to action space
-        n1 = np.array([reduced_n1[self._p1_action_to_idx[a]] for a in range(num_actions)])
-        n2 = np.array([reduced_n2[self._p2_action_to_idx[a]] for a in range(num_actions)])
-
-        return n1, n2
+        result: tuple[np.ndarray, np.ndarray] = compute_marginal_visits_numba(
+            self._visits,
+            self._p1_action_to_idx,
+            self._p2_action_to_idx,
+        )
+        return result
 
     def compute_expected_value(self) -> tuple[float, float]:
         """Compute expected value under NN priors for both players.
@@ -445,25 +424,15 @@ class MCTSNode:
         Returns:
             Tuple (v1, v2) of expected values for P1 and P2.
         """
-        v1 = 0.0
-        v2 = 0.0
-        num_actions = len(self.p1_effective)
-
-        # Get expanded priors
-        prior_p1 = self.prior_policy_p1
-        prior_p2 = self.prior_policy_p2
-
-        for a1 in range(num_actions):
-            idx1 = self._p1_action_to_idx[a1]
-            p1_prior = prior_p1[a1]
-            for a2 in range(num_actions):
-                idx2 = self._p2_action_to_idx[a2]
-                p2_prior = prior_p2[a2]
-                weight = p1_prior * p2_prior
-                v1 += weight * self._payout_p1[idx1][idx2]
-                v2 += weight * self._payout_p2[idx1][idx2]
-
-        return v1, v2
+        result: tuple[float, float] = compute_expected_value_numba(
+            self._payout_p1,
+            self._payout_p2,
+            self._expanded_prior_p1,
+            self._expanded_prior_p2,
+            self._p1_action_to_idx,
+            self._p2_action_to_idx,
+        )
+        return result
 
     def __repr__(self) -> str:
         """String representation for debugging."""
