@@ -130,18 +130,38 @@ class MCTSNode:
             dtype=np.int64,
         )
 
-        # Store priors as reduced [n1], [n2]
-        self._prior_p1 = reduce_prior(prior_policy_p1, self.p1_effective)
-        self._prior_p2 = reduce_prior(prior_policy_p2, self.p2_effective)
+        # Store priors as reduced [n1], [n2] - vectorized reduction
+        self._prior_p1 = np.zeros(self._n1, dtype=prior_policy_p1.dtype)
+        np.add.at(self._prior_p1, self._p1_action_to_idx, prior_policy_p1)
 
-        # Cache expanded priors for hot path (computed once, reused)
-        self._expanded_prior_p1 = expand_prior(self._prior_p1, self.p1_effective)
-        self._expanded_prior_p2 = expand_prior(self._prior_p2, self.p2_effective)
+        self._prior_p2 = np.zeros(self._n2, dtype=prior_policy_p2.dtype)
+        np.add.at(self._prior_p2, self._p2_action_to_idx, prior_policy_p2)
 
-        # Initialize reduced statistics with NN predictions as numpy arrays
-        reduced_payout = reduce_payout(nn_payout_prediction, self.p1_effective, self.p2_effective)
-        self._payout_p1 = np.ascontiguousarray(reduced_payout[0], dtype=np.float64)
-        self._payout_p2 = np.ascontiguousarray(reduced_payout[1], dtype=np.float64)
+        # Cache expanded priors - only canonical actions get probability
+        p1_outcomes_arr = np.array(self._p1_outcomes, dtype=np.int64)
+        p2_outcomes_arr = np.array(self._p2_outcomes, dtype=np.int64)
+
+        self._expanded_prior_p1 = np.zeros(num_actions, dtype=prior_policy_p1.dtype)
+        self._expanded_prior_p1[p1_outcomes_arr] = self._prior_p1
+
+        self._expanded_prior_p2 = np.zeros(num_actions, dtype=prior_policy_p2.dtype)
+        self._expanded_prior_p2[p2_outcomes_arr] = self._prior_p2
+
+        # Initialize reduced payout matrices - vectorized reduction with averaging
+        sums_p1 = np.zeros((self._n1, self._n2), dtype=np.float64)
+        sums_p2 = np.zeros((self._n1, self._n2), dtype=np.float64)
+        counts = np.zeros((self._n1, self._n2), dtype=np.int32)
+
+        # Use meshgrid to create all (i, j) index pairs
+        i_idx = self._p1_action_to_idx  # [num_actions]
+        j_idx = self._p2_action_to_idx  # [num_actions]
+        ii, jj = np.meshgrid(i_idx, j_idx, indexing="ij")  # [5, 5] each
+        np.add.at(sums_p1, (ii, jj), nn_payout_prediction[0])
+        np.add.at(sums_p2, (ii, jj), nn_payout_prediction[1])
+        np.add.at(counts, (ii, jj), 1)
+
+        self._payout_p1 = sums_p1 / counts
+        self._payout_p2 = sums_p2 / counts
         self._visits = np.zeros((self._n1, self._n2), dtype=np.float64)
 
         # Cached total visits for O(1) access
