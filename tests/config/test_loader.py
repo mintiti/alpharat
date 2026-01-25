@@ -73,7 +73,7 @@ class TestLoadConfig:
         if not configs_dir.exists():
             pytest.skip("Project config files not found")
 
-        config = load_config(GameConfig, configs_dir, "5x5")
+        config = load_config(GameConfig, configs_dir, "5x5_open")
         assert config.width == 5
         assert config.height == 5
         assert config.cheese_count == 5

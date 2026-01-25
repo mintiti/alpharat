@@ -2,7 +2,7 @@
 # Usage: alpharat-benchmark configs/tournament.yaml
 #
 # Composes from sub-configs:
-#   - /game: 5x5, 7x7, etc.
+#   - /game: 5x5_open, 7x7_open, 5x5_open_asymmetric, etc.
 
 defaults:
   - /game: 5x5_open
@@ -15,20 +15,26 @@ agents:
     variant: greedy
 
   mcts_100:
-    variant: decoupled_puct
-    simulations: 100
-    c_puct: 1.5
+    variant: mcts
+    mcts:
+      variant: decoupled_puct
+      simulations: 100
+      c_puct: 1.5
 
   mcts_500:
-    variant: decoupled_puct
-    simulations: 500
-    c_puct: 1.5
+    variant: mcts
+    mcts:
+      variant: decoupled_puct
+      simulations: 500
+      c_puct: 1.5
 
   # Example: MCTS with NN prior
   # mcts_nn:
-  #   variant: decoupled_puct
-  #   simulations: 200
-  #   c_puct: 1.5
+  #   variant: mcts
+  #   mcts:
+  #     variant: decoupled_puct
+  #     simulations: 200
+  #     c_puct: 1.5
   #   checkpoint: experiments/runs/mlp_v1/checkpoints/best_model.pt
 
 games_per_matchup: 50
