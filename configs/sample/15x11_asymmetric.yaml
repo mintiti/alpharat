@@ -1,0 +1,17 @@
+# @package _global_
+
+# Self-play sampling: 15x11 asymmetric starts
+# Usage: alpharat-sample configs/sample/15x11_asymmetric.yaml
+
+defaults:
+  - /game: 15x11_asymmetric
+  - /mcts: 5x5_tuned
+  - _self_
+
+group: asymmetric_15x11
+
+sampling:
+  num_games: 50000
+  workers: 4
+
+checkpoint: null

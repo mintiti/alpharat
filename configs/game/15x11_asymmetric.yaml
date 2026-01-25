@@ -1,0 +1,8 @@
+# 15x11 game with asymmetric (random) cheese placement
+width: 15
+height: 11
+max_turns: 120
+cheese_count: 33
+wall_density: 0.0
+mud_density: 0.0
+symmetric: false

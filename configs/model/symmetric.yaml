@@ -1,0 +1,14 @@
+# @package _global_
+# Symmetric MLP model configuration (structural P1/P2 symmetry)
+model:
+  architecture: symmetric
+  hidden_dim: 256
+  dropout: 0.1
+
+optim:
+  architecture: symmetric
+  lr: 1e-3
+  policy_weight: 1.0
+  value_weight: 1.0
+  nash_weight: 0.0
+  nash_mode: target

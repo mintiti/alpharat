@@ -1,0 +1,17 @@
+# @package _global_
+
+# Self-play sampling: 5x5 with fast MCTS
+# Usage: alpharat-sample configs/sample/5x5.yaml
+
+defaults:
+  - /game: 5x5_open
+  - /mcts: fast
+  - _self_
+
+group: uniform_5x5
+
+sampling:
+  num_games: 50000
+  workers: 4
+
+checkpoint: null  # Path to model checkpoint, or null for uniform prior

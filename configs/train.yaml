@@ -1,5 +1,8 @@
-# MLP training configuration
+# Training configuration
 # Usage: alpharat-train configs/train.yaml --name mlp_v1 --shards GROUP/UUID
+#
+# Composes from sub-configs:
+#   - /model: mlp, symmetric
 #
 # CLI overrides (merged into frozen config for reproducibility):
 #   --name NAME         Override experiment name
@@ -7,24 +10,11 @@
 #
 # To find shard IDs: ls experiments/shards/
 
+defaults:
+  - /model: mlp
+  - _self_
+
 name: default  # Override with --name
-
-model:
-  architecture: mlp
-  hidden_dim: 256
-  dropout: 0.0
-  p_augment: 0.5  # probability of player swap augmentation per sample
-
-optim:
-  architecture: mlp
-  lr: 1e-3
-  policy_weight: 1.0
-  value_weight: 1.0
-  # Nash consistency loss: enforces game-theoretic consistency between payout and policy
-  # - nash_weight: loss weight (0 = disabled)
-  # - nash_mode: "target" uses MCTS policies, "predicted" uses NN's own policies
-  nash_weight: 0.0
-  nash_mode: target
 
 data:
   # Override with --shards, or set explicitly:

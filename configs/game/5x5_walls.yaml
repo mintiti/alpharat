@@ -1,0 +1,8 @@
+# 5x5 game configuration with walls (pyrat defaults)
+width: 5
+height: 5
+max_turns: 30
+cheese_count: 5
+wall_density: null  # Use pyrat default (0.7)
+mud_density: null   # Use pyrat default (0.1)
+symmetric: true
