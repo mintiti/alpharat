@@ -136,41 +136,36 @@ def compute_marginal_visits_numba(
 
 
 @njit(cache=True)
-def compute_expected_value_numba(
+def compute_expected_value_reduced(
     payout_p1: np.ndarray,
     payout_p2: np.ndarray,
-    prior_p1: np.ndarray,
-    prior_p2: np.ndarray,
-    p1_action_to_idx: np.ndarray,
-    p2_action_to_idx: np.ndarray,
+    prior_p1_reduced: np.ndarray,
+    prior_p2_reduced: np.ndarray,
 ) -> tuple[float, float]:
-    """Compute expected value under NN priors for both players.
+    """Compute expected value directly in reduced (outcome-indexed) space.
 
     E[V] = π₁ᵀ · Payoff · π₂
 
     Args:
         payout_p1: P1 payout matrix [n1, n2]
         payout_p2: P2 payout matrix [n1, n2]
-        prior_p1: P1 prior over actions [num_actions]
-        prior_p2: P2 prior over actions [num_actions]
-        p1_action_to_idx: Maps action to outcome index [num_actions]
-        p2_action_to_idx: Maps action to outcome index [num_actions]
+        prior_p1_reduced: P1 prior over outcomes [n1]
+        prior_p2_reduced: P2 prior over outcomes [n2]
 
     Returns:
         Tuple (v1, v2) of expected values for P1 and P2.
     """
-    num_actions = len(prior_p1)
+    n1 = payout_p1.shape[0]
+    n2 = payout_p1.shape[1]
     v1 = 0.0
     v2 = 0.0
 
-    for a1 in range(num_actions):
-        idx1 = p1_action_to_idx[a1]
-        p1_prior = prior_p1[a1]
-        for a2 in range(num_actions):
-            idx2 = p2_action_to_idx[a2]
-            weight = p1_prior * prior_p2[a2]
-            v1 += weight * payout_p1[idx1, idx2]
-            v2 += weight * payout_p2[idx1, idx2]
+    for i in range(n1):
+        p1_prior = prior_p1_reduced[i]
+        for j in range(n2):
+            weight = p1_prior * prior_p2_reduced[j]
+            v1 += weight * payout_p1[i, j]
+            v2 += weight * payout_p2[i, j]
 
     return v1, v2
 
@@ -272,6 +267,79 @@ def build_expanded_payout(
             expanded[1, a1, a2] = payout_p2[i, j]
 
     return expanded
+
+
+@njit(cache=True)
+def compute_puct_scores(
+    q_values: np.ndarray,
+    prior: np.ndarray,
+    visit_counts: np.ndarray,
+    total_visits: int,
+    c_puct: float,
+    force_k: float,
+    is_root: bool,
+) -> np.ndarray:
+    """Compute PUCT scores for action selection.
+
+    PUCT = Q + c * prior * sqrt(N) / (1 + n)
+
+    At root with force_k > 0, undervisited actions get a large score boost.
+
+    Args:
+        q_values: Q-values for each action [n].
+        prior: Prior policy [n].
+        visit_counts: Visit count for each action [n].
+        total_visits: Total visits at this node.
+        c_puct: Exploration constant.
+        force_k: Forced playout scaling (0 disables).
+        is_root: Whether this is the root node.
+
+    Returns:
+        PUCT score for each action [n].
+    """
+    n = len(q_values)
+    scores = np.empty(n, dtype=np.float64)
+    sqrt_total = np.sqrt(total_visits)
+
+    for i in range(n):
+        exploration = c_puct * prior[i] * sqrt_total / (1.0 + visit_counts[i])
+        scores[i] = q_values[i] + exploration
+
+    # Forced playouts at root
+    if is_root and force_k > 0:
+        for i in range(n):
+            threshold = np.sqrt(force_k * prior[i] * total_visits)
+            if visit_counts[i] < threshold and prior[i] > 0:
+                scores[i] = 1e20
+
+    return scores
+
+
+@njit(cache=True)
+def select_max_with_tiebreak(scores: np.ndarray) -> int:
+    """Select argmax with random tie-breaking (reservoir sampling).
+
+    Args:
+        scores: Array of scores [n].
+
+    Returns:
+        Index of maximum (random among ties).
+    """
+    max_val = scores[0]
+    max_idx = 0
+    n_ties = 1
+
+    for i in range(1, len(scores)):
+        if scores[i] > max_val + 1e-9:
+            max_val = scores[i]
+            max_idx = i
+            n_ties = 1
+        elif scores[i] > max_val - 1e-9:  # Within tolerance = tie
+            n_ties += 1
+            if np.random.random() < 1.0 / n_ties:
+                max_idx = i
+
+    return max_idx
 
 
 @njit(cache=True)

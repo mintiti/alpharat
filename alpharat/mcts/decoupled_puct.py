@@ -9,13 +9,13 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Literal
 
-import numpy as np
-
 from alpharat.config.base import StrictBaseModel
 from alpharat.mcts.nash import compute_nash_equilibrium
-from alpharat.mcts.selection import compute_forced_threshold
+from alpharat.mcts.numba_ops import compute_puct_scores, select_max_with_tiebreak
 
 if TYPE_CHECKING:
+    import numpy as np
+
     from alpharat.mcts.node import MCTSNode
     from alpharat.mcts.tree import MCTSTree
 
@@ -37,7 +37,6 @@ class DecoupledPUCTConfig(StrictBaseModel):
     gamma: float = 1.0
     c_puct: float = 1.5
     force_k: float = 2.0
-    policy: dict | None = None  # Legacy field, ignored (for manifest compat)
 
     def build(self, tree: MCTSTree) -> DecoupledPUCTSearch:
         """Construct a search instance with these settings."""
@@ -170,79 +169,20 @@ class DecoupledPUCTSearch:
         n_total = node.total_visits
         is_root = node == self.tree.root
 
-        # Compute PUCT in reduced space
-        puct1 = self._compute_puct_scores(q1, node._prior_p1, n1, n_total, is_root)
-        puct2 = self._compute_puct_scores(q2, node._prior_p2, n2, n_total, is_root)
+        # Compute PUCT in reduced space (JIT-compiled)
+        puct1 = compute_puct_scores(
+            q1, node._prior_p1, n1, n_total, self._c_puct, self._force_k, is_root
+        )
+        puct2 = compute_puct_scores(
+            q2, node._prior_p2, n2, n_total, self._c_puct, self._force_k, is_root
+        )
 
-        # Select outcome indices (simple random tie-break)
-        idx1 = self._select_max_with_tiebreak(puct1)
-        idx2 = self._select_max_with_tiebreak(puct2)
+        # Select outcome indices (JIT-compiled random tie-break)
+        idx1 = select_max_with_tiebreak(puct1)
+        idx2 = select_max_with_tiebreak(puct2)
 
         # Map outcome index back to action
         a1 = node._p1_outcomes[idx1]
         a2 = node._p2_outcomes[idx2]
 
         return a1, a2
-
-    def _select_max_with_tiebreak(self, scores: np.ndarray) -> int:
-        """Select argmax with random tie-breaking.
-
-        Args:
-            scores: Array of scores.
-
-        Returns:
-            Index of maximum (random among ties).
-        """
-        max_val = scores[0]
-        max_idx = 0
-        n_ties = 1
-
-        # Single pass: find max and count ties
-        for i in range(1, len(scores)):
-            if scores[i] > max_val + 1e-9:
-                max_val = scores[i]
-                max_idx = i
-                n_ties = 1
-            elif abs(scores[i] - max_val) < 1e-9:
-                n_ties += 1
-                # Reservoir sampling: replace with probability 1/n_ties
-                if np.random.random() < 1.0 / n_ties:
-                    max_idx = i
-
-        return max_idx
-
-    def _compute_puct_scores(
-        self,
-        q_values: np.ndarray,
-        prior: np.ndarray,
-        visit_counts: np.ndarray,
-        total_visits: int,
-        is_root: bool = False,
-    ) -> np.ndarray:
-        """Compute PUCT scores for action selection.
-
-        PUCT = Q + c * prior * sqrt(N) / (1 + n)
-
-        At root with force_k > 0, undervisited actions get a large score boost
-        to ensure exploration proportional to prior (KataGo-style forced playouts).
-
-        Args:
-            q_values: Q-values for each action.
-            prior: Prior policy.
-            visit_counts: Visit count for each action.
-            total_visits: Total visits at this node.
-            is_root: Whether this is the root node.
-
-        Returns:
-            PUCT score for each action.
-        """
-        exploration = self._c_puct * prior * np.sqrt(total_visits) / (1 + visit_counts)
-        scores: np.ndarray = q_values + exploration
-
-        # Forced playouts at root: boost undervisited actions
-        if is_root and self._force_k > 0:
-            threshold = compute_forced_threshold(prior, total_visits, self._force_k)
-            forced = (visit_counts < threshold) & (prior > 0)
-            scores[forced] = 1e20
-
-        return scores

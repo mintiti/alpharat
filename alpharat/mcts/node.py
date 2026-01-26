@@ -15,7 +15,7 @@ from alpharat.mcts.numba_ops import (
     backup_node,
     build_expanded_payout,
     build_expanded_visits,
-    compute_expected_value_numba,
+    compute_expected_value_reduced,
     compute_marginal_q_numba,
     compute_marginal_q_reduced,
     compute_marginal_visits_numba,
@@ -473,13 +473,11 @@ class MCTSNode:
         Returns:
             Tuple (v1, v2) of expected values for P1 and P2.
         """
-        result: tuple[float, float] = compute_expected_value_numba(
+        result: tuple[float, float] = compute_expected_value_reduced(
             self._payout_p1,
             self._payout_p2,
-            self._expanded_prior_p1,
-            self._expanded_prior_p2,
-            self._p1_action_to_idx,
-            self._p2_action_to_idx,
+            self._prior_p1,
+            self._prior_p2,
         )
         return result
 
