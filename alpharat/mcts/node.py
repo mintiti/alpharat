@@ -17,7 +17,9 @@ from alpharat.mcts.numba_ops import (
     build_expanded_visits,
     compute_expected_value_numba,
     compute_marginal_q_numba,
+    compute_marginal_q_reduced,
     compute_marginal_visits_numba,
+    compute_marginal_visits_reduced,
 )
 from alpharat.mcts.reduction import (
     expand_prior,
@@ -433,6 +435,33 @@ class MCTSNode:
             self._visits,
             self._p1_action_to_idx,
             self._p2_action_to_idx,
+        )
+        return result
+
+    def compute_marginal_q_reduced(self) -> tuple[np.ndarray, np.ndarray]:
+        """Compute marginalized Q-values in reduced (outcome-indexed) space.
+
+        Returns:
+            Tuple of (q1, q2) where q1[i] is P1's Q-value for outcome i.
+            Shapes are [n1] and [n2].
+        """
+        result: tuple[np.ndarray, np.ndarray] = compute_marginal_q_reduced(
+            self._payout_p1,
+            self._payout_p2,
+            self._prior_p1,
+            self._prior_p2,
+        )
+        return result
+
+    def compute_marginal_visits_reduced(self) -> tuple[np.ndarray, np.ndarray]:
+        """Compute marginal visit counts in reduced (outcome-indexed) space.
+
+        Returns:
+            Tuple of (n1, n2) where n1[i] is visit count for outcome i.
+            Shapes are [n1] and [n2].
+        """
+        result: tuple[np.ndarray, np.ndarray] = compute_marginal_visits_reduced(
+            self._visits,
         )
         return result
 

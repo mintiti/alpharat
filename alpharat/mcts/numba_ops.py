@@ -176,6 +176,74 @@ def compute_expected_value_numba(
 
 
 @njit(cache=True)
+def compute_marginal_q_reduced(
+    payout_p1: np.ndarray,
+    payout_p2: np.ndarray,
+    prior_p1_reduced: np.ndarray,
+    prior_p2_reduced: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Compute marginalized Q-values in reduced space.
+
+    Q1[i] = sum over j of payout[i, j] * prior_p2[j]
+    Q2[j] = sum over i of payout[i, j] * prior_p1[i]
+
+    Args:
+        payout_p1: P1 payout matrix [n1, n2]
+        payout_p2: P2 payout matrix [n1, n2]
+        prior_p1_reduced: P1 prior over outcomes [n1]
+        prior_p2_reduced: P2 prior over outcomes [n2]
+
+    Returns:
+        Tuple (q1, q2) where q1[i] is P1's Q-value for outcome i.
+    """
+    n1 = payout_p1.shape[0]
+    n2 = payout_p1.shape[1]
+
+    q1 = np.zeros(n1, dtype=np.float64)
+    q2 = np.zeros(n2, dtype=np.float64)
+
+    for i in range(n1):
+        total = 0.0
+        for j in range(n2):
+            total += payout_p1[i, j] * prior_p2_reduced[j]
+        q1[i] = total
+
+    for j in range(n2):
+        total = 0.0
+        for i in range(n1):
+            total += payout_p2[i, j] * prior_p1_reduced[i]
+        q2[j] = total
+
+    return q1, q2
+
+
+@njit(cache=True)
+def compute_marginal_visits_reduced(
+    visits: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Compute marginal visit counts in reduced space.
+
+    Args:
+        visits: Visit counts [n1, n2]
+
+    Returns:
+        Tuple (n1, n2) where n1[i] is visit count for outcome i.
+    """
+    n1_size = visits.shape[0]
+    n2_size = visits.shape[1]
+
+    n1 = np.zeros(n1_size, dtype=np.float64)
+    n2 = np.zeros(n2_size, dtype=np.float64)
+
+    for i in range(n1_size):
+        for j in range(n2_size):
+            n1[i] += visits[i, j]
+            n2[j] += visits[i, j]
+
+    return n1, n2
+
+
+@njit(cache=True)
 def build_expanded_payout(
     payout_p1: np.ndarray,
     payout_p2: np.ndarray,

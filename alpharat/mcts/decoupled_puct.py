@@ -37,6 +37,7 @@ class DecoupledPUCTConfig(StrictBaseModel):
     gamma: float = 1.0
     c_puct: float = 1.5
     force_k: float = 2.0
+    policy: dict | None = None  # Legacy field, ignored (for manifest compat)
 
     def build(self, tree: MCTSTree) -> DecoupledPUCTSearch:
         """Construct a search instance with these settings."""
@@ -153,75 +154,62 @@ class DecoupledPUCTSearch:
     def _select_actions(self, node: MCTSNode) -> tuple[int, int]:
         """Select actions for both players using decoupled PUCT.
 
+        Works entirely in reduced (outcome-indexed) space for efficiency.
+        Each outcome index corresponds to a unique game outcome, so no
+        complex tie-breaking for equivalent actions is needed.
+
         Args:
             node: Current node to select from.
 
         Returns:
             Tuple of (action_p1, action_p2) selected via PUCT formula.
         """
-        q1, q2 = node.compute_marginal_q_values()
-        n1, n2 = node.compute_marginal_visits()
+        # Work in reduced space: [n1], [n2] arrays
+        q1, q2 = node.compute_marginal_q_reduced()
+        n1, n2 = node.compute_marginal_visits_reduced()
         n_total = node.total_visits
         is_root = node == self.tree.root
 
-        puct1 = self._compute_puct_scores(q1, node.prior_policy_p1, n1, n_total, is_root)
-        puct2 = self._compute_puct_scores(q2, node.prior_policy_p2, n2, n_total, is_root)
+        # Compute PUCT in reduced space
+        puct1 = self._compute_puct_scores(q1, node._prior_p1, n1, n_total, is_root)
+        puct2 = self._compute_puct_scores(q2, node._prior_p2, n2, n_total, is_root)
 
-        a1 = self._select_with_tiebreak(puct1, node.p1_effective, node.prior_policy_p1)
-        a2 = self._select_with_tiebreak(puct2, node.p2_effective, node.prior_policy_p2)
+        # Select outcome indices (simple random tie-break)
+        idx1 = self._select_max_with_tiebreak(puct1)
+        idx2 = self._select_max_with_tiebreak(puct2)
+
+        # Map outcome index back to action
+        a1 = node._p1_outcomes[idx1]
+        a2 = node._p2_outcomes[idx2]
 
         return a1, a2
 
-    def _select_with_tiebreak(
-        self, puct_scores: np.ndarray, effective: list[int], prior: np.ndarray
-    ) -> int:
-        """Select action with random tie-breaking among effective actions.
-
-        When PUCT scores are tied (common on first simulation when all are 0),
-        samples from the prior distribution over effective actions to ensure
-        symmetric exploration.
+    def _select_max_with_tiebreak(self, scores: np.ndarray) -> int:
+        """Select argmax with random tie-breaking.
 
         Args:
-            puct_scores: PUCT scores for each action (finite values only).
-            effective: Effective action mapping.
-            prior: Prior distribution over actions.
+            scores: Array of scores.
 
         Returns:
-            Selected action index.
+            Index of maximum (random among ties).
         """
-        max_idx = int(np.argmax(puct_scores))
-        max_val = puct_scores[max_idx]
+        max_val = scores[0]
+        max_idx = 0
+        n_ties = 1
 
-        # Fast path: check if any other score is tied (avoid full sum)
-        has_tie = False
-        for i in range(len(puct_scores)):
-            if i != max_idx and abs(puct_scores[i] - max_val) < 1e-9:
-                has_tie = True
-                break
+        # Single pass: find max and count ties
+        for i in range(1, len(scores)):
+            if scores[i] > max_val + 1e-9:
+                max_val = scores[i]
+                max_idx = i
+                n_ties = 1
+            elif abs(scores[i] - max_val) < 1e-9:
+                n_ties += 1
+                # Reservoir sampling: replace with probability 1/n_ties
+                if np.random.random() < 1.0 / n_ties:
+                    max_idx = i
 
-        if not has_tie:
-            return max_idx
-
-        # Slow path: find tied actions and their effective outcomes
-        is_tied = np.abs(puct_scores - max_val) < 1e-9
-        unique_effective_tied: set[int] = set()
-        for a in range(len(puct_scores)):
-            if is_tied[a]:
-                unique_effective_tied.add(effective[a])
-
-        if len(unique_effective_tied) == 1:
-            return max_idx
-
-        # Multiple tied effective actions - sample from prior among them
-        tied_mask = np.array([effective[a] in unique_effective_tied for a in range(len(prior))])
-        prior_masked = prior * tied_mask
-        prior_sum = prior_masked.sum()
-
-        if prior_sum < 1e-9:
-            return int(np.random.choice(np.where(is_tied)[0]))
-
-        prior_masked /= prior_sum
-        return int(np.random.choice(len(prior), p=prior_masked))
+        return max_idx
 
     def _compute_puct_scores(
         self,
