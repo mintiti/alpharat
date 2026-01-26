@@ -7,10 +7,10 @@ All arrays use float64 for Numba compatibility.
 from __future__ import annotations
 
 import numpy as np
-from numba import njit  # type: ignore[import-untyped]
+from numba import jit  # type: ignore[import-untyped]
 
 
-@njit(cache=True)
+@jit(cache=True)
 def backup_node(
     payout_p1: np.ndarray,
     payout_p2: np.ndarray,
@@ -47,7 +47,7 @@ def backup_node(
     return int(np.sum(visits))
 
 
-@njit(cache=True)
+@jit(cache=True)
 def compute_marginal_q_numba(
     payout_p1: np.ndarray,
     payout_p2: np.ndarray,
@@ -95,7 +95,7 @@ def compute_marginal_q_numba(
     return q1, q2
 
 
-@njit(cache=True)
+@jit(cache=True)
 def compute_marginal_visits_numba(
     visits: np.ndarray,
     p1_action_to_idx: np.ndarray,
@@ -135,7 +135,7 @@ def compute_marginal_visits_numba(
     return n1, n2
 
 
-@njit(cache=True)
+@jit(cache=True)
 def compute_expected_value_reduced(
     payout_p1: np.ndarray,
     payout_p2: np.ndarray,
@@ -170,7 +170,7 @@ def compute_expected_value_reduced(
     return v1, v2
 
 
-@njit(cache=True)
+@jit(cache=True)
 def compute_marginal_q_reduced(
     payout_p1: np.ndarray,
     payout_p2: np.ndarray,
@@ -212,7 +212,7 @@ def compute_marginal_q_reduced(
     return q1, q2
 
 
-@njit(cache=True)
+@jit(cache=True)
 def compute_marginal_visits_reduced(
     visits: np.ndarray,
 ) -> tuple[np.ndarray, np.ndarray]:
@@ -238,7 +238,7 @@ def compute_marginal_visits_reduced(
     return n1, n2
 
 
-@njit(cache=True)
+@jit(cache=True)
 def build_expanded_payout(
     payout_p1: np.ndarray,
     payout_p2: np.ndarray,
@@ -269,7 +269,7 @@ def build_expanded_payout(
     return expanded
 
 
-@njit(cache=True)
+@jit(cache=True)
 def compute_puct_scores(
     q_values: np.ndarray,
     prior: np.ndarray,
@@ -315,7 +315,7 @@ def compute_puct_scores(
     return scores
 
 
-@njit(cache=True)
+@jit(cache=True)
 def select_max_with_tiebreak(scores: np.ndarray) -> int:
     """Select argmax with random tie-breaking (reservoir sampling).
 
@@ -342,7 +342,7 @@ def select_max_with_tiebreak(scores: np.ndarray) -> int:
     return max_idx
 
 
-@njit(cache=True)
+@jit(cache=True)
 def build_expanded_visits(
     visits: np.ndarray,
     p1_action_to_idx: np.ndarray,
