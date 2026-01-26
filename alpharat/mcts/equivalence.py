@@ -42,24 +42,6 @@ def get_effective_actions(effective_map: list[int]) -> list[int]:
     return sorted(set(effective_map))
 
 
-def get_equivalence_classes(effective_map: list[int]) -> dict[int, list[int]]:
-    """Group actions by their effective action.
-
-    Args:
-        effective_map: Maps each action index to its effective action.
-
-    Returns:
-        Dict mapping effective action -> list of equivalent actions.
-        E.g., {1: [1], 2: [2], 3: [3], 4: [0, 4]} for [4, 1, 2, 3, 4].
-    """
-    classes: dict[int, list[int]] = {}
-    for action, effective in enumerate(effective_map):
-        if effective not in classes:
-            classes[effective] = []
-        classes[effective].append(action)
-    return classes
-
-
 def reduce_matrix(
     matrix: np.ndarray,
     p1_effective: list[int],
@@ -123,65 +105,6 @@ def expand_strategy(
         full_strategy[action] = reduced_strategy[i]
 
     return full_strategy
-
-
-def compute_effective_marginals(
-    action_visits: np.ndarray,
-    p1_effective: list[int],
-    p2_effective: list[int],
-) -> tuple[np.ndarray, np.ndarray]:
-    """Compute marginal visit counts without over-counting equivalents.
-
-    When equivalent actions exist (e.g., blocked action 0 maps to STAY/4),
-    backup writes identical values to all equivalent rows/cols. Naive sums
-    double-count these. This function sums only over unique effective actions.
-
-    Args:
-        action_visits: Visit count matrix [5, 5].
-        p1_effective: Effective action mapping for player 1.
-        p2_effective: Effective action mapping for player 2.
-
-    Returns:
-        Tuple (n1, n2) where:
-        - n1[a] = visits for P1's effective action (same for all equivalents)
-        - n2[a] = visits for P2's effective action (same for all equivalents)
-    """
-    p1_unique = get_effective_actions(p1_effective)
-    p2_unique = get_effective_actions(p2_effective)
-
-    # Slice to unique effective actions only
-    reduced = action_visits[np.ix_(p1_unique, p2_unique)]
-
-    # Sum on the reduced matrix
-    n1_reduced = reduced.sum(axis=1)
-    n2_reduced = reduced.sum(axis=0)
-
-    # Expand back: each action gets the marginal of its effective action
-    p1_idx = [p1_unique.index(p1_effective[a]) for a in range(5)]
-    p2_idx = [p2_unique.index(p2_effective[a]) for a in range(5)]
-
-    return n1_reduced[p1_idx], n2_reduced[p2_idx]
-
-
-def compute_effective_total_visits(
-    action_visits: np.ndarray,
-    p1_effective: list[int],
-    p2_effective: list[int],
-) -> int:
-    """Compute total visits without over-counting equivalent pairs.
-
-    Args:
-        action_visits: Visit count matrix [5, 5].
-        p1_effective: Effective action mapping for player 1.
-        p2_effective: Effective action mapping for player 2.
-
-    Returns:
-        True total visit count (each simulation counted once).
-    """
-    p1_unique = get_effective_actions(p1_effective)
-    p2_unique = get_effective_actions(p2_effective)
-
-    return int(action_visits[np.ix_(p1_unique, p2_unique)].sum())
 
 
 def reduce_and_expand_nash(

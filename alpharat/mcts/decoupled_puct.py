@@ -9,91 +9,96 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Literal
 
-import numpy as np
-
 from alpharat.config.base import StrictBaseModel
-from alpharat.mcts.equivalence import compute_effective_marginals
 from alpharat.mcts.nash import compute_nash_equilibrium
-from alpharat.mcts.selection import compute_forced_threshold
+from alpharat.mcts.numba_ops import compute_puct_scores, select_max_with_tiebreak
 
 if TYPE_CHECKING:
+    import numpy as np
+
     from alpharat.mcts.node import MCTSNode
     from alpharat.mcts.tree import MCTSTree
 
 
 @dataclass
 class SearchResult:
-    """Result of an MCTS search.
+    """Result of MCTS search containing policy and value information."""
 
-    Attributes:
-        payout_matrix: Root's updated payout matrix after search.
-        policy_p1: Nash equilibrium strategy for player 1.
-        policy_p2: Nash equilibrium strategy for player 2.
-    """
-
-    payout_matrix: np.ndarray
     policy_p1: np.ndarray
     policy_p2: np.ndarray
+    payout_matrix: np.ndarray
 
 
 class DecoupledPUCTConfig(StrictBaseModel):
-    """Config for decoupled PUCT MCTS search."""
+    """Configuration for decoupled PUCT search."""
 
     variant: Literal["decoupled_puct"] = "decoupled_puct"
-    simulations: int
+    simulations: int = 100
     gamma: float = 1.0
     c_puct: float = 1.5
-    force_k: float = 0.0  # Forced playout scaling (0 disables, 2.0 is KataGo default)
+    force_k: float = 2.0
 
     def build(self, tree: MCTSTree) -> DecoupledPUCTSearch:
-        """Construct a DecoupledPUCTSearch from this config."""
+        """Construct a search instance with these settings."""
         return DecoupledPUCTSearch(tree, self)
 
 
 class DecoupledPUCTSearch:
-    """MCTS search using decoupled PUCT action selection.
+    """Decoupled PUCT search for simultaneous-move MCTS.
 
-    Each player independently selects actions by maximizing:
-        Q(a) + c * P(a) * sqrt(N_total) / (1 + N(a))
+    Each player independently selects actions via PUCT formula with Q-values
+    marginalized over the opponent's prior policy.
 
-    Where Q-values are marginalized over the opponent's prior policy.
-
-    Attributes:
-        tree: The MCTS tree to search.
+    Args:
+        tree: MCTSTree to search
+        config: Search configuration
     """
 
-    def __init__(self, tree: MCTSTree, config: DecoupledPUCTConfig) -> None:
-        """Initialize decoupled PUCT search.
-
-        Args:
-            tree: MCTS tree with root node and game state.
-            config: Configuration including simulations, gamma, c_puct, force_k.
-        """
+    def __init__(self, tree: MCTSTree, config: DecoupledPUCTConfig):
         self.tree = tree
         self._n_sims = config.simulations
         self._c_puct = config.c_puct
         self._force_k = config.force_k
 
     def search(self) -> SearchResult:
-        """Run MCTS search and return result.
-
-        If simulations=0, returns raw NN priors (pure NN mode).
-        If root is terminal, returns current state without simulations.
+        """Run MCTS search and return the result.
 
         Returns:
-            SearchResult with updated payout matrix and Nash/NN strategies.
+            SearchResult with Nash policies and payout matrix.
         """
-        # Pure NN mode: return raw priors, skip MCTS
         if self._n_sims == 0:
-            return self._make_nn_result()
-
-        if self.tree.root.is_terminal:
-            return self._make_result()
+            return self._pure_nn_result()
 
         for _ in range(self._n_sims):
             self._simulate()
 
         return self._make_result()
+
+    def _pure_nn_result(self) -> SearchResult:
+        """Return NN priors directly without tree search."""
+        root = self.tree.root
+        return SearchResult(
+            policy_p1=root.prior_policy_p1.copy(),
+            policy_p2=root.prior_policy_p2.copy(),
+            payout_matrix=root.payout_matrix.copy(),
+        )
+
+    def _make_result(self) -> SearchResult:
+        """Compute Nash equilibrium from root statistics."""
+        root = self.tree.root
+        payout_matrix = root.payout_matrix
+
+        policy_p1, policy_p2 = compute_nash_equilibrium(
+            payout_matrix,
+            root.p1_effective,
+            root.p2_effective,
+        )
+
+        return SearchResult(
+            policy_p1=policy_p1,
+            policy_p2=policy_p2,
+            payout_matrix=payout_matrix.copy(),
+        )
 
     def _simulate(self) -> None:
         """Run a single MCTS simulation.
@@ -106,17 +111,24 @@ class DecoupledPUCTSearch:
         current = self.tree.root
         leaf_child: MCTSNode | None = None
 
-        # Selection + Expansion
-        while not current.is_terminal:
-            # Select actions via decoupled PUCT
+        # Selection phase: walk until we expand or hit terminal
+        while True:
+            if current.is_terminal:
+                break
+
             a1, a2 = self._select_actions(current)
 
-            # Check if this is expansion
-            effective_pair = (current.p1_effective[a1], current.p2_effective[a2])
-            is_expansion = effective_pair not in current.children
+            # Check if this action pair leads to a new node (expansion)
+            # Children are keyed by outcome indices
+            outcome_i = current.action_to_outcome(1, a1)
+            outcome_j = current.action_to_outcome(2, a2)
+            outcome_pair = (outcome_i, outcome_j)
+            is_expansion = outcome_pair not in current.children
 
-            # Execute move
+            # Make move (creates child if needed)
             child, reward = self.tree.make_move_from(current, a1, a2)
+
+            # Record step BEFORE potential expansion
             path.append((current, a1, a2, reward))
 
             if is_expansion:
@@ -134,23 +146,16 @@ class DecoupledPUCTSearch:
             g: tuple[float, float] = (0.0, 0.0)
         else:
             # NN's expected value under its own policy for each player
-            g = (
-                float(
-                    leaf_child.prior_policy_p1
-                    @ leaf_child.payout_matrix[0]
-                    @ leaf_child.prior_policy_p2
-                ),
-                float(
-                    leaf_child.prior_policy_p1
-                    @ leaf_child.payout_matrix[1]
-                    @ leaf_child.prior_policy_p2
-                ),
-            )
+            g = leaf_child.compute_expected_value()
 
         self.tree.backup(path, g=g)
 
     def _select_actions(self, node: MCTSNode) -> tuple[int, int]:
         """Select actions for both players using decoupled PUCT.
+
+        Works entirely in reduced (outcome-indexed) space for efficiency.
+        Each outcome index corresponds to a unique game outcome, so no
+        complex tie-breaking for equivalent actions is needed.
 
         Args:
             node: Current node to select from.
@@ -158,130 +163,26 @@ class DecoupledPUCTSearch:
         Returns:
             Tuple of (action_p1, action_p2) selected via PUCT formula.
         """
-        # Marginal Q-values from bimatrix payout
-        # P1 maximizes payout_matrix[0], expects P2 to play prior_p2
-        q1 = node.payout_matrix[0] @ node.prior_policy_p2
-
-        # P2 maximizes payout_matrix[1], expects P1 to play prior_p1
-        q2 = node.payout_matrix[1].T @ node.prior_policy_p1
-
-        # Marginal visit counts (correctly handles action equivalence)
-        n1, n2 = compute_effective_marginals(
-            node.action_visits, node.p1_effective, node.p2_effective
-        )
+        # Work in reduced space: [n1], [n2] arrays
+        q1, q2 = node.compute_marginal_q_reduced()
+        n1, n2 = node.compute_marginal_visits_reduced()
         n_total = node.total_visits
+        is_root = node == self.tree.root
 
-        # PUCT scores
-        puct1 = self._compute_puct_scores(q1, node.prior_policy_p1, n1, n_total)
-        puct2 = self._compute_puct_scores(q2, node.prior_policy_p2, n2, n_total)
+        # Compute PUCT in reduced space (JIT-compiled)
+        puct1 = compute_puct_scores(
+            q1, node.prior_p1_reduced, n1, n_total, self._c_puct, self._force_k, is_root
+        )
+        puct2 = compute_puct_scores(
+            q2, node.prior_p2_reduced, n2, n_total, self._c_puct, self._force_k, is_root
+        )
 
-        # Forced playouts: set PUCT=inf for undervisited actions (root only)
-        if node == self.tree.root and self._force_k > 0:
-            thresh1 = compute_forced_threshold(node.prior_policy_p1, n_total, self._force_k)
-            thresh2 = compute_forced_threshold(node.prior_policy_p2, n_total, self._force_k)
-            puct1[n1 < thresh1] = np.inf
-            puct2[n2 < thresh2] = np.inf
+        # Select outcome indices (JIT-compiled random tie-break)
+        idx1 = select_max_with_tiebreak(puct1)
+        idx2 = select_max_with_tiebreak(puct2)
 
-        a1 = self._select_with_tiebreak(puct1, node.p1_effective, node.prior_policy_p1)
-        a2 = self._select_with_tiebreak(puct2, node.p2_effective, node.prior_policy_p2)
+        # Map outcome index back to action
+        a1 = node.p1_outcomes[idx1]
+        a2 = node.p2_outcomes[idx2]
+
         return a1, a2
-
-    def _select_with_tiebreak(
-        self, puct_scores: np.ndarray, effective: list[int], prior: np.ndarray
-    ) -> int:
-        """Select action with random tie-breaking among effective actions.
-
-        When PUCT scores are tied (common on first simulation when all are 0),
-        samples from the prior distribution over effective actions to ensure
-        symmetric exploration.
-
-        Args:
-            puct_scores: PUCT scores for each action [5].
-            effective: Effective action mapping (blocked actions map to STAY).
-            prior: Prior policy for this player [5].
-
-        Returns:
-            Selected action index.
-        """
-        # Effective actions are those that map to themselves
-        effective_actions = [a for a in range(5) if effective[a] == a]
-
-        if not effective_actions:
-            # Shouldn't happen, but fallback to STAY
-            return 4
-
-        # Get PUCT scores for effective actions
-        effective_puct = [puct_scores[a] for a in effective_actions]
-        max_puct = max(effective_puct)
-
-        # Find all actions tied at max
-        best_actions = [
-            a for a, p in zip(effective_actions, effective_puct, strict=True) if p == max_puct
-        ]
-
-        if len(best_actions) == 1:
-            return best_actions[0]
-
-        # Multiple tied — sample from prior restricted to tied actions
-        tied_prior = np.array([prior[a] for a in best_actions])
-        tied_prior /= tied_prior.sum()
-        return int(np.random.choice(best_actions, p=tied_prior))
-
-    def _compute_puct_scores(
-        self,
-        q_values: np.ndarray,
-        priors: np.ndarray,
-        marginal_visits: np.ndarray,
-        total_visits: int,
-    ) -> np.ndarray:
-        """Compute PUCT scores: Q(a) + c * P(a) * sqrt(N_total) / (1 + N(a)).
-
-        Args:
-            q_values: Marginalized Q-values for this player [5].
-            priors: NN prior policy [5].
-            marginal_visits: Marginal visit counts [5].
-            total_visits: Total visits to this node.
-
-        Returns:
-            PUCT scores for each action [5].
-        """
-        exploration = self._c_puct * priors * np.sqrt(total_visits) / (1 + marginal_visits)
-        result: np.ndarray = q_values + exploration
-        return result
-
-    def _make_result(self) -> SearchResult:
-        """Create SearchResult from current root state.
-
-        Returns:
-            SearchResult with payout matrix and Nash equilibrium strategies.
-        """
-        root = self.tree.root
-        p1_strat, p2_strat = compute_nash_equilibrium(
-            root.payout_matrix,
-            root.p1_effective,
-            root.p2_effective,
-            prior_p1=root.prior_policy_p1,
-            prior_p2=root.prior_policy_p2,
-            action_visits=root.action_visits,
-        )
-        return SearchResult(
-            payout_matrix=root.payout_matrix.copy(),
-            policy_p1=p1_strat,
-            policy_p2=p2_strat,
-        )
-
-    def _make_nn_result(self) -> SearchResult:
-        """Create SearchResult using raw NN priors (pure NN mode).
-
-        Used when simulations=0 to skip MCTS and return the NN policy directly.
-        At this point, payout_matrix still equals the initial NN prediction.
-
-        Returns:
-            SearchResult with NN payout prediction and prior policies.
-        """
-        root = self.tree.root
-        return SearchResult(
-            payout_matrix=root.payout_matrix.copy(),
-            policy_p1=root.prior_policy_p1.copy(),
-            policy_p2=root.prior_policy_p2.copy(),
-        )

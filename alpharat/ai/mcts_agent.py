@@ -141,7 +141,7 @@ class MCTSAgent(Agent):
             game_state=None,
             prior_policy_p1=dummy,
             prior_policy_p2=dummy,
-            nn_payout_prediction=np.zeros((5, 5)),
+            nn_payout_prediction=np.zeros((2, 5, 5)),
             parent=None,
             p1_mud_turns_remaining=p1_mud,
             p2_mud_turns_remaining=p2_mud,

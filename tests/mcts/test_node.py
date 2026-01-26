@@ -650,3 +650,116 @@ class TestEquivalenceInvariants:
                 assert node.payout_matrix[0, a1, a2] == pytest.approx(reference_p1)
                 assert node.payout_matrix[1, a1, a2] == pytest.approx(reference_p2)
                 assert node.action_visits[a1, a2] == ref_visits
+
+
+class TestUpdateEffectiveActions:
+    """Tests for update_effective_actions method."""
+
+    def test_resets_statistics_to_zero(self) -> None:
+        """Updating effective actions should reset all statistics."""
+        prior_p1 = np.ones(5) / 5
+        prior_p2 = np.ones(5) / 5
+        nn_payout = np.ones((2, 5, 5))
+
+        node = MCTSNode(
+            game_state=None,
+            prior_policy_p1=prior_p1,
+            prior_policy_p2=prior_p2,
+            nn_payout_prediction=nn_payout,
+        )
+
+        # Do some backups
+        node.backup(action_p1=0, action_p2=0, value=(10.0, 5.0))
+        node.backup(action_p1=1, action_p2=1, value=(20.0, 10.0))
+        assert node.total_visits == 2
+
+        # Update effective actions (introduce wall for P1)
+        node.update_effective_actions(p1_effective=[4, 1, 2, 3, 4])
+
+        # Statistics should be reset
+        assert node.total_visits == 0
+        assert np.all(node.action_visits == 0)
+
+    def test_reduced_matrices_resize_correctly(self) -> None:
+        """Updating effective actions should resize reduced matrices."""
+        prior_p1 = np.ones(5) / 5
+        prior_p2 = np.ones(5) / 5
+        nn_payout = np.ones((2, 5, 5))
+
+        # Start with identity mapping (5x5 reduced)
+        node = MCTSNode(
+            game_state=None,
+            prior_policy_p1=prior_p1,
+            prior_policy_p2=prior_p2,
+            nn_payout_prediction=nn_payout,
+        )
+
+        assert node.n1 == 5
+        assert node.n2 == 5
+
+        # Update P1 with blocked action (4x5 reduced)
+        node.update_effective_actions(p1_effective=[4, 1, 2, 3, 4])
+        assert node.n1 == 4  # Actions 0,4 merged
+        assert node.n2 == 5
+
+        # Update both players with walls (3x3 reduced)
+        node.update_effective_actions(
+            p1_effective=[4, 1, 4, 4, 4],  # Only 1,4 unique
+            p2_effective=[4, 4, 2, 4, 4],  # Only 2,4 unique
+        )
+        assert node.n1 == 2
+        assert node.n2 == 2
+
+    def test_action_to_outcome_mappings_update(self) -> None:
+        """Verify action_to_outcome returns correct indices after update."""
+        prior_p1 = np.ones(5) / 5
+        prior_p2 = np.ones(5) / 5
+        nn_payout = np.ones((2, 5, 5))
+
+        node = MCTSNode(
+            game_state=None,
+            prior_policy_p1=prior_p1,
+            prior_policy_p2=prior_p2,
+            nn_payout_prediction=nn_payout,
+        )
+
+        # Initially identity: action i -> outcome i
+        for i in range(5):
+            assert node.action_to_outcome(1, i) == i
+            assert node.action_to_outcome(2, i) == i
+
+        # Update P1: actions 0,4 -> effective 4
+        node.update_effective_actions(p1_effective=[4, 1, 2, 3, 4])
+
+        # Now P1's outcomes are [1, 2, 3, 4] (sorted)
+        # action 0 -> effective 4 -> outcome index 3
+        # action 1 -> effective 1 -> outcome index 0
+        # action 4 -> effective 4 -> outcome index 3
+        assert node.action_to_outcome(1, 0) == node.action_to_outcome(1, 4)  # Same outcome
+        assert node.action_to_outcome(1, 1) != node.action_to_outcome(1, 2)  # Different
+
+    def test_p1_outcomes_and_p2_outcomes_update(self) -> None:
+        """Verify p1_outcomes and p2_outcomes lists update correctly."""
+        prior_p1 = np.ones(5) / 5
+        prior_p2 = np.ones(5) / 5
+        nn_payout = np.ones((2, 5, 5))
+
+        node = MCTSNode(
+            game_state=None,
+            prior_policy_p1=prior_p1,
+            prior_policy_p2=prior_p2,
+            nn_payout_prediction=nn_payout,
+        )
+
+        # Initially all unique
+        assert node.p1_outcomes == [0, 1, 2, 3, 4]
+        assert node.p2_outcomes == [0, 1, 2, 3, 4]
+
+        # Update with walls
+        node.update_effective_actions(
+            p1_effective=[4, 1, 2, 3, 4],  # 0->4
+            p2_effective=[0, 4, 2, 3, 4],  # 1->4
+        )
+
+        assert node.p1_outcomes == [1, 2, 3, 4]  # 0 merged with 4
+        assert node.p2_outcomes == [0, 2, 3, 4]  # 1 merged with 4
