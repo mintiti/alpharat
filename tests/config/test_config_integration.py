@@ -24,7 +24,7 @@ from alpharat.config.game import GameConfig
 from alpharat.config.loader import load_config
 from alpharat.data.sampling import SamplingConfig
 from alpharat.eval.tournament import TournamentConfig
-from alpharat.mcts import MCTSConfig
+from alpharat.mcts import DecoupledPUCTConfig
 from alpharat.mcts.node import MCTSNode
 from alpharat.mcts.tree import MCTSTree
 from alpharat.nn.config import TrainConfig
@@ -99,7 +99,7 @@ class TestTournamentConfigIntegration:
 # --- Sampling Config Integration ---
 
 
-def _create_mcts_tree(game: PyRat, mcts_config: MCTSConfig) -> MCTSTree:
+def _create_mcts_tree(game: PyRat, mcts_config: DecoupledPUCTConfig) -> MCTSTree:
     """Helper to create MCTS tree from game and config."""
     # Create root with dummy priors (tree will reinitialize with smart uniform)
     dummy = np.ones(5) / 5
@@ -207,7 +207,7 @@ class TestCompositionSemantics:
     def test_sample_yaml_uses_default_mcts(self) -> None:
         """Main sample.yaml uses 5x5_tuned MCTS by default."""
         config = load_config(SamplingConfig, CONFIGS, "sample")
-        mcts_config = load_config(MCTSConfig, CONFIGS / "mcts", "5x5_tuned")
+        mcts_config = load_config(DecoupledPUCTConfig, CONFIGS / "mcts", "5x5_tuned")
         assert config.mcts.simulations == mcts_config.simulations
         assert config.mcts.c_puct == mcts_config.c_puct
 

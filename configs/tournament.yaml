@@ -17,14 +17,12 @@ agents:
   mcts_100:
     variant: mcts
     mcts:
-      variant: decoupled_puct
       simulations: 100
       c_puct: 1.5
 
   mcts_500:
     variant: mcts
     mcts:
-      variant: decoupled_puct
       simulations: 500
       c_puct: 1.5
 
@@ -32,7 +30,6 @@ agents:
   # mcts_nn:
   #   variant: mcts
   #   mcts:
-  #     variant: decoupled_puct
   #     simulations: 200
   #     c_puct: 1.5
   #   checkpoint: experiments/runs/mlp_v1/checkpoints/best_model.pt

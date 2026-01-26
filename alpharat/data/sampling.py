@@ -9,14 +9,13 @@ from multiprocessing import Process, Queue
 from typing import TYPE_CHECKING, Any
 
 import numpy as np
-from pydantic import Field
 
 from alpharat.config.base import StrictBaseModel
 from alpharat.config.checkpoint import make_predict_fn
 from alpharat.config.game import GameConfig  # noqa: TC001
 from alpharat.data.recorder import GameBundler, GameRecorder
 from alpharat.eval.game import is_terminal
-from alpharat.mcts import MCTSConfig  # noqa: TC001
+from alpharat.mcts import DecoupledPUCTConfig  # noqa: TC001
 from alpharat.mcts.nash import select_action_from_strategy
 from alpharat.mcts.node import MCTSNode
 from alpharat.mcts.tree import MCTSTree
@@ -58,7 +57,7 @@ class SamplingParams(StrictBaseModel):
 class SamplingConfig(StrictBaseModel):
     """Full configuration for a sampling run."""
 
-    mcts: MCTSConfig = Field(discriminator="variant")
+    mcts: DecoupledPUCTConfig
     game: GameConfig
     sampling: SamplingParams
     group: str  # Required: human-readable grouping name (e.g., "uniform_5x5")

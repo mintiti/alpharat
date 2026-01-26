@@ -13,12 +13,9 @@ from alpharat.mcts.nash import (
 from alpharat.mcts.node import MCTSNode
 from alpharat.mcts.tree import MCTSTree
 
-MCTSConfig = DecoupledPUCTConfig
-
 __all__ = [
     "DecoupledPUCTConfig",
     "DecoupledPUCTSearch",
-    "MCTSConfig",
     "MCTSNode",
     "MCTSTree",
     "SearchResult",

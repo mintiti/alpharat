@@ -18,7 +18,7 @@ from alpharat.ai.config import (
 from alpharat.config.base import StrictBaseModel
 from alpharat.config.game import GameConfig  # noqa: TC001
 from alpharat.eval.tournament import TournamentConfig
-from alpharat.mcts import MCTSConfig  # noqa: TC001
+from alpharat.mcts import DecoupledPUCTConfig  # noqa: TC001
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -45,7 +45,7 @@ class BenchmarkConfig(StrictBaseModel):
     games_per_matchup: int = 50
     workers: int = 4
     device: str = "cpu"
-    mcts: MCTSConfig  # Full MCTS config, no hardcoding
+    mcts: DecoupledPUCTConfig
 
 
 def get_game_config_from_checkpoint(checkpoint_path: Path) -> GameConfig:
@@ -77,7 +77,7 @@ def get_game_config_from_checkpoint(checkpoint_path: Path) -> GameConfig:
 
 def build_standard_agents(
     checkpoint_path: Path,
-    mcts_config: MCTSConfig,
+    mcts_config: DecoupledPUCTConfig,
     baseline_checkpoint: Path | None = None,
 ) -> dict[str, AgentConfig]:
     """Build standard benchmark agent set.

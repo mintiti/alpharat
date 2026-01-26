@@ -9,11 +9,9 @@ from __future__ import annotations
 from datetime import datetime  # noqa: TC003
 from typing import Any
 
-from pydantic import Field
-
 from alpharat.config.base import StrictBaseModel
 from alpharat.config.game import GameConfig  # noqa: TC001
-from alpharat.mcts import MCTSConfig  # noqa: TC001
+from alpharat.mcts import DecoupledPUCTConfig  # noqa: TC001
 
 
 class BatchEntry(StrictBaseModel):
@@ -27,7 +25,7 @@ class BatchEntry(StrictBaseModel):
     uuid: str
     created_at: datetime
     parent_checkpoint: str | None
-    mcts_config: MCTSConfig = Field(discriminator="variant")
+    mcts_config: DecoupledPUCTConfig
     game: GameConfig
     seed_start: int = 0  # First game uses this seed, increments from there
 

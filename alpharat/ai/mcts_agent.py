@@ -17,7 +17,6 @@ from alpharat.mcts.tree import MCTSTree
 if TYPE_CHECKING:
     from pyrat_engine.core.game import PyRat
 
-    from alpharat.mcts import MCTSConfig
     from alpharat.nn.builders.flat import FlatObservationBuilder
     from alpharat.nn.models import LocalValueMLP, PyRatMLP, SymmetricMLP
 
@@ -36,7 +35,7 @@ class MCTSAgent(Agent):
 
     def __init__(
         self,
-        mcts_config: MCTSConfig,
+        mcts_config: DecoupledPUCTConfig,
         checkpoint: str | None = None,
         temperature: float = 1.0,
         device: str = "cpu",

@@ -15,7 +15,7 @@ from alpharat.config.game import GameConfig
 from alpharat.config.loader import load_config, load_raw_config
 from alpharat.data.sampling import SamplingConfig
 from alpharat.eval.tournament import TournamentConfig
-from alpharat.mcts import MCTSConfig
+from alpharat.mcts import DecoupledPUCTConfig
 from alpharat.nn.config import TrainConfig
 
 PROJECT_ROOT = Path(__file__).parent.parent.parent
@@ -60,7 +60,7 @@ class TestGameConfigs:
 
 
 class TestMCTSConfigs:
-    """All MCTS sub-configs resolve to valid MCTSConfig."""
+    """All MCTS sub-configs resolve to valid DecoupledPUCTConfig."""
 
     @pytest.fixture(params=get_tracked_configs("mcts"))
     def config_name(self, request: pytest.FixtureRequest) -> str:
@@ -68,7 +68,7 @@ class TestMCTSConfigs:
 
     def test_resolves_to_mcts_config(self, config_name: str) -> None:
         """MCTS config loads and validates."""
-        config = load_config(MCTSConfig, CONFIGS / "mcts", config_name)
+        config = load_config(DecoupledPUCTConfig, CONFIGS / "mcts", config_name)
         assert config.simulations > 0
         assert config.c_puct > 0
 
@@ -92,7 +92,7 @@ class TestSampleConfigs:
         # Load from configs root with sample/ prefix (Hydra resolves defaults)
         config = load_config(SamplingConfig, CONFIGS, f"sample/{config_name}")
         assert isinstance(config.game, GameConfig)
-        assert config.mcts.variant == "decoupled_puct"
+        assert isinstance(config.mcts, DecoupledPUCTConfig)
         assert config.sampling.num_games > 0
 
 
@@ -127,7 +127,7 @@ class TestEntryPointConfigs:
         """Main sample.yaml composes into valid SamplingConfig."""
         config = load_config(SamplingConfig, CONFIGS, "sample")
         assert isinstance(config.game, GameConfig)
-        assert config.mcts.variant == "decoupled_puct"
+        assert isinstance(config.mcts, DecoupledPUCTConfig)
 
     def test_train_yaml(self) -> None:
         """Main train.yaml composes into valid TrainConfig."""

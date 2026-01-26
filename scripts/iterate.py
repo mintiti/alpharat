@@ -16,7 +16,7 @@ Usage:
     # Start with an existing checkpoint
     alpharat-iterate configs/iterate.yaml --prefix sym_5x5 --start-checkpoint path/to/model.pt
 
-    # Resume from iteration 2
+    # Start from iteration 2 (for naming: prefix_iter2, prefix_iter3, ...)
     alpharat-iterate configs/iterate.yaml --prefix sym_5x5 --start-iteration 2
 
     # Benchmark every 2nd iteration
@@ -39,7 +39,7 @@ from pydantic import Field
 from alpharat.config.base import StrictBaseModel
 from alpharat.config.game import GameConfig  # noqa: TC001
 from alpharat.config.loader import load_config
-from alpharat.mcts import MCTSConfig  # noqa: TC001
+from alpharat.mcts import DecoupledPUCTConfig  # noqa: TC001
 from alpharat.nn.config import ModelConfig, OptimConfig  # noqa: TC001
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
@@ -85,7 +85,7 @@ class IterateConfig(StrictBaseModel):
     """Full configuration for an iteration run."""
 
     game: GameConfig
-    mcts: MCTSConfig = Field(discriminator="variant")
+    mcts: DecoupledPUCTConfig
     model: ModelConfig = Field(discriminator="architecture")
     optim: OptimConfig = Field(discriminator="architecture")
     iteration: IterationParams = Field(default_factory=IterationParams)
@@ -369,44 +369,6 @@ def _get_dimensions_from_batch(batch_dir: Path) -> tuple[int, int]:
     return game_config["width"], game_config["height"]
 
 
-def _artifact_exists(exp_dir: Path, artifact_type: str, name: str) -> bool:
-    """Check if an artifact already exists.
-
-    Args:
-        exp_dir: Experiments directory.
-        artifact_type: One of "batches", "shards", "runs".
-        name: Artifact name or group to check.
-
-    Returns:
-        True if the artifact exists.
-    """
-    from alpharat.experiments import ExperimentManager
-
-    exp = ExperimentManager(exp_dir)
-
-    if artifact_type == "batches":
-        return any(b.startswith(f"{name}/") for b in exp.list_batches())
-    elif artifact_type == "shards":
-        return any(s.startswith(f"{name}/") for s in exp.list_shards())
-    elif artifact_type == "runs":
-        return name in exp.list_runs()
-    return False
-
-
-def _get_best_checkpoint(exp_dir: Path, run_name: str) -> Path | None:
-    """Get the best checkpoint for a run if it exists."""
-    from alpharat.experiments import ExperimentManager
-
-    exp = ExperimentManager(exp_dir)
-    if run_name not in exp.list_runs():
-        return None
-
-    checkpoint_path = exp.get_run_checkpoints_path(run_name) / "best_model.pt"
-    if checkpoint_path.exists():
-        return checkpoint_path
-    return None
-
-
 # --- Main Loop ---
 
 
@@ -437,7 +399,7 @@ def main() -> None:
         "--start-iteration",
         type=int,
         default=0,
-        help="Resume from this iteration number",
+        help="Starting iteration number (for artifact naming)",
     )
     parser.add_argument(
         "--benchmark-every",
@@ -489,7 +451,7 @@ def main() -> None:
     logger.info("=" * 60)
     logger.info(f"Prefix: {prefix}")
     logger.info(f"Game: {config.game.width}x{config.game.height}")
-    logger.info(f"MCTS: {config.mcts.variant}, {config.mcts.simulations} sims")
+    logger.info(f"MCTS: {config.mcts.simulations} sims, c_puct={config.mcts.c_puct}")
     logger.info(f"Model: {config.model.architecture}")
     logger.info(f"Games per iteration: {config.iteration.games}")
     logger.info(f"Epochs per iteration: {config.iteration.epochs}")
@@ -503,7 +465,6 @@ def main() -> None:
     max_iterations = args.iterations if args.iterations > 0 else float("inf")
 
     iteration = start_iteration
-    previous_checkpoint: Path | None = None
 
     try:
         while iteration < max_iterations:
@@ -516,93 +477,66 @@ def main() -> None:
 
             # --- Phase 1: Sampling ---
             batch_group = iter_name
-            if _artifact_exists(experiments_dir, "batches", batch_group):
-                logger.info(f"Batch group '{batch_group}' exists, skipping sampling")
+            logger.info("")
+            logger.info(f"Phase 1: Sampling ({config.iteration.games} games)")
+            logger.info("-" * 40)
+            if current_checkpoint:
+                logger.info(f"Using checkpoint: {current_checkpoint}")
             else:
-                logger.info("")
-                logger.info(f"Phase 1: Sampling ({config.iteration.games} games)")
-                logger.info("-" * 40)
-                if current_checkpoint:
-                    logger.info(f"Using checkpoint: {current_checkpoint}")
-                else:
-                    logger.info("Using uniform priors (no checkpoint)")
+                logger.info("Using uniform priors (no checkpoint)")
 
-                run_sampling_phase(
-                    config,
-                    batch_group,
-                    current_checkpoint,
-                    experiments_dir,
-                    device,
-                )
+            run_sampling_phase(
+                config,
+                batch_group,
+                current_checkpoint,
+                experiments_dir,
+                device,
+            )
 
             # --- Phase 2: Sharding ---
             shard_group = f"{iter_name}_shards"
-            if _artifact_exists(experiments_dir, "shards", shard_group):
-                logger.info(f"Shard group '{shard_group}' exists, skipping sharding")
-                # Need to find the shard ID
-                from alpharat.experiments import ExperimentManager
-
-                exp = ExperimentManager(experiments_dir)
-                shard_ids = [s for s in exp.list_shards() if s.startswith(f"{shard_group}/")]
-                if not shard_ids:
-                    raise ValueError(f"No shards found for group '{shard_group}'")
-                shard_id = shard_ids[0]
-            else:
-                logger.info("")
-                logger.info("Phase 2: Sharding")
-                logger.info("-" * 40)
-                shard_id = run_sharding_phase(
-                    config,
-                    shard_group,
-                    batch_group,
-                    experiments_dir,
-                )
+            logger.info("")
+            logger.info("Phase 2: Sharding")
+            logger.info("-" * 40)
+            shard_id = run_sharding_phase(
+                config,
+                shard_group,
+                batch_group,
+                experiments_dir,
+            )
 
             # --- Phase 3: Training ---
             run_name = iter_name
-            existing_checkpoint = _get_best_checkpoint(experiments_dir, run_name)
-            if existing_checkpoint:
-                logger.info(f"Run '{run_name}' exists, skipping training")
-                checkpoint_path = existing_checkpoint
-            else:
-                logger.info("")
-                logger.info(f"Phase 3: Training ({config.iteration.epochs} epochs)")
-                logger.info("-" * 40)
-                checkpoint_path = run_training_phase(
-                    config,
-                    run_name,
-                    shard_id,
-                    experiments_dir,
-                    device,
-                    resume_from=current_checkpoint,
-                )
+            logger.info("")
+            logger.info(f"Phase 3: Training ({config.iteration.epochs} epochs)")
+            logger.info("-" * 40)
+            checkpoint_path = run_training_phase(
+                config,
+                run_name,
+                shard_id,
+                experiments_dir,
+                device,
+                resume_from=current_checkpoint,
+            )
 
             logger.info(f"Checkpoint: {checkpoint_path}")
 
             # --- Phase 4: Benchmark (optional) ---
             if benchmark_every > 0 and (iteration + 1) % benchmark_every == 0:
                 benchmark_name = f"{iter_name}_benchmark"
-                # Check if benchmark exists
-                from alpharat.experiments import ExperimentManager
-
-                exp = ExperimentManager(experiments_dir)
-                if benchmark_name in exp.list_benchmarks():
-                    logger.info(f"Benchmark '{benchmark_name}' exists, skipping")
-                else:
-                    logger.info("")
-                    logger.info("Phase 4: Benchmark")
-                    logger.info("-" * 40)
-                    run_benchmark_phase(
-                        config,
-                        benchmark_name,
-                        checkpoint_path,
-                        previous_checkpoint,
-                        experiments_dir,
-                        device,
-                    )
+                logger.info("")
+                logger.info("Phase 4: Benchmark")
+                logger.info("-" * 40)
+                run_benchmark_phase(
+                    config,
+                    benchmark_name,
+                    checkpoint_path,
+                    current_checkpoint,  # The checkpoint we trained from
+                    experiments_dir,
+                    device,
+                )
 
             # Update state for next iteration
-            previous_checkpoint = current_checkpoint
             current_checkpoint = checkpoint_path
             iteration += 1
 
