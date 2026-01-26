@@ -56,6 +56,30 @@ We don't have predefined thresholds. What matters is the shape of the data:
 
 The measurement tells us whether the problem is real. If it's clearly negligible, we stop. If it's meaningful, we proceed. The data decides.
 
+### Results (2026-01-27)
+
+Sweep over sim counts on 7×7, 10 cheese, 50 max turns, 20 games per sim count. Raw data in `experiments/transposition_measurement/`.
+
+| Sims | Dup% (+turn) | Dup% (-turn) | Avg Nodes/Search |
+|------|-------------|-------------|-----------------|
+| 50   | 10.0%       | 26.1%       | 50              |
+| 200  | 34.6%       | 50.4%       | 194             |
+| 554  | 49.1%       | 63.8%       | 524             |
+| 1000 | 56.8%       | 69.5%       | 923             |
+| 2000 | 64.6%       | 75.4%       | 1,783           |
+
+**Key findings:**
+
+1. **Transpositions scale hard with sim count.** 10% → 65% (+turn) across the sweep. The marginal gain decelerates but hasn't flattened by 2000 sims. At our production sim count (554), roughly half the tree is wasted on duplicate states.
+
+2. **The +turn / -turn gap is entirely cross-depth.** In every depth breakdown across all games, `unique_with_turn == unique_no_turn` at every depth level. Within a fixed tree depth, turn = root_turn + depth, so turn adds no discriminating power. The extra ~15pp from dropping turn comes from the same position appearing at different depths (e.g., both players STAY, arriving at the same position one turn later). Whether MCGS should merge these is a design question — same board at different turns may warrant different valuations due to remaining horizon.
+
+3. **Games get shorter with more sims** (631 → 288 searches across the sweep). Stronger play collects cheese faster, fewer wasted moves.
+
+**Conclusion:** The problem is real. At 554 sims, MCGS could cut tree size roughly in half from within-depth sharing alone (the safe, same-turn transpositions). Proceed to Phase 2.
+
+**Side note — NN evaluation cache:** Even without full MCGS, a simple cache keyed by state hash would avoid redundant NN forward passes for transposed positions. This is much cheaper to implement than full graph search and captures the "fewer NN evaluations" win directly. Tracked separately as a GitHub issue.
+
 ## Phase 2: Formalize the Algorithm
 
 Before writing any code, work out the full algorithm on paper. The goal is a complete description of how every component works — selection, expansion, backup, transposition handling — adapted to our simultaneous-move, bimatrix setting.
