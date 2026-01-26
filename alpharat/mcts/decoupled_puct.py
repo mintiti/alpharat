@@ -171,10 +171,10 @@ class DecoupledPUCTSearch:
 
         # Compute PUCT in reduced space (JIT-compiled)
         puct1 = compute_puct_scores(
-            q1, node._prior_p1, n1, n_total, self._c_puct, self._force_k, is_root
+            q1, node.prior_p1_reduced, n1, n_total, self._c_puct, self._force_k, is_root
         )
         puct2 = compute_puct_scores(
-            q2, node._prior_p2, n2, n_total, self._c_puct, self._force_k, is_root
+            q2, node.prior_p2_reduced, n2, n_total, self._c_puct, self._force_k, is_root
         )
 
         # Select outcome indices (JIT-compiled random tie-break)
@@ -182,7 +182,7 @@ class DecoupledPUCTSearch:
         idx2 = select_max_with_tiebreak(puct2)
 
         # Map outcome index back to action
-        a1 = node._p1_outcomes[idx1]
-        a2 = node._p2_outcomes[idx2]
+        a1 = node.p1_outcomes[idx1]
+        a2 = node.p2_outcomes[idx2]
 
         return a1, a2
