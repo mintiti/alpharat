@@ -9,6 +9,9 @@ from __future__ import annotations
 import numpy as np
 from numba import jit  # type: ignore[import-untyped]
 
+# Large score boost for forced playouts (effectively infinite priority)
+FORCED_PLAYOUT_SCORE = 1e20
+
 
 @jit(cache=True)
 def backup_node(
@@ -310,7 +313,7 @@ def compute_puct_scores(
         for i in range(n):
             threshold = np.sqrt(force_k * prior[i] * total_visits)
             if visit_counts[i] < threshold and prior[i] > 0:
-                scores[i] = 1e20
+                scores[i] = FORCED_PLAYOUT_SCORE
 
     return scores
 
