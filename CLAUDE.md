@@ -60,11 +60,11 @@ experiments/        # Data folder (NOT in git): batches, shards, runs, benchmark
 
 | File | Purpose |
 |------|---------|
-| `node.py` | `MCTSNode` — outcome-indexed storage for O(1) backup, action equivalence |
+| `node.py` | `MCTSNode` — outcome-indexed storage for O(1) backup |
 | `tree.py` | `MCTSTree` — efficient navigation via `make_move/unmake_move` |
 | `decoupled_puct.py` | `DecoupledPUCTSearch` — each player picks via PUCT formula, returns Nash at root |
-| `equivalence.py` | Action equivalence utilities (walls/edges/mud → same outcome) |
 | `reduction.py` | Boundary translation between 5-action and outcome-indexed space |
+| `numba_ops.py` | JIT-compiled hot paths: backup, PUCT scores, marginal Q |
 | `nash.py` | Nash equilibrium computation via nashpy |
 
 ### alpharat/data/
@@ -210,11 +210,13 @@ This is the most non-trivial aspect of the codebase. Multiple actions can lead t
 
 In PyRat, if a player tries to move UP but there's a wall, they stay in place. So UP and STAY produce identical game states. If we treat them as different actions, MCTS explores redundant branches and Nash equilibrium computation becomes degenerate (multiple equivalent equilibria).
 
-### How It's Handled
+### How It's Handled: Outcome-Indexed Architecture
+
+The key insight: store statistics indexed by **unique outcomes**, not raw actions. When UP is blocked, UP and STAY produce the same outcome — so we only need one entry.
 
 **1. Detection (`tree.py:_compute_effective_actions`)**
 
-At each position, we query `game.get_valid_moves(position)` to see which directions are actually valid. Each of the 5 actions maps to an "effective action":
+At each position, we query `game.get_valid_moves(position)` to build the effective action mapping:
 - Valid moves → map to themselves
 - Blocked moves (walls/edges) → map to STAY (action 4)
 - Mud → forces all actions to STAY for that player
@@ -222,48 +224,47 @@ At each position, we query `game.get_valid_moves(position)` to see which directi
 ```python
 # Example: player against north wall
 p1_effective = [4, 1, 2, 3, 4]  # UP(0) blocked → STAY(4)
+p1_outcomes = [1, 2, 3, 4]      # 4 unique outcomes (action 0 collapsed into 4)
 ```
 
-**2. Child Sharing (`tree.py:make_move_from`)**
+**2. Reduced Storage (`node.py`)**
 
-When expanding, we look up children by *effective* action pair, not raw actions. Multiple raw action pairs that map to the same effective pair share a single child node:
+Nodes store statistics in outcome-indexed space:
+- `prior_p1_reduced[n1]`, `prior_p2_reduced[n2]` — priors over unique outcomes
+- `_payout_p1[n1, n2]`, `_payout_p2[n1, n2]` — payout matrices
+- `_visits[n1, n2]` — visit counts
+- Children keyed by outcome index pairs `(i, j)`, not action pairs
 
 ```python
-# Both (UP, LEFT) and (STAY, LEFT) lead to same child if UP is blocked
-effective_pair = (node.p1_effective[action_p1], node.p2_effective[action_p2])
-if effective_pair in node.children:
-    child = node.children[effective_pair]  # Reuse existing child
+# With 4 unique outcomes for P1 and 5 for P2, matrices are [4, 5] not [5, 5]
 ```
 
-**3. Statistics Consistency (`node.py:backup`)**
+**3. O(1) Backup (`numba_ops.py:backup_node`)**
 
-During backup, we update *all* equivalent action pairs together, not just the one played. If P1 played action 0 (UP) but it was blocked:
+Backup directly indexes the reduced matrix — no need to update multiple equivalent pairs:
 
 ```python
-p1_equiv = [0, 4]  # Both UP and STAY
-p2_equiv = [2]     # Just DOWN
-# Updates the rectangular region covering all (p1_equiv × p2_equiv) pairs
+idx1 = node._p1_action_to_idx[action_p1]  # Action → outcome index
+idx2 = node._p2_action_to_idx[action_p2]
+# Single update at [idx1, idx2]
 ```
 
-This maintains the invariant: **equivalent action pairs have identical payout matrix values**.
+**4. Boundary Translation (`reduction.py`)**
 
-**4. Nash Computation (`equivalence.py:reduce_and_expand_nash`)**
-
-For Nash equilibrium, we:
-1. **Reduce** the payout matrix to only effective actions (removes duplicate rows/cols)
-2. **Compute** Nash on the smaller matrix (unique equilibrium)
-3. **Expand** strategies back to full 5-action space (non-effective get 0 probability)
+The algorithm operates in outcome space. Boundaries handle translation:
+- **Input**: NN predictions `[5]`, `[5]`, `[2,5,5]` → reduced `[n1]`, `[n2]`, `[2,n1,n2]`
+- **Output**: Nash strategies `[n1]`, `[n2]` → expanded `[5]`, `[5]`
 
 ```python
-# If P1 has effective=[4,1,2,3,4], reduced matrix is 4×5 (only actions 1,2,3,4)
-# After Nash, expand: strategy[0] = 0.0 (blocked), strategy[1:5] from Nash
+# reduce_prior(): sums probabilities of equivalent actions
+# expand_prior(): copies outcome probs to canonical actions only (blocked → 0)
 ```
 
 ### Flow Through Training
 
 **Recording (`recorder.py`):**
 - Saves post-MCTS Nash policies (which have 0 for blocked actions)
-- Saves the 5×5 payout matrix (with equivalence structure: blocked rows equal STAY rows)
+- Saves the `[2, 5, 5]` payout matrix (separate P1/P2 payoffs, equivalence structure preserved)
 
 **Targets (`targets.py`):**
 - Passes through the Nash policies as-is — no additional processing needed
@@ -278,7 +279,7 @@ For Nash equilibrium, we:
 
 The NN outputs:
 - `policy_p1[5]`, `policy_p2[5]` — should assign ~0 to blocked actions
-- `payout_matrix[5,5]` — should reflect equivalence structure
+- `payout_matrix[2,5,5]` — separate P1/P2 payoffs, should reflect equivalence structure
 
 This isn't hard-masked; it's learned behavior. The NN must infer from the observation (maze layout, positions) which actions are valid.
 
@@ -308,7 +309,7 @@ Even if the NN makes mistakes on blocked actions, the tree's child sharing and s
 
 ### Payout Matrices, Not Q-Values
 
-Standard MCTS stores one value per action. For simultaneous games, we need the expected value for each *pair* of actions — a 5×5 payout matrix per node.
+Standard MCTS stores one value per action. For simultaneous games, we need the expected value for each *pair* of actions. Internally, nodes store reduced `[n1, n2]` matrices indexed by unique outcomes; these expand to `[2, 5, 5]` at boundaries.
 
 ### make_move / unmake_move
 
@@ -354,7 +355,7 @@ Line length 100. Enabled: pycodestyle, pyflakes, isort, pep8-naming, pyupgrade, 
 
 ## Dependencies
 
-**Core:** numpy, nashpy, pydantic, pyyaml, pyrat-engine (Rust-backed)
+**Core:** numpy, numba, nashpy, pydantic, pyyaml, pyrat-engine (Rust-backed)
 
 **Training (optional):** torch, tensorboard
 
@@ -534,9 +535,9 @@ has_cheese = obs.cheese_matrix[x, y] == 1
 
 ## Development Tips
 
-1. **Action equivalence is everywhere** — when modifying MCTS logic, ensure equivalent actions share statistics. If you're touching `backup()`, `make_move_from()`, or Nash computation, think through the equivalence implications.
+1. **Equivalence is handled at boundaries** — the core algorithm works in outcome-indexed space. `reduction.py` handles translation to/from 5-action space. You rarely need to think about equivalence directly.
 
-2. **Node statistics are [5,5]** — payout matrix and visit counts are per action pair, not per action.
+2. **Node statistics are reduced** — payout and visit matrices are `[n1, n2]` where n = unique outcomes. Use `node.payout_matrix` or `node.action_visits` if you need the expanded `[5, 5]` view.
 
 3. **Don't copy game state** — use `make_move/unmake_move` pattern.
 
