@@ -78,7 +78,19 @@ Sweep over sim counts on 7×7, 10 cheese, 50 max turns, 20 games per sim count. 
 
 **Conclusion:** The problem is real. At 554 sims, MCGS could cut tree size roughly in half from within-depth sharing alone (the safe, same-turn transpositions). Proceed to Phase 2.
 
-**Side note — NN evaluation cache:** Even without full MCGS, a simple cache keyed by state hash would avoid redundant NN forward passes for transposed positions. This is much cheaper to implement than full graph search and captures the "fewer NN evaluations" win directly. Tracked separately as a GitHub issue.
+**Side note — NN evaluation cache:** Even without full MCGS, a simple cache keyed by state hash would avoid redundant NN forward passes for transposed positions. This is much cheaper to implement than full graph search and captures the "fewer NN evaluations" win directly. Tracked separately as a GitHub issue (#50).
+
+### Beyond speed: search quality
+
+The measurements above frame MCGS as a compute savings story — fewer NN calls for the same search. But there's a potentially stronger argument: **MCGS improves search quality at the same sim budget.**
+
+Two effects worth investigating:
+
+1. **Unique state coverage.** At 554 sims with walls, ~530 nodes per search but only ~140 unique states (74% wasted). MCGS would spend those same 554 sims exploring ~530 *unique* states — roughly 3.8× more coverage of the actual game tree. More of the state space understood per search.
+
+2. **Effective search depth.** Duplicates consume expansion budget that could push the search deeper. With MCGS, the freed-up sims should reach greater depth, giving the agent better lookahead. The depth breakdowns in our data already show where duplicates concentrate — could quantify the expected depth gain.
+
+Both are "the search understands the problem space better" rather than "the search runs faster." This matters for playing strength: at equal sim counts, MCGS should produce better policies, not just the same policies cheaper. Worth measuring in Phase 4 tournaments — compare not just sims/s but also win rates at equal sim budgets.
 
 ## Phase 2: Formalize the Algorithm
 
