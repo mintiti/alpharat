@@ -5,6 +5,7 @@ import pytest
 
 from alpharat.mcts.nash import (
     _filter_by_visits,
+    _resolve_fallback,
     aggregate_equilibria,
     compute_nash_equilibrium,
     compute_nash_from_reduced,
@@ -724,3 +725,114 @@ class TestFilterByVisits:
         assert filtered.shape == (2, 1, 1)
         assert filtered[0, 0, 0] == 3.0  # matrix[0, 1, 0]
         assert filtered[1, 0, 0] == 1.5  # matrix[1, 1, 0]
+
+
+class TestResolveFallback:
+    """Tests for the _resolve_fallback helper."""
+
+    def test_marginal_visits_preferred(self) -> None:
+        """Marginal visits are used when available and nonzero."""
+        visits = np.array([3.0, 1.0, 6.0])
+        prior = np.array([0.5, 0.3, 0.2])
+
+        result = _resolve_fallback(3, visits, prior)
+        np.testing.assert_array_almost_equal(result, [0.3, 0.1, 0.6])
+
+    def test_zero_visits_falls_through_to_prior(self) -> None:
+        """All-zero visits fall through to prior."""
+        visits = np.array([0.0, 0.0, 0.0])
+        prior = np.array([0.5, 0.3, 0.2])
+
+        result = _resolve_fallback(3, visits, prior)
+        np.testing.assert_array_almost_equal(result, prior)
+
+    def test_no_visits_no_prior_gives_uniform(self) -> None:
+        """Without visits or prior, returns uniform."""
+        result = _resolve_fallback(4, None, None)
+        np.testing.assert_array_almost_equal(result, np.ones(4) / 4)
+
+
+class TestMarginalVisitFallback:
+    """Tests for Nash fallback using marginal visit distribution."""
+
+    def test_constant_matrix_uses_marginal_visits(self) -> None:
+        """Constant payout with visits → marginal visit distribution, not prior."""
+        from alpharat.mcts.nash import _compute_nash_raw
+
+        payout = np.zeros((2, 3, 3))
+        prior_p1 = np.array([0.5, 0.3, 0.2])
+        prior_p2 = np.array([0.2, 0.3, 0.5])
+        marginals_p1 = np.array([10.0, 20.0, 10.0])  # → [0.25, 0.5, 0.25]
+        marginals_p2 = np.array([5.0, 5.0, 10.0])  # → [0.25, 0.25, 0.5]
+
+        p1, p2 = _compute_nash_raw(
+            payout,
+            prior_p1=prior_p1,
+            prior_p2=prior_p2,
+            marginal_visits_p1=marginals_p1,
+            marginal_visits_p2=marginals_p2,
+        )
+
+        # Should use visits, not priors
+        np.testing.assert_array_almost_equal(p1, [0.25, 0.5, 0.25])
+        np.testing.assert_array_almost_equal(p2, [0.25, 0.25, 0.5])
+
+    def test_constant_matrix_zero_visits_falls_through_to_prior(self) -> None:
+        """Constant payout with all-zero visits → falls through to prior."""
+        from alpharat.mcts.nash import _compute_nash_raw
+
+        payout = np.zeros((2, 3, 3))
+        prior_p1 = np.array([0.5, 0.3, 0.2])
+        prior_p2 = np.array([0.2, 0.3, 0.5])
+        marginals_p1 = np.array([0.0, 0.0, 0.0])
+        marginals_p2 = np.array([0.0, 0.0, 0.0])
+
+        p1, p2 = _compute_nash_raw(
+            payout,
+            prior_p1=prior_p1,
+            prior_p2=prior_p2,
+            marginal_visits_p1=marginals_p1,
+            marginal_visits_p2=marginals_p2,
+        )
+
+        # Zero visits → prior
+        np.testing.assert_array_almost_equal(p1, prior_p1)
+        np.testing.assert_array_almost_equal(p2, prior_p2)
+
+    def test_from_reduced_constant_matrix_uses_visits(self) -> None:
+        """End-to-end: compute_nash_from_reduced with constant matrix uses visits."""
+        reduced_payout = np.zeros((2, 3, 4))
+        prior_p1 = np.array([0.5, 0.3, 0.2])
+        prior_p2 = np.array([0.4, 0.3, 0.2, 0.1])
+
+        # Visits that produce non-uniform marginals
+        # P1 marginals: [6, 12, 6] → [0.25, 0.5, 0.25]
+        # P2 marginals: [3, 9, 6, 6] → [0.125, 0.375, 0.25, 0.25]
+        visits = np.array([[1.0, 2.0, 1.0, 2.0], [2.0, 4.0, 3.0, 3.0], [0.0, 3.0, 2.0, 1.0]])
+
+        p1, p2 = compute_nash_from_reduced(
+            reduced_payout,
+            reduced_prior_p1=prior_p1,
+            reduced_prior_p2=prior_p2,
+            reduced_visits=visits,
+        )
+
+        # All visits pass min_visits=5 threshold for marginals:
+        # P1 marginals: [6, 12, 6] → all ≥ 5
+        # P2 marginals: [3, 9, 6, 6] → col 0 has 3, below default min_visits=5
+        # So col 0 gets filtered out, leaving 3x3 constant matrix
+        # P1 filtered marginals: [4, 10, 6] → from visits[:, 1:]
+        # P2 filtered marginals: [9, 6, 6]
+        # → Normalized: P1=[0.2, 0.5, 0.3], P2=[3/7, 2/7, 2/7]
+        # Then expanded back: P2 col 0 = 0
+
+        # Verify basic properties
+        assert abs(p1.sum() - 1.0) < 1e-6
+        assert abs(p2.sum() - 1.0) < 1e-6
+        assert p1.shape == (3,)
+        assert p2.shape == (4,)
+        # P2 action 0 filtered out (only 3 marginal visits < min_visits=5)
+        assert p2[0] == 0.0
+        # Remaining P2 actions should reflect marginal visits, not prior
+        # P2 marginals for kept actions [1,2,3]: [9, 6, 6] → [3/7, 2/7, 2/7]
+        np.testing.assert_array_almost_equal(p2[1:], [9 / 21, 6 / 21, 6 / 21])

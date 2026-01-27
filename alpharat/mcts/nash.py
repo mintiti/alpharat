@@ -211,28 +211,37 @@ def compute_nash_equilibrium(
         nash_matrix, p1_nash_actions, p2_nash_actions = _filter_by_visits(
             reduced_matrix, reduced_visits, p1_eff_actions, p2_eff_actions, min_visits
         )
-        # Also filter priors to match the visit-filtered actions
+        # Also filter priors and marginal visits to match the visit-filtered actions
+        eff_to_idx_p1 = {a: i for i, a in enumerate(p1_eff_actions)}
+        eff_to_idx_p2 = {a: i for i, a in enumerate(p2_eff_actions)}
+
         if reduced_p1_prior is not None:
-            # Map effective actions to indices in reduced prior
-            eff_to_idx = {a: i for i, a in enumerate(p1_eff_actions)}
-            nash_p1_prior = np.array([reduced_p1_prior[eff_to_idx[a]] for a in p1_nash_actions])
+            nash_p1_prior = np.array([reduced_p1_prior[eff_to_idx_p1[a]] for a in p1_nash_actions])
         else:
             nash_p1_prior = None
         if reduced_p2_prior is not None:
-            eff_to_idx = {a: i for i, a in enumerate(p2_eff_actions)}
-            nash_p2_prior = np.array([reduced_p2_prior[eff_to_idx[a]] for a in p2_nash_actions])
+            nash_p2_prior = np.array([reduced_p2_prior[eff_to_idx_p2[a]] for a in p2_nash_actions])
         else:
             nash_p2_prior = None
+
+        # Compute marginal visits filtered to nash actions
+        p1_marginals = reduced_visits.sum(axis=1)  # [m]
+        p2_marginals = reduced_visits.sum(axis=0)  # [n]
+        nash_p1_marginals = np.array([p1_marginals[eff_to_idx_p1[a]] for a in p1_nash_actions])
+        nash_p2_marginals = np.array([p2_marginals[eff_to_idx_p2[a]] for a in p2_nash_actions])
     else:
         nash_matrix = reduced_matrix
         p1_nash_actions, p2_nash_actions = p1_eff_actions, p2_eff_actions
         nash_p1_prior, nash_p2_prior = reduced_p1_prior, reduced_p2_prior
+        nash_p1_marginals, nash_p2_marginals = None, None
 
     # Step 4: Compute Nash
     p1_strat, p2_strat = _compute_nash_raw(
         nash_matrix,
         prior_p1=nash_p1_prior,
         prior_p2=nash_p2_prior,
+        marginal_visits_p1=nash_p1_marginals,
+        marginal_visits_p2=nash_p2_marginals,
     )
 
     # Step 5: Expand to full action space
@@ -242,10 +251,29 @@ def compute_nash_equilibrium(
     return full_p1, full_p2
 
 
+def _resolve_fallback(
+    num_actions: int,
+    marginal_visits: np.ndarray | None,
+    prior: np.ndarray | None,
+) -> np.ndarray:
+    """Pick best available fallback: marginal visits → prior → uniform."""
+    if marginal_visits is not None:
+        total = marginal_visits.sum()
+        if total > 0:
+            result: np.ndarray = marginal_visits / total
+            return result
+    if prior is not None:
+        normalized: np.ndarray = prior / prior.sum()
+        return normalized
+    return np.ones(num_actions) / num_actions
+
+
 def _compute_nash_raw(
     payout_matrix: np.ndarray,
     prior_p1: np.ndarray | None = None,
     prior_p2: np.ndarray | None = None,
+    marginal_visits_p1: np.ndarray | None = None,
+    marginal_visits_p2: np.ndarray | None = None,
 ) -> tuple[np.ndarray, np.ndarray]:
     """Compute Nash equilibrium on raw bimatrix game without equivalence handling.
 
@@ -257,21 +285,23 @@ def _compute_nash_raw(
         prior_p1: Optional prior policy for P1 (used as fallback for constant or
                   degenerate matrices).
         prior_p2: Optional prior policy for P2 (used as fallback).
+        marginal_visits_p1: Optional marginal visit counts for P1's actions.
+                           Preferred over prior when available (more informed fallback).
+        marginal_visits_p2: Optional marginal visit counts for P2's actions.
     """
     p1_payoffs = payout_matrix[0]
     p2_payoffs = payout_matrix[1]
     num_p1, num_p2 = p1_payoffs.shape
 
     # Optimization: if both matrices are constant, any strategy is Nash
-    # Use NN prior if available (it's what we started with, MCTS couldn't find better)
+    # Fallback chain: marginal visits → prior → uniform
     p1_constant = np.allclose(p1_payoffs, p1_payoffs.flat[0])
     p2_constant = np.allclose(p2_payoffs, p2_payoffs.flat[0])
     if p1_constant and p2_constant:
-        if prior_p1 is not None and prior_p2 is not None:
-            # Normalize priors (should already sum to 1, but defensive)
-            return prior_p1 / prior_p1.sum(), prior_p2 / prior_p2.sum()
-        # No priors available (e.g., no NN) - fall back to uniform
-        return np.ones(num_p1) / num_p1, np.ones(num_p2) / num_p2
+        return (
+            _resolve_fallback(num_p1, marginal_visits_p1, prior_p1),
+            _resolve_fallback(num_p2, marginal_visits_p2, prior_p2),
+        )
 
     # Create bimatrix game
     # P1 wants to maximize p1_payoffs
@@ -294,21 +324,32 @@ def _compute_nash_raw(
 
     if len(equilibria) == 0:
         # No equilibrium found (shouldn't happen for valid games)
-        # Use NN prior if available, otherwise uniform
-        fallback_type = "prior" if (prior_p1 is not None and prior_p2 is not None) else "uniform"
+        # Fallback chain: marginal visits → prior → uniform
+        p1_fallback = _resolve_fallback(num_p1, marginal_visits_p1, prior_p1)
+        p2_fallback = _resolve_fallback(num_p2, marginal_visits_p2, prior_p2)
+
+        # Determine fallback type for logging
+        def _fallback_label(marginals: np.ndarray | None, prior: np.ndarray | None) -> str:
+            if marginals is not None and marginals.sum() > 0:
+                return "marginal_visits"
+            if prior is not None:
+                return "prior"
+            return "uniform"
+
+        p1_label = _fallback_label(marginal_visits_p1, prior_p1)
+        p2_label = _fallback_label(marginal_visits_p2, prior_p2)
         logger.warning(
-            "No Nash equilibrium found, falling back to %s.\n"
+            "No Nash equilibrium found, falling back to P1=%s, P2=%s.\n"
             "P1 payoffs:\n%s\nP2 payoffs:\n%s\n"
             "P1 prior: %s\nP2 prior: %s",
-            fallback_type,
+            p1_label,
+            p2_label,
             p1_payoffs,
             p2_payoffs,
             prior_p1,
             prior_p2,
         )
-        if prior_p1 is not None and prior_p2 is not None:
-            return prior_p1 / prior_p1.sum(), prior_p2 / prior_p2.sum()
-        return np.ones(num_p1) / num_p1, np.ones(num_p2) / num_p2
+        return p1_fallback, p2_fallback
 
     # Aggregate equilibria via centroid
     # For constant-sum games, the centroid is a valid equilibrium due to
@@ -361,17 +402,26 @@ def compute_nash_from_reduced(
             nash_p2_prior = np.array([reduced_prior_p2[i] for i in p2_kept])
         else:
             nash_p2_prior = None
+
+        # Compute marginal visits filtered to kept actions
+        p1_marginals = reduced_visits.sum(axis=1)  # [n1]
+        p2_marginals = reduced_visits.sum(axis=0)  # [n2]
+        nash_p1_marginals = np.array([p1_marginals[i] for i in p1_kept])
+        nash_p2_marginals = np.array([p2_marginals[i] for i in p2_kept])
     else:
         nash_matrix = reduced_payout
         p1_kept, p2_kept = p1_indices, p2_indices
         nash_p1_prior = reduced_prior_p1
         nash_p2_prior = reduced_prior_p2
+        nash_p1_marginals, nash_p2_marginals = None, None
 
     # Compute Nash
     p1_strat, p2_strat = _compute_nash_raw(
         nash_matrix,
         prior_p1=nash_p1_prior,
         prior_p2=nash_p2_prior,
+        marginal_visits_p1=nash_p1_marginals,
+        marginal_visits_p2=nash_p2_marginals,
     )
 
     # Expand from filtered subset back to full reduced space [n1], [n2]
