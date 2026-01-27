@@ -23,10 +23,10 @@ class PolicyStrategy(Protocol):
 
     def derive_policy(
         self,
-        marginal_visits: np.ndarray,  # (5,) marginal visit counts for one player
-        nash_policy: np.ndarray,  # (5,) Nash equilibrium for same player
+        marginal_visits: np.ndarray,  # (n,) marginal visit counts for one player
+        nash_policy: np.ndarray,  # (n,) Nash equilibrium for same player
     ) -> np.ndarray:
-        """Return final policy (5,) for this player."""
+        """Return final policy (n,) for this player."""
         ...
 
 
@@ -42,7 +42,7 @@ class NashPolicyStrategy:
         marginal_visits: np.ndarray,
         nash_policy: np.ndarray,
     ) -> np.ndarray:
-        """Return Nash equilibrium policy."""
+        """Return Nash equilibrium policy (n,)."""
         return nash_policy.copy()
 
 
@@ -70,7 +70,7 @@ class VisitPolicyStrategy:
         marginal_visits: np.ndarray,
         nash_policy: np.ndarray,
     ) -> np.ndarray:
-        """Return visit-based policy with KataGo temperature."""
+        """Return visit-based policy (n,) with KataGo temperature."""
         return apply_katago_temperature(
             marginal_visits,
             self.temperature,
@@ -92,7 +92,7 @@ def apply_katago_temperature(
     Based on KataGo's searchhelpers.cpp:chooseIndexWithTemperature.
 
     Args:
-        visits: Raw visit counts (5,).
+        visits: Raw visit counts (n,).
         temperature: Temperature for softening. 1.0 = proportional to visits.
         only_below_prob: Only apply temperature to moves below this prob threshold.
             1.0 = apply to all moves. 0.1 = only dampen moves with <10% probability.
@@ -100,7 +100,7 @@ def apply_katago_temperature(
         subtract_visits: Subtract this constant from all visits before temperature.
 
     Returns:
-        Normalized policy (5,) as float32.
+        Normalized policy (n,) as float32.
     """
     visits = visits.astype(float).copy()
 

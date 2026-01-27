@@ -16,58 +16,56 @@ def compute_pruning_adjustment(
     marginal_visits: np.ndarray,
     total_visits: int,
     c_puct: float,
-    effective: list[int],
 ) -> np.ndarray:
-    """Compute per-action visit adjustments for forced playout pruning.
+    """Compute per-outcome visit adjustments for forced playout pruning.
 
-    For each action, computes how many visits were "forced" (exceeded what
-    PUCT would naturally select). These forced visits are subtracted before
-    using the visit counts for training.
+    For each unique outcome, computes how many visits were "forced" (exceeded
+    what PUCT would naturally select). These forced visits are subtracted
+    before using the visit counts for training.
+
+    All inputs are in reduced (outcome-indexed) space — already over unique
+    outcomes, no effective-action filtering needed.
 
     Algorithm (per player):
-    1. Find the best action i* (most marginal visits among effective actions)
+    1. Find the best outcome i* (most marginal visits)
     2. Compute PUCT* = Q[i*] + c * P[i*] * sqrt(N) / (1 + M[i*])
-    3. For each other action i:
-       - If Q[i] >= PUCT*: action is genuinely good, Δ[i] = 0
+    3. For each other outcome i:
+       - If Q[i] >= PUCT*: outcome is genuinely good, Δ[i] = 0
        - Else: compute N'_min = c * P[i] * sqrt(N) / (PUCT* - Q[i]) - 1
          This is the visit count that would make PUCT(i) = PUCT*
        - Δ[i] = max(0, M[i] - N'_min)
 
     Args:
-        q_values: Marginalized Q-values for this player [5].
-        prior: NN prior policy [5].
-        marginal_visits: Marginal visit counts [5].
+        q_values: Marginalized Q-values per unique outcome [n].
+        prior: Prior policy per unique outcome [n].
+        marginal_visits: Marginal visit counts per unique outcome [n].
         total_visits: Total visits to the node.
         c_puct: PUCT exploration constant.
-        effective: Effective action mapping (blocked actions map to STAY).
 
     Returns:
-        Adjustment array Δ[5]: visits to subtract from each action's marginal.
+        Adjustment array Δ[n]: visits to subtract from each outcome's marginal.
     """
-    delta = np.zeros(5)
+    n = len(q_values)
+    delta = np.zeros(n)
 
-    # Find effective actions (those that map to themselves)
-    effective_actions = [a for a in range(5) if effective[a] == a]
-    if len(effective_actions) <= 1:
+    if n <= 1:
         return delta  # Nothing to prune
 
-    # Find best action: most marginal visits among effective actions
-    effective_visits = [marginal_visits[a] for a in effective_actions]
-    best_idx = np.argmax(effective_visits)
-    i_star = effective_actions[best_idx]
+    # Find best outcome: most marginal visits
+    i_star = int(np.argmax(marginal_visits))
 
-    # Compute PUCT* for best action
+    # Compute PUCT* for best outcome
     sqrt_n = np.sqrt(total_visits) if total_visits > 0 else 0.0
     puct_star = q_values[i_star] + c_puct * prior[i_star] * sqrt_n / (1 + marginal_visits[i_star])
 
-    # Compute adjustments for other actions
-    for a in effective_actions:
+    # Compute adjustments for other outcomes
+    for a in range(n):
         if a == i_star:
-            continue  # Don't touch best action
+            continue  # Don't touch best outcome
 
         q_a = q_values[a]
         if q_a >= puct_star:
-            # Action is genuinely good (high Q), don't prune
+            # Outcome is genuinely good (high Q), don't prune
             delta[a] = 0.0
         else:
             # Compute minimum visits that would achieve PUCT*
@@ -97,25 +95,27 @@ def prune_visit_counts(
     Distributes marginal adjustments to pairs using opponent's prior as weights.
     V'[i,j] = max(0, V[i,j] - Δ1[i] * π2[j] - Δ2[j] * π1[i])
 
-    The intuition: when P1 was forced to action i, P2 was selecting via PUCT
+    The intuition: when P1 was forced to outcome i, P2 was selecting via PUCT
     (approximately proportional to π2). So forced visits to pairs (i, ·) are
     distributed as π2.
 
+    All inputs are in reduced (outcome-indexed) space.
+
     Args:
-        action_visits: Original visit counts [5, 5].
-        delta_p1: P1's marginal adjustments [5].
-        delta_p2: P2's marginal adjustments [5].
-        prior_p1: P1's prior policy [5].
-        prior_p2: P2's prior policy [5].
+        action_visits: Original visit counts [n1, n2].
+        delta_p1: P1's marginal adjustments [n1].
+        delta_p2: P2's marginal adjustments [n2].
+        prior_p1: P1's prior policy [n1].
+        prior_p2: P2's prior policy [n2].
 
     Returns:
-        Pruned visit counts [5, 5] (can be fractional, may have zeros).
+        Pruned visit counts [n1, n2] (can be fractional, may have zeros).
     """
     # Outer products for distributing adjustments
     # Δ1[i] affects row i, distributed by π2[j]
-    p1_adjustment = np.outer(delta_p1, prior_p2)  # [5, 5]
+    p1_adjustment = np.outer(delta_p1, prior_p2)  # [n1, n2]
     # Δ2[j] affects column j, distributed by π1[i]
-    p2_adjustment = np.outer(prior_p1, delta_p2)  # [5, 5]
+    p2_adjustment = np.outer(prior_p1, delta_p2)  # [n1, n2]
 
     pruned = action_visits - p1_adjustment - p2_adjustment
     result: np.ndarray = np.maximum(0.0, pruned)

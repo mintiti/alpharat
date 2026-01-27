@@ -6,6 +6,7 @@ import pytest
 from alpharat.mcts.nash import (
     aggregate_equilibria,
     compute_nash_equilibrium,
+    compute_nash_from_reduced,
     compute_nash_value,
     select_action_from_strategy,
 )
@@ -562,3 +563,108 @@ class TestAggregateEquilibria:
         # Should average to (0.5, 0.5)
         np.testing.assert_array_almost_equal(p1_result, [0.5, 0.5])
         np.testing.assert_array_almost_equal(p2_result, [0.5, 0.5])
+
+
+class TestNashFromReduced:
+    """Tests for compute_nash_from_reduced — Nash on already-reduced matrices."""
+
+    def test_matching_pennies_reduced(self) -> None:
+        """Matching pennies in reduced space (2×2) returns [0.5, 0.5]."""
+        p1_payout = np.array([[1.0, -1.0], [-1.0, 1.0]])
+        reduced_payout = np.stack([p1_payout, -p1_payout])
+
+        p1, p2 = compute_nash_from_reduced(reduced_payout, p1_outcomes=[0, 1], p2_outcomes=[0, 1])
+
+        np.testing.assert_array_almost_equal(p1, [0.5, 0.5])
+        np.testing.assert_array_almost_equal(p2, [0.5, 0.5])
+
+    def test_result_shapes_match_input(self) -> None:
+        """Output shapes match reduced dimensions, not expanded."""
+        # 3×4 reduced matrix
+        p1_pay = np.random.default_rng(42).random((3, 4))
+        reduced_payout = np.stack([p1_pay, -p1_pay])
+
+        p1, p2 = compute_nash_from_reduced(
+            reduced_payout, p1_outcomes=[1, 2, 3], p2_outcomes=[0, 1, 2, 4]
+        )
+
+        assert p1.shape == (3,)
+        assert p2.shape == (4,)
+        assert abs(p1.sum() - 1.0) < 1e-6
+        assert abs(p2.sum() - 1.0) < 1e-6
+
+    def test_constant_matrix_returns_prior(self) -> None:
+        """All-constant payout returns reduced prior when provided."""
+        reduced_payout = np.zeros((2, 3, 4))
+        prior_p1 = np.array([0.5, 0.3, 0.2])
+        prior_p2 = np.array([0.4, 0.3, 0.2, 0.1])
+
+        p1, p2 = compute_nash_from_reduced(
+            reduced_payout,
+            p1_outcomes=[1, 2, 4],
+            p2_outcomes=[0, 1, 2, 3],
+            reduced_prior_p1=prior_p1,
+            reduced_prior_p2=prior_p2,
+        )
+
+        np.testing.assert_array_almost_equal(p1, prior_p1)
+        np.testing.assert_array_almost_equal(p2, prior_p2)
+
+    def test_constant_matrix_no_prior_returns_uniform(self) -> None:
+        """All-constant payout without prior returns uniform."""
+        reduced_payout = np.zeros((2, 3, 4))
+
+        p1, p2 = compute_nash_from_reduced(
+            reduced_payout, p1_outcomes=[1, 2, 4], p2_outcomes=[0, 1, 2, 3]
+        )
+
+        np.testing.assert_array_almost_equal(p1, np.ones(3) / 3)
+        np.testing.assert_array_almost_equal(p2, np.ones(4) / 4)
+
+    def test_with_visit_filtering(self) -> None:
+        """Low-visit outcomes get filtered before Nash computation."""
+        p1_payout = np.array([[1.0, -1.0, 0.0], [-1.0, 1.0, 0.0], [0.0, 0.0, 0.0]])
+        reduced_payout = np.stack([p1_payout, -p1_payout])
+
+        # Only outcomes 0 and 1 have enough visits
+        visits = np.array([[10.0, 8.0, 1.0], [8.0, 10.0, 0.0], [1.0, 0.0, 0.0]])
+
+        p1, p2 = compute_nash_from_reduced(
+            reduced_payout,
+            p1_outcomes=[0, 1, 2],
+            p2_outcomes=[0, 1, 2],
+            reduced_visits=visits,
+            min_visits=5,
+        )
+
+        assert p1.shape == (3,)
+        assert p2.shape == (3,)
+        # Outcome 2 should get zero probability (filtered out)
+        assert p1[2] == 0.0
+        assert p2[2] == 0.0
+        # Valid distribution
+        assert abs(p1.sum() - 1.0) < 1e-6
+        assert abs(p2.sum() - 1.0) < 1e-6
+
+    def test_multiple_equilibria_centroid(self) -> None:
+        """Multiple equilibria are averaged (centroid) in reduced space."""
+        # Battle of the sexes has multiple equilibria
+        p1_payout = np.array([[3.0, 0.0], [0.0, 2.0]])
+        reduced_payout = np.stack([p1_payout, -p1_payout])
+
+        p1, p2 = compute_nash_from_reduced(reduced_payout, p1_outcomes=[0, 1], p2_outcomes=[0, 1])
+
+        # Should be valid distributions
+        assert abs(p1.sum() - 1.0) < 1e-6
+        assert abs(p2.sum() - 1.0) < 1e-6
+        assert np.all(p1 >= 0)
+        assert np.all(p2 >= 0)
+
+    def test_single_outcome_per_player(self) -> None:
+        """Single outcome for each player → trivial Nash."""
+        reduced_payout = np.array([[[5.0]], [[-5.0]]])
+
+        p1, p2 = compute_nash_from_reduced(reduced_payout, p1_outcomes=[4], p2_outcomes=[4])
+
+        np.testing.assert_array_almost_equal(p1, [1.0])
+        np.testing.assert_array_almost_equal(p2, [1.0])

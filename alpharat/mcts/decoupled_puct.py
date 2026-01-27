@@ -12,10 +12,11 @@ from typing import TYPE_CHECKING
 from pydantic import Field
 
 from alpharat.config.base import StrictBaseModel
-from alpharat.mcts.nash import compute_nash_equilibrium
+from alpharat.mcts.nash import compute_nash_from_reduced
 from alpharat.mcts.numba_ops import compute_puct_scores, select_max_with_tiebreak
 from alpharat.mcts.payout_filter import filter_low_visit_payout
 from alpharat.mcts.policy_strategy import NashPolicyConfig, PolicyConfig, PolicyStrategy
+from alpharat.mcts.reduction import expand_payout, expand_prior, expand_visits
 from alpharat.mcts.selection import compute_pruning_adjustment, prune_visit_counts
 
 if TYPE_CHECKING:
@@ -119,56 +120,49 @@ class DecoupledPUCTSearch:
     def _make_result(self) -> SearchResult:
         """Compute policies from root statistics.
 
-        When forced playouts are enabled (force_k > 0), prunes artificial visits
-        before filtering. This gives cleaner training targets by removing visits
-        that were forced for exploration rather than naturally selected by PUCT.
-
-        Filters low-visit cells to 0 before Nash computation — pessimistic estimate
-        for unexplored action pairs. This ensures Nash and training data use only
-        trustworthy values.
+        All decision computation (pruning, filtering, Nash, policy derivation)
+        happens in reduced (n1×n2) space. Expansion to 5-action space only at
+        the SearchResult boundary for consumers (recorder, agent, NN).
         """
         root = self.tree.root
-        visits_for_filtering = root.action_visits
 
-        # Prune forced visits if forced playouts were used
+        # --- Reduced space: all decisions ---
+        visits_reduced = root._visits.copy()  # [n1, n2] float64
         if self._force_k > 0:
-            visits_for_filtering = self._prune_forced_visits(root)
+            visits_reduced = self._prune_forced_visits(root)
 
-        # Filter unreliable cells before Nash and recording
-        filtered_payout = filter_low_visit_payout(
-            root.payout_matrix, visits_for_filtering, min_visits=2
+        payout_reduced = root.get_reduced_payout()  # [2, n1, n2]
+        filtered_payout_reduced = filter_low_visit_payout(
+            payout_reduced, visits_reduced, min_visits=2
         )
 
-        nash_p1, nash_p2 = compute_nash_equilibrium(
-            filtered_payout,
-            root.p1_effective,
-            root.p2_effective,
-            prior_p1=root.prior_policy_p1,
-            prior_p2=root.prior_policy_p2,
-            action_visits=visits_for_filtering,
+        nash_p1, nash_p2 = compute_nash_from_reduced(
+            filtered_payout_reduced,
+            p1_outcomes=root.p1_outcomes,
+            p2_outcomes=root.p2_outcomes,
+            reduced_prior_p1=root.prior_p1_reduced,
+            reduced_prior_p2=root.prior_p2_reduced,
+            reduced_visits=visits_reduced,
         )
 
-        # Compute marginal visits for policy derivation
-        marginal_p1 = visits_for_filtering.sum(axis=1)
-        marginal_p2 = visits_for_filtering.sum(axis=0)
+        marginal_p1 = visits_reduced.sum(axis=1)  # [n1]
+        marginal_p2 = visits_reduced.sum(axis=0)  # [n2]
 
-        # Acting policies (agent samples from these)
         acting_p1 = self._acting_strategy.derive_policy(marginal_p1, nash_p1)
         acting_p2 = self._acting_strategy.derive_policy(marginal_p2, nash_p2)
-
-        # Learning policies (recorded for NN training)
         learning_p1 = self._learning_strategy.derive_policy(marginal_p1, nash_p1)
         learning_p2 = self._learning_strategy.derive_policy(marginal_p2, nash_p2)
 
+        # --- Boundary: expand to 5-action space for consumers ---
         return SearchResult(
-            payout_matrix=filtered_payout,
-            policy_p1=acting_p1,
-            policy_p2=acting_p2,
-            learning_policy_p1=learning_p1,
-            learning_policy_p2=learning_p2,
-            action_visits=visits_for_filtering.copy()
-            if visits_for_filtering is not root.action_visits
-            else root.action_visits.copy(),
+            payout_matrix=expand_payout(
+                filtered_payout_reduced, root.p1_effective, root.p2_effective
+            ),
+            policy_p1=expand_prior(acting_p1, root.p1_effective),
+            policy_p2=expand_prior(acting_p2, root.p2_effective),
+            learning_policy_p1=expand_prior(learning_p1, root.p1_effective),
+            learning_policy_p2=expand_prior(learning_p2, root.p2_effective),
+            action_visits=expand_visits(visits_reduced, root.p1_effective, root.p2_effective),
         )
 
     def _simulate(self) -> None:
@@ -261,34 +255,25 @@ class DecoupledPUCTSearch:
     def _prune_forced_visits(self, node: MCTSNode) -> np.ndarray:
         """Prune forced playout visits from the visit counts.
 
-        Computes how many visits were "forced" (exceeded PUCT-justified amount)
-        and subtracts them, distributing the adjustment across pairs using
-        opponent's prior as weights.
+        All computation in reduced (outcome-indexed) space.
 
         Args:
             node: Node to prune visits for (typically root).
 
         Returns:
-            Pruned visit counts [5, 5]. Can be fractional.
+            Pruned visits [n1, n2] in reduced space. Can be fractional.
         """
-        # Marginal Q-values (expanded space)
-        q1 = node.payout_matrix[0] @ node.prior_policy_p2
-        q2 = node.payout_matrix[1].T @ node.prior_policy_p1
-
-        # Marginal visit counts
-        n1 = node.action_visits.sum(axis=1)
-        n2 = node.action_visits.sum(axis=0)
+        q1, q2 = node.compute_marginal_q_reduced()  # [n1], [n2]
+        n1, n2 = node.compute_marginal_visits_reduced()  # [n1], [n2]
         n_total = node.total_visits
 
-        # Compute adjustments for each player
-        delta_p1 = compute_pruning_adjustment(
-            q1, node.prior_policy_p1, n1, n_total, self._c_puct, node.p1_effective
-        )
-        delta_p2 = compute_pruning_adjustment(
-            q2, node.prior_policy_p2, n2, n_total, self._c_puct, node.p2_effective
-        )
+        delta_p1 = compute_pruning_adjustment(q1, node.prior_p1_reduced, n1, n_total, self._c_puct)
+        delta_p2 = compute_pruning_adjustment(q2, node.prior_p2_reduced, n2, n_total, self._c_puct)
 
-        # Apply to pair visits
         return prune_visit_counts(
-            node.action_visits, delta_p1, delta_p2, node.prior_policy_p1, node.prior_policy_p2
+            node._visits.copy(),
+            delta_p1,
+            delta_p2,
+            node.prior_p1_reduced,
+            node.prior_p2_reduced,
         )

@@ -22,9 +22,11 @@ def filter_low_visit_payout(
     This prevents NN predictions for unexplored cells from polluting Nash computation
     and training data.
 
+    Works with any shape — both expanded [2, 5, 5] and reduced [2, n1, n2].
+
     Args:
-        payout: Shape [2, 5, 5] — P1 and P2 payouts per action pair.
-        visits: Shape [5, 5] — visit count per action pair.
+        payout: Shape [2, n1, n2] — P1 and P2 payouts per action pair.
+        visits: Shape [n1, n2] — visit count per action pair.
         min_visits: Cells with visits < this are zeroed (default: 2, i.e., filter ≤1).
 
     Returns:

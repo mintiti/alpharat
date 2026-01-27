@@ -332,6 +332,77 @@ def _compute_nash_raw(
     return aggregate_equilibria(equilibria)
 
 
+def compute_nash_from_reduced(
+    reduced_payout: np.ndarray,
+    p1_outcomes: list[int],
+    p2_outcomes: list[int],
+    reduced_prior_p1: np.ndarray | None = None,
+    reduced_prior_p2: np.ndarray | None = None,
+    reduced_visits: np.ndarray | None = None,
+    min_visits: int = 5,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Compute Nash equilibrium from already-reduced payout matrix.
+
+    Like compute_nash_equilibrium but skips the reduce_matrix step — the
+    input is already in outcome-indexed space [2, n1, n2]. Returns strategies
+    in the same reduced space [n1], [n2].
+
+    Args:
+        reduced_payout: Payout matrix [2, n1, n2] already in reduced space.
+        p1_outcomes: Unique outcome action values for P1 (for logging only).
+        p2_outcomes: Unique outcome action values for P2 (for logging only).
+        reduced_prior_p1: Prior policy [n1] in reduced space.
+        reduced_prior_p2: Prior policy [n2] in reduced space.
+        reduced_visits: Visit counts [n1, n2] in reduced space.
+        min_visits: Minimum visits per action for visit filtering.
+
+    Returns:
+        (p1_strategy, p2_strategy) — each [n1] and [n2] in reduced space.
+    """
+    n1 = reduced_payout.shape[1]
+    n2 = reduced_payout.shape[2]
+
+    # Outcome indices as labels for _filter_by_visits / _expand_strategy
+    p1_indices = list(range(n1))
+    p2_indices = list(range(n2))
+
+    # Filter by visits if provided
+    if reduced_visits is not None:
+        nash_matrix, p1_kept, p2_kept = _filter_by_visits(
+            reduced_payout, reduced_visits, p1_indices, p2_indices, min_visits
+        )
+        # Filter priors to match
+        if reduced_prior_p1 is not None:
+            nash_p1_prior = np.array([reduced_prior_p1[i] for i in p1_kept])
+        else:
+            nash_p1_prior = None
+        if reduced_prior_p2 is not None:
+            nash_p2_prior = np.array([reduced_prior_p2[i] for i in p2_kept])
+        else:
+            nash_p2_prior = None
+    else:
+        nash_matrix = reduced_payout
+        p1_kept, p2_kept = p1_indices, p2_indices
+        nash_p1_prior = reduced_prior_p1
+        nash_p2_prior = reduced_prior_p2
+
+    # Compute Nash
+    p1_strat, p2_strat = _compute_nash_raw(
+        nash_matrix,
+        prior_p1=nash_p1_prior,
+        prior_p2=nash_p2_prior,
+        p1_effective=p1_outcomes,
+        p2_effective=p2_outcomes,
+        original_payout_matrix=reduced_payout,
+    )
+
+    # Expand from filtered subset back to full reduced space [n1], [n2]
+    full_p1 = _expand_strategy(p1_strat, p1_kept, n1)
+    full_p2 = _expand_strategy(p2_strat, p2_kept, n2)
+
+    return full_p1, full_p2
+
+
 def compute_nash_value(
     payout_matrix: np.ndarray,
     p1_strategy: np.ndarray,
