@@ -15,14 +15,12 @@ Example YAML:
       mcts_baseline:
         variant: mcts
         mcts:
-          variant: decoupled_puct
           simulations: 200
           c_puct: 4.73
           force_k: 0.0
       mcts_with_nn:
         variant: mcts
         mcts:
-          variant: decoupled_puct
           simulations: 200
         checkpoint: checkpoints/best_model.pt
 """
@@ -35,7 +33,7 @@ from typing import TYPE_CHECKING, Annotated, Literal
 from pydantic import Field
 
 from alpharat.config.base import StrictBaseModel
-from alpharat.mcts import MCTSConfig  # noqa: TC001
+from alpharat.mcts import DecoupledPUCTConfig  # noqa: TC001
 
 if TYPE_CHECKING:
     from alpharat.ai.base import Agent
@@ -123,7 +121,7 @@ class MCTSAgentConfig(AgentConfigBase):
     """
 
     variant: Literal["mcts"] = "mcts"
-    mcts: Annotated[MCTSConfig, Field(discriminator="variant")]
+    mcts: DecoupledPUCTConfig
     checkpoint: str | None = None
     temperature: float = 1.0  # For action sampling (Nash uses 1.0)
 

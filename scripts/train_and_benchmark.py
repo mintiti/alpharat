@@ -20,111 +20,25 @@ from __future__ import annotations
 import argparse
 import logging
 import sys
-from dataclasses import dataclass
 from pathlib import Path
 
 import yaml
 
-from alpharat.ai.config import (
-    AgentConfigBase,
-    GreedyAgentConfig,
-    MCTSAgentConfig,
-    NNAgentConfig,
-    RandomAgentConfig,
-)
 from alpharat.config.game import GameConfig
-from alpharat.eval.elo import compute_elo, from_tournament_result
-from alpharat.eval.tournament import TournamentConfig, run_tournament
+from alpharat.config.loader import load_config
+from alpharat.eval.benchmark import (
+    BenchmarkConfig,
+    build_benchmark_tournament,
+    print_benchmark_results,
+)
+from alpharat.eval.tournament import run_tournament
 from alpharat.experiments import ExperimentManager
+from alpharat.mcts.decoupled_puct import DecoupledPUCTConfig
 from alpharat.nn.config import TrainConfig
 from alpharat.nn.training import run_training
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
-
-
-@dataclass
-class BenchmarkSettings:
-    """Settings for the benchmark phase."""
-
-    games_per_matchup: int
-    workers: int
-    device: str
-    mcts_simulations: int
-    baseline_checkpoint: Path | None = None
-
-
-def get_game_config_from_checkpoint(checkpoint_path: Path) -> GameConfig:
-    """Extract game dimensions from checkpoint."""
-    import torch
-
-    checkpoint = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
-
-    width = checkpoint.get("width", 5)
-    height = checkpoint.get("height", 5)
-
-    # Use defaults for other params, matching training data
-    return GameConfig(
-        width=width,
-        height=height,
-        max_turns=30,
-        cheese_count=5,
-        wall_density=0.0,
-        mud_density=0.0,
-    )
-
-
-def build_benchmark_config(
-    benchmark_name: str,
-    checkpoint_path: Path,
-    settings: BenchmarkSettings,
-) -> TournamentConfig:
-    """Build tournament config for benchmarking a trained model."""
-    from alpharat.mcts.decoupled_puct import DecoupledPUCTConfig
-
-    game_config = get_game_config_from_checkpoint(checkpoint_path)
-
-    checkpoint_str = str(checkpoint_path)
-
-    # Default MCTS config for benchmarking (matches sampling defaults)
-    mcts_config = DecoupledPUCTConfig(
-        simulations=settings.mcts_simulations,
-        c_puct=8.34,
-        force_k=0.88,
-    )
-
-    agents: dict[str, AgentConfigBase] = {
-        "random": RandomAgentConfig(),
-        "greedy": GreedyAgentConfig(),
-        "mcts": MCTSAgentConfig(
-            mcts=mcts_config,
-        ),
-        "nn": NNAgentConfig(
-            checkpoint=checkpoint_str,
-            temperature=1.0,
-        ),
-        "mcts+nn": MCTSAgentConfig(
-            mcts=mcts_config,
-            checkpoint=checkpoint_str,
-        ),
-    }
-
-    if settings.baseline_checkpoint:
-        baseline_str = str(settings.baseline_checkpoint)
-        agents["nn-prev"] = NNAgentConfig(checkpoint=baseline_str, temperature=1.0)
-        agents["mcts+nn-prev"] = MCTSAgentConfig(
-            mcts=mcts_config,
-            checkpoint=baseline_str,
-        )
-
-    return TournamentConfig(
-        name=benchmark_name,
-        agents=agents,  # type: ignore[arg-type]  # AgentConfigBase is compatible
-        games_per_matchup=settings.games_per_matchup,
-        game=game_config,
-        workers=settings.workers,
-        device=settings.device,
-    )
 
 
 def main() -> None:
@@ -159,7 +73,18 @@ def main() -> None:
     parser.add_argument("--games", type=int, default=50, help="Games per matchup")
     parser.add_argument("--workers", type=int, default=4, help="Parallel workers for games")
     parser.add_argument("--device", type=str, default="auto", help="Device (auto, cpu, cuda, mps)")
-    parser.add_argument("--mcts-sims", type=int, default=554, help="MCTS simulations for baseline")
+    parser.add_argument(
+        "--mcts",
+        type=str,
+        default="5x5_tuned",
+        help="MCTS sub-config name from configs/mcts/ (default: 5x5_tuned)",
+    )
+    parser.add_argument(
+        "--game",
+        type=str,
+        default="5x5_open",
+        help="Game sub-config name from configs/game/ (default: 5x5_open)",
+    )
 
     # Skip flags
     parser.add_argument(
@@ -274,16 +199,24 @@ def main() -> None:
         logger.info("  → Used by: nn-prev, mcts+nn-prev")
     logger.info("")
 
-    settings = BenchmarkSettings(
+    # Load MCTS and game configs from Hydra sub-configs
+    mcts_config = load_config(DecoupledPUCTConfig, "configs/mcts", args.mcts)
+    game_config = load_config(GameConfig, "configs/game", args.game)
+
+    benchmark_config = BenchmarkConfig(
         games_per_matchup=args.games,
         workers=args.workers,
         device=args.device,
-        mcts_simulations=args.mcts_sims,
-        baseline_checkpoint=baseline,
+        mcts=mcts_config,
     )
 
-    tournament_config = build_benchmark_config(benchmark_name, checkpoint_path, settings)
-    game_config = tournament_config.game
+    tournament_config = build_benchmark_tournament(
+        benchmark_name,
+        checkpoint_path,
+        benchmark_config,
+        game_config=game_config,
+        baseline_checkpoint=baseline,
+    )
     logger.info(
         "Game settings: %dx%d, %d cheese, %d max turns",
         game_config.width,
@@ -304,39 +237,11 @@ def main() -> None:
 
     result = run_tournament(tournament_config)
 
-    # Save results via ExperimentManager
-    results_dict = {
-        "standings": result.standings(),
-        "wdl_matrix": {
-            agent: {
-                opp: {"wins": wdl[0], "draws": wdl[1], "losses": wdl[2]}
-                for opp, wdl in opps.items()
-            }
-            for agent, opps in result.wdl_matrix().items()
-        },
-        "cheese_stats": {
-            agent: {
-                opp: {"scored": cheese[0], "conceded": cheese[1]} for opp, cheese in opps.items()
-            }
-            for agent, opps in result.cheese_matrix().items()
-        },
-    }
-    exp.save_benchmark_results(benchmark_name, results_dict)
+    # Save and print results
+    exp.save_benchmark_results(benchmark_name, result.to_dict())
     logger.info(f"Results saved to {bench_dir / 'results.json'}")
 
-    # Print results
-    print()
-    print(result.standings_table())
-    print()
-    print(result.wdl_table())
-    print()
-    print(result.cheese_table())
-
-    # Compute and print Elo ratings
-    print()
-    records = from_tournament_result(result)
-    elo_result = compute_elo(records, anchor="greedy", anchor_elo=1000, compute_uncertainty=True)
-    print(elo_result.format_table())
+    print_benchmark_results(result, anchor="greedy")
 
 
 if __name__ == "__main__":

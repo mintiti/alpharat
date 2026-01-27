@@ -6,6 +6,7 @@ import itertools
 import multiprocessing as mp
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from dataclasses import dataclass
+from typing import Any
 
 from tqdm import tqdm
 
@@ -265,6 +266,30 @@ class TournamentResult:
                 if m:
                     result[name][other] = (m.avg_cheese_a, m.avg_cheese_b)
         return result
+
+    def to_dict(self) -> dict[str, Any]:
+        """Serialize results to a plain dict for JSON persistence.
+
+        Returns:
+            Dict with standings, wdl_matrix, and cheese_stats.
+        """
+        return {
+            "standings": self.standings(),
+            "wdl_matrix": {
+                agent: {
+                    opp: {"wins": wdl[0], "draws": wdl[1], "losses": wdl[2]}
+                    for opp, wdl in opps.items()
+                }
+                for agent, opps in self.wdl_matrix().items()
+            },
+            "cheese_stats": {
+                agent: {
+                    opp: {"scored": cheese[0], "conceded": cheese[1]}
+                    for opp, cheese in opps.items()
+                }
+                for agent, opps in self.cheese_matrix().items()
+            },
+        }
 
 
 @dataclass

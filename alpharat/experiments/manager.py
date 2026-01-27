@@ -27,7 +27,7 @@ from alpharat.experiments.schema import (
 
 if TYPE_CHECKING:
     from alpharat.config.game import GameConfig
-    from alpharat.mcts import MCTSConfig
+    from alpharat.mcts import DecoupledPUCTConfig
 
 
 class ExperimentManager:
@@ -133,7 +133,7 @@ class ExperimentManager:
     def create_batch(
         self,
         group: str,
-        mcts_config: MCTSConfig,
+        mcts_config: DecoupledPUCTConfig,
         game: GameConfig,
         checkpoint_path: str | None = None,
         seed_start: int = 0,

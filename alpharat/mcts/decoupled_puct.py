@@ -7,7 +7,7 @@ marginalized over the opponent's prior policy.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Literal
+from typing import TYPE_CHECKING
 
 from alpharat.config.base import StrictBaseModel
 from alpharat.mcts.nash import compute_nash_equilibrium
@@ -32,7 +32,6 @@ class SearchResult:
 class DecoupledPUCTConfig(StrictBaseModel):
     """Configuration for decoupled PUCT search."""
 
-    variant: Literal["decoupled_puct"] = "decoupled_puct"
     simulations: int = 100
     gamma: float = 1.0
     c_puct: float = 1.5

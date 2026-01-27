@@ -11,13 +11,15 @@ Example YAML config:
 
     agents:
       puct_100:
-        variant: decoupled_puct
-        simulations: 100
-        c_puct: 1.5
+        variant: mcts
+        mcts:
+          simulations: 100
+          c_puct: 1.5
       puct_500:
-        variant: decoupled_puct
-        simulations: 500
-        c_puct: 1.5
+        variant: mcts
+        mcts:
+          simulations: 500
+          c_puct: 1.5
 
     games_per_matchup: 20
 
@@ -35,7 +37,7 @@ import logging
 from pathlib import Path
 
 from alpharat.config.loader import load_config
-from alpharat.eval.elo import compute_elo, from_tournament_result
+from alpharat.eval.benchmark import print_benchmark_results
 from alpharat.eval.tournament import TournamentConfig, run_tournament
 from alpharat.experiments import ExperimentManager
 
@@ -114,41 +116,12 @@ def main() -> None:
     logger.info("Running tournament...")
     result = run_tournament(config)
 
-    # Save results
-    results_dict = {
-        "standings": result.standings(),
-        "wdl_matrix": {
-            agent: {
-                opp: {"wins": wdl[0], "draws": wdl[1], "losses": wdl[2]}
-                for opp, wdl in opps.items()
-            }
-            for agent, opps in result.wdl_matrix().items()
-        },
-        "cheese_stats": {
-            agent: {
-                opp: {"scored": cheese[0], "conceded": cheese[1]} for opp, cheese in opps.items()
-            }
-            for agent, opps in result.cheese_matrix().items()
-        },
-    }
-    exp.save_benchmark_results(benchmark_name, results_dict)
+    # Save and print results
+    exp.save_benchmark_results(benchmark_name, result.to_dict())
     logger.info(f"Results saved to {bench_dir / 'results.json'}")
 
-    # Print results
-    print()
-    print(result.standings_table())
-    print()
-    print(result.wdl_table())
-    print()
-    print(result.cheese_table())
-
-    # Compute and print Elo ratings
-    print()
-    records = from_tournament_result(result)
-    # Use first agent as anchor if no greedy, otherwise greedy
     anchor = "greedy" if "greedy" in config.agents else list(config.agents.keys())[0]
-    elo_result = compute_elo(records, anchor=anchor, anchor_elo=1000, compute_uncertainty=True)
-    print(elo_result.format_table())
+    print_benchmark_results(result, anchor=anchor)
 
 
 if __name__ == "__main__":

@@ -8,11 +8,10 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 import numpy as np
-from pydantic import Field
 
 from alpharat.config.base import StrictBaseModel
 from alpharat.config.game import GameConfig  # noqa: TC001
-from alpharat.mcts import MCTSConfig  # noqa: TC001
+from alpharat.mcts import DecoupledPUCTConfig  # noqa: TC001
 
 # --- Batch Metadata ---
 
@@ -23,7 +22,7 @@ class BatchMetadata(StrictBaseModel):
     batch_id: str
     created_at: datetime
     checkpoint_path: str | None
-    mcts_config: MCTSConfig = Field(discriminator="variant")
+    mcts_config: DecoupledPUCTConfig
     game: GameConfig
 
 
@@ -40,7 +39,7 @@ class BatchStats(StrictBaseModel):
 def create_batch(
     parent_dir: Path | str,
     checkpoint_path: str | None,
-    mcts_config: MCTSConfig,
+    mcts_config: DecoupledPUCTConfig,
     game: GameConfig,
 ) -> Path:
     """Create a new batch directory with metadata.
