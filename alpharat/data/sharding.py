@@ -302,92 +302,6 @@ def prepare_training_set_with_split(
     )
 
 
-def _process_game_files_to_shards(
-    game_files: list[Path],
-    output_dir: Path,
-    builder: ObservationBuilder,
-    positions_per_shard: int,
-    seed: int | None,
-    training_set_id: str,
-    source_batches: list[str],
-) -> int:
-    """Process game files into shards for a single split.
-
-    Args:
-        game_files: List of game npz files to process.
-        output_dir: Directory to write shards to.
-        builder: ObservationBuilder to use.
-        positions_per_shard: Maximum positions per shard.
-        seed: Random seed for shuffling positions.
-        training_set_id: ID for the manifest.
-        source_batches: Batch names for the manifest.
-
-    Returns:
-        Number of positions written.
-    """
-    # Load and process all positions
-    (
-        obs_array,
-        policy_p1_array,
-        policy_p2_array,
-        p1_values_array,
-        p2_values_array,
-        payout_array,
-        action_p1_array,
-        action_p2_array,
-        cheese_outcomes_array,
-        width,
-        height,
-    ) = _load_positions_from_files(game_files, builder)
-
-    total_positions = len(p1_values_array)
-
-    # Shuffle positions within this split
-    rng = np.random.default_rng(seed)
-    indices = rng.permutation(total_positions)
-
-    obs_array = obs_array[indices]
-    policy_p1_array = policy_p1_array[indices]
-    policy_p2_array = policy_p2_array[indices]
-    p1_values_array = p1_values_array[indices]
-    p2_values_array = p2_values_array[indices]
-    payout_array = payout_array[indices]
-    action_p1_array = action_p1_array[indices]
-    action_p2_array = action_p2_array[indices]
-    cheese_outcomes_array = cheese_outcomes_array[indices]
-
-    # Write shards
-    shard_count = _write_shards(
-        output_dir,
-        obs_array,
-        policy_p1_array,
-        policy_p2_array,
-        p1_values_array,
-        p2_values_array,
-        payout_array,
-        action_p1_array,
-        action_p2_array,
-        cheese_outcomes_array,
-        positions_per_shard,
-    )
-
-    # Write manifest
-    manifest = TrainingSetManifest(
-        training_set_id=training_set_id,
-        created_at=datetime.now(UTC),
-        builder_version=builder.version,
-        source_batches=source_batches,
-        total_positions=total_positions,
-        shard_count=shard_count,
-        positions_per_shard=positions_per_shard,
-        width=width,
-        height=height,
-    )
-    _save_manifest(output_dir, manifest)
-
-    return total_positions
-
-
 def _process_game_refs_to_shards(
     game_refs: list[GameRef],
     output_dir: Path,
@@ -585,8 +499,24 @@ def _iter_games_from_refs(
         yield games_by_idx[idx]
 
 
-def _load_positions_from_refs(
-    refs: list[GameRef],
+def _iter_games_from_files(game_files: list[Path]) -> Iterator[GameData]:
+    """Iterate over games from file list, handling bundles transparently.
+
+    Args:
+        game_files: List of game npz files (single or bundled).
+
+    Yields:
+        GameData objects from all files.
+    """
+    for game_file in tqdm(game_files, desc="Loading files", unit="file"):
+        if is_bundle_file(game_file):
+            yield from iter_games_from_bundle(game_file)
+        else:
+            yield load_game_data(game_file)
+
+
+def _process_games_to_arrays(
+    games: Iterator[GameData],
     builder: ObservationBuilder,
 ) -> tuple[
     np.ndarray,
@@ -601,14 +531,21 @@ def _load_positions_from_refs(
     int,
     int,
 ]:
-    """Load and process positions from game refs into stacked arrays.
+    """Build observations and targets from a game sequence.
+
+    Shared logic for both ref-based and file-based loading paths.
+    Patches each position's played cell with ground truth game outcome.
 
     Args:
-        refs: List of GameRef objects specifying which games to load.
-        builder: ObservationBuilder to use.
+        games: Iterator of GameData objects to process.
+        builder: ObservationBuilder to use for encoding.
 
     Returns:
-        Same tuple as _load_positions_from_files.
+        Tuple of (observations, policy_p1, policy_p2, p1_values, p2_values,
+        payout_matrices, action_p1, action_p2, cheese_outcomes, width, height).
+
+    Raises:
+        ValueError: If games have different dimensions or no positions found.
     """
     all_observations: list[np.ndarray] = []
     all_policy_p1: list[np.ndarray] = []
@@ -623,7 +560,7 @@ def _load_positions_from_refs(
     width: int | None = None
     height: int | None = None
 
-    for game_data in _iter_games_from_refs(refs):
+    for game_data in games:
         # Validate dimensions
         if width is None:
             width = game_data.width
@@ -658,7 +595,7 @@ def _load_positions_from_refs(
             all_cheese_outcomes.append(targets.cheese_outcomes)
 
     if width is None or height is None:
-        raise ValueError("No positions found in game refs")
+        raise ValueError("No positions found in games")
 
     return (
         np.stack(all_observations),
@@ -673,6 +610,26 @@ def _load_positions_from_refs(
         width,
         height,
     )
+
+
+def _load_positions_from_refs(
+    refs: list[GameRef],
+    builder: ObservationBuilder,
+) -> tuple[
+    np.ndarray,
+    np.ndarray,
+    np.ndarray,
+    np.ndarray,
+    np.ndarray,
+    np.ndarray,
+    np.ndarray,
+    np.ndarray,
+    np.ndarray,
+    int,
+    int,
+]:
+    """Load and process positions from game refs into stacked arrays."""
+    return _process_games_to_arrays(_iter_games_from_refs(refs), builder)
 
 
 def _load_positions_from_files(
@@ -691,108 +648,8 @@ def _load_positions_from_files(
     int,
     int,
 ]:
-    """Load and process positions from game files into stacked arrays.
-
-    Handles both single-game .npz files and bundled .npz files.
-
-    Args:
-        game_files: List of game npz files to process (single or bundled).
-        builder: ObservationBuilder to use.
-
-    Returns:
-        Tuple of:
-            - observations: float32 (N, obs_dim)
-            - policy_p1: float32 (N, 5)
-            - policy_p2: float32 (N, 5)
-            - p1_values: float32 (N,) — P1's remaining score (actual game outcome)
-            - p2_values: float32 (N,) — P2's remaining score (actual game outcome)
-            - payout_matrices: float32 (N, 2, 5, 5)
-            - action_p1: int8 (N,)
-            - action_p2: int8 (N,)
-            - cheese_outcomes: int8 (N, H, W) — position-level ownership targets.
-                Values: -1=inactive (no cheese), 0-3=outcome class.
-            - width: int
-            - height: int
-
-    Raises:
-        ValueError: If game files have different dimensions or no positions found.
-    """
-    all_observations: list[np.ndarray] = []
-    all_policy_p1: list[np.ndarray] = []
-    all_policy_p2: list[np.ndarray] = []
-    all_p1_values: list[float] = []
-    all_p2_values: list[float] = []
-    all_payout_matrices: list[np.ndarray] = []
-    all_action_p1: list[int] = []
-    all_action_p2: list[int] = []
-    all_cheese_outcomes: list[np.ndarray] = []
-
-    width: int | None = None
-    height: int | None = None
-
-    def process_game(game_data: GameData, source_file: Path) -> None:
-        """Process a single game and append to result lists."""
-        nonlocal width, height
-
-        # Validate dimensions
-        if width is None:
-            width = game_data.width
-            height = game_data.height
-        elif game_data.width != width or game_data.height != height:
-            raise ValueError(
-                f"Dimension mismatch: expected ({width}, {height}), "
-                f"got ({game_data.width}, {game_data.height}) in {source_file}"
-            )
-
-        # Process each position
-        for position in game_data.positions:
-            obs_input = from_game_arrays(game_data, position)
-            obs = builder.build(obs_input)
-            targets = build_targets(game_data, position)
-
-            # Patch played cell with ground truth game outcome.
-            # The MCTS payout matrix has estimates for all action pairs. For the
-            # actually-played pair, we have the real outcome. Patching here avoids
-            # per-batch cloning during training.
-            targets.payout_matrix[0, targets.action_p1, targets.action_p2] = targets.p1_value
-            targets.payout_matrix[1, targets.action_p1, targets.action_p2] = targets.p2_value
-
-            all_observations.append(obs)
-            all_policy_p1.append(targets.policy_p1)
-            all_policy_p2.append(targets.policy_p2)
-            all_p1_values.append(targets.p1_value)
-            all_p2_values.append(targets.p2_value)
-            all_payout_matrices.append(targets.payout_matrix)
-            all_action_p1.append(targets.action_p1)
-            all_action_p2.append(targets.action_p2)
-            all_cheese_outcomes.append(targets.cheese_outcomes)
-
-    for game_file in tqdm(game_files, desc="Loading files", unit="file"):
-        if is_bundle_file(game_file):
-            # Bundle file: iterate over all games in the bundle
-            for game_data in iter_games_from_bundle(game_file):
-                process_game(game_data, game_file)
-        else:
-            # Single-game file
-            game_data = load_game_data(game_file)
-            process_game(game_data, game_file)
-
-    if width is None or height is None:
-        raise ValueError("No positions found in game files")
-
-    return (
-        np.stack(all_observations),
-        np.stack(all_policy_p1),
-        np.stack(all_policy_p2),
-        np.array(all_p1_values, dtype=np.float32),
-        np.array(all_p2_values, dtype=np.float32),
-        np.stack(all_payout_matrices),
-        np.array(all_action_p1, dtype=np.int8),
-        np.array(all_action_p2, dtype=np.int8),
-        np.stack(all_cheese_outcomes),
-        width,
-        height,
-    )
+    """Load and process positions from game files into stacked arrays."""
+    return _process_games_to_arrays(_iter_games_from_files(game_files), builder)
 
 
 def _load_all_positions(
@@ -818,7 +675,7 @@ def _load_all_positions(
         builder: ObservationBuilder to use.
 
     Returns:
-        Tuple of stacked arrays and dimensions. See _load_positions_from_files.
+        Tuple of stacked arrays and dimensions. See _process_games_to_arrays.
 
     Raises:
         ValueError: If batches have different dimensions or no games found.

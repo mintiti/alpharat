@@ -12,12 +12,12 @@ from typing import TYPE_CHECKING
 from pydantic import Field
 
 from alpharat.config.base import StrictBaseModel
+from alpharat.mcts.forced_playouts import compute_pruning_adjustment, prune_visit_counts
 from alpharat.mcts.nash import compute_nash_from_reduced
 from alpharat.mcts.numba_ops import compute_puct_scores, select_max_with_tiebreak
 from alpharat.mcts.payout_filter import filter_low_visit_payout
 from alpharat.mcts.policy_strategy import NashPolicyConfig, PolicyConfig, PolicyStrategy
 from alpharat.mcts.reduction import expand_payout, expand_prior, expand_visits
-from alpharat.mcts.selection import compute_pruning_adjustment, prune_visit_counts
 
 if TYPE_CHECKING:
     import numpy as np

@@ -6,7 +6,7 @@ These tests cover the post-search *pruning* of forced visits.
 
 import numpy as np
 
-from alpharat.mcts.selection import (
+from alpharat.mcts.forced_playouts import (
     compute_pruning_adjustment,
     prune_visit_counts,
 )

@@ -4,6 +4,7 @@ import numpy as np
 import pytest
 
 from alpharat.mcts.nash import (
+    _filter_by_visits,
     aggregate_equilibria,
     compute_nash_equilibrium,
     compute_nash_from_reduced,
@@ -668,3 +669,66 @@ class TestNashFromReduced:
 
         np.testing.assert_array_almost_equal(p1, [1.0])
         np.testing.assert_array_almost_equal(p2, [1.0])
+
+
+class TestFilterByVisits:
+    """Tests for _filter_by_visits edge case: all actions below threshold."""
+
+    def test_all_p1_below_threshold_keeps_most_visited(self) -> None:
+        """When all P1 actions are below threshold, keep the most-visited P1 action."""
+        matrix = np.ones((2, 3, 3))
+        visits = np.array([[1.0, 1.0, 1.0], [2.0, 2.0, 2.0], [0.0, 0.0, 0.0]])
+        # P1 marginal visits: [3, 6, 0] — all below min_visits=10
+        # P2 marginal visits: [3, 3, 3] — all below min_visits=10
+
+        filtered, p1_kept, p2_kept = _filter_by_visits(
+            matrix, visits, p1_actions=[0, 1, 2], p2_actions=[0, 1, 2], min_visits=10
+        )
+
+        # P1: most visited is index 1 (marginal=6)
+        assert p1_kept == [1]
+        # P2: most visited is index 0 (argmax of tied values)
+        assert len(p2_kept) == 1
+
+    def test_all_p2_below_threshold_keeps_most_visited(self) -> None:
+        """When all P2 actions are below threshold, keep the most-visited P2 action."""
+        matrix = np.ones((2, 3, 3))
+        # P1 marginals: [30, 30, 30] — above threshold
+        # P2 marginals: [3, 6, 0] — all below threshold
+        visits = np.array([[10.0, 10.0, 10.0], [10.0, 10.0, 10.0], [10.0, 10.0, 10.0]])
+        # Override for P2: make column sums small
+        visits = np.array([[1.0, 2.0, 0.0], [1.0, 2.0, 0.0], [1.0, 2.0, 0.0]])
+        # P1 marginals: [3, 3, 3] — below 10
+        # P2 marginals: [3, 6, 0] — below 10
+
+        filtered, p1_kept, p2_kept = _filter_by_visits(
+            matrix, visits, p1_actions=[0, 1, 2], p2_actions=[0, 1, 2], min_visits=10
+        )
+
+        # P2: most visited is column 1 (marginal=6)
+        assert p2_kept == [1]
+
+    def test_both_all_below_threshold(self) -> None:
+        """When both players have all actions below threshold, keep most-visited for each."""
+        matrix = np.array(
+            [
+                [[1.0, 2.0], [3.0, 4.0], [5.0, 6.0]],
+                [[0.5, 1.0], [1.5, 2.0], [2.5, 3.0]],
+            ]
+        )
+        visits = np.array([[0.0, 1.0], [3.0, 0.0], [1.0, 0.0]])
+        # P1 marginals: [1, 3, 1] — all below 10
+        # P2 marginals: [4, 1] — all below 10
+
+        filtered, p1_kept, p2_kept = _filter_by_visits(
+            matrix, visits, p1_actions=[0, 1, 2], p2_actions=[0, 1], min_visits=10
+        )
+
+        # P1: most visited is action 1 (marginal=3)
+        assert p1_kept == [1]
+        # P2: most visited is action 0 (marginal=4)
+        assert p2_kept == [0]
+        # Filtered matrix is 1x1 from the intersection
+        assert filtered.shape == (2, 1, 1)
+        assert filtered[0, 0, 0] == 3.0  # matrix[0, 1, 0]
+        assert filtered[1, 0, 0] == 1.5  # matrix[1, 1, 0]
