@@ -641,3 +641,31 @@ Iteration 2: MCTS+NN sampling using iter1 checkpoint, 50k games → finetune fro
 Centroid results are slightly weaker than the main branch iteration 2 logged earlier. Reason unknown.
 
 **Bug found during testing:** Pydantic silently ignored unknown fields. Config used `checkpoint:` but code expected `resume_from:`. Both "from scratch" and "finetune" runs trained identically (same seed → same weights). Fixed by adding `extra="forbid"` to TrainConfig.
+
+### 2026-01-27: Move Pruning & Filtering to Reduced Space
+
+**Branch:** `feature/centroid-equilibria`
+
+**Problem:** `_make_result()` and `_prune_forced_visits()` in `decoupled_puct.py` were working in expanded 5-action space — expanding from reduced `[n1, n2]` node storage to `[5, 5]`, then doing all decision computation (pruning, filtering, Nash), then returning `[5]` policies. This meant unnecessary expand→reduce→expand round-trips and the `compute_pruning_adjustment` function needed an `effective` parameter to figure out which of the 5 actions were real outcomes.
+
+**Change:** All decision computation now happens in outcome-indexed `[n1, n2]` space. Expansion to 5-action space only at the `SearchResult` boundary (for consumers: recorder, agent, NN).
+
+**Files changed:**
+
+| File | What |
+|------|------|
+| `selection.py` | `compute_pruning_adjustment` dropped `effective` param, works on `[n]` arrays directly |
+| `payout_filter.py` | Docstring update only — body was already dimension-agnostic |
+| `nash.py` | Added `compute_nash_from_reduced()` — takes `[2, n1, n2]`, returns `[n1]`, `[n2]` |
+| `policy_strategy.py` | Docstring update only — `(5,)` → `(n,)` |
+| `decoupled_puct.py` | Rewrote `_make_result` and `_prune_forced_visits` to work in reduced space, expand at boundary |
+
+**Key design decisions:**
+
+- `compute_nash_from_reduced()` uses outcome indices (`range(n1)`) as labels for `_filter_by_visits` and `_expand_strategy`. This keeps the existing visit-filtering and strategy-expansion machinery working without changes.
+- `_prune_forced_visits` uses `node._visits.copy()` (float64) instead of `get_reduced_visits()` (int32) to preserve fractional precision after pruning.
+- Existing `compute_nash_equilibrium` stays unchanged for backward compat (tests, debug tools).
+
+**Verification:** Full test suite passes (721 passed). Added 9 new tests: 2 for reduced-space pruning, 1 for non-square visit matrices, 7 for `compute_nash_from_reduced`. No behavior change — `SearchResult` still has `[5]` and `[2, 5, 5]` shapes.
+
+**No performance impact expected.** This is a cleanup — removes redundant expand/reduce cycles but the hot path (selection, backup) was already in reduced space.

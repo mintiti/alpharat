@@ -265,7 +265,7 @@ The algorithm operates in outcome space. Boundaries handle translation:
 ### Flow Through Training
 
 **Recording (`recorder.py`):**
-- Saves post-MCTS Nash policies (which have 0 for blocked actions)
+- Saves post-MCTS learning policies (which have 0 for blocked actions)
 - Saves the `[2, 5, 5]` payout matrix (separate P1/P2 payoffs, equivalence structure preserved)
 
 **Targets (`targets.py`):**
@@ -643,6 +643,22 @@ The `/exp:*` commands support the experiment lifecycle:
 - `IDEAS.md` — parking lot for fuzzy thinking, unstructured ideas
 
 The commands pull from these files automatically. When helping with experiments, read them first.
+
+---
+
+## Game Configuration Scaling
+
+When scaling to larger grids, maintain consistent cheese density (~20%, or 1 cheese per 5 cells):
+
+| Grid | Cells | Cheese | Density |
+|------|-------|--------|---------|
+| 5×5  | 25    | 5      | 20%     |
+| 7×7  | 49    | 10     | 20.4%   |
+| 9×9  | 81    | 16     | 19.8%   |
+
+**Max turns**: Scale roughly with grid size. 5×5 uses 30 turns; 7×7 might use ~50.
+
+**Data organization**: Separate folders per grid size (`batches/5x5/`, `batches/7x7/`). Models are dimension-specific — a 5×5 checkpoint won't work on 7×7.
 
 ---
 

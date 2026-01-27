@@ -11,7 +11,7 @@ Usage:
     alpharat-train-and-benchmark configs/train.yaml --games 100 --device mps
     alpharat-train-and-benchmark configs/train.yaml --epochs 50 --workers 8
 
-CLI overrides (--name, --shards) are merged into the config before saving,
+CLI overrides (--name, --shards) are passed as Hydra overrides,
 so the frozen config in experiments/runs/{name}/config.yaml has actual values.
 """
 
@@ -22,10 +22,8 @@ import logging
 import sys
 from pathlib import Path
 
-import yaml
-
 from alpharat.config.game import GameConfig
-from alpharat.config.loader import load_config
+from alpharat.config.loader import load_config, split_config_path
 from alpharat.eval.benchmark import (
     BenchmarkConfig,
     build_benchmark_tournament,
@@ -47,7 +45,11 @@ def main() -> None:
     )
 
     # Training args
-    parser.add_argument("config", type=Path, help="Path to training YAML config")
+    parser.add_argument(
+        "config",
+        type=str,
+        help="Config path: 'configs/train.yaml' or 'configs/train/mlp' (with or without .yaml)",
+    )
     parser.add_argument(
         "--name",
         type=str,
@@ -103,27 +105,23 @@ def main() -> None:
 
     exp = ExperimentManager(args.experiments_dir)
 
-    # Load config as dict first (for merging CLI overrides)
-    config_data = yaml.safe_load(args.config.read_text())
+    config_dir, config_name = split_config_path(args.config)
 
-    # Merge CLI overrides BEFORE validation (so frozen config has actual values)
+    # Build Hydra overrides from CLI args
+    overrides: list[str] = []
     if args.shards:
-        # Validate format
         if "/" not in args.shards:
             parser.error("--shards requires 'GROUP/UUID' format (e.g., 'mygroup/abc123')")
         shard_path = exp.get_shard_path(args.shards)
         if not shard_path.exists():
             parser.error(f"Shard not found: {args.shards} (looked in {shard_path})")
-        # Merge into config
-        config_data.setdefault("data", {})
-        config_data["data"]["train_dir"] = str(shard_path / "train")
-        config_data["data"]["val_dir"] = str(shard_path / "val")
-
+        overrides.append(f"data.train_dir={shard_path / 'train'}")
+        overrides.append(f"data.val_dir={shard_path / 'val'}")
     if args.name:
-        config_data["name"] = args.name
+        overrides.append(f"name={args.name}")
 
-    # Now validate the merged config
-    config = TrainConfig.model_validate(config_data)
+    # Load config using Hydra (resolves defaults) + Pydantic (validates)
+    config = load_config(TrainConfig, config_dir, config_name, overrides=overrides or None)
 
     # Tri-state AMP: True (force on), False (force off), None (auto-detect)
     use_amp = True if args.amp else (False if args.no_amp else None)

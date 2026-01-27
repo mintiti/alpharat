@@ -13,6 +13,8 @@ from typing import TYPE_CHECKING, Any
 
 import torch
 
+from alpharat.nn.training_utils import select_device
+
 if TYPE_CHECKING:
     from collections.abc import Callable
 
@@ -53,7 +55,7 @@ def load_model_from_checkpoint(
     from alpharat.nn.config import ModelConfig
 
     checkpoint_path = Path(checkpoint_path)
-    torch_device = torch.device(device)
+    torch_device = select_device(device)
 
     # weights_only=False required to load full config dict, not just weights.
     # Only load checkpoints from trusted sources.
@@ -136,13 +138,14 @@ def make_predict_fn(
 
     maze = build_maze_array(simulator, width, height)
     max_turns = simulator.max_turns
+    resolved_device = select_device(device)
 
     def predict_fn(_observation: Any) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
         """Run NN inference on current simulator state."""
         obs_input = from_pyrat_game(simulator, maze, max_turns)
         obs = builder.build(obs_input)
 
-        obs_tensor = torch.from_numpy(obs).unsqueeze(0).to(device)
+        obs_tensor = torch.from_numpy(obs).unsqueeze(0).to(resolved_device)
 
         with torch.inference_mode():
             result = model.predict(obs_tensor)

@@ -11,7 +11,7 @@ Usage:
     # Using --architecture directly (simpler)
     alpharat-prepare-shards --architecture mlp --group myshards --batches mybatches
 
-    # Using config file (alternative)
+    # Using config file (resolves Hydra defaults)
     alpharat-prepare-shards configs/train.yaml --group myshards --batches mybatches
 """
 
@@ -23,9 +23,9 @@ import json
 import logging
 from pathlib import Path
 
-import yaml
 from pydantic import TypeAdapter
 
+from alpharat.config.loader import load_raw_config, split_config_path
 from alpharat.data.sharding import prepare_training_set_with_split
 from alpharat.experiments import ExperimentManager
 from alpharat.experiments.paths import METADATA_FILE, TRAIN_DIR, VAL_DIR, get_shards_dir
@@ -42,9 +42,9 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Prepare training shards from game batches.")
     parser.add_argument(
         "config",
-        type=Path,
+        type=str,
         nargs="?",
-        help="Path to YAML config file (optional if --architecture is specified)",
+        help="Config path, e.g. 'configs/train.yaml' (optional if --architecture)",
     )
     parser.add_argument(
         "--architecture",
@@ -97,12 +97,11 @@ def main() -> None:
 
     # Get architecture from --architecture or from config file
     if args.architecture:
-        # Use --architecture directly
         model_config = _model_config_adapter.validate_python({"architecture": args.architecture})
         logger.info(f"Using architecture: {args.architecture}")
     elif args.config:
-        # Load from config file
-        config_data = yaml.safe_load(args.config.read_text())
+        config_dir, config_name = split_config_path(args.config)
+        config_data = load_raw_config(config_dir, config_name)
         if "model" not in config_data:
             logger.error(f"Config file {args.config} must have a 'model' section")
             return
@@ -139,6 +138,7 @@ def main() -> None:
     logger.info(f"Using observation builder: {builder.version}")
 
     # Prepare shards (output to experiments/shards/{group}/)
+    # Policy targets come from recorded games (chosen at MCTS time via policy strategy)
     logger.info("Processing games into shards...")
     shards_group_dir = get_shards_dir(exp.root) / args.group
     shards_group_dir.mkdir(parents=True, exist_ok=True)

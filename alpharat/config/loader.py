@@ -26,6 +26,22 @@ from pydantic import BaseModel
 T = TypeVar("T", bound=BaseModel)
 
 
+def split_config_path(config_arg: str) -> tuple[str, str]:
+    """Split a CLI config argument into (config_dir, config_name) for Hydra.
+
+    Handles paths like 'configs/train.yaml', 'configs/sample/5x5', or 'train'.
+
+    Returns:
+        (config_dir, config_name) — e.g. ("configs", "train") or ("configs", "sample/5x5")
+    """
+    config_path = Path(config_arg)
+    config_name = str(config_path.with_suffix(""))  # Remove .yaml if present
+    if config_name.startswith("configs/"):
+        return "configs", config_name[len("configs/") :]
+    config_dir = str(config_path.parent) if config_path.parent.name else "."
+    return config_dir, config_path.stem
+
+
 def load_config(
     model_class: type[T],
     config_path: str | Path,

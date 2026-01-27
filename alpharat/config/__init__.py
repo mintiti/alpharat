@@ -11,13 +11,14 @@ from __future__ import annotations
 from alpharat.config.base import StrictBaseModel
 from alpharat.config.checkpoint import load_model_from_checkpoint, make_predict_fn
 from alpharat.config.game import GameConfig
-from alpharat.config.loader import load_config, load_raw_config
+from alpharat.config.loader import load_config, load_raw_config, split_config_path
 
 __all__ = [
     "StrictBaseModel",
     "GameConfig",
     "load_config",
     "load_raw_config",
+    "split_config_path",
     "load_model_from_checkpoint",
     "make_predict_fn",
 ]

@@ -156,7 +156,8 @@ class SamplingMetrics:
 def load_nn_context(checkpoint_path: str, device: str = "cpu") -> NNContext:
     """Load NN model for use in sampling using ModelConfig.build_model().
 
-    Called once per worker process at startup.
+    Called once per worker process at startup. Uses Pydantic config from checkpoint
+    to build the correct model and observation builder automatically.
 
     Args:
         checkpoint_path: Path to model checkpoint.
@@ -312,7 +313,7 @@ def play_and_record_game(
             positions += 1
             total_simulations += config.mcts.simulations
 
-            # Sample actions from Nash equilibrium policies
+            # Sample actions from search policies
             a1 = select_action_from_strategy(result.policy_p1)
             a2 = select_action_from_strategy(result.policy_p2)
 

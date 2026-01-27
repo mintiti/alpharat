@@ -311,6 +311,113 @@ class TestWithRealGame:
                 assert result.policy_p2[i] == 0.0
 
 
+class TestMakeResultIntegration:
+    """Integration tests for _make_result() — full search pipeline."""
+
+    def test_search_result_shapes(self) -> None:
+        """SearchResult arrays have correct shapes after a real search."""
+        game = PyRat(width=5, height=5, cheese_count=3, seed=42)
+        prior = np.ones(5) / 5
+        root = MCTSNode(
+            game_state=None,
+            prior_policy_p1=prior,
+            prior_policy_p2=prior,
+            nn_payout_prediction=np.zeros((2, 5, 5)),
+        )
+        tree = MCTSTree(game=game, root=root, gamma=0.99)
+        search = DecoupledPUCTSearch(tree, DecoupledPUCTConfig(simulations=50))
+        result = search.search()
+
+        assert result.policy_p1.shape == (5,)
+        assert result.policy_p2.shape == (5,)
+        assert result.payout_matrix.shape == (2, 5, 5)
+        assert result.action_visits.shape == (5, 5)
+
+    def test_policies_sum_to_one(self) -> None:
+        """Both acting and learning policies sum to ~1.0."""
+        game = PyRat(width=5, height=5, cheese_count=3, seed=42)
+        prior = np.ones(5) / 5
+        root = MCTSNode(
+            game_state=None,
+            prior_policy_p1=prior,
+            prior_policy_p2=prior,
+            nn_payout_prediction=np.zeros((2, 5, 5)),
+        )
+        tree = MCTSTree(game=game, root=root, gamma=0.99)
+        search = DecoupledPUCTSearch(tree, DecoupledPUCTConfig(simulations=50))
+        result = search.search()
+
+        assert result.policy_p1.sum() == pytest.approx(1.0, abs=1e-6)
+        assert result.policy_p2.sum() == pytest.approx(1.0, abs=1e-6)
+        assert result.learning_policy_p1.sum() == pytest.approx(1.0, abs=1e-6)
+        assert result.learning_policy_p2.sum() == pytest.approx(1.0, abs=1e-6)
+
+    def test_blocked_actions_get_zero_probability(self) -> None:
+        """Blocked actions get 0 probability in search result policies."""
+        game = PyRat(width=5, height=5, cheese_count=3, seed=42)
+        prior = np.ones(5) / 5
+        root = MCTSNode(
+            game_state=None,
+            prior_policy_p1=prior,
+            prior_policy_p2=prior,
+            nn_payout_prediction=np.zeros((2, 5, 5)),
+        )
+        tree = MCTSTree(game=game, root=root, gamma=0.99)
+        search = DecoupledPUCTSearch(tree, DecoupledPUCTConfig(simulations=50))
+        result = search.search()
+
+        for i in range(5):
+            if root.p1_effective[i] != i:
+                assert result.policy_p1[i] == 0.0
+                assert result.learning_policy_p1[i] == 0.0
+            if root.p2_effective[i] != i:
+                assert result.policy_p2[i] == 0.0
+                assert result.learning_policy_p2[i] == 0.0
+
+    def test_payout_zeros_for_low_visits(self) -> None:
+        """Payout matrix has zeros where visit count was too low."""
+        game = PyRat(width=5, height=5, cheese_count=3, seed=42)
+        prior = np.ones(5) / 5
+        root = MCTSNode(
+            game_state=None,
+            prior_policy_p1=prior,
+            prior_policy_p2=prior,
+            nn_payout_prediction=np.zeros((2, 5, 5)),
+        )
+        tree = MCTSTree(game=game, root=root, gamma=0.99)
+        # Few simulations so some pairs will have < 2 visits
+        search = DecoupledPUCTSearch(tree, DecoupledPUCTConfig(simulations=10))
+        result = search.search()
+
+        # Cells with 0 visits in the expanded visit matrix should have 0 payout
+        for i in range(5):
+            for j in range(5):
+                if result.action_visits[i, j] == 0:
+                    assert result.payout_matrix[0, i, j] == 0.0
+                    assert result.payout_matrix[1, i, j] == 0.0
+
+    def test_forced_playouts_produce_valid_visits(self) -> None:
+        """With force_k > 0, search produces valid non-negative visit counts."""
+        game = PyRat(width=5, height=5, cheese_count=3, seed=42)
+        prior = np.ones(5) / 5
+        root = MCTSNode(
+            game_state=None,
+            prior_policy_p1=prior,
+            prior_policy_p2=prior,
+            nn_payout_prediction=np.zeros((2, 5, 5)),
+        )
+        tree = MCTSTree(game=game, root=root, gamma=0.99)
+
+        config = DecoupledPUCTConfig(simulations=50, force_k=2.0)
+        search = DecoupledPUCTSearch(tree, config)
+        result = search.search()
+
+        # Pruned visits should be non-negative and have some mass
+        assert np.all(result.action_visits >= 0)
+        assert result.action_visits.sum() > 0
+        assert result.action_visits.shape == (5, 5)
+
+
 class TestBackupWithLeafValue:
     """Tests for backup with non-zero leaf value."""
 

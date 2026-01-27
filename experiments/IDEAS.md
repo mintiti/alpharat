@@ -644,3 +644,287 @@ Potential change:
 - Reconstruct from threshold: if visits < threshold at end, they were all forced
 
 **Next step**: Read KataGo paper/code to understand their exact mechanism
+
+---
+
+## 2026-01-20: Forced Playout Pruning — Implementation Details
+
+### Context
+
+From 7x7 iter2: payout matrix correlation is 0.10 (garbage). Root cause: MCTS explores 1-2 pairs deeply, rest are noise. Forced playouts help exploration but pollute training targets.
+
+### KataGo's Approach (Single-Player)
+
+From the paper: "we identify the child c* with the most playouts, and then from each other child c, we subtract up to n_forced playouts so long as it does not cause PUCT(c) >= PUCT(c*)"
+
+**PUCT formula:**
+```
+PUCT(a) = Q(a) + c · P(a) · √N / (1 + N(a))
+```
+
+**Inverse (solve for N given target PUCT):**
+```
+N'_min(a) = c · P(a) · √N / (PUCT* - Q(a)) - 1
+```
+
+This is "the weight that would make this action's PUCT equal to the best action's PUCT."
+
+### Adaptation for Simultaneous Games
+
+We have decoupled selection — each player selects independently. Adapt by:
+
+1. Compute marginal adjustments per player:
+```
+For P1:
+    i* = argmax_i M₁[i]
+    PUCT* = Q₁[i*] + c · π₁[i*] · √N / (1 + M₁[i*])
+
+    For i ≠ i*:
+        if Q₁[i] ≥ PUCT*:
+            Δ₁[i] = 0  # genuinely good
+        else:
+            N'_min = c · π₁[i] · √N / (PUCT* - Q₁[i]) - 1
+            Δ₁[i] = max(0, M₁[i] - N'_min)
+
+    Δ₁[i*] = 0
+```
+
+2. Distribute to pairs (additive):
+```
+V'[i,j] = max(0, V[i,j] - Δ₁[i] · π₂[j] - Δ₂[j] · π₁[i])
+```
+
+**Intuition:** When P1 was forced to action i, P2 was selecting via PUCT (initially ~proportional to π₂). So forced visits to pairs (i, ·) are spread roughly as π₂.
+
+### Why Additive Form
+
+The forced visits for pair (i,j) come from:
+- P1 being forced to i (distributed across j by P2's prior)
+- P2 being forced to j (distributed across i by P1's prior)
+
+These are approximately independent contributions. Additive form is the natural decomposition.
+
+Could over-subtract if both players were heavily forced to the same pair — but that's rare, and aggressive pruning is probably fine.
+
+### Fractional Visits
+
+After pruning, V'[i,j] can be fractional. That's fine:
+- For Nash computation: weight pairs by V'
+- For training: these become loss weights
+
+### Edge Cases
+
+- **Q(a) ≥ PUCT***: Action is genuinely good. Don't prune.
+- **All visits forced**: Could result in empty matrix. Fall back to existing min_visits filter.
+- **Best action for one player, worst for other**: Each player's adjustment is independent.
+
+### Implementation Location
+
+- `alpharat/mcts/selection.py`: `compute_pruning_adjustment()` and `prune_visit_counts()`
+- `alpharat/mcts/decoupled_puct.py`: `_prune_forced_visits()` method, called from `_make_result()`
+
+Pruning is automatic when `force_k > 0` in MCTS config.
+
+---
+
+## 2026-01-21: Re-tune MCTS After Pruning Changes
+
+**Context**: Forced playout pruning changed how visits are recorded. The old c_puct and force_k values were tuned for the previous behavior.
+
+**Problem**: Optimal MCTS parameters likely shifted. With pruning, we might want more aggressive forcing (since it gets cleaned up) or different c_puct.
+
+**Approach**: Re-run Optuna sweep on MCTS params with the new pruning logic.
+
+---
+
+## 2026-01-21: Enforce Action Equivalence in NN Payout Output
+
+**Context**: Blocked actions map to STAY (e.g., effective[UP] = STAY when UP is blocked). Equivalent actions should have identical payout values, but the NN doesn't naturally satisfy this.
+
+**Idea**: When MCTS receives the NN's payout prediction, immediately average equivalent rows/columns before using it in the tree.
+
+```python
+# In MCTSTree or MCTSNode, after getting NN prediction:
+payout = equalize_equivalent_actions(payout, p1_effective, p2_effective)
+```
+
+**Why here**: Clean intervention point. NN outputs whatever it outputs, we enforce the constraint before it affects search. No architecture or training changes needed.
+
+**Implementation location**: `MCTSTree._get_nn_prediction()` or `MCTSNode` initialization.
+
+---
+
+## 2026-01-21: Learn from Marginal Visits (AlphaZero-style)
+
+**Context**: Current approach: learn full 5×5 payout matrix → compute Nash → use Nash as policy target.
+
+**The problem with Nash-from-noisy-payouts:**
+
+Nash equilibrium is a *sharp* function. It takes a payout matrix and outputs a potentially peaked strategy — high confidence about which actions are optimal. But our payout matrices are approximations (MCTS estimates with limited rollouts, not ground truth). Applying a sharp function to noisy inputs produces overconfident outputs.
+
+The feedback loop:
+1. MCTS produces approximate payout matrix
+2. Nash computes peaked strategy from it (throws away uncertainty)
+3. NN learns to reproduce that confidence
+4. Next iteration: confident NN priors → exploration concentrates on "best" actions
+5. Other action pairs starved for data → worse payout estimates for them
+6. Repeat — exploration collapses, convergence suffers
+
+**Why visit distributions help:**
+
+Visit counts naturally preserve uncertainty. When MCTS isn't sure, it explores multiple actions — the visit distribution reflects that. Learning from visits keeps the "I'm not sure" signal that Nash throws away.
+
+This is the standard approach (AlphaZero, KataGo). The payout matrix still guides MCTS selection during search. We're not bypassing it — we're just not asking the NN to learn a sharpened version of it.
+
+```python
+# Instead of Nash equilibrium:
+policy_target_p1 = marginal_visits_p1 / total_visits  # [5]
+policy_target_p2 = marginal_visits_p2 / total_visits  # [5]
+```
+
+**Trade-offs:**
+
+| Aspect | Nash targets | Visit targets |
+|--------|--------------|---------------|
+| Confidence | High (sharp) | Calibrated to search uncertainty |
+| Exploration | Tends to collapse | Preserved |
+| Game-theoretic soundness | Exact (given true payouts) | Approximate |
+| Exploitability | Guaranteed unexploitable* | Might be exploitable |
+
+*Only if payout matrix is accurate — which it isn't.
+
+**Hypothesis**: For self-play with approximate payouts, visit targets lead to better long-term convergence because they maintain exploration. The game-theoretic guarantee of Nash is only as good as the payout estimates it's computed from.
+
+---
+
+## 2026-01-21: MCCFR for Simultaneous Games (Big Guns)
+
+**Context**: Current MCTS + Nash approach is a bit ad-hoc. For proper game-theoretic reasoning in simultaneous/imperfect-info games, MCCFR (Monte Carlo Counterfactual Regret Minimization) is the standard.
+
+**What it is**: Instead of Q-values or payout matrices, track regret per action. Policy converges to Nash equilibrium over iterations. Used in poker AI (Libratus, Pluribus).
+
+**Why consider it**:
+- Theoretically sound for simultaneous games
+- Handles mixed strategies naturally
+- Proven at scale
+
+**Why not yet**:
+- Big implementation effort
+- Different algorithm entirely (not MCTS)
+- Current approach might be "good enough" for PyRat
+
+---
+
+## 2026-01-21: Modular Policy Derivation — Acting vs Learning
+
+**Context**: Currently both acting (during self-play) and learning (NN targets) use the same policy: Nash equilibrium from the payout matrix. These should be independently configurable.
+
+### The Decomposition
+
+```
+              SearchResult
+                   │
+       ┌───────────┴───────────┐
+       │                       │
+  action_visits            payout_matrix
+       │                       │
+       ▼                       ▼
+ marginalize()           reduce_and_expand_nash()
+       │                       │
+       ▼                       ▼
+  visit_policy              nash_policy
+
+         Either can be used for:
+         • Acting (sample from it during self-play)
+         • Learning (target for NN training)
+```
+
+**Two independent choices:**
+1. **Acting policy**: How does the agent pick moves? (Nash vs marginal visits)
+2. **Learning target**: What does the NN learn to predict? (Nash vs marginal visits)
+
+Current: both use Nash. But these could be mixed — e.g., act from visits, learn from Nash (or vice versa).
+
+### Why Marginal Visits?
+
+AlphaZero uses visit counts directly as policy targets. Visits naturally reflect MCTS's uncertainty — when the search isn't sure, it explores multiple actions, and the visit distribution captures that.
+
+Nash, by contrast, is a sharp function. It takes noisy payout estimates and outputs confident strategies, throwing away the uncertainty signal. This can cause exploration to collapse over self-play iterations (see "Learn from Marginal Visits" section above).
+
+For simultaneous games, marginalize the visit matrix:
+```python
+policy_p1 = visits.sum(axis=1)  # sum over P2's actions
+policy_p1 /= policy_p1.sum()
+
+policy_p2 = visits.sum(axis=0)  # sum over P1's actions
+policy_p2 /= policy_p2.sum()
+```
+
+**Key point**: The payout matrix still guides MCTS selection during search. We're not removing it — we're just using visits (which preserve uncertainty) as the learning target instead of Nash (which sharpens it).
+
+### KataGo Reference
+
+KataGo separates search params from action selection params in the same config struct:
+
+```cpp
+// searchparams.h
+// Search exploration
+double cpuctExploration;
+...
+
+// Action selection (post-search)
+double chosenMoveTemperature;
+double chosenMoveSubtract;
+double chosenMovePrune;
+```
+
+The pattern: search produces visit counts, then `chosenMove*` params control how visits → action. See `.mt/reference_code/KataGo/cpp/search/searchresults.cpp:572-596` for `getChosenMoveLoc()`.
+
+### Proposed Implementation
+
+Add to `DecoupledPUCTConfig`:
+
+```python
+class DecoupledPUCTConfig(StrictBaseModel):
+    # Exploration (existing)
+    simulations: int
+    c_puct: float
+    ...
+
+    # Action selection (new)
+    action_method: Literal["nash", "visits"] = "nash"
+    action_temperature: float = 1.0
+```
+
+Default `"nash"` preserves current behavior — existing configs work unchanged.
+
+For learning targets, add similar option in training config or `targets.py`.
+
+### Dependency: Config Infrastructure Branch
+
+**Wait for `refactor/config-infrastructure` to merge first.** That branch:
+- Adds `StrictBaseModel` with `extra='forbid'` (catches config typos)
+- Adds Hydra-based config loading with validation
+- Already migrates `DecoupledPUCTConfig` to `StrictBaseModel`
+
+Adding action selection config on that foundation is cleaner.
+
+### Implementation Steps (Post-Merge)
+
+**Part 1 — Learning target (easy)**:
+- `visit_counts` already saved in recordings
+- Add utility: `visits_to_marginal_policy(visits, axis) -> policy`
+- Add flag in `targets.py` or training config to switch between Nash and visits
+- Test: check marginal policies match expected values
+
+**Part 2 — Acting (more plumbing)**:
+- Add `action_method` and `action_temperature` to `DecoupledPUCTConfig`
+- Modify `MCTSAgent.get_move()` to use config to derive policy from `SearchResult`
+- Could compute marginal in agent from `result.action_visits` rather than using `result.policy_*`
+- Game loop stays unchanged — just calls `agent.get_move()`
+
+### Open Questions
+
+- Should `SearchResult.policy_*` always be Nash, with acting policy computed by consumer? Or should SearchResult not have pre-computed policies at all?
+- For acting from visits: use temperature like AlphaZero (`visits^(1/temp)`)? Or just proportional?
+- When to use which? Current hypothesis: **visits for learning** (preserves uncertainty, better long-term convergence), acting policy TBD (could be either).

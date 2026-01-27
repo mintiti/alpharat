@@ -4,7 +4,11 @@ import numpy as np
 import pytest
 
 from alpharat.mcts.nash import (
+    _filter_by_visits,
+    _resolve_fallback,
+    aggregate_equilibria,
     compute_nash_equilibrium,
+    compute_nash_from_reduced,
     compute_nash_value,
     select_action_from_strategy,
 )
@@ -421,3 +425,414 @@ class TestNashWithEquivalence:
 
         # Nash value should be computable (strategies are valid)
         compute_nash_value(p1_payout, p1_strategy, p2_strategy)
+
+
+class TestAggregateEquilibria:
+    """Tests for aggregate_equilibria function — mathematical properties of centroid."""
+
+    # --- Centroid Properties ---
+
+    def test_centroid_is_arithmetic_mean(self) -> None:
+        """Centroid should be the arithmetic mean of input vectors."""
+        v1 = np.array([0.2, 0.3, 0.5])
+        v2 = np.array([0.4, 0.4, 0.2])
+        v3 = np.array([0.1, 0.6, 0.3])
+
+        equilibria = [(v1, v1), (v2, v2), (v3, v3)]
+        p1_result, p2_result = aggregate_equilibria(equilibria)
+
+        expected = (v1 + v2 + v3) / 3
+        np.testing.assert_array_almost_equal(p1_result, expected)
+        np.testing.assert_array_almost_equal(p2_result, expected)
+
+    def test_centroid_of_single_vector(self) -> None:
+        """Centroid of a single vector is that vector."""
+        v = np.array([0.1, 0.2, 0.7])
+        u = np.array([0.5, 0.5])
+
+        p1_result, p2_result = aggregate_equilibria([(v, u)])
+
+        np.testing.assert_array_almost_equal(p1_result, v)
+        np.testing.assert_array_almost_equal(p2_result, u)
+
+    def test_centroid_preserves_probability_sum(self) -> None:
+        """If all inputs sum to 1, output sums to 1."""
+        equilibria = [
+            (np.array([0.3, 0.7]), np.array([0.2, 0.8])),
+            (np.array([0.6, 0.4]), np.array([0.5, 0.5])),
+            (np.array([0.1, 0.9]), np.array([0.9, 0.1])),
+        ]
+
+        p1_result, p2_result = aggregate_equilibria(equilibria)
+
+        assert abs(p1_result.sum() - 1.0) < 1e-10
+        assert abs(p2_result.sum() - 1.0) < 1e-10
+
+    def test_centroid_preserves_nonnegativity(self) -> None:
+        """If all inputs are non-negative, output is non-negative."""
+        equilibria = [
+            (np.array([0.0, 0.5, 0.5]), np.array([1.0, 0.0])),
+            (np.array([0.5, 0.0, 0.5]), np.array([0.0, 1.0])),
+            (np.array([0.5, 0.5, 0.0]), np.array([0.5, 0.5])),
+        ]
+
+        p1_result, p2_result = aggregate_equilibria(equilibria)
+
+        assert np.all(p1_result >= 0)
+        assert np.all(p2_result >= 0)
+
+    def test_centroid_in_convex_hull(self) -> None:
+        """Centroid is a convex combination of inputs (equal weights)."""
+        v1 = np.array([1.0, 0.0, 0.0])
+        v2 = np.array([0.0, 1.0, 0.0])
+        v3 = np.array([0.0, 0.0, 1.0])
+
+        equilibria = [(v1, v1), (v2, v2), (v3, v3)]
+        p1_result, _ = aggregate_equilibria(equilibria)
+
+        # Centroid of three corners of simplex is the center
+        expected = np.array([1 / 3, 1 / 3, 1 / 3])
+        np.testing.assert_array_almost_equal(p1_result, expected)
+
+    def test_centroid_idempotent_on_identical(self) -> None:
+        """Centroid of identical vectors is that vector."""
+        v = np.array([0.25, 0.25, 0.5])
+        u = np.array([0.4, 0.6])
+
+        equilibria = [(v, u), (v, u), (v, u)]
+        p1_result, p2_result = aggregate_equilibria(equilibria)
+
+        np.testing.assert_array_almost_equal(p1_result, v)
+        np.testing.assert_array_almost_equal(p2_result, u)
+
+    # --- Policy Aggregation Properties ---
+
+    def test_aggregate_independent_per_player(self) -> None:
+        """P1's result depends only on P1 strategies, not P2's."""
+        p1_a = np.array([0.3, 0.7])
+        p1_b = np.array([0.5, 0.5])
+        p2_x = np.array([0.1, 0.9])
+        p2_y = np.array([0.8, 0.2])
+
+        # Different P2 strategies should not affect P1 result
+        result1, _ = aggregate_equilibria([(p1_a, p2_x), (p1_b, p2_x)])
+        result2, _ = aggregate_equilibria([(p1_a, p2_y), (p1_b, p2_y)])
+
+        np.testing.assert_array_almost_equal(result1, result2)
+
+    def test_aggregate_returns_valid_distributions(self) -> None:
+        """Both outputs are valid probability distributions."""
+        equilibria = [
+            (np.array([0.2, 0.3, 0.5]), np.array([0.6, 0.4])),
+            (np.array([0.4, 0.4, 0.2]), np.array([0.3, 0.7])),
+        ]
+
+        p1_result, p2_result = aggregate_equilibria(equilibria)
+
+        # Sum to 1
+        assert abs(p1_result.sum() - 1.0) < 1e-10
+        assert abs(p2_result.sum() - 1.0) < 1e-10
+        # Non-negative
+        assert np.all(p1_result >= 0)
+        assert np.all(p2_result >= 0)
+
+    def test_aggregate_handles_different_action_counts(self) -> None:
+        """Works when P1 and P2 have different numbers of actions."""
+        p1_strat = np.array([0.5, 0.3, 0.2])  # 3 actions
+        p2_strat = np.array([0.2, 0.2, 0.2, 0.2, 0.2])  # 5 actions
+
+        equilibria = [(p1_strat, p2_strat)]
+        p1_result, p2_result = aggregate_equilibria(equilibria)
+
+        assert len(p1_result) == 3
+        assert len(p2_result) == 5
+
+    # --- Edge Cases ---
+
+    def test_aggregate_empty_raises(self) -> None:
+        """Empty list raises ValueError."""
+        with pytest.raises(ValueError, match="Cannot aggregate empty"):
+            aggregate_equilibria([])
+
+    def test_aggregate_pure_strategies(self) -> None:
+        """Pure strategies average to mixed correctly."""
+        # Two pure strategies: (1,0) and (0,1)
+        eq1 = (np.array([1.0, 0.0]), np.array([1.0, 0.0]))
+        eq2 = (np.array([0.0, 1.0]), np.array([0.0, 1.0]))
+
+        p1_result, p2_result = aggregate_equilibria([eq1, eq2])
+
+        # Should average to (0.5, 0.5)
+        np.testing.assert_array_almost_equal(p1_result, [0.5, 0.5])
+        np.testing.assert_array_almost_equal(p2_result, [0.5, 0.5])
+
+
+class TestNashFromReduced:
+    """Tests for compute_nash_from_reduced — Nash on already-reduced matrices."""
+
+    def test_matching_pennies_reduced(self) -> None:
+        """Matching pennies in reduced space (2×2) returns [0.5, 0.5]."""
+        p1_payout = np.array([[1.0, -1.0], [-1.0, 1.0]])
+        reduced_payout = np.stack([p1_payout, -p1_payout])
+
+        p1, p2 = compute_nash_from_reduced(reduced_payout)
+
+        np.testing.assert_array_almost_equal(p1, [0.5, 0.5])
+        np.testing.assert_array_almost_equal(p2, [0.5, 0.5])
+
+    def test_result_shapes_match_input(self) -> None:
+        """Output shapes match reduced dimensions, not expanded."""
+        # 3×4 reduced matrix
+        p1_pay = np.random.default_rng(42).random((3, 4))
+        reduced_payout = np.stack([p1_pay, -p1_pay])
+
+        p1, p2 = compute_nash_from_reduced(reduced_payout)
+
+        assert p1.shape == (3,)
+        assert p2.shape == (4,)
+        assert abs(p1.sum() - 1.0) < 1e-6
+        assert abs(p2.sum() - 1.0) < 1e-6
+
+    def test_constant_matrix_returns_prior(self) -> None:
+        """All-constant payout returns reduced prior when provided."""
+        reduced_payout = np.zeros((2, 3, 4))
+        prior_p1 = np.array([0.5, 0.3, 0.2])
+        prior_p2 = np.array([0.4, 0.3, 0.2, 0.1])
+
+        p1, p2 = compute_nash_from_reduced(
+            reduced_payout,
+            reduced_prior_p1=prior_p1,
+            reduced_prior_p2=prior_p2,
+        )
+
+        np.testing.assert_array_almost_equal(p1, prior_p1)
+        np.testing.assert_array_almost_equal(p2, prior_p2)
+
+    def test_constant_matrix_no_prior_returns_uniform(self) -> None:
+        """All-constant payout without prior returns uniform."""
+        reduced_payout = np.zeros((2, 3, 4))
+
+        p1, p2 = compute_nash_from_reduced(reduced_payout)
+
+        np.testing.assert_array_almost_equal(p1, np.ones(3) / 3)
+        np.testing.assert_array_almost_equal(p2, np.ones(4) / 4)
+
+    def test_with_visit_filtering(self) -> None:
+        """Low-visit outcomes get filtered before Nash computation."""
+        p1_payout = np.array([[1.0, -1.0, 0.0], [-1.0, 1.0, 0.0], [0.0, 0.0, 0.0]])
+        reduced_payout = np.stack([p1_payout, -p1_payout])
+
+        # Only outcomes 0 and 1 have enough visits
+        visits = np.array([[10.0, 8.0, 1.0], [8.0, 10.0, 0.0], [1.0, 0.0, 0.0]])
+
+        p1, p2 = compute_nash_from_reduced(
+            reduced_payout,
+            reduced_visits=visits,
+            min_visits=5,
+        )
+
+        assert p1.shape == (3,)
+        assert p2.shape == (3,)
+        # Outcome 2 should get zero probability (filtered out)
+        assert p1[2] == 0.0
+        assert p2[2] == 0.0
+        # Valid distribution
+        assert abs(p1.sum() - 1.0) < 1e-6
+        assert abs(p2.sum() - 1.0) < 1e-6
+
+    def test_multiple_equilibria_centroid(self) -> None:
+        """Multiple equilibria are averaged (centroid) in reduced space."""
+        # Battle of the sexes has multiple equilibria
+        p1_payout = np.array([[3.0, 0.0], [0.0, 2.0]])
+        reduced_payout = np.stack([p1_payout, -p1_payout])
+
+        p1, p2 = compute_nash_from_reduced(reduced_payout)
+
+        # Should be valid distributions
+        assert abs(p1.sum() - 1.0) < 1e-6
+        assert abs(p2.sum() - 1.0) < 1e-6
+        assert np.all(p1 >= 0)
+        assert np.all(p2 >= 0)
+
+    def test_single_outcome_per_player(self) -> None:
+        """Single outcome for each player → trivial Nash."""
+        reduced_payout = np.array([[[5.0]], [[-5.0]]])
+
+        p1, p2 = compute_nash_from_reduced(reduced_payout)
+
+        np.testing.assert_array_almost_equal(p1, [1.0])
+        np.testing.assert_array_almost_equal(p2, [1.0])
+
+
+class TestFilterByVisits:
+    """Tests for _filter_by_visits edge case: all actions below threshold."""
+
+    def test_all_p1_below_threshold_keeps_most_visited(self) -> None:
+        """When all P1 actions are below threshold, keep the most-visited P1 action."""
+        matrix = np.ones((2, 3, 3))
+        visits = np.array([[1.0, 1.0, 1.0], [2.0, 2.0, 2.0], [0.0, 0.0, 0.0]])
+        # P1 marginal visits: [3, 6, 0] — all below min_visits=10
+        # P2 marginal visits: [3, 3, 3] — all below min_visits=10
+
+        filtered, p1_kept, p2_kept = _filter_by_visits(
+            matrix, visits, p1_actions=[0, 1, 2], p2_actions=[0, 1, 2], min_visits=10
+        )
+
+        # P1: most visited is index 1 (marginal=6)
+        assert p1_kept == [1]
+        # P2: most visited is index 0 (argmax of tied values)
+        assert len(p2_kept) == 1
+
+    def test_all_p2_below_threshold_keeps_most_visited(self) -> None:
+        """When all P2 actions are below threshold, keep the most-visited P2 action."""
+        matrix = np.ones((2, 3, 3))
+        # P1 marginals: [30, 30, 30] — above threshold
+        # P2 marginals: [3, 6, 0] — all below threshold
+        visits = np.array([[10.0, 10.0, 10.0], [10.0, 10.0, 10.0], [10.0, 10.0, 10.0]])
+        # Override for P2: make column sums small
+        visits = np.array([[1.0, 2.0, 0.0], [1.0, 2.0, 0.0], [1.0, 2.0, 0.0]])
+        # P1 marginals: [3, 3, 3] — below 10
+        # P2 marginals: [3, 6, 0] — below 10
+
+        filtered, p1_kept, p2_kept = _filter_by_visits(
+            matrix, visits, p1_actions=[0, 1, 2], p2_actions=[0, 1, 2], min_visits=10
+        )
+
+        # P2: most visited is column 1 (marginal=6)
+        assert p2_kept == [1]
+
+    def test_both_all_below_threshold(self) -> None:
+        """When both players have all actions below threshold, keep most-visited for each."""
+        matrix = np.array(
+            [
+                [[1.0, 2.0], [3.0, 4.0], [5.0, 6.0]],
+                [[0.5, 1.0], [1.5, 2.0], [2.5, 3.0]],
+            ]
+        )
+        visits = np.array([[0.0, 1.0], [3.0, 0.0], [1.0, 0.0]])
+        # P1 marginals: [1, 3, 1] — all below 10
+        # P2 marginals: [4, 1] — all below 10
+
+        filtered, p1_kept, p2_kept = _filter_by_visits(
+            matrix, visits, p1_actions=[0, 1, 2], p2_actions=[0, 1], min_visits=10
+        )
+
+        # P1: most visited is action 1 (marginal=3)
+        assert p1_kept == [1]
+        # P2: most visited is action 0 (marginal=4)
+        assert p2_kept == [0]
+        # Filtered matrix is 1x1 from the intersection
+        assert filtered.shape == (2, 1, 1)
+        assert filtered[0, 0, 0] == 3.0  # matrix[0, 1, 0]
+        assert filtered[1, 0, 0] == 1.5  # matrix[1, 1, 0]
+
+
+class TestResolveFallback:
+    """Tests for the _resolve_fallback helper."""
+
+    def test_marginal_visits_preferred(self) -> None:
+        """Marginal visits are used when available and nonzero."""
+        visits = np.array([3.0, 1.0, 6.0])
+        prior = np.array([0.5, 0.3, 0.2])
+
+        result = _resolve_fallback(3, visits, prior)
+        np.testing.assert_array_almost_equal(result, [0.3, 0.1, 0.6])
+
+    def test_zero_visits_falls_through_to_prior(self) -> None:
+        """All-zero visits fall through to prior."""
+        visits = np.array([0.0, 0.0, 0.0])
+        prior = np.array([0.5, 0.3, 0.2])
+
+        result = _resolve_fallback(3, visits, prior)
+        np.testing.assert_array_almost_equal(result, prior)
+
+    def test_no_visits_no_prior_gives_uniform(self) -> None:
+        """Without visits or prior, returns uniform."""
+        result = _resolve_fallback(4, None, None)
+        np.testing.assert_array_almost_equal(result, np.ones(4) / 4)
+
+
+class TestMarginalVisitFallback:
+    """Tests for Nash fallback using marginal visit distribution."""
+
+    def test_constant_matrix_uses_marginal_visits(self) -> None:
+        """Constant payout with visits → marginal visit distribution, not prior."""
+        from alpharat.mcts.nash import _compute_nash_raw
+
+        payout = np.zeros((2, 3, 3))
+        prior_p1 = np.array([0.5, 0.3, 0.2])
+        prior_p2 = np.array([0.2, 0.3, 0.5])
+        marginals_p1 = np.array([10.0, 20.0, 10.0])  # → [0.25, 0.5, 0.25]
+        marginals_p2 = np.array([5.0, 5.0, 10.0])  # → [0.25, 0.25, 0.5]
+
+        p1, p2 = _compute_nash_raw(
+            payout,
+            prior_p1=prior_p1,
+            prior_p2=prior_p2,
+            marginal_visits_p1=marginals_p1,
+            marginal_visits_p2=marginals_p2,
+        )
+
+        # Should use visits, not priors
+        np.testing.assert_array_almost_equal(p1, [0.25, 0.5, 0.25])
+        np.testing.assert_array_almost_equal(p2, [0.25, 0.25, 0.5])
+
+    def test_constant_matrix_zero_visits_falls_through_to_prior(self) -> None:
+        """Constant payout with all-zero visits → falls through to prior."""
+        from alpharat.mcts.nash import _compute_nash_raw
+
+        payout = np.zeros((2, 3, 3))
+        prior_p1 = np.array([0.5, 0.3, 0.2])
+        prior_p2 = np.array([0.2, 0.3, 0.5])
+        marginals_p1 = np.array([0.0, 0.0, 0.0])
+        marginals_p2 = np.array([0.0, 0.0, 0.0])
+
+        p1, p2 = _compute_nash_raw(
+            payout,
+            prior_p1=prior_p1,
+            prior_p2=prior_p2,
+            marginal_visits_p1=marginals_p1,
+            marginal_visits_p2=marginals_p2,
+        )
+
+        # Zero visits → prior
+        np.testing.assert_array_almost_equal(p1, prior_p1)
+        np.testing.assert_array_almost_equal(p2, prior_p2)
+
+    def test_from_reduced_constant_matrix_uses_visits(self) -> None:
+        """End-to-end: compute_nash_from_reduced with constant matrix uses visits."""
+        reduced_payout = np.zeros((2, 3, 4))
+        prior_p1 = np.array([0.5, 0.3, 0.2])
+        prior_p2 = np.array([0.4, 0.3, 0.2, 0.1])
+
+        # Visits that produce non-uniform marginals
+        # P1 marginals: [6, 12, 6] → [0.25, 0.5, 0.25]
+        # P2 marginals: [3, 9, 6, 6] → [0.125, 0.375, 0.25, 0.25]
+        visits = np.array([[1.0, 2.0, 1.0, 2.0], [2.0, 4.0, 3.0, 3.0], [0.0, 3.0, 2.0, 1.0]])
+
+        p1, p2 = compute_nash_from_reduced(
+            reduced_payout,
+            reduced_prior_p1=prior_p1,
+            reduced_prior_p2=prior_p2,
+            reduced_visits=visits,
+        )
+
+        # All visits pass min_visits=5 threshold for marginals:
+        # P1 marginals: [6, 12, 6] → all ≥ 5
+        # P2 marginals: [3, 9, 6, 6] → col 0 has 3, below default min_visits=5
+        # So col 0 gets filtered out, leaving 3x3 constant matrix
+        # P1 filtered marginals: [4, 10, 6] → from visits[:, 1:]
+        # P2 filtered marginals: [9, 6, 6]
+        # → Normalized: P1=[0.2, 0.5, 0.3], P2=[3/7, 2/7, 2/7]
+        # Then expanded back: P2 col 0 = 0
+
+        # Verify basic properties
+        assert abs(p1.sum() - 1.0) < 1e-6
+        assert abs(p2.sum() - 1.0) < 1e-6
+        assert p1.shape == (3,)
+        assert p2.shape == (4,)
+        # P2 action 0 filtered out (only 3 marginal visits < min_visits=5)
+        assert p2[0] == 0.0
+        # Remaining P2 actions should reflect marginal visits, not prior
+        # P2 marginals for kept actions [1,2,3]: [9, 6, 6] → [3/7, 2/7, 2/7]
+        np.testing.assert_array_almost_equal(p2[1:], [9 / 21, 6 / 21, 6 / 21])

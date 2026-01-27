@@ -176,8 +176,9 @@ class GameRecorder:
             visit_counts=visit_counts.copy(),
             prior_p1=prior_p1.copy(),
             prior_p2=prior_p2.copy(),
-            policy_p1=search_result.policy_p1.copy(),
-            policy_p2=search_result.policy_p2.copy(),
+            # Save learning policies (for NN training), not acting policies
+            policy_p1=search_result.learning_policy_p1.copy(),
+            policy_p2=search_result.learning_policy_p2.copy(),
             action_p1=action_p1,
             action_p2=action_p2,
         )

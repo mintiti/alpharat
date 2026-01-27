@@ -9,7 +9,10 @@ import numpy as np
 import pytest
 
 from alpharat.data.sharding import (
+    GameRef,
     TrainingSetManifest,
+    _collect_game_refs,
+    _iter_games_from_refs,
     _load_all_positions,
     _write_shards,
     load_training_set_manifest,
@@ -786,3 +789,173 @@ class TestPrepareTrainingSetWithSplit:
                     output_dir=output_dir,
                     builder=builder,
                 )
+
+
+# =============================================================================
+# GameRef pipeline tests
+# =============================================================================
+
+
+def _create_bundle_npz(
+    path: Path,
+    *,
+    num_games: int = 2,
+    positions_per_game: int = 3,
+    width: int = 5,
+    height: int = 5,
+) -> None:
+    """Create a minimal valid bundle npz file for testing."""
+    k = num_games
+    n = num_games * positions_per_game
+
+    game_lengths = np.array([positions_per_game] * k, dtype=np.int32)
+
+    maze = np.ones((k, height, width, 4), dtype=np.int8)
+    maze[:, :, 0, 3] = -1  # LEFT edge
+    maze[:, :, width - 1, 1] = -1  # RIGHT edge
+    maze[:, 0, :, 0] = -1  # UP edge
+    maze[:, height - 1, :, 2] = -1  # DOWN edge
+
+    initial_cheese = np.zeros((k, height, width), dtype=bool)
+    initial_cheese[:, 2, 2] = True
+
+    cheese_outcomes = np.full((k, height, width), CheeseOutcome.UNCOLLECTED, dtype=np.int8)
+    cheese_outcomes[:, 2, 2] = CheeseOutcome.P1_WIN
+
+    np.savez_compressed(
+        path,
+        game_lengths=game_lengths,
+        maze=maze,
+        initial_cheese=initial_cheese,
+        cheese_outcomes=cheese_outcomes,
+        max_turns=np.full(k, 100, dtype=np.int16),
+        result=np.ones(k, dtype=np.int8),
+        final_p1_score=np.full(k, 2.0, dtype=np.float32),
+        final_p2_score=np.full(k, 1.0, dtype=np.float32),
+        p1_pos=np.tile(np.array([[1, 1]], dtype=np.int8), (n, 1)),
+        p2_pos=np.tile(np.array([[3, 3]], dtype=np.int8), (n, 1)),
+        p1_score=np.zeros(n, dtype=np.float32),
+        p2_score=np.zeros(n, dtype=np.float32),
+        p1_mud=np.zeros(n, dtype=np.int8),
+        p2_mud=np.zeros(n, dtype=np.int8),
+        cheese_mask=np.zeros((n, height, width), dtype=bool),
+        turn=np.tile(np.arange(positions_per_game, dtype=np.int16), k),
+        payout_matrix=np.zeros((n, 2, 5, 5), dtype=np.float32),
+        visit_counts=np.ones((n, 5, 5), dtype=np.int32) * 10,
+        prior_p1=np.ones((n, 5), dtype=np.float32) / 5,
+        prior_p2=np.ones((n, 5), dtype=np.float32) / 5,
+        policy_p1=np.ones((n, 5), dtype=np.float32) / 5,
+        policy_p2=np.ones((n, 5), dtype=np.float32) / 5,
+        action_p1=np.zeros(n, dtype=np.int8),
+        action_p2=np.zeros(n, dtype=np.int8),
+    )
+
+
+class TestCollectGameRefs:
+    """Tests for _collect_game_refs()."""
+
+    def test_single_file_games(self) -> None:
+        """Single-game files produce refs with bundle_index=None."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            batch_dir = _create_batch(Path(tmpdir), "batch1", num_games=3)
+            refs = _collect_game_refs([batch_dir])
+
+            assert len(refs) == 3
+            for ref in refs:
+                assert ref.bundle_index is None
+
+    def test_bundle_file_games(self) -> None:
+        """Bundle files produce one ref per game with correct bundle_index."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp_path = Path(tmpdir)
+            batch_dir = tmp_path / "batch1"
+            games_dir = batch_dir / "games"
+            games_dir.mkdir(parents=True)
+
+            _create_bundle_npz(games_dir / "bundle.npz", num_games=3, positions_per_game=2)
+
+            refs = _collect_game_refs([batch_dir])
+
+            assert len(refs) == 3
+            bundle_indices = {ref.bundle_index for ref in refs}
+            assert bundle_indices == {0, 1, 2}
+            # All point to the same file
+            assert all(ref.file_path == games_dir / "bundle.npz" for ref in refs)
+
+    def test_mixed_directory(self) -> None:
+        """Directories with both bundles and single files are handled correctly."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp_path = Path(tmpdir)
+            batch_dir = tmp_path / "batch1"
+            games_dir = batch_dir / "games"
+            games_dir.mkdir(parents=True)
+
+            # 2 single-game files
+            _create_game_npz(games_dir / "game_0.npz")
+            _create_game_npz(games_dir / "game_1.npz")
+
+            # 1 bundle with 3 games
+            _create_bundle_npz(games_dir / "bundle.npz", num_games=3, positions_per_game=2)
+
+            refs = _collect_game_refs([batch_dir])
+
+            assert len(refs) == 5  # 2 single + 3 from bundle
+            single_refs = [r for r in refs if r.bundle_index is None]
+            bundle_refs = [r for r in refs if r.bundle_index is not None]
+            assert len(single_refs) == 2
+            assert len(bundle_refs) == 3
+
+    def test_no_games_raises(self) -> None:
+        """Empty batch directory raises ValueError."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            batch_dir = Path(tmpdir) / "empty_batch"
+            batch_dir.mkdir()
+            (batch_dir / "games").mkdir()
+
+            with pytest.raises(ValueError, match="No games found"):
+                _collect_game_refs([batch_dir])
+
+
+class TestIterGamesFromRefs:
+    """Tests for _iter_games_from_refs()."""
+
+    def test_returns_games_in_ref_order(self) -> None:
+        """Games are yielded in the order specified by refs."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp_path = Path(tmpdir)
+            games_dir = tmp_path / "games"
+            games_dir.mkdir()
+
+            # Create 3 single-game files with distinct scores
+            for i in range(3):
+                _create_game_npz(
+                    games_dir / f"game_{i}.npz",
+                    final_p1_score=float(i + 1),
+                    final_p2_score=0.0,
+                )
+
+            files = sorted(games_dir.glob("*.npz"))
+            refs = [GameRef(f, bundle_index=None) for f in files]
+
+            # Reverse the order
+            reversed_refs = list(reversed(refs))
+            games = list(_iter_games_from_refs(reversed_refs))
+
+            # Scores should match reversed file order
+            scores = [g.final_p1_score for g in games]
+            assert scores == [3.0, 2.0, 1.0]
+
+    def test_handles_bundle_refs(self) -> None:
+        """Correctly extracts specific games from bundle files."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp_path = Path(tmpdir)
+            bundle_path = tmp_path / "bundle.npz"
+            _create_bundle_npz(bundle_path, num_games=3, positions_per_game=2)
+
+            # Request only the second game (index 1)
+            refs = [GameRef(bundle_path, bundle_index=1)]
+            games = list(_iter_games_from_refs(refs))
+
+            assert len(games) == 1
+            # Game should have 2 positions (as created)
+            assert len(games[0].positions) == 2

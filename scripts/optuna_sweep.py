@@ -20,14 +20,25 @@ from alpharat.ai import GreedyAgent, MCTSAgent
 from alpharat.eval.game import play_game
 from alpharat.mcts.decoupled_puct import DecoupledPUCTConfig
 
-# Game parameters - 5x5 open maze
-WIDTH, HEIGHT = 5, 5
-CHEESE_COUNT, MAX_TURNS = 5, 30
+# Game parameters - 7x7 open maze
+WIDTH, HEIGHT = 7, 7
+CHEESE_COUNT, MAX_TURNS = 10, 50
 WALL_DENSITY, MUD_DENSITY = 0.0, 0.0
 GAMES_PER_CONFIG = 100
 
+# Known-good configs to seed the search
+SEED_CONFIGS = [
+    # Previous Optuna best (pre-pruning)
+    {"n_sims": 554, "c_puct": 8.34, "force_k": 0.88},
+    # KataGo default force_k
+    {"n_sims": 200, "c_puct": 4.73, "force_k": 2.0},
+    # Higher forcing variants (pruning should handle these better now)
+    {"n_sims": 554, "c_puct": 8.34, "force_k": 4.0},
+    {"n_sims": 554, "c_puct": 8.34, "force_k": 8.0},
+]
 
-def objective(trial: optuna.Trial) -> float:
+
+def objective(trial: optuna.Trial) -> tuple[float, int]:
     """Run games vs Greedy, return win rate."""
     n_sims = trial.suggest_int("n_sims", 200, 1200, log=True)
     c_puct = trial.suggest_float("c_puct", 0.5, 16.0, log=True)
@@ -57,12 +68,7 @@ def objective(trial: optuna.Trial) -> float:
         elif result.winner == 0:
             wins += 0.5  # Draw counts as half win
 
-        # Report intermediate result for pruning
-        trial.report(wins / (game_idx + 1), step=game_idx)
-        if trial.should_prune():
-            raise optuna.TrialPruned()
-
-    return wins / GAMES_PER_CONFIG
+    return wins / GAMES_PER_CONFIG, n_sims
 
 
 def enqueue_seed_trials(study: optuna.Study, csv_path: str, top_n: int) -> None:
@@ -88,7 +94,7 @@ def enqueue_seed_trials(study: optuna.Study, csv_path: str, top_n: int) -> None:
 def main() -> None:
     parser = argparse.ArgumentParser(description="PUCT parameter sweep with Optuna")
     parser.add_argument("--n-jobs", type=int, default=1, help="Parallel workers")
-    parser.add_argument("--study-name", default="bimatrix_mcts_5x5", help="Study name")
+    parser.add_argument("--study-name", default="visits_fix_7x7_mo", help="Study name")
     parser.add_argument("--seed-from", type=str, help="CSV file to seed trials from")
     parser.add_argument("--seed-top", type=int, default=20, help="Number of top configs to seed")
     args = parser.parse_args()
@@ -96,39 +102,45 @@ def main() -> None:
     # Ensure results directory exists
     Path("results").mkdir(exist_ok=True)
 
-    storage = "sqlite:///results/bimatrix_mcts_5x5.db"
-    pruner = optuna.pruners.HyperbandPruner(
-        min_resource=40,
-        max_resource=GAMES_PER_CONFIG,
-        reduction_factor=2,
-    )
+    db_path = f"results/{args.study_name}.db"
+    storage = f"sqlite:///{db_path}"
 
     study = optuna.create_study(
         study_name=args.study_name,
         storage=storage,
-        pruner=pruner,
-        direction="maximize",
+        directions=["maximize", "minimize"],  # win_rate up, n_sims down
         load_if_exists=True,
     )
+    print(f"Study: {args.study_name}, DB: {db_path}")
 
-    # Seed with good configs from previous sweep
+    # Seed with known-good configs
+    for cfg in SEED_CONFIGS:
+        study.enqueue_trial(cfg)
+    print(f"Enqueued {len(SEED_CONFIGS)} known-good configs")
+
+    # Optionally seed from CSV results
     if args.seed_from:
         enqueue_seed_trials(study, args.seed_from, args.seed_top)
 
     n_trials = 20000  # TPE sampler explores the space
     study.optimize(objective, n_trials=n_trials, n_jobs=args.n_jobs)
 
-    # Visualizations
-    fig = optuna.visualization.plot_contour(study, params=["n_sims", "c_puct"])
-    fig.write_image("results/puct_contour.png")
+    # Visualizations (MO-compatible)
+    fig = optuna.visualization.plot_pareto_front(study, target_names=["win_rate", "n_sims"])
+    fig.write_image(f"results/{args.study_name}_pareto.png")
 
-    fig = optuna.visualization.plot_param_importances(study)
-    fig.write_image("results/puct_importance.png")
+    fig = optuna.visualization.plot_param_importances(
+        study,
+        target=lambda t: t.values[0],  # importance for win_rate
+    )
+    fig.write_image(f"results/{args.study_name}_importance.png")
 
-    # Summary
-    print(f"\nBest params: {study.best_params}")
-    print(f"Best score: {study.best_value:.2f}")
-    print("\nVisualizations saved to results/")
+    # Summary — Pareto front
+    print("\nPareto front:")
+    for trial in study.best_trials:
+        win_rate, n_sims = trial.values
+        print(f"  win_rate={win_rate:.2%}, n_sims={n_sims} — {trial.params}")
+    print(f"\nVisualizations saved to results/{args.study_name}_*.png")
 
 
 if __name__ == "__main__":
