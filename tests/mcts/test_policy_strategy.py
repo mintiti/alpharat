@@ -288,6 +288,7 @@ class TestVisitPolicyConfig:
             subtract_visits=3.0,
         )
         strategy = config.build()
+        assert isinstance(strategy, VisitPolicyStrategy)
 
         assert strategy.temperature == 0.5
         assert strategy.temperature_only_below_prob == 0.2

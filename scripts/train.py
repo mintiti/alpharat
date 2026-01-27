@@ -17,7 +17,7 @@ import logging
 import sys
 from pathlib import Path
 
-from alpharat.config.loader import load_config
+from alpharat.config.loader import load_config, split_config_path
 from alpharat.experiments import ExperimentManager
 from alpharat.nn.config import TrainConfig
 from alpharat.nn.training import run_training
@@ -66,15 +66,7 @@ def main() -> None:
 
     exp = ExperimentManager(args.experiments_dir)
 
-    # Parse config path: extract configs directory and config name
-    config_path = Path(args.config)
-    config_name = str(config_path.with_suffix(""))  # Remove .yaml if present
-    if config_name.startswith("configs/"):
-        config_dir = "configs"
-        config_name = config_name[len("configs/") :]
-    else:
-        config_dir = str(config_path.parent) if config_path.parent.name else "."
-        config_name = config_path.stem
+    config_dir, config_name = split_config_path(args.config)
 
     # Build Hydra overrides from CLI args
     overrides: list[str] = []

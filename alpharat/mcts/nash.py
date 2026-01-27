@@ -30,8 +30,9 @@ def aggregate_equilibria(
     """Aggregate multiple Nash equilibria into a single policy pair.
 
     Computes the centroid (arithmetic mean) of each player's equilibrium
-    strategies independently. For constant-sum games like PyRat, this is
-    guaranteed to be a valid equilibrium due to interchangeability.
+    strategies independently. For constant-sum games this is guaranteed to be
+    a valid equilibrium due to interchangeability. PyRat is approximately
+    constant-sum (exact under infinite horizon, approximate under turn limits).
 
     Args:
         equilibria: List of (p1_strategy, p2_strategy) Nash equilibria.
@@ -77,17 +78,21 @@ def _filter_by_visits(
     p2_actions: list[int],
     min_visits: int = 5,
 ) -> tuple[np.ndarray, list[int], list[int]]:
-    """Filter actions with insufficient exploration.
+    """Remove entire actions with insufficient marginal visits from Nash computation.
 
-    Actions with total visits below threshold are removed from Nash computation.
-    This prevents computing equilibrium on unreliable payoff estimates.
+    This is the second of two filtering stages in the pipeline:
+    1. ``filter_low_visit_payout`` (in payout_filter.py) zeros individual cells
+       where a specific action *pair* has < 2 visits — pessimistic per-cell cleanup.
+    2. This function removes entire rows/columns where a player's *marginal*
+       visits (summed across opponent actions) fall below threshold — structural
+       reduction of the matrix dimensions before Nash.
 
     Args:
         matrix: Reduced payout matrix [2, m, n].
         visits: Reduced visit matrix [m, n].
-        p1_actions: Effective actions for P1.
-        p2_actions: Effective actions for P2.
-        min_visits: Minimum visits required per player action.
+        p1_actions: Action labels for P1's rows.
+        p2_actions: Action labels for P2's columns.
+        min_visits: Minimum marginal visits required per player action.
 
     Returns:
         Tuple of:
@@ -162,8 +167,9 @@ def compute_nash_equilibrium(
         p1_effective: Optional effective action mapping for P1's actions. If provided,
                      computation reduces to effective actions only.
         p2_effective: Optional effective action mapping for P2's actions.
-        prior_p1: Optional NN prior policy for P1 (for logging on fallback).
-        prior_p2: Optional NN prior policy for P2 (for logging on fallback).
+        prior_p1: Optional prior policy for P1 (used as fallback for constant
+                  or degenerate matrices).
+        prior_p2: Optional prior policy for P2 (used as fallback).
         action_visits: Optional visit counts per action pair. If provided, actions
                       with insufficient visits are filtered before Nash computation.
         min_visits: Minimum visits required per player action (default 5).
@@ -188,10 +194,6 @@ def compute_nash_equilibrium(
             payout_matrix,
             prior_p1=prior_p1,
             prior_p2=prior_p2,
-            p1_effective=p1_effective,
-            p2_effective=p2_effective,
-            action_visits=action_visits,
-            original_payout_matrix=payout_matrix,
         )
 
     # Step 1: Reduce by effective actions
@@ -231,10 +233,6 @@ def compute_nash_equilibrium(
         nash_matrix,
         prior_p1=nash_p1_prior,
         prior_p2=nash_p2_prior,
-        p1_effective=p1_effective,
-        p2_effective=p2_effective,
-        action_visits=action_visits,
-        original_payout_matrix=payout_matrix,
     )
 
     # Step 5: Expand to full action space
@@ -248,24 +246,17 @@ def _compute_nash_raw(
     payout_matrix: np.ndarray,
     prior_p1: np.ndarray | None = None,
     prior_p2: np.ndarray | None = None,
-    p1_effective: list[int] | None = None,
-    p2_effective: list[int] | None = None,
-    action_visits: np.ndarray | None = None,
-    original_payout_matrix: np.ndarray | None = None,
 ) -> tuple[np.ndarray, np.ndarray]:
     """Compute Nash equilibrium on raw bimatrix game without equivalence handling.
 
-    Internal function used by compute_nash_equilibrium.
+    Internal function used by compute_nash_equilibrium and compute_nash_from_reduced.
 
     Args:
         payout_matrix: Shape [2, p1_actions, p2_actions] where [0] is P1's payoffs
                       and [1] is P2's payoffs. May be reduced if using equivalence.
-        prior_p1: Optional NN prior policy for P1 (for logging on fallback).
-        prior_p2: Optional NN prior policy for P2 (for logging on fallback).
-        p1_effective: Optional effective action mapping for P1 (for logging on fallback).
-        p2_effective: Optional effective action mapping for P2 (for logging on fallback).
-        action_visits: Optional visit counts per action pair (for logging on fallback).
-        original_payout_matrix: Optional original (non-reduced) payout matrix for logging.
+        prior_p1: Optional prior policy for P1 (used as fallback for constant or
+                  degenerate matrices).
+        prior_p2: Optional prior policy for P2 (used as fallback).
     """
     p1_payoffs = payout_matrix[0]
     p2_payoffs = payout_matrix[1]
@@ -304,38 +295,30 @@ def _compute_nash_raw(
     if len(equilibria) == 0:
         # No equilibrium found (shouldn't happen for valid games)
         # Use NN prior if available, otherwise uniform
-        log_matrix = original_payout_matrix if original_payout_matrix is not None else payout_matrix
         fallback_type = "prior" if (prior_p1 is not None and prior_p2 is not None) else "uniform"
         logger.warning(
             "No Nash equilibrium found, falling back to %s.\n"
             "P1 payoffs:\n%s\nP2 payoffs:\n%s\n"
-            "P1 prior: %s\nP2 prior: %s\n"
-            "P1 effective: %s\nP2 effective: %s\n"
-            "Action visits:\n%s",
+            "P1 prior: %s\nP2 prior: %s",
             fallback_type,
-            log_matrix[0],
-            log_matrix[1],
+            p1_payoffs,
+            p2_payoffs,
             prior_p1,
             prior_p2,
-            p1_effective,
-            p2_effective,
-            action_visits,
         )
         if prior_p1 is not None and prior_p2 is not None:
             return prior_p1 / prior_p1.sum(), prior_p2 / prior_p2.sum()
         return np.ones(num_p1) / num_p1, np.ones(num_p2) / num_p2
 
     # Aggregate equilibria via centroid
-    # For constant-sum games like PyRat, the centroid is guaranteed to be a valid
-    # equilibrium due to interchangeability: any convex combination of equilibrium
-    # strategies is also an equilibrium.
+    # For constant-sum games, the centroid is a valid equilibrium due to
+    # interchangeability. PyRat is approximately constant-sum (exact under
+    # infinite horizon, approximate under turn limits).
     return aggregate_equilibria(equilibria)
 
 
 def compute_nash_from_reduced(
     reduced_payout: np.ndarray,
-    p1_outcomes: list[int],
-    p2_outcomes: list[int],
     reduced_prior_p1: np.ndarray | None = None,
     reduced_prior_p2: np.ndarray | None = None,
     reduced_visits: np.ndarray | None = None,
@@ -349,8 +332,6 @@ def compute_nash_from_reduced(
 
     Args:
         reduced_payout: Payout matrix [2, n1, n2] already in reduced space.
-        p1_outcomes: Unique outcome action values for P1 (for logging only).
-        p2_outcomes: Unique outcome action values for P2 (for logging only).
         reduced_prior_p1: Prior policy [n1] in reduced space.
         reduced_prior_p2: Prior policy [n2] in reduced space.
         reduced_visits: Visit counts [n1, n2] in reduced space.
@@ -391,9 +372,6 @@ def compute_nash_from_reduced(
         nash_matrix,
         prior_p1=nash_p1_prior,
         prior_p2=nash_p2_prior,
-        p1_effective=p1_outcomes,
-        p2_effective=p2_outcomes,
-        original_payout_matrix=reduced_payout,
     )
 
     # Expand from filtered subset back to full reduced space [n1], [n2]

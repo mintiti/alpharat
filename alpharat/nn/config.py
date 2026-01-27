@@ -13,7 +13,7 @@ from __future__ import annotations
 
 from typing import Annotated, Self
 
-from pydantic import ConfigDict, Discriminator, model_validator
+from pydantic import Discriminator, model_validator
 
 from alpharat.config.base import StrictBaseModel
 from alpharat.config.game import GameConfig  # noqa: TC001

@@ -38,7 +38,7 @@ from pydantic import Field
 
 from alpharat.config.base import StrictBaseModel
 from alpharat.config.game import GameConfig  # noqa: TC001
-from alpharat.config.loader import load_config
+from alpharat.config.loader import load_config, split_config_path
 from alpharat.mcts import DecoupledPUCTConfig  # noqa: TC001
 from alpharat.nn.config import ModelConfig, OptimConfig  # noqa: TC001
 
@@ -400,15 +400,7 @@ def main() -> None:
     )
     args = parser.parse_args()
 
-    # Parse config path
-    config_path = Path(args.config)
-    config_name = str(config_path.with_suffix(""))
-    if config_name.startswith("configs/"):
-        config_dir = "configs"
-        config_name = config_name[len("configs/") :]
-    else:
-        config_dir = str(config_path.parent) if config_path.parent.name else "."
-        config_name = config_path.stem
+    config_dir, config_name = split_config_path(args.config)
 
     # Load config
     config = load_config(IterateConfig, config_dir, config_name)

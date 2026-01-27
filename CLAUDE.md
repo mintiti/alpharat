@@ -265,7 +265,7 @@ The algorithm operates in outcome space. Boundaries handle translation:
 ### Flow Through Training
 
 **Recording (`recorder.py`):**
-- Saves post-MCTS Nash policies (which have 0 for blocked actions)
+- Saves post-MCTS learning policies (which have 0 for blocked actions)
 - Saves the `[2, 5, 5]` payout matrix (separate P1/P2 payoffs, equivalence structure preserved)
 
 **Targets (`targets.py`):**

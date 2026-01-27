@@ -13,9 +13,8 @@ so the batch metadata has actual values.
 from __future__ import annotations
 
 import argparse
-from pathlib import Path
 
-from alpharat.config.loader import load_config
+from alpharat.config.loader import load_config, split_config_path
 from alpharat.data.sampling import SamplingConfig, run_sampling
 
 
@@ -43,16 +42,7 @@ def main() -> None:
     parser.add_argument("--workers", type=int, help="Override number of parallel workers")
     args = parser.parse_args()
 
-    # Parse config path: extract configs directory and config name
-    config_path = Path(args.config)
-    config_name = str(config_path.with_suffix(""))  # Remove .yaml if present
-    if config_name.startswith("configs/"):
-        config_dir = "configs"
-        config_name = config_name[len("configs/") :]
-    else:
-        # Config is in current directory or explicit path
-        config_dir = str(config_path.parent) if config_path.parent.name else "."
-        config_name = config_path.stem
+    config_dir, config_name = split_config_path(args.config)
 
     # Build Hydra overrides from CLI args
     overrides: list[str] = []

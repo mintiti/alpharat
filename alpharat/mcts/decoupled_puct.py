@@ -86,7 +86,8 @@ class DecoupledPUCTSearch:
         self._c_puct = config.c_puct
         self._force_k = config.force_k
 
-        # Two separate slots, but same instance when config couples them
+        # Agent samples from acting, recorder saves learning targets.
+        # Two slots so they can diverge later without changing the data flow.
         strategy: PolicyStrategy = config.policy.build()
         self._acting_strategy = strategy
         self._learning_strategy = strategy
@@ -95,7 +96,7 @@ class DecoupledPUCTSearch:
         """Run MCTS search and return the result.
 
         Returns:
-            SearchResult with Nash policies and payout matrix.
+            SearchResult with policies and payout matrix.
         """
         if self._n_sims == 0:
             return self._pure_nn_result()
@@ -138,8 +139,6 @@ class DecoupledPUCTSearch:
 
         nash_p1, nash_p2 = compute_nash_from_reduced(
             filtered_payout_reduced,
-            p1_outcomes=root.p1_outcomes,
-            p2_outcomes=root.p2_outcomes,
             reduced_prior_p1=root.prior_p1_reduced,
             reduced_prior_p2=root.prior_p2_reduced,
             reduced_visits=visits_reduced,

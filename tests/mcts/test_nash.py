@@ -574,7 +574,7 @@ class TestNashFromReduced:
         p1_payout = np.array([[1.0, -1.0], [-1.0, 1.0]])
         reduced_payout = np.stack([p1_payout, -p1_payout])
 
-        p1, p2 = compute_nash_from_reduced(reduced_payout, p1_outcomes=[0, 1], p2_outcomes=[0, 1])
+        p1, p2 = compute_nash_from_reduced(reduced_payout)
 
         np.testing.assert_array_almost_equal(p1, [0.5, 0.5])
         np.testing.assert_array_almost_equal(p2, [0.5, 0.5])
@@ -585,9 +585,7 @@ class TestNashFromReduced:
         p1_pay = np.random.default_rng(42).random((3, 4))
         reduced_payout = np.stack([p1_pay, -p1_pay])
 
-        p1, p2 = compute_nash_from_reduced(
-            reduced_payout, p1_outcomes=[1, 2, 3], p2_outcomes=[0, 1, 2, 4]
-        )
+        p1, p2 = compute_nash_from_reduced(reduced_payout)
 
         assert p1.shape == (3,)
         assert p2.shape == (4,)
@@ -602,8 +600,6 @@ class TestNashFromReduced:
 
         p1, p2 = compute_nash_from_reduced(
             reduced_payout,
-            p1_outcomes=[1, 2, 4],
-            p2_outcomes=[0, 1, 2, 3],
             reduced_prior_p1=prior_p1,
             reduced_prior_p2=prior_p2,
         )
@@ -615,9 +611,7 @@ class TestNashFromReduced:
         """All-constant payout without prior returns uniform."""
         reduced_payout = np.zeros((2, 3, 4))
 
-        p1, p2 = compute_nash_from_reduced(
-            reduced_payout, p1_outcomes=[1, 2, 4], p2_outcomes=[0, 1, 2, 3]
-        )
+        p1, p2 = compute_nash_from_reduced(reduced_payout)
 
         np.testing.assert_array_almost_equal(p1, np.ones(3) / 3)
         np.testing.assert_array_almost_equal(p2, np.ones(4) / 4)
@@ -632,8 +626,6 @@ class TestNashFromReduced:
 
         p1, p2 = compute_nash_from_reduced(
             reduced_payout,
-            p1_outcomes=[0, 1, 2],
-            p2_outcomes=[0, 1, 2],
             reduced_visits=visits,
             min_visits=5,
         )
@@ -653,7 +645,7 @@ class TestNashFromReduced:
         p1_payout = np.array([[3.0, 0.0], [0.0, 2.0]])
         reduced_payout = np.stack([p1_payout, -p1_payout])
 
-        p1, p2 = compute_nash_from_reduced(reduced_payout, p1_outcomes=[0, 1], p2_outcomes=[0, 1])
+        p1, p2 = compute_nash_from_reduced(reduced_payout)
 
         # Should be valid distributions
         assert abs(p1.sum() - 1.0) < 1e-6
@@ -665,7 +657,7 @@ class TestNashFromReduced:
         """Single outcome for each player → trivial Nash."""
         reduced_payout = np.array([[[5.0]], [[-5.0]]])
 
-        p1, p2 = compute_nash_from_reduced(reduced_payout, p1_outcomes=[4], p2_outcomes=[4])
+        p1, p2 = compute_nash_from_reduced(reduced_payout)
 
         np.testing.assert_array_almost_equal(p1, [1.0])
         np.testing.assert_array_almost_equal(p2, [1.0])

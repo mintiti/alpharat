@@ -313,7 +313,7 @@ def play_and_record_game(
             positions += 1
             total_simulations += config.mcts.simulations
 
-            # Sample actions from Nash equilibrium policies
+            # Sample actions from search policies
             a1 = select_action_from_strategy(result.policy_p1)
             a2 = select_action_from_strategy(result.policy_p2)
 

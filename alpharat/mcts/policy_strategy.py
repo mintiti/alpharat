@@ -224,7 +224,7 @@ class VisitPolicyConfig(StrictBaseModel):
         ),
     )
 
-    def build(self) -> VisitPolicyStrategy:
+    def build(self) -> PolicyStrategy:
         """Build the visit policy strategy."""
         return VisitPolicyStrategy(
             temperature=self.temperature,

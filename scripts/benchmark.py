@@ -36,7 +36,7 @@ import argparse
 import logging
 from pathlib import Path
 
-from alpharat.config.loader import load_config
+from alpharat.config.loader import load_config, split_config_path
 from alpharat.eval.benchmark import print_benchmark_results
 from alpharat.eval.tournament import TournamentConfig, run_tournament
 from alpharat.experiments import ExperimentManager
@@ -67,18 +67,7 @@ def main() -> None:
     )
     args = parser.parse_args()
 
-    # Parse config path: extract configs directory and config name
-    config_path = Path(args.config)
-    if not config_path.exists() and not config_path.with_suffix(".yaml").exists():
-        parser.error(f"Config file not found: {args.config}")
-
-    config_name = str(config_path.with_suffix(""))  # Remove .yaml if present
-    if config_name.startswith("configs/"):
-        config_dir = "configs"
-        config_name = config_name[len("configs/") :]
-    else:
-        config_dir = str(config_path.parent) if config_path.parent.name else "."
-        config_name = config_path.stem
+    config_dir, config_name = split_config_path(args.config)
 
     # Build Hydra overrides from CLI args
     overrides: list[str] = []
