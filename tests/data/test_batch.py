@@ -25,14 +25,12 @@ class TestMCTSConfig:
     def test_decoupled_puct_from_dict(self) -> None:
         """DecoupledPUCTConfig parses from dict."""
         data = {
-            "variant": "decoupled_puct",
             "simulations": 400,
             "gamma": 0.98,
             "c_puct": 2.0,
         }
         config = DecoupledPUCTConfig.model_validate(data)
 
-        assert config.variant == "decoupled_puct"
         assert config.simulations == 400
         assert config.gamma == 0.98
         assert config.c_puct == 2.0
@@ -50,7 +48,7 @@ class TestMCTSConfig:
             "batch_id": "test-id",
             "created_at": "2024-01-01T00:00:00Z",
             "checkpoint_path": "/path/to/model.pt",
-            "mcts_config": {"variant": "decoupled_puct", "simulations": 400, "c_puct": 2.5},
+            "mcts_config": {"simulations": 400, "c_puct": 2.5},
             "game": {"width": 10, "height": 10, "max_turns": 200, "cheese_count": 21},
         }
         metadata = BatchMetadata.model_validate(data)

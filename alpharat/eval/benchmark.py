@@ -17,7 +17,8 @@ from alpharat.ai.config import (
 )
 from alpharat.config.base import StrictBaseModel
 from alpharat.config.game import GameConfig  # noqa: TC001
-from alpharat.eval.tournament import TournamentConfig
+from alpharat.eval.elo import compute_elo, from_tournament_result
+from alpharat.eval.tournament import TournamentConfig, TournamentResult
 from alpharat.mcts import DecoupledPUCTConfig  # noqa: TC001
 
 if TYPE_CHECKING:
@@ -36,7 +37,6 @@ class BenchmarkConfig(StrictBaseModel):
           workers: 4
           device: cuda
           mcts:
-            variant: decoupled_puct
             simulations: 554
             c_puct: 8.34
             force_k: 0.88
@@ -155,3 +155,26 @@ def build_benchmark_tournament(
         workers=config.workers,
         device=config.device,
     )
+
+
+def print_benchmark_results(
+    result: TournamentResult,
+    anchor: str = "greedy",
+) -> None:
+    """Print benchmark tables: standings, WDL, cheese, and Elo ratings.
+
+    Args:
+        result: Tournament result to display.
+        anchor: Agent name to anchor Elo ratings at 1000.
+    """
+    print()
+    print(result.standings_table())
+    print()
+    print(result.wdl_table())
+    print()
+    print(result.cheese_table())
+    print()
+
+    records = from_tournament_result(result)
+    elo_result = compute_elo(records, anchor=anchor, anchor_elo=1000, compute_uncertainty=True)
+    print(elo_result.format_table())

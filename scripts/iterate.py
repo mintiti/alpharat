@@ -288,8 +288,11 @@ def run_benchmark_phase(
         experiments_dir: Experiments directory.
         device: Device for inference.
     """
-    from alpharat.eval.benchmark import BenchmarkConfig, build_benchmark_tournament
-    from alpharat.eval.elo import compute_elo, from_tournament_result
+    from alpharat.eval.benchmark import (
+        BenchmarkConfig,
+        build_benchmark_tournament,
+        print_benchmark_results,
+    )
     from alpharat.eval.tournament import run_tournament
     from alpharat.experiments import ExperimentManager
 
@@ -321,38 +324,9 @@ def run_benchmark_phase(
 
     result = run_tournament(tournament_config)
 
-    # Save results
-    results_dict = {
-        "standings": result.standings(),
-        "wdl_matrix": {
-            agent: {
-                opp: {"wins": wdl[0], "draws": wdl[1], "losses": wdl[2]}
-                for opp, wdl in opps.items()
-            }
-            for agent, opps in result.wdl_matrix().items()
-        },
-        "cheese_stats": {
-            agent: {
-                opp: {"scored": cheese[0], "conceded": cheese[1]} for opp, cheese in opps.items()
-            }
-            for agent, opps in result.cheese_matrix().items()
-        },
-    }
-    exp.save_benchmark_results(benchmark_name, results_dict)
-
-    # Print results
-    print()
-    print(result.standings_table())
-    print()
-    print(result.wdl_table())
-    print()
-    print(result.cheese_table())
-    print()
-
-    # Compute and print Elo ratings
-    records = from_tournament_result(result)
-    elo_result = compute_elo(records, anchor="greedy", anchor_elo=1000, compute_uncertainty=True)
-    print(elo_result.format_table())
+    # Save and print results
+    exp.save_benchmark_results(benchmark_name, result.to_dict())
+    print_benchmark_results(result, anchor="greedy")
 
 
 # --- Helper Functions ---

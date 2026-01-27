@@ -57,7 +57,6 @@ group: iter2_from_mlp_v1  # or whatever naming makes sense
 checkpoint: experiments/runs/mlp_v1/checkpoints/best_model.pt
 
 mcts:
-  variant: decoupled_puct
   simulations: 554
   c_puct: 8.34
   # ... same as before, or adjusted

@@ -437,7 +437,7 @@ def run_sampling(config: SamplingConfig, *, verbose: bool = True) -> tuple[Path,
     if verbose:
         print(f"Sampling {config.sampling.num_games} games")
         print(f"  Group: {config.group}")
-        print(f"  MCTS: {config.mcts.variant}, {config.mcts.simulations} sims")
+        print(f"  MCTS: {config.mcts.simulations} sims")
         print(
             f"  Game: {config.game.width}x{config.game.height}, {config.game.cheese_count} cheese"
         )

@@ -5,6 +5,7 @@ from alpharat.eval.benchmark import (
     build_benchmark_tournament,
     build_standard_agents,
     get_game_config_from_checkpoint,
+    print_benchmark_results,
 )
 from alpharat.eval.elo import (
     EloRating,
@@ -30,6 +31,7 @@ __all__ = [
     "build_benchmark_tournament",
     "build_standard_agents",
     "get_game_config_from_checkpoint",
+    "print_benchmark_results",
     # Elo rating
     "EloRating",
     "EloResult",

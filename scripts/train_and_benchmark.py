@@ -24,8 +24,13 @@ from pathlib import Path
 
 import yaml
 
-from alpharat.eval.benchmark import BenchmarkConfig, build_benchmark_tournament
-from alpharat.eval.elo import compute_elo, from_tournament_result
+from alpharat.config.game import GameConfig
+from alpharat.config.loader import load_config
+from alpharat.eval.benchmark import (
+    BenchmarkConfig,
+    build_benchmark_tournament,
+    print_benchmark_results,
+)
 from alpharat.eval.tournament import run_tournament
 from alpharat.experiments import ExperimentManager
 from alpharat.mcts.decoupled_puct import DecoupledPUCTConfig
@@ -68,7 +73,18 @@ def main() -> None:
     parser.add_argument("--games", type=int, default=50, help="Games per matchup")
     parser.add_argument("--workers", type=int, default=4, help="Parallel workers for games")
     parser.add_argument("--device", type=str, default="auto", help="Device (auto, cpu, cuda, mps)")
-    parser.add_argument("--mcts-sims", type=int, default=554, help="MCTS simulations for baseline")
+    parser.add_argument(
+        "--mcts",
+        type=str,
+        default="5x5_tuned",
+        help="MCTS sub-config name from configs/mcts/ (default: 5x5_tuned)",
+    )
+    parser.add_argument(
+        "--game",
+        type=str,
+        default="5x5_open",
+        help="Game sub-config name from configs/game/ (default: 5x5_open)",
+    )
 
     # Skip flags
     parser.add_argument(
@@ -183,12 +199,9 @@ def main() -> None:
         logger.info("  → Used by: nn-prev, mcts+nn-prev")
     logger.info("")
 
-    # Build MCTS config for benchmark agents
-    mcts_config = DecoupledPUCTConfig(
-        simulations=args.mcts_sims,
-        c_puct=8.34,
-        force_k=0.88,
-    )
+    # Load MCTS and game configs from Hydra sub-configs
+    mcts_config = load_config(DecoupledPUCTConfig, "configs/mcts", args.mcts)
+    game_config = load_config(GameConfig, "configs/game", args.game)
 
     benchmark_config = BenchmarkConfig(
         games_per_matchup=args.games,
@@ -201,9 +214,9 @@ def main() -> None:
         benchmark_name,
         checkpoint_path,
         benchmark_config,
+        game_config=game_config,
         baseline_checkpoint=baseline,
     )
-    game_config = tournament_config.game
     logger.info(
         "Game settings: %dx%d, %d cheese, %d max turns",
         game_config.width,
@@ -224,39 +237,11 @@ def main() -> None:
 
     result = run_tournament(tournament_config)
 
-    # Save results via ExperimentManager
-    results_dict = {
-        "standings": result.standings(),
-        "wdl_matrix": {
-            agent: {
-                opp: {"wins": wdl[0], "draws": wdl[1], "losses": wdl[2]}
-                for opp, wdl in opps.items()
-            }
-            for agent, opps in result.wdl_matrix().items()
-        },
-        "cheese_stats": {
-            agent: {
-                opp: {"scored": cheese[0], "conceded": cheese[1]} for opp, cheese in opps.items()
-            }
-            for agent, opps in result.cheese_matrix().items()
-        },
-    }
-    exp.save_benchmark_results(benchmark_name, results_dict)
+    # Save and print results
+    exp.save_benchmark_results(benchmark_name, result.to_dict())
     logger.info(f"Results saved to {bench_dir / 'results.json'}")
 
-    # Print results
-    print()
-    print(result.standings_table())
-    print()
-    print(result.wdl_table())
-    print()
-    print(result.cheese_table())
-
-    # Compute and print Elo ratings
-    print()
-    records = from_tournament_result(result)
-    elo_result = compute_elo(records, anchor="greedy", anchor_elo=1000, compute_uncertainty=True)
-    print(elo_result.format_table())
+    print_benchmark_results(result, anchor="greedy")
 
 
 if __name__ == "__main__":
