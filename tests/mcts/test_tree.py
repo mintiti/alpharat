@@ -1,11 +1,18 @@
 """Tests for MCTS Tree implementation."""
 
+from __future__ import annotations
+
+from typing import TYPE_CHECKING
+
 import numpy as np
 import pytest
 from pyrat_engine.core.game import PyRat
 
 from alpharat.mcts.node import MCTSNode
 from alpharat.mcts.tree import MCTSTree
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
 
 
 class FakeMoveUndo:
@@ -94,6 +101,10 @@ class FakeGame:
         """Return all movement directions (no walls in FakeGame)."""
         # UP=0, RIGHT=1, DOWN=2, LEFT=3 are all valid (no walls)
         return [0, 1, 2, 3]
+
+    def get_observation(self, is_player_one: bool = True) -> object:
+        """Return a dummy observation for predict_fn tests."""
+        return object()
 
     def cheese_positions(self) -> list[tuple[int, int]]:
         """Return remaining cheese positions."""
@@ -547,3 +558,122 @@ class TestAdvanceRoot:
 
         # Game should have advanced (player moved RIGHT)
         assert fake_game.player1_position != initial_pos
+
+
+class TestPredictionCache:
+    """Tests for NN prediction caching on transposed positions."""
+
+    @staticmethod
+    def _counting_predict_fn() -> tuple[
+        list[int],
+        Callable[[object], tuple[np.ndarray, np.ndarray, np.ndarray]],
+    ]:
+        """Create a predict_fn that counts how many times it's called."""
+        call_count = [0]
+
+        def predict_fn(
+            observation: object,
+        ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+            call_count[0] += 1
+            return np.ones(5) / 5, np.ones(5) / 5, np.zeros((2, 5, 5))
+
+        return call_count, predict_fn
+
+    def test_cache_hit_same_state_via_transposition(self) -> None:
+        """Two paths converging to the same state should call predict_fn once."""
+        game = FakeGame()
+        call_count, predict_fn = self._counting_predict_fn()
+
+        root = MCTSNode(
+            game_state=None,
+            prior_policy_p1=np.ones(5) / 5,
+            prior_policy_p2=np.ones(5) / 5,
+            nn_payout_prediction=np.zeros((2, 5, 5)),
+        )
+        tree = MCTSTree(game=game, root=root, gamma=1.0, predict_fn=predict_fn)  # type: ignore[arg-type]
+
+        # Root init calls predict_fn once (state: P1=(5,5), P2=(5,5), turn=0)
+        assert call_count[0] == 1
+
+        # Path 1: root → A (RIGHT, UP) → AA (UP, RIGHT)
+        # A: P1=(6,5), P2=(5,6), turn=1
+        a, _ = tree.make_move_from(tree.root, 1, 0)  # P1 RIGHT, P2 UP
+        assert call_count[0] == 2
+        # AA: P1=(6,6), P2=(6,6), turn=2
+        _aa, _ = tree.make_move_from(a, 0, 1)  # P1 UP, P2 RIGHT
+        assert call_count[0] == 3
+
+        # Path 2: root → B (UP, RIGHT) → BB (RIGHT, UP)
+        # B: P1=(5,6), P2=(6,5), turn=1 — different positions from A, so new call
+        b, _ = tree.make_move_from(tree.root, 0, 1)  # P1 UP, P2 RIGHT
+        assert call_count[0] == 4
+        # BB: P1=(6,6), P2=(6,6), turn=2 — same state as AA → cache hit!
+        _bb, _ = tree.make_move_from(b, 1, 0)  # P1 RIGHT, P2 UP
+        assert call_count[0] == 4  # No new call — cache hit
+
+    def test_cache_miss_different_states(self) -> None:
+        """Different game states should each call predict_fn."""
+        game = FakeGame()
+        call_count, predict_fn = self._counting_predict_fn()
+
+        root = MCTSNode(
+            game_state=None,
+            prior_policy_p1=np.ones(5) / 5,
+            prior_policy_p2=np.ones(5) / 5,
+            nn_payout_prediction=np.zeros((2, 5, 5)),
+        )
+        tree = MCTSTree(game=game, root=root, gamma=1.0, predict_fn=predict_fn)  # type: ignore[arg-type]
+        assert call_count[0] == 1  # Root init
+
+        # Each child has a unique position → all misses
+        tree.make_move_from(tree.root, 0, 0)  # P1=(5,6), P2=(5,6)
+        assert call_count[0] == 2
+        tree.make_move_from(tree.root, 1, 1)  # P1=(6,5), P2=(6,5)
+        assert call_count[0] == 3
+        tree.make_move_from(tree.root, 2, 2)  # P1=(5,4), P2=(5,4)
+        assert call_count[0] == 4
+
+    def test_no_caching_without_predict_fn(self) -> None:
+        """With no predict_fn, cache should remain empty (smart uniform is cheap)."""
+        game = FakeGame()
+        root = MCTSNode(
+            game_state=None,
+            prior_policy_p1=np.ones(5) / 5,
+            prior_policy_p2=np.ones(5) / 5,
+            nn_payout_prediction=np.zeros((2, 5, 5)),
+        )
+        tree = MCTSTree(game=game, root=root, gamma=1.0)  # type: ignore[arg-type]
+
+        # Expand some children
+        tree.make_move_from(tree.root, 0, 0)
+        tree.make_move_from(tree.root, 1, 1)
+
+        # Cache should be empty — uniform priors don't use it
+        assert len(tree._prediction_cache) == 0
+
+    def test_cached_arrays_are_independent_copies(self) -> None:
+        """Mutating returned arrays should not corrupt the cache."""
+        game = FakeGame()
+        call_count, predict_fn = self._counting_predict_fn()
+
+        root = MCTSNode(
+            game_state=None,
+            prior_policy_p1=np.ones(5) / 5,
+            prior_policy_p2=np.ones(5) / 5,
+            nn_payout_prediction=np.zeros((2, 5, 5)),
+        )
+        tree = MCTSTree(game=game, root=root, gamma=1.0, predict_fn=predict_fn)  # type: ignore[arg-type]
+
+        # Build a transposition: two paths to P1=(6,6), P2=(6,6), turn=2
+        a, _ = tree.make_move_from(tree.root, 1, 0)
+        _aa, _ = tree.make_move_from(a, 0, 1)
+
+        b, _ = tree.make_move_from(tree.root, 0, 1)
+        count_before_bb = call_count[0]
+        _bb, _ = tree.make_move_from(b, 1, 0)
+        # BB was a cache hit — predict_fn was NOT called again
+        assert call_count[0] == count_before_bb
+
+        # The two nodes should have independent prior arrays
+        # (node init uses np.add.at which mutates in place)
+        assert _aa.prior_policy_p1 is not _bb.prior_policy_p1

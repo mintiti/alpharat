@@ -53,6 +53,9 @@ class MCTSTree:
         self.gamma = gamma
         self._predict_fn = predict_fn
 
+        # Cache NN predictions keyed on game state (skip redundant forward passes)
+        self._prediction_cache: dict[tuple, tuple[np.ndarray, np.ndarray, np.ndarray]] = {}
+
         # Track where simulator currently is
         self._sim_path: list[MCTSNode] = [root]
 
@@ -295,12 +298,34 @@ class MCTSTree:
 
         return child
 
+    def _make_state_key(self) -> tuple:
+        """Build a hashable key from the current game state for prediction caching.
+
+        Captures everything that affects NN output: positions, cheese layout,
+        mud status, and turn number.
+        """
+        game = self.game
+        p1 = game.player1_position
+        p2 = game.player2_position
+        cheese = frozenset((c[0], c[1]) for c in game.cheese_positions())
+        return (
+            (p1[0], p1[1]),
+            (p2[0], p2[1]),
+            cheese,
+            game.player1_mud_turns,
+            game.player2_mud_turns,
+            game.turn,
+        )
+
     def _predict(
         self,
         p1_effective: list[int] | None = None,
         p2_effective: list[int] | None = None,
     ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
         """Run policy/value network to obtain priors and payout prediction.
+
+        Uses a transposition cache to skip redundant NN calls when the same
+        game state is reached via different move sequences.
 
         Args:
             p1_effective: Effective action mapping for P1 (used for smart uniform priors).
@@ -316,8 +341,15 @@ class MCTSTree:
             payout = np.zeros((2, 5, 5))  # Separate payoffs for P1 and P2
             return prior_p1, prior_p2, payout
 
-        observation = self._get_observation()
-        return self._predict_fn(observation)
+        key = self._make_state_key()
+        cached = self._prediction_cache.get(key)
+        if cached is not None:
+            # Return copies — node init mutates arrays via np.add.at
+            return cached[0].copy(), cached[1].copy(), cached[2].copy()
+
+        result = self._predict_fn(self._get_observation())
+        self._prediction_cache[key] = result
+        return result
 
     def _smart_uniform_prior(self, effective: list[int] | None) -> np.ndarray:
         """Create uniform prior over unique effective actions only.
