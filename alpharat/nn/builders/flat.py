@@ -199,7 +199,6 @@ class FlatDataset:
         policy_p2_list: list[np.ndarray] = []
         p1_value_list: list[np.ndarray] = []
         p2_value_list: list[np.ndarray] = []
-        payout_matrix_list: list[np.ndarray] = []
         action_p1_list: list[np.ndarray] = []
         action_p2_list: list[np.ndarray] = []
 
@@ -211,7 +210,6 @@ class FlatDataset:
                 policy_p2_list.append(data["policy_p2"])
                 p1_value_list.append(data["p1_value"])
                 p2_value_list.append(data["p2_value"])
-                payout_matrix_list.append(data["payout_matrix"])
                 action_p1_list.append(data["action_p1"])
                 action_p2_list.append(data["action_p2"])
 
@@ -220,7 +218,6 @@ class FlatDataset:
         self._policy_p2 = np.concatenate(policy_p2_list)
         self._p1_value = np.concatenate(p1_value_list)
         self._p2_value = np.concatenate(p2_value_list)
-        self._payout_matrix = np.concatenate(payout_matrix_list)
         self._action_p1 = np.concatenate(action_p1_list)
         self._action_p2 = np.concatenate(action_p2_list)
 
@@ -246,7 +243,6 @@ class FlatDataset:
                 - "policy_p2": float32 (5,)
                 - "p1_value": float32 (1,) — P1's actual remaining score
                 - "p2_value": float32 (1,) — P2's actual remaining score
-                - "payout_matrix": float32 (2, 5, 5)
                 - "action_p1": int8 (1,)
                 - "action_p2": int8 (1,)
         """
@@ -256,7 +252,6 @@ class FlatDataset:
             "policy_p2": self._policy_p2[idx],
             "p1_value": self._p1_value[idx : idx + 1],  # Keep as 1D for consistency
             "p2_value": self._p2_value[idx : idx + 1],
-            "payout_matrix": self._payout_matrix[idx],
             "action_p1": self._action_p1[idx : idx + 1],
             "action_p2": self._action_p2[idx : idx + 1],
         }

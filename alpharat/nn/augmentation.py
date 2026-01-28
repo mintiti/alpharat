@@ -12,14 +12,11 @@ def swap_player_perspective(
     policy_p2: np.ndarray,
     p1_value: np.ndarray,
     p2_value: np.ndarray,
-    payout_matrix: np.ndarray,
     action_p1: np.ndarray,
     action_p2: np.ndarray,
     width: int,
     height: int,
-) -> tuple[
-    np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray
-]:
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     """Swap P1/P2 perspective in all tensors.
 
     Transforms the game state to view it from P2's perspective instead of P1's.
@@ -35,7 +32,6 @@ def swap_player_perspective(
         policy_p2: P2 policy, shape (5,).
         p1_value: P1's remaining score, shape (1,).
         p2_value: P2's remaining score, shape (1,).
-        payout_matrix: Payout matrix, shape (2, 5, 5).
         action_p1: P1 action, shape (1,).
         action_p2: P2 action, shape (1,).
         width: Maze width.
@@ -81,13 +77,6 @@ def swap_player_perspective(
     new_p1_value = p2_value.copy()
     new_p2_value = p1_value.copy()
 
-    # Bimatrix: swap player indices and transpose
-    # new_payout[0] = payout[1].T (new P1's payoffs = old P2's, transposed)
-    # new_payout[1] = payout[0].T (new P2's payoffs = old P1's, transposed)
-    new_payout = np.empty_like(payout_matrix)
-    new_payout[0] = payout_matrix[1].T
-    new_payout[1] = payout_matrix[0].T
-
     new_action_p1 = action_p2.copy()
     new_action_p2 = action_p1.copy()
 
@@ -97,7 +86,6 @@ def swap_player_perspective(
         new_policy_p2,
         new_p1_value,
         new_p2_value,
-        new_payout,
         new_action_p1,
         new_action_p2,
     )
@@ -120,12 +108,11 @@ def swap_player_perspective_batch(
         - policy_p1/p2: swap
         - action_p1/p2: swap
         - p1_value/p2_value: swap
-        - payout_matrix: swap player indices and transpose
         - cheese_outcomes: swap P1_WIN(0) <-> P2_WIN(3), keep others unchanged
 
     Args:
         batch: Dict with keys observation, policy_p1, policy_p2, p1_value, p2_value,
-            payout_matrix, action_p1, action_p2, cheese_outcomes. Shapes are (N, ...).
+            action_p1, action_p2, cheese_outcomes. Shapes are (N, ...).
         mask: Boolean tensor of shape (N,) indicating which samples to augment.
         width: Maze width.
         height: Maze height.
@@ -194,14 +181,6 @@ def swap_player_perspective_batch(
     batch["p1_value"] = torch.where(mask_2d, v2, v1)
     batch["p2_value"] = torch.where(mask_2d, v1, v2)
 
-    # === Payout matrix ===
-    # Bimatrix: swap player indices and transpose for swapped samples
-    # new_payout[:, 0] = payout[:, 1].T, new_payout[:, 1] = payout[:, 0].T
-    payout = batch["payout_matrix"]  # (N, 2, 5, 5)
-    swapped_payout = payout.flip(dims=[1]).transpose(-1, -2)
-    mask_4d = mask_2d.unsqueeze(-1).unsqueeze(-1)  # (N, 1, 1, 1)
-    batch["payout_matrix"] = torch.where(mask_4d, swapped_payout, payout)
-
     # === Cheese outcomes ===
     # Swap P1_WIN (0) <-> P2_WIN (3), keep SIMULTANEOUS (1), UNCOLLECTED (2), and -1 unchanged
     # This is an involution: swap(swap(x)) = x
@@ -251,8 +230,8 @@ class BatchAugmentation:
         """Apply augmentations to a batch.
 
         Args:
-            batch: Dict with observation, policy_p1, policy_p2, value,
-                payout_matrix, action_p1, action_p2 tensors.
+            batch: Dict with observation, policy_p1, policy_p2, p1_value,
+                p2_value, action_p1, action_p2 tensors.
 
         Returns:
             Augmented batch (modified in-place where possible).

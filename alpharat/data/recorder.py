@@ -139,7 +139,8 @@ class GameRecorder:
         search_result: SearchResult,
         prior_p1: np.ndarray,
         prior_p2: np.ndarray,
-        visit_counts: np.ndarray,
+        visit_counts_p1: np.ndarray,
+        visit_counts_p2: np.ndarray,
         action_p1: int,
         action_p2: int,
     ) -> None:
@@ -150,10 +151,11 @@ class GameRecorder:
 
         Args:
             game: Current game state.
-            search_result: MCTS search output (payout_matrix, policy_p1, policy_p2).
+            search_result: MCTS search output (policy_p1, policy_p2, value_p1, value_p2).
             prior_p1: Neural network's policy prior for player 1.
             prior_p2: Neural network's policy prior for player 2.
-            visit_counts: MCTS visit counts for action pairs.
+            visit_counts_p1: Marginal MCTS visit counts for P1 actions.
+            visit_counts_p2: Marginal MCTS visit counts for P2 actions.
             action_p1: Action taken by player 1 (0-4).
             action_p2: Action taken by player 2 (0-4).
 
@@ -172,8 +174,10 @@ class GameRecorder:
             p2_mud=int(game.player2_mud_turns),
             cheese_positions=[(c.x, c.y) for c in game.cheese_positions()],
             turn=int(game.turn),
-            payout_matrix=search_result.payout_matrix.copy(),
-            visit_counts=visit_counts.copy(),
+            value_p1=search_result.value_p1,
+            value_p2=search_result.value_p2,
+            visit_counts_p1=visit_counts_p1.copy(),
+            visit_counts_p2=visit_counts_p2.copy(),
             prior_p1=prior_p1.copy(),
             prior_p2=prior_p2.copy(),
             # Save learning policies (for NN training), not acting policies
@@ -281,13 +285,13 @@ class GameRecorder:
             raise ValueError(f"Invalid result: {self.data.result}")
 
         for i, pos in enumerate(self.data.positions):
-            if pos.payout_matrix.shape != (2, 5, 5):
+            if pos.visit_counts_p1.shape != (5,):
                 raise ValueError(
-                    f"Position {i}: invalid payout_matrix shape {pos.payout_matrix.shape}"
+                    f"Position {i}: invalid visit_counts_p1 shape {pos.visit_counts_p1.shape}"
                 )
-            if pos.visit_counts.shape != (5, 5):
+            if pos.visit_counts_p2.shape != (5,):
                 raise ValueError(
-                    f"Position {i}: invalid visit_counts shape {pos.visit_counts.shape}"
+                    f"Position {i}: invalid visit_counts_p2 shape {pos.visit_counts_p2.shape}"
                 )
             if pos.prior_p1.shape != (5,):
                 raise ValueError(f"Position {i}: invalid prior_p1 shape {pos.prior_p1.shape}")
@@ -322,8 +326,10 @@ class GameRecorder:
         p2_mud = np.zeros(n, dtype=np.int8)
         cheese_mask = np.zeros((n, h, w), dtype=bool)
         turn = np.zeros(n, dtype=np.int16)
-        payout_matrix = np.zeros((n, 2, 5, 5), dtype=np.float32)
-        visit_counts = np.zeros((n, 5, 5), dtype=np.int32)
+        value_p1 = np.zeros(n, dtype=np.float32)
+        value_p2 = np.zeros(n, dtype=np.float32)
+        visit_counts_p1 = np.zeros((n, 5), dtype=np.float32)
+        visit_counts_p2 = np.zeros((n, 5), dtype=np.float32)
         prior_p1 = np.zeros((n, 5), dtype=np.float32)
         prior_p2 = np.zeros((n, 5), dtype=np.float32)
         policy_p1 = np.zeros((n, 5), dtype=np.float32)
@@ -340,8 +346,10 @@ class GameRecorder:
             p2_mud[i] = pos.p2_mud
             cheese_mask[i] = self._cheese_to_mask(pos.cheese_positions)
             turn[i] = pos.turn
-            payout_matrix[i] = pos.payout_matrix.astype(np.float32)
-            visit_counts[i] = pos.visit_counts.astype(np.int32)
+            value_p1[i] = pos.value_p1
+            value_p2[i] = pos.value_p2
+            visit_counts_p1[i] = pos.visit_counts_p1.astype(np.float32)
+            visit_counts_p2[i] = pos.visit_counts_p2.astype(np.float32)
             prior_p1[i] = pos.prior_p1.astype(np.float32)
             prior_p2[i] = pos.prior_p2.astype(np.float32)
             policy_p1[i] = pos.policy_p1.astype(np.float32)
@@ -368,8 +376,10 @@ class GameRecorder:
             "p2_mud": p2_mud,
             "cheese_mask": cheese_mask,
             "turn": turn,
-            "payout_matrix": payout_matrix,
-            "visit_counts": visit_counts,
+            "value_p1": value_p1,
+            "value_p2": value_p2,
+            "visit_counts_p1": visit_counts_p1,
+            "visit_counts_p2": visit_counts_p2,
             "prior_p1": prior_p1,
             "prior_p2": prior_p2,
             "policy_p1": policy_p1,
@@ -525,8 +535,10 @@ class GameBundler:
             + 1  # mud
             + h * w  # cheese_mask
             + 2  # turn
-            + 2 * 5 * 5 * 4  # payout_matrix
-            + 5 * 5 * 4  # visit_counts
+            + 4
+            + 4  # value_p1, value_p2
+            + 5 * 4
+            + 5 * 4  # visit_counts_p1, visit_counts_p2
             + 5 * 4 * 4  # priors and policies
             + 1
             + 1  # actions
@@ -579,8 +591,10 @@ class GameBundler:
         p2_mud = np.zeros(n, dtype=np.int8)
         cheese_mask = np.zeros((n, h, w), dtype=bool)
         turn = np.zeros(n, dtype=np.int16)
-        payout_matrix = np.zeros((n, 2, 5, 5), dtype=np.float32)
-        visit_counts = np.zeros((n, 5, 5), dtype=np.int32)
+        value_p1 = np.zeros(n, dtype=np.float32)
+        value_p2 = np.zeros(n, dtype=np.float32)
+        visit_counts_p1 = np.zeros((n, 5), dtype=np.float32)
+        visit_counts_p2 = np.zeros((n, 5), dtype=np.float32)
         prior_p1 = np.zeros((n, 5), dtype=np.float32)
         prior_p2 = np.zeros((n, 5), dtype=np.float32)
         policy_p1 = np.zeros((n, 5), dtype=np.float32)
@@ -611,8 +625,10 @@ class GameBundler:
                 p2_mud[pos_offset] = pos.p2_mud
                 cheese_mask[pos_offset] = self._cheese_to_mask(pos.cheese_positions)
                 turn[pos_offset] = pos.turn
-                payout_matrix[pos_offset] = pos.payout_matrix.astype(np.float32)
-                visit_counts[pos_offset] = pos.visit_counts.astype(np.int32)
+                value_p1[pos_offset] = pos.value_p1
+                value_p2[pos_offset] = pos.value_p2
+                visit_counts_p1[pos_offset] = pos.visit_counts_p1.astype(np.float32)
+                visit_counts_p2[pos_offset] = pos.visit_counts_p2.astype(np.float32)
                 prior_p1[pos_offset] = pos.prior_p1.astype(np.float32)
                 prior_p2[pos_offset] = pos.prior_p2.astype(np.float32)
                 policy_p1[pos_offset] = pos.policy_p1.astype(np.float32)
@@ -641,8 +657,10 @@ class GameBundler:
             "p2_mud": p2_mud,
             "cheese_mask": cheese_mask,
             "turn": turn,
-            "payout_matrix": payout_matrix,
-            "visit_counts": visit_counts,
+            "value_p1": value_p1,
+            "value_p2": value_p2,
+            "visit_counts_p1": visit_counts_p1,
+            "visit_counts_p2": visit_counts_p2,
             "prior_p1": prior_p1,
             "prior_p2": prior_p2,
             "policy_p1": policy_p1,

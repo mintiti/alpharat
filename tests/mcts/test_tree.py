@@ -122,12 +122,12 @@ def fake_tree(fake_game: FakeGame) -> MCTSTree:
     """Tree backed by FakeGame."""
     prior_p1 = np.ones(5) / 5
     prior_p2 = np.ones(5) / 5
-    nn_payout = np.zeros((2, 5, 5))  # Bimatrix format: [p1_payoffs, p2_payoffs]
     root = MCTSNode(
         game_state=None,
         prior_policy_p1=prior_p1,
         prior_policy_p2=prior_p2,
-        nn_payout_prediction=nn_payout,
+        nn_value_p1=0.0,
+        nn_value_p2=0.0,
         parent=None,
     )
     return MCTSTree(game=fake_game, root=root, gamma=1.0)  # type: ignore[arg-type]
@@ -144,13 +144,13 @@ def root_node() -> MCTSNode:
     """Create a root node with uniform priors."""
     prior_p1 = np.ones(5) / 5
     prior_p2 = np.ones(5) / 5
-    nn_payout = np.zeros((2, 5, 5))  # Bimatrix format: [p1_payoffs, p2_payoffs]
 
     return MCTSNode(
         game_state=None,
         prior_policy_p1=prior_p1,
         prior_policy_p2=prior_p2,
-        nn_payout_prediction=nn_payout,
+        nn_value_p1=0.0,
+        nn_value_p2=0.0,
         parent=None,
         move_undo=None,
     )
@@ -383,15 +383,22 @@ class TestBackup:
         # Create a child
         child, _ = tree.make_move_from(tree.root, 0, 0)
 
+        # Get outcome indices for the action (handles wall-blocked actions)
+        idx1 = tree.root.action_to_outcome(1, 0)  # P1's outcome index
+        idx2 = tree.root.action_to_outcome(2, 0)  # P2's outcome index
+
         # Backup path with one step - tuple rewards (p1_reward, p2_reward)
         path = [(tree.root, 0, 0, (1.0, -0.5))]  # (node, action_p1, action_p2, reward)
         tree.backup(path)
 
-        # Root should have updated Q-value for both players
-        assert tree.root.action_visits[0, 0] == 1
+        # Root should have updated Q-values (marginal, per-player)
+        n1, n2 = tree.root.get_visit_counts()
+        q1, q2 = tree.root.get_q_values()
+        assert n1[idx1] == 1  # Outcome visited once
+        assert n2[idx2] == 1  # Outcome visited once
         # value = reward + gamma * 0 = (1.0, -0.5) + 1.0 * (0, 0) = (1.0, -0.5)
-        assert tree.root.payout_matrix[0, 0, 0] == pytest.approx(1.0)  # P1's payout
-        assert tree.root.payout_matrix[1, 0, 0] == pytest.approx(-0.5)  # P2's payout
+        assert q1[idx1] == pytest.approx(1.0)  # P1's Q-value
+        assert q2[idx2] == pytest.approx(-0.5)  # P2's Q-value
 
     def test_backup_with_discount_factor(self, tree: MCTSTree) -> None:
         """Backup should apply gamma discounting."""
@@ -400,6 +407,10 @@ class TestBackup:
 
         # Create path: root → child
         child, _ = tree_discounted.make_move_from(tree.root, 0, 0)
+
+        # Get outcome indices
+        root_idx1 = tree.root.action_to_outcome(1, 0)
+        child_idx1 = child.action_to_outcome(1, 1)
 
         # Backup path with two steps - tuple rewards (p1_reward, p2_reward)
         # At child: reward = (0.5, 0.0), future value = (0, 0)
@@ -411,27 +422,36 @@ class TestBackup:
         tree_discounted.backup(path)
 
         # Child: value = (0.5, 0.0) + 0.9 * (0, 0) = (0.5, 0.0)
-        assert child.payout_matrix[0, 1, 1] == pytest.approx(0.5)  # P1's payout
+        child_q1, child_q2 = child.get_q_values()
+        assert child_q1[child_idx1] == pytest.approx(0.5)  # P1's Q-value
 
         # Root: value = (1.0, 0.0) + 0.9 * (0.5, 0.0) = (1.45, 0.0)
-        assert tree.root.payout_matrix[0, 0, 0] == pytest.approx(1.45)  # P1's payout
+        root_q1, root_q2 = tree.root.get_q_values()
+        assert root_q1[root_idx1] == pytest.approx(1.45)  # P1's Q-value
 
     def test_backup_multiple_visits(self, tree: MCTSTree) -> None:
         """Multiple backups should use incremental mean."""
+        # Get outcome indices for action 0
+        idx1 = tree.root.action_to_outcome(1, 0)
+        idx2 = tree.root.action_to_outcome(2, 0)
+
         # First backup - tuple rewards (p1_reward, p2_reward)
         path1 = [(tree.root, 0, 0, (10.0, -10.0))]
         tree.backup(path1)
-        assert tree.root.payout_matrix[0, 0, 0] == pytest.approx(10.0)  # P1
-        assert tree.root.payout_matrix[1, 0, 0] == pytest.approx(-10.0)  # P2
+        q1, q2 = tree.root.get_q_values()
+        assert q1[idx1] == pytest.approx(10.0)  # P1
+        assert q2[idx2] == pytest.approx(-10.0)  # P2
 
         # Second backup to same action
         path2 = [(tree.root, 0, 0, (6.0, -6.0))]
         tree.backup(path2)
         # P1: Q = 10.0 + (6.0 - 10.0) / 2 = 8.0
         # P2: Q = -10.0 + (-6.0 - (-10.0)) / 2 = -8.0
-        assert tree.root.payout_matrix[0, 0, 0] == pytest.approx(8.0)  # P1
-        assert tree.root.payout_matrix[1, 0, 0] == pytest.approx(-8.0)  # P2
-        assert tree.root.action_visits[0, 0] == 2
+        q1, q2 = tree.root.get_q_values()
+        n1, n2 = tree.root.get_visit_counts()
+        assert q1[idx1] == pytest.approx(8.0)  # P1
+        assert q2[idx2] == pytest.approx(-8.0)  # P2
+        assert n1[idx1] == 2  # Outcome visited twice
 
 
 class TestMultipleExpansions:
@@ -566,16 +586,16 @@ class TestPredictionCache:
     @staticmethod
     def _counting_predict_fn() -> tuple[
         list[int],
-        Callable[[object], tuple[np.ndarray, np.ndarray, np.ndarray]],
+        Callable[[object], tuple[np.ndarray, np.ndarray, float, float]],
     ]:
         """Create a predict_fn that counts how many times it's called."""
         call_count = [0]
 
         def predict_fn(
             observation: object,
-        ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+        ) -> tuple[np.ndarray, np.ndarray, float, float]:
             call_count[0] += 1
-            return np.ones(5) / 5, np.ones(5) / 5, np.zeros((2, 5, 5))
+            return np.ones(5) / 5, np.ones(5) / 5, 0.0, 0.0
 
         return call_count, predict_fn
 
@@ -588,7 +608,8 @@ class TestPredictionCache:
             game_state=None,
             prior_policy_p1=np.ones(5) / 5,
             prior_policy_p2=np.ones(5) / 5,
-            nn_payout_prediction=np.zeros((2, 5, 5)),
+            nn_value_p1=0.0,
+            nn_value_p2=0.0,
         )
         tree = MCTSTree(game=game, root=root, gamma=1.0, predict_fn=predict_fn)  # type: ignore[arg-type]
 
@@ -620,7 +641,8 @@ class TestPredictionCache:
             game_state=None,
             prior_policy_p1=np.ones(5) / 5,
             prior_policy_p2=np.ones(5) / 5,
-            nn_payout_prediction=np.zeros((2, 5, 5)),
+            nn_value_p1=0.0,
+            nn_value_p2=0.0,
         )
         tree = MCTSTree(game=game, root=root, gamma=1.0, predict_fn=predict_fn)  # type: ignore[arg-type]
         assert call_count[0] == 1  # Root init
@@ -640,7 +662,8 @@ class TestPredictionCache:
             game_state=None,
             prior_policy_p1=np.ones(5) / 5,
             prior_policy_p2=np.ones(5) / 5,
-            nn_payout_prediction=np.zeros((2, 5, 5)),
+            nn_value_p1=0.0,
+            nn_value_p2=0.0,
         )
         tree = MCTSTree(game=game, root=root, gamma=1.0)  # type: ignore[arg-type]
 
@@ -660,7 +683,8 @@ class TestPredictionCache:
             game_state=None,
             prior_policy_p1=np.ones(5) / 5,
             prior_policy_p2=np.ones(5) / 5,
-            nn_payout_prediction=np.zeros((2, 5, 5)),
+            nn_value_p1=0.0,
+            nn_value_p2=0.0,
         )
         tree = MCTSTree(game=game, root=root, gamma=1.0, predict_fn=predict_fn)  # type: ignore[arg-type]
 

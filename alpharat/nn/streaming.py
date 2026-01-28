@@ -102,7 +102,6 @@ class StreamingDataset(IterableDataset[dict[str, torch.Tensor]]):
                         "policy_p2": torch.from_numpy(shard_data["policy_p2"][j].copy()),
                         "p1_value": torch.from_numpy(shard_data["p1_value"][j : j + 1].copy()),
                         "p2_value": torch.from_numpy(shard_data["p2_value"][j : j + 1].copy()),
-                        "payout_matrix": torch.from_numpy(shard_data["payout_matrix"][j].copy()),
                         "action_p1": torch.from_numpy(shard_data["action_p1"][j : j + 1].copy()),
                         "action_p2": torch.from_numpy(shard_data["action_p2"][j : j + 1].copy()),
                         # cheese_outcomes: int8 with -1=inactive, 0-3=outcome class
@@ -128,7 +127,7 @@ def _load_shard(path: Path) -> dict[str, np.ndarray]:
         path: Path to shard npz file.
 
     Returns:
-        Dict with observations, policies, p1/p2 values, payout_matrix, actions, cheese_outcomes.
+        Dict with observations, policies, p1/p2 values, actions, cheese_outcomes.
         cheese_outcomes uses -1 sentinel for inactive cells, 0-3 for outcome classes.
     """
     with np.load(path) as data:
@@ -138,7 +137,6 @@ def _load_shard(path: Path) -> dict[str, np.ndarray]:
             "policy_p2": np.array(data["policy_p2"]),
             "p1_value": np.array(data["p1_value"]),
             "p2_value": np.array(data["p2_value"]),
-            "payout_matrix": np.array(data["payout_matrix"]),
             "action_p1": np.array(data["action_p1"]),
             "action_p2": np.array(data["action_p2"]),
             "cheese_outcomes": np.array(data["cheese_outcomes"]),

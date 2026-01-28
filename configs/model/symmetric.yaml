@@ -10,5 +10,3 @@ optim:
   lr: 1e-3
   policy_weight: 1.0
   value_weight: 1.0
-  nash_weight: 0.0
-  nash_mode: target

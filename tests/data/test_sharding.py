@@ -69,8 +69,10 @@ def _create_game_npz(
 
     turn = np.arange(n, dtype=np.int16)
 
-    payout_matrix = np.zeros((n, 2, 5, 5), dtype=np.float32)
-    visit_counts = np.ones((n, 5, 5), dtype=np.int32) * 10
+    value_p1 = np.zeros(n, dtype=np.float32)
+    value_p2 = np.zeros(n, dtype=np.float32)
+    visit_counts_p1 = np.ones((n, 5), dtype=np.float32) * 10
+    visit_counts_p2 = np.ones((n, 5), dtype=np.float32) * 10
 
     # Uniform policies
     prior_p1 = np.ones((n, 5), dtype=np.float32) / 5
@@ -100,8 +102,10 @@ def _create_game_npz(
         p2_mud=p2_mud,
         cheese_mask=cheese_mask,
         turn=turn,
-        payout_matrix=payout_matrix,
-        visit_counts=visit_counts,
+        value_p1=value_p1,
+        value_p2=value_p2,
+        visit_counts_p1=visit_counts_p1,
+        visit_counts_p2=visit_counts_p2,
         prior_p1=prior_p1,
         prior_p2=prior_p2,
         policy_p1=policy_p1,
@@ -240,7 +244,6 @@ class TestPrepareTrainingSet:
                     "policy_p2",
                     "p1_value",
                     "p2_value",
-                    "payout_matrix",
                     "action_p1",
                     "action_p2",
                     "cheese_outcomes",
@@ -272,7 +275,6 @@ class TestPrepareTrainingSet:
                 assert data["policy_p2"].shape == (n, 5)
                 assert data["p1_value"].shape == (n,)
                 assert data["p2_value"].shape == (n,)
-                assert data["payout_matrix"].shape == (n, 2, 5, 5)
                 assert data["action_p1"].shape == (n,)
                 assert data["action_p2"].shape == (n,)
                 assert data["cheese_outcomes"].shape == (n, 5, 5)  # (N, H, W)
@@ -301,7 +303,6 @@ class TestPrepareTrainingSet:
                 assert data["policy_p2"].dtype == np.float32
                 assert data["p1_value"].dtype == np.float32
                 assert data["p2_value"].dtype == np.float32
-                assert data["payout_matrix"].dtype == np.float32
                 assert data["action_p1"].dtype == np.int8
                 assert data["action_p2"].dtype == np.int8
                 assert data["cheese_outcomes"].dtype == np.int8
@@ -486,7 +487,7 @@ class TestLoadAllPositions:
             batch_dir = _create_batch(tmp_path, "batch1", num_games=2)
 
             builder = FlatObservationBuilder(width=5, height=5)
-            obs, p1, p2, p1_values, p2_values, payout, a1, a2, cheese, w, h = _load_all_positions(
+            obs, p1, p2, p1_values, p2_values, a1, a2, cheese, w, h = _load_all_positions(
                 [batch_dir], builder
             )
 
@@ -495,7 +496,6 @@ class TestLoadAllPositions:
             assert obs.shape[0] == 6
             assert p1.shape == (6, 5)
             assert p2.shape == (6, 5)
-            assert payout.shape == (6, 2, 5, 5)
             assert a1.shape == (6,)
             assert a2.shape == (6,)
             assert cheese.shape == (6, 5, 5)
@@ -516,7 +516,6 @@ class TestWriteShards:
             p2 = np.zeros((10, 5), dtype=np.float32)
             p1_values = np.zeros(10, dtype=np.float32)
             p2_values = np.zeros(10, dtype=np.float32)
-            payout = np.zeros((10, 2, 5, 5), dtype=np.float32)
             a1 = np.zeros(10, dtype=np.int8)
             a2 = np.zeros(10, dtype=np.int8)
             cheese = np.zeros((10, 5, 5), dtype=np.int8)
@@ -528,7 +527,6 @@ class TestWriteShards:
                 p2,
                 p1_values,
                 p2_values,
-                payout,
                 a1,
                 a2,
                 cheese,
@@ -548,7 +546,6 @@ class TestWriteShards:
             p2 = np.zeros((5, 5), dtype=np.float32)
             p1_values = np.zeros(5, dtype=np.float32)
             p2_values = np.zeros(5, dtype=np.float32)
-            payout = np.zeros((5, 2, 5, 5), dtype=np.float32)
             a1 = np.zeros(5, dtype=np.int8)
             a2 = np.zeros(5, dtype=np.int8)
             cheese = np.zeros((5, 5, 5), dtype=np.int8)
@@ -560,7 +557,6 @@ class TestWriteShards:
                 p2,
                 p1_values,
                 p2_values,
-                payout,
                 a1,
                 a2,
                 cheese,

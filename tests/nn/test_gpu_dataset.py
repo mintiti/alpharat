@@ -58,8 +58,10 @@ def _create_game_npz(
 
     turn = np.arange(n, dtype=np.int16)
 
-    payout_matrix = np.zeros((n, 2, 5, 5), dtype=np.float32)
-    visit_counts = np.ones((n, 5, 5), dtype=np.int32) * 10
+    value_p1 = np.zeros(n, dtype=np.float32)
+    value_p2 = np.zeros(n, dtype=np.float32)
+    visit_counts_p1 = np.ones((n, 5), dtype=np.int32) * 10
+    visit_counts_p2 = np.ones((n, 5), dtype=np.int32) * 10
 
     prior_p1 = np.ones((n, 5), dtype=np.float32) / 5
     prior_p2 = np.ones((n, 5), dtype=np.float32) / 5
@@ -86,8 +88,10 @@ def _create_game_npz(
         p2_mud=p2_mud,
         cheese_mask=cheese_mask,
         turn=turn,
-        payout_matrix=payout_matrix,
-        visit_counts=visit_counts,
+        value_p1=value_p1,
+        value_p2=value_p2,
+        visit_counts_p1=visit_counts_p1,
+        visit_counts_p2=visit_counts_p2,
         prior_p1=prior_p1,
         prior_p2=prior_p2,
         policy_p1=policy_p1,
@@ -192,7 +196,6 @@ class TestGPUDataset:
             assert "policy_p2" in batch
             assert "p1_value" in batch
             assert "p2_value" in batch
-            assert "payout_matrix" in batch
             assert "action_p1" in batch
             assert "action_p2" in batch
 
@@ -209,7 +212,6 @@ class TestGPUDataset:
             assert batch["policy_p2"].shape == (2, 5)
             assert batch["p1_value"].shape == (2, 1)
             assert batch["p2_value"].shape == (2, 1)
-            assert batch["payout_matrix"].shape == (2, 2, 5, 5)
             assert batch["action_p1"].shape == (2, 1)
             assert batch["action_p2"].shape == (2, 1)
 

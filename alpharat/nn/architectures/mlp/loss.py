@@ -7,7 +7,6 @@ from typing import TYPE_CHECKING
 import torch
 import torch.nn.functional as F
 
-from alpharat.nn.losses import constant_sum_loss, nash_consistency_loss, sparse_payout_loss
 from alpharat.nn.training.keys import BatchKey, LossKey, ModelOutput
 
 if TYPE_CHECKING:
@@ -22,9 +21,9 @@ def compute_mlp_losses(
     """Compute losses for MLP model.
 
     Args:
-        model_output: Dict from model.forward() with LOGITS_P1, LOGITS_P2, PAYOUT.
-        batch: Training batch with policy_p1, policy_p2, action_p1, action_p2,
-            p1_value, p2_value.
+        model_output: Dict from model.forward() with LOGITS_P1, LOGITS_P2,
+            VALUE_P1, VALUE_P2.
+        batch: Training batch with policy_p1, policy_p2, p1_value, p2_value.
         config: MLPOptimConfig with loss weights.
 
     Returns:
@@ -32,64 +31,30 @@ def compute_mlp_losses(
     """
     logits_p1 = model_output[ModelOutput.LOGITS_P1]
     logits_p2 = model_output[ModelOutput.LOGITS_P2]
-    pred_payout = model_output[ModelOutput.PAYOUT]
+    pred_v1 = model_output[ModelOutput.VALUE_P1]
+    pred_v2 = model_output[ModelOutput.VALUE_P2]
 
     # Policy losses (cross-entropy with soft targets)
     loss_p1 = F.cross_entropy(logits_p1, batch[BatchKey.POLICY_P1])
     loss_p2 = F.cross_entropy(logits_p2, batch[BatchKey.POLICY_P2])
 
-    # Payout loss (sparse - only at played action pair)
-    loss_value = sparse_payout_loss(
-        pred_payout,
-        batch[BatchKey.ACTION_P1],
-        batch[BatchKey.ACTION_P2],
-        batch[BatchKey.P1_VALUE],
-        batch[BatchKey.P2_VALUE],
-    )
+    # Value losses (MSE on scalar values)
+    target_v1 = batch[BatchKey.P1_VALUE].squeeze(-1)
+    target_v2 = batch[BatchKey.P2_VALUE].squeeze(-1)
+    loss_v1 = F.mse_loss(pred_v1, target_v1)
+    loss_v2 = F.mse_loss(pred_v2, target_v2)
+    loss_value = 0.5 * (loss_v1 + loss_v2)
 
-    # Combine base losses
+    # Combine losses
     loss = config.policy_weight * (loss_p1 + loss_p2) + config.value_weight * loss_value
 
     result: dict[str, torch.Tensor] = {
         LossKey.POLICY_P1: loss_p1,
         LossKey.POLICY_P2: loss_p2,
         LossKey.VALUE: loss_value,
+        LossKey.VALUE_P1: loss_v1,
+        LossKey.VALUE_P2: loss_v2,
+        LossKey.TOTAL: loss,
     }
-
-    # Optional Nash consistency loss
-    loss_nash = torch.tensor(0.0, device=loss.device)
-    loss_indiff = torch.tensor(0.0, device=loss.device)
-    loss_dev = torch.tensor(0.0, device=loss.device)
-
-    if config.nash_weight > 0:
-        if config.nash_mode == "target":
-            pi1 = batch[BatchKey.POLICY_P1]
-            pi2 = batch[BatchKey.POLICY_P2]
-        else:  # predicted
-            pi1 = F.softmax(logits_p1, dim=-1)
-            pi2 = F.softmax(logits_p2, dim=-1)
-
-        loss_nash, loss_indiff, loss_dev = nash_consistency_loss(pred_payout, pi1, pi2)
-        loss = loss + config.nash_weight * loss_nash
-
-    result[LossKey.NASH] = loss_nash
-    result[LossKey.NASH_INDIFF] = loss_indiff
-    result[LossKey.NASH_DEV] = loss_dev
-
-    # Optional constant-sum regularization
-    loss_constant_sum = torch.tensor(0.0, device=loss.device)
-
-    if config.constant_sum_weight > 0:
-        loss_constant_sum = constant_sum_loss(
-            pred_payout,
-            batch[BatchKey.P1_VALUE],
-            batch[BatchKey.P2_VALUE],
-        )
-        loss = loss + config.constant_sum_weight * loss_constant_sum
-
-    result[LossKey.CONSTANT_SUM] = loss_constant_sum
-
-    # Total loss for backward
-    result[LossKey.TOTAL] = loss
 
     return result

@@ -28,7 +28,6 @@ from torch.utils.tensorboard import SummaryWriter
 from alpharat.nn.gpu_dataset import GPUDataset
 from alpharat.nn.metrics import (
     GPUMetricsAccumulator,
-    compute_payout_metrics,
     compute_policy_metrics,
     compute_value_metrics,
 )
@@ -55,7 +54,7 @@ def _compute_detailed_metrics(
     """Compute detailed metrics from accumulated batch outputs.
 
     Args:
-        all_outputs: List of dicts with logits, targets, and payouts per batch.
+        all_outputs: List of dicts with logits, targets, and values per batch.
 
     Returns:
         Dict of metric name -> value.
@@ -63,22 +62,17 @@ def _compute_detailed_metrics(
     # Concatenate all batch outputs
     all_logits_p1 = torch.cat([d[ModelOutput.LOGITS_P1] for d in all_outputs])
     all_logits_p2 = torch.cat([d[ModelOutput.LOGITS_P2] for d in all_outputs])
-    all_pred_payout = torch.cat([d[ModelOutput.PAYOUT] for d in all_outputs])
+    all_pred_v1 = torch.cat([d[ModelOutput.VALUE_P1] for d in all_outputs])
+    all_pred_v2 = torch.cat([d[ModelOutput.VALUE_P2] for d in all_outputs])
     all_policy_p1 = torch.cat([d[BatchKey.POLICY_P1] for d in all_outputs])
     all_policy_p2 = torch.cat([d[BatchKey.POLICY_P2] for d in all_outputs])
-    all_payout_matrix = torch.cat([d[BatchKey.PAYOUT_MATRIX] for d in all_outputs])
-    all_action_p1 = torch.cat([d[BatchKey.ACTION_P1] for d in all_outputs])
-    all_action_p2 = torch.cat([d[BatchKey.ACTION_P2] for d in all_outputs])
     all_p1_value = torch.cat([d[BatchKey.P1_VALUE] for d in all_outputs])
     all_p2_value = torch.cat([d[BatchKey.P2_VALUE] for d in all_outputs])
 
     # Compute metrics on full epoch data
     p1_metrics = compute_policy_metrics(all_logits_p1, all_policy_p1)
     p2_metrics = compute_policy_metrics(all_logits_p2, all_policy_p2)
-    payout_metrics = compute_payout_metrics(all_pred_payout, all_payout_matrix)
-    value_metrics = compute_value_metrics(
-        all_pred_payout, all_action_p1, all_action_p2, all_p1_value, all_p2_value
-    )
+    value_metrics = compute_value_metrics(all_pred_v1, all_pred_v2, all_p1_value, all_p2_value)
 
     # Convert tensors to floats
     metrics: dict[str, float] = {}
@@ -86,8 +80,6 @@ def _compute_detailed_metrics(
         metrics[f"p1/{k}"] = v.item()
     for k, v in p2_metrics.items():
         metrics[f"p2/{k}"] = v.item()
-    for k, v in payout_metrics.items():
-        metrics[f"payout/{k}"] = v.item()
     for k, v in value_metrics.items():
         metrics[f"value/{k}"] = v.item()
 
@@ -239,7 +231,6 @@ def run_training(
                 BatchKey.POLICY_P2: train[BatchKey.POLICY_P2][batch_idx],
                 BatchKey.P1_VALUE: train[BatchKey.P1_VALUE][batch_idx],
                 BatchKey.P2_VALUE: train[BatchKey.P2_VALUE][batch_idx],
-                BatchKey.PAYOUT_MATRIX: train[BatchKey.PAYOUT_MATRIX][batch_idx],
                 BatchKey.ACTION_P1: train[BatchKey.ACTION_P1][batch_idx],
                 BatchKey.ACTION_P2: train[BatchKey.ACTION_P2][batch_idx],
             }
@@ -277,12 +268,10 @@ def run_training(
                     {
                         ModelOutput.LOGITS_P1: model_output[ModelOutput.LOGITS_P1].detach().clone(),
                         ModelOutput.LOGITS_P2: model_output[ModelOutput.LOGITS_P2].detach().clone(),
-                        ModelOutput.PAYOUT: model_output[ModelOutput.PAYOUT].detach().clone(),
+                        ModelOutput.VALUE_P1: model_output[ModelOutput.VALUE_P1].detach().clone(),
+                        ModelOutput.VALUE_P2: model_output[ModelOutput.VALUE_P2].detach().clone(),
                         BatchKey.POLICY_P1: batch[BatchKey.POLICY_P1],
                         BatchKey.POLICY_P2: batch[BatchKey.POLICY_P2],
-                        BatchKey.PAYOUT_MATRIX: batch[BatchKey.PAYOUT_MATRIX],
-                        BatchKey.ACTION_P1: batch[BatchKey.ACTION_P1],
-                        BatchKey.ACTION_P2: batch[BatchKey.ACTION_P2],
                         BatchKey.P1_VALUE: batch[BatchKey.P1_VALUE],
                         BatchKey.P2_VALUE: batch[BatchKey.P2_VALUE],
                     }
@@ -314,7 +303,6 @@ def run_training(
                     BatchKey.POLICY_P2: val[BatchKey.POLICY_P2][start_idx:end_idx],
                     BatchKey.P1_VALUE: val[BatchKey.P1_VALUE][start_idx:end_idx],
                     BatchKey.P2_VALUE: val[BatchKey.P2_VALUE][start_idx:end_idx],
-                    BatchKey.PAYOUT_MATRIX: val[BatchKey.PAYOUT_MATRIX][start_idx:end_idx],
                     BatchKey.ACTION_P1: val[BatchKey.ACTION_P1][start_idx:end_idx],
                     BatchKey.ACTION_P2: val[BatchKey.ACTION_P2][start_idx:end_idx],
                 }
@@ -340,12 +328,10 @@ def run_training(
                         {
                             ModelOutput.LOGITS_P1: model_output[ModelOutput.LOGITS_P1].clone(),
                             ModelOutput.LOGITS_P2: model_output[ModelOutput.LOGITS_P2].clone(),
-                            ModelOutput.PAYOUT: model_output[ModelOutput.PAYOUT].clone(),
+                            ModelOutput.VALUE_P1: model_output[ModelOutput.VALUE_P1].clone(),
+                            ModelOutput.VALUE_P2: model_output[ModelOutput.VALUE_P2].clone(),
                             BatchKey.POLICY_P1: val_batch[BatchKey.POLICY_P1],
                             BatchKey.POLICY_P2: val_batch[BatchKey.POLICY_P2],
-                            BatchKey.PAYOUT_MATRIX: val_batch[BatchKey.PAYOUT_MATRIX],
-                            BatchKey.ACTION_P1: val_batch[BatchKey.ACTION_P1],
-                            BatchKey.ACTION_P2: val_batch[BatchKey.ACTION_P2],
                             BatchKey.P1_VALUE: val_batch[BatchKey.P1_VALUE],
                             BatchKey.P2_VALUE: val_batch[BatchKey.P2_VALUE],
                         }

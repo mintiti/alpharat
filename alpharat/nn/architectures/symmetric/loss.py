@@ -2,16 +2,15 @@
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
 import torch
 import torch.nn.functional as F
 
-from alpharat.nn.architectures.symmetric.config import SymmetricOptimConfig  # noqa: TC001
-from alpharat.nn.losses import (
-    constant_sum_loss,
-    nash_consistency_loss,
-    sparse_payout_loss,
-)
 from alpharat.nn.training.keys import BatchKey, LossKey, ModelOutput
+
+if TYPE_CHECKING:
+    from alpharat.nn.architectures.symmetric.config import SymmetricOptimConfig
 
 
 def compute_symmetric_losses(
@@ -22,74 +21,40 @@ def compute_symmetric_losses(
     """Compute losses for SymmetricMLP.
 
     Args:
-        model_output: Dict from model.forward() with logits and payout.
-        batch: Training batch with targets.
-        config: OptimConfig with loss weights.
+        model_output: Dict from model.forward() with LOGITS_P1, LOGITS_P2,
+            VALUE_P1, VALUE_P2.
+        batch: Training batch with policy_p1, policy_p2, p1_value, p2_value.
+        config: SymmetricOptimConfig with loss weights.
 
     Returns:
-        Dict with LossKey keys containing individual and total losses.
+        Dict with LossKey.TOTAL and individual loss components.
     """
     logits_p1 = model_output[ModelOutput.LOGITS_P1]
     logits_p2 = model_output[ModelOutput.LOGITS_P2]
-    pred_payout = model_output[ModelOutput.PAYOUT]
+    pred_v1 = model_output[ModelOutput.VALUE_P1]
+    pred_v2 = model_output[ModelOutput.VALUE_P2]
 
-    # Policy losses
+    # Policy losses (cross-entropy with soft targets)
     loss_p1 = F.cross_entropy(logits_p1, batch[BatchKey.POLICY_P1])
     loss_p2 = F.cross_entropy(logits_p2, batch[BatchKey.POLICY_P2])
 
-    # Sparse payout loss (ground truth for played pair only)
-    loss_value = sparse_payout_loss(
-        pred_payout,
-        batch[BatchKey.ACTION_P1],
-        batch[BatchKey.ACTION_P2],
-        batch[BatchKey.P1_VALUE],
-        batch[BatchKey.P2_VALUE],
-    )
+    # Value losses (MSE on scalar values)
+    target_v1 = batch[BatchKey.P1_VALUE].squeeze(-1)
+    target_v2 = batch[BatchKey.P2_VALUE].squeeze(-1)
+    loss_v1 = F.mse_loss(pred_v1, target_v1)
+    loss_v2 = F.mse_loss(pred_v2, target_v2)
+    loss_value = 0.5 * (loss_v1 + loss_v2)
 
-    # Full matrix loss (NN vs targets with ground truth at played cell)
-    # Payout matrix is pre-patched during sharding — no clone needed here.
-    if config.matrix_loss_weight > 0:
-        loss_matrix = F.mse_loss(pred_payout, batch[BatchKey.PAYOUT_MATRIX])
-    else:
-        loss_matrix = torch.tensor(0.0, device=pred_payout.device)
+    # Combine losses
+    loss = config.policy_weight * (loss_p1 + loss_p2) + config.value_weight * loss_value
 
-    # Nash consistency loss (optional)
-    if config.nash_weight > 0:
-        if config.nash_mode == "predicted":
-            pi1 = F.softmax(logits_p1, dim=-1)
-            pi2 = F.softmax(logits_p2, dim=-1)
-        else:
-            pi1 = batch[BatchKey.POLICY_P1]
-            pi2 = batch[BatchKey.POLICY_P2]
-        loss_nash, loss_indiff, loss_dev = nash_consistency_loss(pred_payout, pi1, pi2)
-    else:
-        zero = torch.tensor(0.0, device=pred_payout.device)
-        loss_nash, loss_indiff, loss_dev = zero, zero, zero
-
-    # Constant-sum regularization (optional)
-    if config.constant_sum_weight > 0:
-        loss_csum = constant_sum_loss(
-            pred_payout, batch[BatchKey.P1_VALUE], batch[BatchKey.P2_VALUE]
-        )
-    else:
-        loss_csum = torch.tensor(0.0, device=pred_payout.device)
-
-    loss = (
-        config.policy_weight * (loss_p1 + loss_p2)
-        + config.value_weight * loss_value
-        + config.matrix_loss_weight * loss_matrix
-        + config.nash_weight * loss_nash
-        + config.constant_sum_weight * loss_csum
-    )
-
-    return {
-        LossKey.TOTAL: loss,
+    result: dict[str, torch.Tensor] = {
         LossKey.POLICY_P1: loss_p1,
         LossKey.POLICY_P2: loss_p2,
         LossKey.VALUE: loss_value,
-        LossKey.MATRIX: loss_matrix,
-        LossKey.NASH: loss_nash,
-        LossKey.NASH_INDIFF: loss_indiff,
-        LossKey.NASH_DEV: loss_dev,
-        LossKey.CONSTANT_SUM: loss_csum,
+        LossKey.VALUE_P1: loss_v1,
+        LossKey.VALUE_P2: loss_v2,
+        LossKey.TOTAL: loss,
     }
+
+    return result
