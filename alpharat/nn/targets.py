@@ -19,15 +19,14 @@ CHEESE_INACTIVE = -1
 def build_targets(game: GameData, position: PositionData) -> TargetBundle:
     """Build training targets for a single position.
 
-    Policy targets come from the Nash equilibrium computed by MCTS
+    Policy targets come from the visit-proportional policy computed by MCTS
     at this position (stored in position.policy_p1/p2).
 
     Value targets are the actual remaining scores for each player:
         p1_value = final_p1_score - current_p1_score
         p2_value = final_p2_score - current_p2_score
 
-    These are ground truth outcomes used to supervise the payout matrix
-    at the played action pair.
+    These are ground truth outcomes used to supervise the scalar value heads.
 
     Cheese outcomes are masked to only include cheese still on the board
     at this position. Cells without active cheese get CHEESE_INACTIVE (-1).
@@ -35,10 +34,10 @@ def build_targets(game: GameData, position: PositionData) -> TargetBundle:
 
     Args:
         game: Game-level data containing final scores and cheese outcomes.
-        position: Position-level data containing Nash policies and current scores.
+        position: Position-level data containing policies and current scores.
 
     Returns:
-        TargetBundle with policy, values, payout_matrix, action, and cheese targets.
+        TargetBundle with policy, values, action, and cheese targets.
     """
     p1_value = game.final_p1_score - position.p1_score
     p2_value = game.final_p2_score - position.p2_score
@@ -58,7 +57,6 @@ def build_targets(game: GameData, position: PositionData) -> TargetBundle:
         policy_p2=position.policy_p2.astype(np.float32),
         p1_value=p1_value,
         p2_value=p2_value,
-        payout_matrix=position.payout_matrix.astype(np.float32),
         action_p1=position.action_p1,
         action_p2=position.action_p2,
         cheese_outcomes=cheese_outcomes,

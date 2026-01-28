@@ -107,7 +107,8 @@ def _create_mcts_tree(game: PyRat, mcts_config: DecoupledPUCTConfig) -> MCTSTree
         game_state=None,
         prior_policy_p1=dummy,
         prior_policy_p2=dummy,
-        nn_payout_prediction=np.zeros((5, 5)),
+        nn_value_p1=0.0,
+        nn_value_p2=0.0,
         parent=None,
         p1_mud_turns_remaining=game.player1_mud_turns,
         p2_mud_turns_remaining=game.player2_mud_turns,
@@ -182,13 +183,15 @@ class TestTrainConfigIntegration:
         # Verify output structure
         assert "policy_p1" in output
         assert "policy_p2" in output
-        assert "payout" in output
+        assert "value_p1" in output
+        assert "value_p2" in output
 
         # Verify output shapes
         assert output["policy_p1"].shape == (1, 5)
         assert output["policy_p2"].shape == (1, 5)
-        # Payout shape is (batch, 2, 5, 5) - both players' 5x5 payout matrices
-        assert output["payout"].shape == (1, 2, 5, 5)
+        # Value shapes are scalar per sample
+        assert output["value_p1"].shape == (1,)
+        assert output["value_p2"].shape == (1,)
 
 
 # --- Composition Semantics ---

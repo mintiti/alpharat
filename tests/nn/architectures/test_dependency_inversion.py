@@ -264,7 +264,12 @@ class TestSelfConsistency:
             output = model(batch["observation"])
 
         # All models must have these core keys
-        required_keys = [ModelOutput.LOGITS_P1, ModelOutput.LOGITS_P2, ModelOutput.PAYOUT]
+        required_keys = [
+            ModelOutput.LOGITS_P1,
+            ModelOutput.LOGITS_P2,
+            ModelOutput.VALUE_P1,
+            ModelOutput.VALUE_P2,
+        ]
         for key in required_keys:
             assert key in output, f"{arch_type}: model output missing {key}"
 
@@ -284,7 +289,12 @@ class TestSelfConsistency:
             output = model.predict(batch["observation"])
 
         # All models must have these core keys
-        required_keys = [ModelOutput.POLICY_P1, ModelOutput.POLICY_P2, ModelOutput.PAYOUT]
+        required_keys = [
+            ModelOutput.POLICY_P1,
+            ModelOutput.POLICY_P2,
+            ModelOutput.VALUE_P1,
+            ModelOutput.VALUE_P2,
+        ]
         for key in required_keys:
             assert key in output, f"{arch_type}: model predict output missing {key}"
 

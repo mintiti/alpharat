@@ -1,7 +1,7 @@
 """Decoupled PUCT search for simultaneous-move MCTS.
 
-Each player independently selects actions via PUCT formula with Q-values
-marginalized over the opponent's prior policy.
+Each player independently selects actions via PUCT formula with marginal
+Q-values. Returns visit-proportional policies instead of Nash equilibrium.
 """
 
 from __future__ import annotations
@@ -9,13 +9,12 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
+import numpy as np
+
 from alpharat.config.base import StrictBaseModel
-from alpharat.mcts.nash import compute_nash_equilibrium
 from alpharat.mcts.numba_ops import compute_puct_scores, select_max_with_tiebreak
 
 if TYPE_CHECKING:
-    import numpy as np
-
     from alpharat.mcts.node import MCTSNode
     from alpharat.mcts.tree import MCTSTree
 
@@ -24,9 +23,10 @@ if TYPE_CHECKING:
 class SearchResult:
     """Result of MCTS search containing policy and value information."""
 
-    policy_p1: np.ndarray
-    policy_p2: np.ndarray
-    payout_matrix: np.ndarray
+    policy_p1: np.ndarray  # [5] visit-proportional policy
+    policy_p2: np.ndarray  # [5] visit-proportional policy
+    value_p1: float  # Root value estimate for P1
+    value_p2: float  # Root value estimate for P2
 
 
 class DecoupledPUCTConfig(StrictBaseModel):
@@ -79,24 +79,39 @@ class DecoupledPUCTSearch:
         return SearchResult(
             policy_p1=root.prior_policy_p1.copy(),
             policy_p2=root.prior_policy_p2.copy(),
-            payout_matrix=root.payout_matrix.copy(),
+            value_p1=root.init_v1,
+            value_p2=root.init_v2,
         )
 
     def _make_result(self) -> SearchResult:
-        """Compute Nash equilibrium from root statistics."""
+        """Compute visit-proportional policy from root statistics."""
         root = self.tree.root
-        payout_matrix = root.payout_matrix
 
-        policy_p1, policy_p2 = compute_nash_equilibrium(
-            payout_matrix,
-            root.p1_effective,
-            root.p2_effective,
-        )
+        # Get marginal visit counts in expanded [5] space
+        n1_expanded, n2_expanded = root.get_marginal_visits_expanded()
+
+        # Normalize to get visit-proportional policy
+        n1_sum = n1_expanded.sum()
+        n2_sum = n2_expanded.sum()
+
+        policy_p1 = n1_expanded / n1_sum if n1_sum > 0 else root.prior_policy_p1.copy()
+        policy_p2 = n2_expanded / n2_sum if n2_sum > 0 else root.prior_policy_p2.copy()
+
+        # Compute root value from Q-values weighted by visit counts
+        q1, q2 = root.get_q_values()
+        n1, n2 = root.get_visit_counts()
+
+        n1_total = n1.sum()
+        n2_total = n2.sum()
+
+        value_p1 = float(np.dot(q1, n1) / n1_total) if n1_total > 0 else root.init_v1
+        value_p2 = float(np.dot(q2, n2) / n2_total) if n2_total > 0 else root.init_v2
 
         return SearchResult(
-            policy_p1=policy_p1,
-            policy_p2=policy_p2,
-            payout_matrix=payout_matrix.copy(),
+            policy_p1=policy_p1.astype(np.float64),
+            policy_p2=policy_p2.astype(np.float64),
+            value_p1=value_p1,
+            value_p2=value_p2,
         )
 
     def _simulate(self) -> None:
@@ -144,8 +159,8 @@ class DecoupledPUCTSearch:
         if leaf_child is None or leaf_child.is_terminal:
             g: tuple[float, float] = (0.0, 0.0)
         else:
-            # NN's expected value under its own policy for each player
-            g = leaf_child.compute_expected_value()
+            # NN's scalar value estimates for the leaf position
+            g = (leaf_child.init_v1, leaf_child.init_v2)
 
         self.tree.backup(path, g=g)
 
@@ -163,8 +178,9 @@ class DecoupledPUCTSearch:
             Tuple of (action_p1, action_p2) selected via PUCT formula.
         """
         # Work in reduced space: [n1], [n2] arrays
-        q1, q2 = node.compute_marginal_q_reduced()
-        n1, n2 = node.compute_marginal_visits_reduced()
+        # Decoupled UCT: each player has independent Q and N
+        q1, q2 = node.get_q_values()
+        n1, n2 = node.get_visit_counts()
         n_total = node.total_visits
         is_root = node == self.tree.root
 

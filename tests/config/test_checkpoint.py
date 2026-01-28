@@ -198,7 +198,8 @@ class TestLoadModelInference:
         # Forward returns logits (see ModelOutput enum)
         assert "logits_p1" in output
         assert "logits_p2" in output
-        assert "payout" in output
+        assert "value_p1" in output
+        assert "value_p2" in output
 
     def test_model_can_predict(self, mlp_checkpoint: Path) -> None:
         """Loaded model can run predict (with softmax)."""

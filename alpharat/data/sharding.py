@@ -79,7 +79,6 @@ def prepare_training_set(
         - policy_p2: float32 (N, 5)
         - p1_value: float32 (N,) — P1's actual remaining score
         - p2_value: float32 (N,) — P2's actual remaining score
-        - payout_matrix: float32 (N, 2, 5, 5)
         - action_p1: int8 (N,)
         - action_p2: int8 (N,)
         - cheese_outcomes: int8 (N, H, W) — position-level ownership targets.
@@ -109,7 +108,6 @@ def prepare_training_set(
         all_policy_p2,
         all_p1_values,
         all_p2_values,
-        all_payout_matrices,
         all_action_p1,
         all_action_p2,
         all_cheese_outcomes,
@@ -130,7 +128,6 @@ def prepare_training_set(
     all_policy_p2 = all_policy_p2[indices]
     all_p1_values = all_p1_values[indices]
     all_p2_values = all_p2_values[indices]
-    all_payout_matrices = all_payout_matrices[indices]
     all_action_p1 = all_action_p1[indices]
     all_action_p2 = all_action_p2[indices]
     all_cheese_outcomes = all_cheese_outcomes[indices]
@@ -148,7 +145,6 @@ def prepare_training_set(
         all_policy_p2,
         all_p1_values,
         all_p2_values,
-        all_payout_matrices,
         all_action_p1,
         all_action_p2,
         all_cheese_outcomes,
@@ -314,7 +310,6 @@ def _process_game_files_to_shards(
         policy_p2_array,
         p1_values_array,
         p2_values_array,
-        payout_array,
         action_p1_array,
         action_p2_array,
         cheese_outcomes_array,
@@ -333,7 +328,6 @@ def _process_game_files_to_shards(
     policy_p2_array = policy_p2_array[indices]
     p1_values_array = p1_values_array[indices]
     p2_values_array = p2_values_array[indices]
-    payout_array = payout_array[indices]
     action_p1_array = action_p1_array[indices]
     action_p2_array = action_p2_array[indices]
     cheese_outcomes_array = cheese_outcomes_array[indices]
@@ -346,7 +340,6 @@ def _process_game_files_to_shards(
         policy_p2_array,
         p1_values_array,
         p2_values_array,
-        payout_array,
         action_p1_array,
         action_p2_array,
         cheese_outcomes_array,
@@ -399,7 +392,6 @@ def _load_positions_from_files(
     np.ndarray,
     np.ndarray,
     np.ndarray,
-    np.ndarray,
     int,
     int,
 ]:
@@ -418,7 +410,6 @@ def _load_positions_from_files(
             - policy_p2: float32 (N, 5)
             - p1_values: float32 (N,) — P1's remaining score (actual game outcome)
             - p2_values: float32 (N,) — P2's remaining score (actual game outcome)
-            - payout_matrices: float32 (N, 2, 5, 5)
             - action_p1: int8 (N,)
             - action_p2: int8 (N,)
             - cheese_outcomes: int8 (N, H, W) — position-level ownership targets.
@@ -434,7 +425,6 @@ def _load_positions_from_files(
     all_policy_p2: list[np.ndarray] = []
     all_p1_values: list[float] = []
     all_p2_values: list[float] = []
-    all_payout_matrices: list[np.ndarray] = []
     all_action_p1: list[int] = []
     all_action_p2: list[int] = []
     all_cheese_outcomes: list[np.ndarray] = []
@@ -467,7 +457,6 @@ def _load_positions_from_files(
             all_policy_p2.append(targets.policy_p2)
             all_p1_values.append(targets.p1_value)
             all_p2_values.append(targets.p2_value)
-            all_payout_matrices.append(targets.payout_matrix)
             all_action_p1.append(targets.action_p1)
             all_action_p2.append(targets.action_p2)
             all_cheese_outcomes.append(targets.cheese_outcomes)
@@ -491,7 +480,6 @@ def _load_positions_from_files(
         np.stack(all_policy_p2),
         np.array(all_p1_values, dtype=np.float32),
         np.array(all_p2_values, dtype=np.float32),
-        np.stack(all_payout_matrices),
         np.array(all_action_p1, dtype=np.int8),
         np.array(all_action_p2, dtype=np.int8),
         np.stack(all_cheese_outcomes),
@@ -504,7 +492,6 @@ def _load_all_positions(
     batch_dirs: list[Path],
     builder: ObservationBuilder,
 ) -> tuple[
-    np.ndarray,
     np.ndarray,
     np.ndarray,
     np.ndarray,
@@ -548,7 +535,6 @@ def _write_shards(
     policy_p2: np.ndarray,
     p1_values: np.ndarray,
     p2_values: np.ndarray,
-    payout_matrices: np.ndarray,
     action_p1: np.ndarray,
     action_p2: np.ndarray,
     cheese_outcomes: np.ndarray,
@@ -563,7 +549,6 @@ def _write_shards(
         policy_p2: All P2 policies, shape (N, 5).
         p1_values: P1's remaining scores, shape (N,).
         p2_values: P2's remaining scores, shape (N,).
-        payout_matrices: All payout matrices, shape (N, 2, 5, 5).
         action_p1: All P1 actions, shape (N,).
         action_p2: All P2 actions, shape (N,).
         cheese_outcomes: Position-level ownership targets, shape (N, H, W).
@@ -593,7 +578,6 @@ def _write_shards(
             policy_p2=policy_p2[start_idx:end_idx],
             p1_value=p1_values[start_idx:end_idx],
             p2_value=p2_values[start_idx:end_idx],
-            payout_matrix=payout_matrices[start_idx:end_idx],
             action_p1=action_p1[start_idx:end_idx],
             action_p2=action_p2[start_idx:end_idx],
             cheese_outcomes=cheese_outcomes[start_idx:end_idx],

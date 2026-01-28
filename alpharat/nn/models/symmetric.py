@@ -31,9 +31,8 @@ class SymmetricMLP(nn.Module):
         policy_head(cat(h1, agg)) → logits_p1  (same head)
         policy_head(cat(h2, agg)) → logits_p2  (same head)
 
-        payout_head(cat(h1, agg)) → payout_p1  (same head)
-        payout_head(cat(h2, agg)) → payout_p2  (same head)
-        bimatrix = [payout_p1, payout_p2.T]
+        value_head(cat(h1, agg)) → value_p1  (same head)
+        value_head(cat(h2, agg)) → value_p2  (same head)
     """
 
     def __init__(
@@ -98,7 +97,7 @@ class SymmetricMLP(nn.Module):
         # Heads (rho) - each shared for both players
         # Input: cat(h_i, agg) = hidden_dim * 2
         self.policy_head = nn.Linear(hidden_dim * 2, num_actions)
-        self.payout_head = nn.Linear(hidden_dim * 2, num_actions * num_actions)
+        self.value_head = nn.Linear(hidden_dim * 2, 1)
 
         self._init_weights()
 
@@ -116,9 +115,9 @@ class SymmetricMLP(nn.Module):
         nn.init.normal_(self.policy_head.weight, std=0.01)
         nn.init.zeros_(self.policy_head.bias)
 
-        # Payout head: small init → near-zero predictions
-        nn.init.normal_(self.payout_head.weight, std=0.01)
-        nn.init.zeros_(self.payout_head.bias)
+        # Value head: small init → near-zero predictions
+        nn.init.normal_(self.value_head.weight, std=0.01)
+        nn.init.zeros_(self.value_head.bias)
 
     def _parse_obs(self, obs: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """Parse flat observation into shared, p1, p2 components.
@@ -174,7 +173,8 @@ class SymmetricMLP(nn.Module):
             Dict with:
                 - ModelOutput.LOGITS_P1: Raw logits for P1, shape (batch, 5).
                 - ModelOutput.LOGITS_P2: Raw logits for P2, shape (batch, 5).
-                - ModelOutput.PAYOUT: Predicted payout values, shape (batch, 2, 5, 5).
+                - ModelOutput.VALUE_P1: Predicted value for P1, shape (batch,).
+                - ModelOutput.VALUE_P2: Predicted value for P2, shape (batch,).
         """
         # Parse and encode
         shared_raw, p1_raw, p2_raw = self._parse_obs(x)
@@ -193,23 +193,16 @@ class SymmetricMLP(nn.Module):
         logits_p1 = self.policy_head(torch.cat([h1, agg], dim=-1))
         logits_p2 = self.policy_head(torch.cat([h2, agg], dim=-1))  # Same head!
 
-        # Payout head (rho)
+        # Value head (rho)
         # softplus ensures non-negative outputs
-        payout_p1_flat = self.payout_head(torch.cat([h1, agg], dim=-1))
-        payout_p2_flat = self.payout_head(torch.cat([h2, agg], dim=-1))  # Same head!
-
-        payout_p1 = F.softplus(payout_p1_flat.view(-1, self.num_actions, self.num_actions))
-        payout_p2 = F.softplus(payout_p2_flat.view(-1, self.num_actions, self.num_actions))
-
-        # Stack into bimatrix [batch, 2, 5, 5]
-        # P2's payout needs transpose: her (i,j) is when she plays i, opponent plays j
-        # But bimatrix[1,i,j] should be P2's payout when P1 plays i, P2 plays j
-        payout_matrix = torch.stack([payout_p1, payout_p2.transpose(-1, -2)], dim=1)
+        value_p1 = F.softplus(self.value_head(torch.cat([h1, agg], dim=-1))).squeeze(-1)
+        value_p2 = F.softplus(self.value_head(torch.cat([h2, agg], dim=-1))).squeeze(-1)
 
         return {
             ModelOutput.LOGITS_P1: logits_p1,
             ModelOutput.LOGITS_P2: logits_p2,
-            ModelOutput.PAYOUT: payout_matrix,
+            ModelOutput.VALUE_P1: value_p1,
+            ModelOutput.VALUE_P2: value_p2,
         }
 
     def predict(self, x: torch.Tensor, **kwargs: object) -> dict[str, torch.Tensor]:
@@ -223,11 +216,13 @@ class SymmetricMLP(nn.Module):
             Dict with:
                 - ModelOutput.POLICY_P1: Probabilities for P1, shape (batch, 5).
                 - ModelOutput.POLICY_P2: Probabilities for P2, shape (batch, 5).
-                - ModelOutput.PAYOUT: Predicted payout values, shape (batch, 2, 5, 5).
+                - ModelOutput.VALUE_P1: Predicted value for P1, shape (batch,).
+                - ModelOutput.VALUE_P2: Predicted value for P2, shape (batch,).
         """
         output = self.forward(x)
         return {
             ModelOutput.POLICY_P1: F.softmax(output[ModelOutput.LOGITS_P1], dim=-1),
             ModelOutput.POLICY_P2: F.softmax(output[ModelOutput.LOGITS_P2], dim=-1),
-            ModelOutput.PAYOUT: output[ModelOutput.PAYOUT],
+            ModelOutput.VALUE_P1: output[ModelOutput.VALUE_P1],
+            ModelOutput.VALUE_P2: output[ModelOutput.VALUE_P2],
         }

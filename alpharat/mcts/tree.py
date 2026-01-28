@@ -37,7 +37,7 @@ class MCTSTree:
         game: PyRat,
         root: MCTSNode,
         gamma: float = 1.0,
-        predict_fn: Callable[[Any], tuple[np.ndarray, np.ndarray, np.ndarray]] | None = None,
+        predict_fn: Callable[[Any], tuple[np.ndarray, np.ndarray, float, float]] | None = None,
     ):
         """Initialize MCTS tree.
 
@@ -46,7 +46,7 @@ class MCTSTree:
             root: Root node of the tree
             gamma: Discount factor (1.0 = no discounting)
             predict_fn: Callable taking an observation and returning
-                        (prior_p1, prior_p2, payout_matrix) as numpy arrays.
+                        (prior_p1, prior_p2, v1, v2) as numpy arrays and floats.
         """
         self.game = game
         self.root = root
@@ -54,7 +54,7 @@ class MCTSTree:
         self._predict_fn = predict_fn
 
         # Cache NN predictions keyed on game state (skip redundant forward passes)
-        self._prediction_cache: dict[tuple, tuple[np.ndarray, np.ndarray, np.ndarray]] = {}
+        self._prediction_cache: dict[tuple, tuple[np.ndarray, np.ndarray, float, float]] = {}
 
         # Track where simulator currently is
         self._sim_path: list[MCTSNode] = [root]
@@ -276,14 +276,15 @@ class MCTSTree:
         p1_effective = self._compute_effective_actions(self.game.player1_position)
         p2_effective = self._compute_effective_actions(self.game.player2_position)
 
-        # Get priors (smart uniform uses effective mappings)
-        prior_p1, prior_p2, nn_payout = self._predict(p1_effective, p2_effective)
+        # Get priors and values (smart uniform uses effective mappings)
+        prior_p1, prior_p2, v1, v2 = self._predict(p1_effective, p2_effective)
 
         child = MCTSNode(
             game_state=None,  # Don't store game state
             prior_policy_p1=prior_p1,
             prior_policy_p2=prior_p2,
-            nn_payout_prediction=nn_payout,
+            nn_value_p1=v1,
+            nn_value_p2=v2,
             parent=parent,
             p1_mud_turns_remaining=p1_mud,
             p2_mud_turns_remaining=p2_mud,
@@ -321,8 +322,8 @@ class MCTSTree:
         self,
         p1_effective: list[int] | None = None,
         p2_effective: list[int] | None = None,
-    ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-        """Run policy/value network to obtain priors and payout prediction.
+    ) -> tuple[np.ndarray, np.ndarray, float, float]:
+        """Run policy/value network to obtain priors and value prediction.
 
         Uses a transposition cache to skip redundant NN calls when the same
         game state is reached via different move sequences.
@@ -332,24 +333,23 @@ class MCTSTree:
             p2_effective: Effective action mapping for P2 (used for smart uniform priors).
 
         Returns:
-            Tuple of (prior_p1, prior_p2, payout) where payout has shape (2, 5, 5)
+            Tuple of (prior_p1, prior_p2, v1, v2) where v1, v2 are scalar values.
         """
         if self._predict_fn is None:
             # Smart uniform: only spread probability over actions that do different things
             prior_p1 = self._smart_uniform_prior(p1_effective)
             prior_p2 = self._smart_uniform_prior(p2_effective)
-            payout = np.zeros((2, 5, 5))  # Separate payoffs for P1 and P2
-            return prior_p1, prior_p2, payout
+            return prior_p1, prior_p2, 0.0, 0.0
 
         key = self._make_state_key()
         cached = self._prediction_cache.get(key)
         if cached is not None:
-            # Return copies — node init mutates arrays via np.add.at
-            return cached[0].copy(), cached[1].copy(), cached[2].copy()
+            # Return copies of arrays — node init mutates arrays via np.add.at
+            return cached[0].copy(), cached[1].copy(), cached[2], cached[3]
 
         result = self._predict_fn(self._get_observation())
         self._prediction_cache[key] = result
-        return result
+        return result[0], result[1], result[2], result[3]
 
     def _smart_uniform_prior(self, effective: list[int] | None) -> np.ndarray:
         """Create uniform prior over unique effective actions only.
@@ -391,18 +391,16 @@ class MCTSTree:
         """Initialize root node with NN predictions.
 
         Called during tree initialization to ensure root has proper
-        policy priors and payout predictions from the neural network,
+        policy priors and value predictions from the neural network,
         consistent with how child nodes are created.
 
         Note: Must be called after _init_root_effective so smart uniform
         priors can use the effective action mappings.
         """
-        prior_p1, prior_p2, nn_payout = self._predict(
-            self.root.p1_effective, self.root.p2_effective
-        )
+        prior_p1, prior_p2, v1, v2 = self._predict(self.root.p1_effective, self.root.p2_effective)
         self.root.prior_policy_p1 = prior_p1
         self.root.prior_policy_p2 = prior_p2
-        self.root.payout_matrix = nn_payout.copy()
+        self.root.set_init_values(v1, v2)
 
     def _init_root_effective(self) -> None:
         """Initialize effective action mappings for the root node.

@@ -42,12 +42,14 @@ class PositionData:
     p2_mud: int
     cheese_positions: list[tuple[int, int]]
     turn: int
-    payout_matrix: np.ndarray  # (2, 5, 5) — bimatrix: [0]=P1's payoffs, [1]=P2's
-    visit_counts: np.ndarray  # (5, 5)
+    value_p1: float  # MCTS root value estimate for P1
+    value_p2: float  # MCTS root value estimate for P2
+    visit_counts_p1: np.ndarray  # (5,) marginal visit counts for P1
+    visit_counts_p2: np.ndarray  # (5,) marginal visit counts for P2
     prior_p1: np.ndarray  # (5,)
     prior_p2: np.ndarray  # (5,)
-    policy_p1: np.ndarray  # (5,)
-    policy_p2: np.ndarray  # (5,)
+    policy_p1: np.ndarray  # (5,) visit-proportional policy
+    policy_p2: np.ndarray  # (5,) visit-proportional policy
     action_p1: int  # action taken by player 1 (0-4)
     action_p2: int  # action taken by player 2 (0-4)
 
