@@ -49,14 +49,12 @@ class TargetBundle:
     """Training targets for a single position.
 
     Attributes:
-        policy_p1: Nash policy for player 1, shape (5,). Sums to 1.
-        policy_p2: Nash policy for player 2, shape (5,). Sums to 1.
+        policy_p1: Visit-proportional policy for player 1, shape (5,). Sums to 1.
+        policy_p2: Visit-proportional policy for player 2, shape (5,). Sums to 1.
         p1_value: P1's remaining score (final_p1_score - current_p1_score).
             Ground truth outcome for P1 from this position.
         p2_value: P2's remaining score (final_p2_score - current_p2_score).
             Ground truth outcome for P2 from this position.
-        payout_matrix: MCTS refined bimatrix, shape (2, 5, 5).
-            [0] = P1's payoffs, [1] = P2's payoffs.
         action_p1: Action taken by player 1 (0-4).
         action_p2: Action taken by player 2 (0-4).
         cheese_outcomes: Per-cell ownership outcomes, shape (H, W).
@@ -78,7 +76,6 @@ class TargetBundle:
     policy_p2: np.ndarray  # float32 (5,)
     p1_value: float  # P1's actual remaining score
     p2_value: float  # P2's actual remaining score
-    payout_matrix: np.ndarray  # float32 (2, 5, 5)
     action_p1: int
     action_p2: int
     cheese_outcomes: np.ndarray  # int8 (H, W), -1 sentinel for inactive cells

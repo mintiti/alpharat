@@ -64,7 +64,6 @@ def _make_sample(
     np.ndarray,
     np.ndarray,
     np.ndarray,
-    np.ndarray,
 ]:
     """Create a complete sample with asymmetric P1/P2 values."""
     builder = FlatObservationBuilder(width=width, height=height)
@@ -79,10 +78,6 @@ def _make_sample(
     p1_value = np.array([2.5], dtype=np.float32)
     p2_value = np.array([1.5], dtype=np.float32)
 
-    # Asymmetric payout matrix for bimatrix game
-    # payout[0] = P1's payoffs, payout[1] = P2's payoffs
-    payout_matrix = np.arange(50).reshape(2, 5, 5).astype(np.float32)
-
     # Asymmetric actions
     action_p1 = np.array([0], dtype=np.int8)
     action_p2 = np.array([4], dtype=np.int8)
@@ -93,7 +88,6 @@ def _make_sample(
         policy_p2,
         p1_value,
         p2_value,
-        payout_matrix,
         action_p1,
         action_p2,
     )
@@ -104,19 +98,17 @@ class TestSwapPlayerPerspective:
 
     def test_swap_is_involution(self) -> None:
         """swap(swap(x)) = x for all fields."""
-        obs, p1, p2, p1_val, p2_val, payout, a1, a2 = _make_sample()
+        obs, p1, p2, p1_val, p2_val, a1, a2 = _make_sample()
         width, height = 5, 5
 
         # First swap
-        s_obs, s_p1, s_p2, s_p1_val, s_p2_val, s_payout, s_a1, s_a2 = swap_player_perspective(
-            obs, p1, p2, p1_val, p2_val, payout, a1, a2, width, height
+        s_obs, s_p1, s_p2, s_p1_val, s_p2_val, s_a1, s_a2 = swap_player_perspective(
+            obs, p1, p2, p1_val, p2_val, a1, a2, width, height
         )
 
         # Second swap
-        ss_obs, ss_p1, ss_p2, ss_p1_val, ss_p2_val, ss_payout, ss_a1, ss_a2 = (
-            swap_player_perspective(
-                s_obs, s_p1, s_p2, s_p1_val, s_p2_val, s_payout, s_a1, s_a2, width, height
-            )
+        ss_obs, ss_p1, ss_p2, ss_p1_val, ss_p2_val, ss_a1, ss_a2 = swap_player_perspective(
+            s_obs, s_p1, s_p2, s_p1_val, s_p2_val, s_a1, s_a2, width, height
         )
 
         # Should equal original
@@ -125,24 +117,22 @@ class TestSwapPlayerPerspective:
         np.testing.assert_array_almost_equal(ss_p2, p2)
         np.testing.assert_array_almost_equal(ss_p1_val, p1_val)
         np.testing.assert_array_almost_equal(ss_p2_val, p2_val)
-        np.testing.assert_array_almost_equal(ss_payout, payout)
         np.testing.assert_array_equal(ss_a1, a1)
         np.testing.assert_array_equal(ss_a2, a2)
 
     def test_swap_is_not_identity(self) -> None:
         """Swap should change asymmetric inputs (not be identity)."""
-        obs, p1, p2, p1_val, p2_val, payout, a1, a2 = _make_sample()
+        obs, p1, p2, p1_val, p2_val, a1, a2 = _make_sample()
         width, height = 5, 5
 
-        s_obs, s_p1, s_p2, s_p1_val, s_p2_val, s_payout, s_a1, s_a2 = swap_player_perspective(
-            obs, p1, p2, p1_val, p2_val, payout, a1, a2, width, height
+        s_obs, s_p1, s_p2, s_p1_val, s_p2_val, s_a1, s_a2 = swap_player_perspective(
+            obs, p1, p2, p1_val, p2_val, a1, a2, width, height
         )
 
         # At least some things should be different
         assert not np.allclose(s_obs, obs), "Observation should change"
         assert not np.allclose(s_p1, p1), "Policy P1 should change"
         assert not np.allclose(s_p1_val, p1_val), "P1 value should change"
-        assert not np.allclose(s_payout, payout), "Payout should change"
 
     def test_swap_positions(self) -> None:
         """P1 and P2 positions are swapped in observation."""
@@ -155,11 +145,10 @@ class TestSwapPlayerPerspective:
         p2 = np.ones(5, dtype=np.float32) / 5
         p1_val = np.array([0.0], dtype=np.float32)
         p2_val = np.array([0.0], dtype=np.float32)
-        payout = np.zeros((2, 5, 5), dtype=np.float32)
         a1 = np.array([0], dtype=np.int8)
         a2 = np.array([0], dtype=np.int8)
 
-        s_obs, *_ = swap_player_perspective(obs, p1, p2, p1_val, p2_val, payout, a1, a2, 5, 5)
+        s_obs, *_ = swap_player_perspective(obs, p1, p2, p1_val, p2_val, a1, a2, 5, 5)
 
         spatial = 25
         p1_start = spatial * 4
@@ -184,11 +173,10 @@ class TestSwapPlayerPerspective:
         p2 = np.ones(5, dtype=np.float32) / 5
         p1_val = np.array([0.0], dtype=np.float32)
         p2_val = np.array([0.0], dtype=np.float32)
-        payout = np.zeros((2, 5, 5), dtype=np.float32)
         a1 = np.array([0], dtype=np.int8)
         a2 = np.array([0], dtype=np.int8)
 
-        s_obs, *_ = swap_player_perspective(obs, p1, p2, p1_val, p2_val, payout, a1, a2, 5, 5)
+        s_obs, *_ = swap_player_perspective(obs, p1, p2, p1_val, p2_val, a1, a2, 5, 5)
 
         scalars_start = 25 * 7
         assert obs[scalars_start] == pytest.approx(5.0)  # Original diff
@@ -204,11 +192,10 @@ class TestSwapPlayerPerspective:
         p2 = np.ones(5, dtype=np.float32) / 5
         p1_val = np.array([0.0], dtype=np.float32)
         p2_val = np.array([0.0], dtype=np.float32)
-        payout = np.zeros((2, 5, 5), dtype=np.float32)
         a1 = np.array([0], dtype=np.int8)
         a2 = np.array([0], dtype=np.int8)
 
-        s_obs, *_ = swap_player_perspective(obs, p1, p2, p1_val, p2_val, payout, a1, a2, 5, 5)
+        s_obs, *_ = swap_player_perspective(obs, p1, p2, p1_val, p2_val, a1, a2, 5, 5)
 
         scalars_start = 25 * 7
         p1_mud_idx = scalars_start + 2
@@ -230,11 +217,10 @@ class TestSwapPlayerPerspective:
         p2 = np.ones(5, dtype=np.float32) / 5
         p1_val = np.array([0.0], dtype=np.float32)
         p2_val = np.array([0.0], dtype=np.float32)
-        payout = np.zeros((2, 5, 5), dtype=np.float32)
         a1 = np.array([0], dtype=np.int8)
         a2 = np.array([0], dtype=np.int8)
 
-        s_obs, *_ = swap_player_perspective(obs, p1, p2, p1_val, p2_val, payout, a1, a2, 5, 5)
+        s_obs, *_ = swap_player_perspective(obs, p1, p2, p1_val, p2_val, a1, a2, 5, 5)
 
         scalars_start = 25 * 7
         p1_score_idx = scalars_start + 4
@@ -247,65 +233,44 @@ class TestSwapPlayerPerspective:
 
     def test_swap_policies(self) -> None:
         """P1 and P2 policies are swapped."""
-        obs, _, _, p1_val, p2_val, payout, a1, a2 = _make_sample()
+        obs, _, _, p1_val, p2_val, a1, a2 = _make_sample()
         p1 = np.array([0.5, 0.3, 0.1, 0.05, 0.05], dtype=np.float32)
         p2 = np.array([0.1, 0.1, 0.2, 0.3, 0.3], dtype=np.float32)
 
-        _, s_p1, s_p2, *_ = swap_player_perspective(
-            obs, p1, p2, p1_val, p2_val, payout, a1, a2, 5, 5
-        )
+        _, s_p1, s_p2, *_ = swap_player_perspective(obs, p1, p2, p1_val, p2_val, a1, a2, 5, 5)
 
         np.testing.assert_array_equal(s_p1, p2)
         np.testing.assert_array_equal(s_p2, p1)
 
     def test_swap_actions(self) -> None:
         """P1 and P2 actions are swapped."""
-        obs, p1, p2, p1_val, p2_val, payout, _, _ = _make_sample()
+        obs, p1, p2, p1_val, p2_val, _, _ = _make_sample()
         a1 = np.array([1], dtype=np.int8)
         a2 = np.array([3], dtype=np.int8)
 
-        *_, s_a1, s_a2 = swap_player_perspective(obs, p1, p2, p1_val, p2_val, payout, a1, a2, 5, 5)
+        *_, s_a1, s_a2 = swap_player_perspective(obs, p1, p2, p1_val, p2_val, a1, a2, 5, 5)
 
         np.testing.assert_array_equal(s_a1, a2)
         np.testing.assert_array_equal(s_a2, a1)
 
     def test_swap_values_swapped(self) -> None:
         """P1 and P2 values are swapped after swap."""
-        obs, p1, p2, _, _, payout, a1, a2 = _make_sample()
+        obs, p1, p2, _, _, a1, a2 = _make_sample()
         p1_val = np.array([3.5], dtype=np.float32)
         p2_val = np.array([1.5], dtype=np.float32)
 
-        *_, s_p1_val, s_p2_val, _, _, _ = swap_player_perspective(
-            obs, p1, p2, p1_val, p2_val, payout, a1, a2, 5, 5
+        *_, s_p1_val, s_p2_val, _, _ = swap_player_perspective(
+            obs, p1, p2, p1_val, p2_val, a1, a2, 5, 5
         )
 
         assert s_p1_val[0] == pytest.approx(1.5)  # Was p2_val
         assert s_p2_val[0] == pytest.approx(3.5)  # Was p1_val
 
-    def test_swap_payout_matrix(self) -> None:
-        """Payout matrix swaps player indices and transposes for bimatrix.
-
-        For bimatrix games:
-        - new_payout[0] = payout[1].T (new P1's payoffs = old P2's, transposed)
-        - new_payout[1] = payout[0].T (new P2's payoffs = old P1's, transposed)
-        """
-        obs, p1, p2, p1_val, p2_val, _, a1, a2 = _make_sample()
-        payout = np.arange(50).reshape(2, 5, 5).astype(np.float32)
-
-        *_, s_payout, _, _ = swap_player_perspective(
-            obs, p1, p2, p1_val, p2_val, payout, a1, a2, 5, 5
-        )
-
-        expected = np.empty_like(payout)
-        expected[0] = payout[1].T  # New P1's payoffs = old P2's, transposed
-        expected[1] = payout[0].T  # New P2's payoffs = old P1's, transposed
-        np.testing.assert_array_almost_equal(s_payout, expected)
-
     def test_swap_preserves_maze(self) -> None:
         """Maze section is unchanged after swap."""
-        obs, p1, p2, p1_val, p2_val, payout, a1, a2 = _make_sample()
+        obs, p1, p2, p1_val, p2_val, a1, a2 = _make_sample()
 
-        s_obs, *_ = swap_player_perspective(obs, p1, p2, p1_val, p2_val, payout, a1, a2, 5, 5)
+        s_obs, *_ = swap_player_perspective(obs, p1, p2, p1_val, p2_val, a1, a2, 5, 5)
 
         spatial = 25
         maze_end = spatial * 4
@@ -313,9 +278,9 @@ class TestSwapPlayerPerspective:
 
     def test_swap_preserves_cheese(self) -> None:
         """Cheese section is unchanged after swap."""
-        obs, p1, p2, p1_val, p2_val, payout, a1, a2 = _make_sample()
+        obs, p1, p2, p1_val, p2_val, a1, a2 = _make_sample()
 
-        s_obs, *_ = swap_player_perspective(obs, p1, p2, p1_val, p2_val, payout, a1, a2, 5, 5)
+        s_obs, *_ = swap_player_perspective(obs, p1, p2, p1_val, p2_val, a1, a2, 5, 5)
 
         spatial = 25
         cheese_start = spatial * 6
@@ -324,9 +289,9 @@ class TestSwapPlayerPerspective:
 
     def test_swap_preserves_progress(self) -> None:
         """Progress scalar is unchanged after swap."""
-        obs, p1, p2, p1_val, p2_val, payout, a1, a2 = _make_sample()
+        obs, p1, p2, p1_val, p2_val, a1, a2 = _make_sample()
 
-        s_obs, *_ = swap_player_perspective(obs, p1, p2, p1_val, p2_val, payout, a1, a2, 5, 5)
+        s_obs, *_ = swap_player_perspective(obs, p1, p2, p1_val, p2_val, a1, a2, 5, 5)
 
         scalars_start = 25 * 7
         progress_idx = scalars_start + 1
@@ -334,20 +299,18 @@ class TestSwapPlayerPerspective:
 
     def test_swap_does_not_mutate_inputs(self) -> None:
         """Swap should not modify input arrays."""
-        obs, p1, p2, p1_val, p2_val, payout, a1, a2 = _make_sample()
+        obs, p1, p2, p1_val, p2_val, a1, a2 = _make_sample()
 
         # Make copies to compare
         obs_copy = obs.copy()
         p1_copy = p1.copy()
         p1_val_copy = p1_val.copy()
-        payout_copy = payout.copy()
 
-        swap_player_perspective(obs, p1, p2, p1_val, p2_val, payout, a1, a2, 5, 5)
+        swap_player_perspective(obs, p1, p2, p1_val, p2_val, a1, a2, 5, 5)
 
         np.testing.assert_array_equal(obs, obs_copy)
         np.testing.assert_array_equal(p1, p1_copy)
         np.testing.assert_array_equal(p1_val, p1_val_copy)
-        np.testing.assert_array_equal(payout, payout_copy)
 
 
 def _make_batch(batch_size: int = 4, width: int = 5, height: int = 5) -> dict[str, torch.Tensor]:
@@ -360,9 +323,8 @@ def _make_batch(batch_size: int = 4, width: int = 5, height: int = 5) -> dict[st
         "policy_p2": torch.from_numpy(np.stack([s[2] for s in samples])),
         "p1_value": torch.from_numpy(np.stack([s[3] for s in samples])),
         "p2_value": torch.from_numpy(np.stack([s[4] for s in samples])),
-        "payout_matrix": torch.from_numpy(np.stack([s[5] for s in samples])),
-        "action_p1": torch.from_numpy(np.stack([s[6] for s in samples])),
-        "action_p2": torch.from_numpy(np.stack([s[7] for s in samples])),
+        "action_p1": torch.from_numpy(np.stack([s[5] for s in samples])),
+        "action_p2": torch.from_numpy(np.stack([s[6] for s in samples])),
     }
 
 
@@ -372,11 +334,11 @@ class TestSwapPlayerPerspectiveBatch:
     def test_batch_swap_matches_single(self) -> None:
         """Batch version with all-True mask matches single-sample version."""
         width, height = 5, 5
-        obs, p1, p2, p1_val, p2_val, payout, a1, a2 = _make_sample(width, height)
+        obs, p1, p2, p1_val, p2_val, a1, a2 = _make_sample(width, height)
 
         # Single sample result
-        s_obs, s_p1, s_p2, s_p1_val, s_p2_val, s_payout, s_a1, s_a2 = swap_player_perspective(
-            obs, p1, p2, p1_val, p2_val, payout, a1, a2, width, height
+        s_obs, s_p1, s_p2, s_p1_val, s_p2_val, s_a1, s_a2 = swap_player_perspective(
+            obs, p1, p2, p1_val, p2_val, a1, a2, width, height
         )
 
         # Batch of 1 with mask=True
@@ -386,7 +348,6 @@ class TestSwapPlayerPerspectiveBatch:
             "policy_p2": torch.from_numpy(p2[np.newaxis, :].copy()),
             "p1_value": torch.from_numpy(p1_val[np.newaxis, :].copy()),
             "p2_value": torch.from_numpy(p2_val[np.newaxis, :].copy()),
-            "payout_matrix": torch.from_numpy(payout[np.newaxis, :, :].copy()),
             "action_p1": torch.from_numpy(a1[np.newaxis, :].copy()),
             "action_p2": torch.from_numpy(a2[np.newaxis, :].copy()),
         }
@@ -400,7 +361,6 @@ class TestSwapPlayerPerspectiveBatch:
         np.testing.assert_array_almost_equal(result["policy_p2"][0].numpy(), s_p2)
         np.testing.assert_array_almost_equal(result["p1_value"][0].numpy(), s_p1_val)
         np.testing.assert_array_almost_equal(result["p2_value"][0].numpy(), s_p2_val)
-        np.testing.assert_array_almost_equal(result["payout_matrix"][0].numpy(), s_payout)
         np.testing.assert_array_equal(result["action_p1"][0].numpy(), s_a1)
         np.testing.assert_array_equal(result["action_p2"][0].numpy(), s_a2)
 
@@ -476,25 +436,6 @@ class TestSwapPlayerPerspectiveBatch:
         # Results should still be on GPU
         for key in result:
             assert result[key].is_cuda
-
-    def test_batch_payout_matrix_transform(self) -> None:
-        """Payout matrix swaps player indices and transposes for bimatrix.
-
-        For bimatrix games:
-        - new_payout[:, 0] = payout[:, 1].transpose(-1, -2)
-        - new_payout[:, 1] = payout[:, 0].transpose(-1, -2)
-        """
-        width, height = 5, 5
-        batch = _make_batch(batch_size=2, width=width, height=height)
-        original_payout = batch["payout_matrix"].clone()
-
-        mask = torch.tensor([True, True])
-
-        swap_player_perspective_batch(batch, mask, width, height)
-
-        # Check bimatrix swap: flip player axis, then transpose
-        expected = original_payout.flip(dims=[1]).transpose(-1, -2)
-        torch.testing.assert_close(batch["payout_matrix"], expected)
 
 
 class TestBatchAugmentation:

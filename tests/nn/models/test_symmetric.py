@@ -128,7 +128,8 @@ class TestSymmetricMLPForward:
 
         assert out[ModelOutput.LOGITS_P1].shape == (batch_size, 5)
         assert out[ModelOutput.LOGITS_P2].shape == (batch_size, 5)
-        assert out[ModelOutput.PAYOUT].shape == (batch_size, 2, 5, 5)
+        assert out[ModelOutput.VALUE_P1].shape == (batch_size,)
+        assert out[ModelOutput.VALUE_P2].shape == (batch_size,)
 
     def test_single_sample_eval_mode(self) -> None:
         """Should handle single sample in eval mode."""
@@ -142,7 +143,8 @@ class TestSymmetricMLPForward:
 
         assert out[ModelOutput.LOGITS_P1].shape == (1, 5)
         assert out[ModelOutput.LOGITS_P2].shape == (1, 5)
-        assert out[ModelOutput.PAYOUT].shape == (1, 2, 5, 5)
+        assert out[ModelOutput.VALUE_P1].shape == (1,)
+        assert out[ModelOutput.VALUE_P2].shape == (1,)
 
     def test_custom_hidden_dim(self) -> None:
         """Should work with custom hidden dimension."""
@@ -155,7 +157,8 @@ class TestSymmetricMLPForward:
 
         assert out[ModelOutput.LOGITS_P1].shape == (4, 5)
         assert out[ModelOutput.LOGITS_P2].shape == (4, 5)
-        assert out[ModelOutput.PAYOUT].shape == (4, 2, 5, 5)
+        assert out[ModelOutput.VALUE_P1].shape == (4,)
+        assert out[ModelOutput.VALUE_P2].shape == (4,)
 
     def test_different_maze_size(self) -> None:
         """Should work with different maze dimensions."""
@@ -168,7 +171,8 @@ class TestSymmetricMLPForward:
 
         assert out[ModelOutput.LOGITS_P1].shape == (4, 5)
         assert out[ModelOutput.LOGITS_P2].shape == (4, 5)
-        assert out[ModelOutput.PAYOUT].shape == (4, 2, 5, 5)
+        assert out[ModelOutput.VALUE_P1].shape == (4,)
+        assert out[ModelOutput.VALUE_P2].shape == (4,)
 
 
 class TestSymmetricMLPPredict:
@@ -185,7 +189,8 @@ class TestSymmetricMLPPredict:
 
         assert out[ModelOutput.POLICY_P1].shape == (8, 5)
         assert out[ModelOutput.POLICY_P2].shape == (8, 5)
-        assert out[ModelOutput.PAYOUT].shape == (8, 2, 5, 5)
+        assert out[ModelOutput.VALUE_P1].shape == (8,)
+        assert out[ModelOutput.VALUE_P2].shape == (8,)
 
     def test_probs_sum_to_one(self) -> None:
         """Probabilities should sum to 1."""
@@ -217,19 +222,21 @@ class TestSymmetricMLPPredict:
         assert (out[ModelOutput.POLICY_P2] >= 0).all()
         assert (out[ModelOutput.POLICY_P2] <= 1).all()
 
-    def test_payout_non_negative(self) -> None:
-        """Payout matrix should be >= 0 (cheese scores can't be negative)."""
+    def test_values_non_negative(self) -> None:
+        """Value outputs should be >= 0 (cheese scores can't be negative)."""
         width, height = 5, 5
         model = SymmetricMLP(width=width, height=height)
         model.eval()
 
-        # Use valid observations (payout bounded by remaining_cheese which is non-negative)
+        # Use valid observations
         x = _make_valid_obs(width, height, batch_size=32)
         with torch.no_grad():
             out = model.predict(x)
 
-        payout = out[ModelOutput.PAYOUT]
-        assert (payout >= 0).all(), f"Found negative payouts: min={payout.min().item()}"
+        value_p1 = out[ModelOutput.VALUE_P1]
+        value_p2 = out[ModelOutput.VALUE_P2]
+        assert (value_p1 >= 0).all(), f"Found negative value_p1: min={value_p1.min().item()}"
+        assert (value_p2 >= 0).all(), f"Found negative value_p2: min={value_p2.min().item()}"
 
 
 class TestSymmetricMLPSymmetry:
@@ -262,12 +269,12 @@ class TestSymmetricMLPSymmetry:
             out[ModelOutput.POLICY_P2], out_swap[ModelOutput.POLICY_P1], rtol=1e-5, atol=1e-5
         )
 
-    def test_swap_equivariance_payout(self) -> None:
-        """Swapping players should transform payout matrix correctly.
+    def test_swap_equivariance_value(self) -> None:
+        """Swapping players should swap value outputs.
 
         When you swap players:
-        - new_payout[0] = old_payout[1].T
-        - new_payout[1] = old_payout[0].T
+        - new_value_p1 = old_value_p2
+        - new_value_p2 = old_value_p1
         """
         width, height = 5, 5
         obs_dim = width * height * 7 + 6
@@ -281,16 +288,12 @@ class TestSymmetricMLPSymmetry:
             out = model.predict(obs)
             out_swap = model.predict(obs_swapped)
 
-        payout = out[ModelOutput.PAYOUT]
-        payout_swap = out_swap[ModelOutput.PAYOUT]
-
-        # new_payout[0] = old_payout[1].T
+        # After swapping: new P1's value = old P2's value
         torch.testing.assert_close(
-            payout_swap[:, 0], payout[:, 1].transpose(-1, -2), rtol=1e-5, atol=1e-5
+            out[ModelOutput.VALUE_P1], out_swap[ModelOutput.VALUE_P2], rtol=1e-5, atol=1e-5
         )
-        # new_payout[1] = old_payout[0].T
         torch.testing.assert_close(
-            payout_swap[:, 1], payout[:, 0].transpose(-1, -2), rtol=1e-5, atol=1e-5
+            out[ModelOutput.VALUE_P2], out_swap[ModelOutput.VALUE_P1], rtol=1e-5, atol=1e-5
         )
 
     def test_symmetric_position_identical_policies(self) -> None:
@@ -313,11 +316,11 @@ class TestSymmetricMLPSymmetry:
             out[ModelOutput.POLICY_P1], out[ModelOutput.POLICY_P2], rtol=1e-5, atol=1e-5
         )
 
-    def test_symmetric_position_payout_structure(self) -> None:
-        """Symmetric position payouts should have expected structure.
+    def test_symmetric_position_value_structure(self) -> None:
+        """Symmetric position values should be identical for P1 and P2.
 
-        For symmetric positions:
-        - payout[0] should equal payout[1].T (P1's view = P2's view transposed)
+        For symmetric positions where both players are in identical states,
+        their expected values should be equal.
         """
         width, height = 5, 5
         model = SymmetricMLP(width=width, height=height)
@@ -328,10 +331,9 @@ class TestSymmetricMLPSymmetry:
         with torch.no_grad():
             out = model.predict(obs)
 
-        payout = out[ModelOutput.PAYOUT]
-        # payout[0] = payout[1].T for symmetric positions
+        # For symmetric positions, values should be equal
         torch.testing.assert_close(
-            payout[:, 0], payout[:, 1].transpose(-1, -2), rtol=1e-5, atol=1e-5
+            out[ModelOutput.VALUE_P1], out[ModelOutput.VALUE_P2], rtol=1e-5, atol=1e-5
         )
 
     def test_swap_is_involution(self) -> None:
@@ -356,7 +358,10 @@ class TestSymmetricMLPSymmetry:
             out[ModelOutput.POLICY_P2], out_ds[ModelOutput.POLICY_P2], rtol=1e-5, atol=1e-5
         )
         torch.testing.assert_close(
-            out[ModelOutput.PAYOUT], out_ds[ModelOutput.PAYOUT], rtol=1e-5, atol=1e-5
+            out[ModelOutput.VALUE_P1], out_ds[ModelOutput.VALUE_P1], rtol=1e-5, atol=1e-5
+        )
+        torch.testing.assert_close(
+            out[ModelOutput.VALUE_P2], out_ds[ModelOutput.VALUE_P2], rtol=1e-5, atol=1e-5
         )
 
 
@@ -375,7 +380,8 @@ class TestSymmetricMLPGradients:
         loss = (
             out[ModelOutput.LOGITS_P1].sum()
             + out[ModelOutput.LOGITS_P2].sum()
-            + out[ModelOutput.PAYOUT].sum()
+            + out[ModelOutput.VALUE_P1].sum()
+            + out[ModelOutput.VALUE_P2].sum()
         )
         loss.backward()
 
@@ -433,8 +439,8 @@ class TestSymmetricMLPInitialization:
         assert (out[ModelOutput.POLICY_P1].mean(dim=0) - uniform).abs().max() < 0.1
         assert (out[ModelOutput.POLICY_P2].mean(dim=0) - uniform).abs().max() < 0.1
 
-    def test_initial_payout_near_zero(self) -> None:
-        """Fresh model should predict small non-negative payouts."""
+    def test_initial_values_near_zero(self) -> None:
+        """Fresh model should predict small non-negative values."""
         width, height = 5, 5
         model = SymmetricMLP(width=width, height=height)
         model.eval()
@@ -443,11 +449,14 @@ class TestSymmetricMLPInitialization:
         with torch.no_grad():
             out = model.predict(x)
 
-        payout = out[ModelOutput.PAYOUT]
+        value_p1 = out[ModelOutput.VALUE_P1]
+        value_p2 = out[ModelOutput.VALUE_P2]
         # softplus ensures non-negative, small init keeps values small
-        assert (payout >= 0).all()
+        assert (value_p1 >= 0).all()
+        assert (value_p2 >= 0).all()
         # With std=0.01 init, softplus(x≈0) ≈ 0.69, should be well under 5
-        assert payout.max() < 5.0
+        assert value_p1.max() < 5.0
+        assert value_p2.max() < 5.0
 
 
 class TestSymmetricMLPConsistency:
@@ -478,7 +487,8 @@ class TestSymmetricMLPConsistency:
             rtol=1e-5,
             atol=1e-5,
         )
-        torch.testing.assert_close(fwd[ModelOutput.PAYOUT], pred[ModelOutput.PAYOUT])
+        torch.testing.assert_close(fwd[ModelOutput.VALUE_P1], pred[ModelOutput.VALUE_P1])
+        torch.testing.assert_close(fwd[ModelOutput.VALUE_P2], pred[ModelOutput.VALUE_P2])
 
     def test_deterministic_in_eval_mode(self) -> None:
         """Same input should produce same output in eval mode."""

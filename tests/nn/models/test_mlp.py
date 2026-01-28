@@ -22,7 +22,8 @@ class TestPyRatMLPForward:
 
         assert out[ModelOutput.LOGITS_P1].shape == (batch_size, 5)
         assert out[ModelOutput.LOGITS_P2].shape == (batch_size, 5)
-        assert out[ModelOutput.PAYOUT].shape == (batch_size, 2, 5, 5)
+        assert out[ModelOutput.VALUE_P1].shape == (batch_size,)
+        assert out[ModelOutput.VALUE_P2].shape == (batch_size,)
 
     def test_single_sample(self) -> None:
         """Should handle single sample (batch_size=1) in eval mode.
@@ -39,7 +40,8 @@ class TestPyRatMLPForward:
 
         assert out[ModelOutput.LOGITS_P1].shape == (1, 5)
         assert out[ModelOutput.LOGITS_P2].shape == (1, 5)
-        assert out[ModelOutput.PAYOUT].shape == (1, 2, 5, 5)
+        assert out[ModelOutput.VALUE_P1].shape == (1,)
+        assert out[ModelOutput.VALUE_P2].shape == (1,)
 
     def test_softmax_of_logits_sums_to_one(self) -> None:
         """softmax(logits) should sum to 1."""
@@ -80,7 +82,8 @@ class TestPyRatMLPForward:
 
         assert out[ModelOutput.LOGITS_P1].shape == (4, 5)
         assert out[ModelOutput.LOGITS_P2].shape == (4, 5)
-        assert out[ModelOutput.PAYOUT].shape == (4, 2, 5, 5)
+        assert out[ModelOutput.VALUE_P1].shape == (4,)
+        assert out[ModelOutput.VALUE_P2].shape == (4,)
 
     def test_different_obs_dim(self) -> None:
         """Should work with different observation dimensions."""
@@ -92,7 +95,8 @@ class TestPyRatMLPForward:
 
         assert out[ModelOutput.LOGITS_P1].shape == (4, 5)
         assert out[ModelOutput.LOGITS_P2].shape == (4, 5)
-        assert out[ModelOutput.PAYOUT].shape == (4, 2, 5, 5)
+        assert out[ModelOutput.VALUE_P1].shape == (4,)
+        assert out[ModelOutput.VALUE_P2].shape == (4,)
 
 
 class TestPyRatMLPPredict:
@@ -109,7 +113,8 @@ class TestPyRatMLPPredict:
 
         assert out[ModelOutput.POLICY_P1].shape == (batch_size, 5)
         assert out[ModelOutput.POLICY_P2].shape == (batch_size, 5)
-        assert out[ModelOutput.PAYOUT].shape == (batch_size, 2, 5, 5)
+        assert out[ModelOutput.VALUE_P1].shape == (batch_size,)
+        assert out[ModelOutput.VALUE_P2].shape == (batch_size,)
 
     def test_probs_sum_to_one(self) -> None:
         """Probabilities should sum to 1."""
@@ -148,8 +153,8 @@ class TestPyRatMLPPredict:
         assert (out[ModelOutput.POLICY_P1] <= 1).all()
         assert (out[ModelOutput.POLICY_P2] <= 1).all()
 
-    def test_payout_non_negative(self) -> None:
-        """Payout matrix should be >= 0 (cheese scores can't be negative)."""
+    def test_values_non_negative(self) -> None:
+        """Value outputs should be >= 0 (cheese scores can't be negative)."""
         obs_dim = 181
         model = PyRatMLP(obs_dim=obs_dim)
         model.eval()
@@ -159,8 +164,10 @@ class TestPyRatMLPPredict:
         with torch.no_grad():
             out = model.predict(x)
 
-        payout = out[ModelOutput.PAYOUT]
-        assert (payout >= 0).all(), f"Found negative payouts: min={payout.min().item()}"
+        value_p1 = out[ModelOutput.VALUE_P1]
+        value_p2 = out[ModelOutput.VALUE_P2]
+        assert (value_p1 >= 0).all(), f"Found negative value_p1: min={value_p1.min().item()}"
+        assert (value_p2 >= 0).all(), f"Found negative value_p2: min={value_p2.min().item()}"
 
 
 class TestPyRatMLPGradients:
@@ -178,7 +185,8 @@ class TestPyRatMLPGradients:
         loss = (
             out[ModelOutput.LOGITS_P1].sum()
             + out[ModelOutput.LOGITS_P2].sum()
-            + out[ModelOutput.PAYOUT].sum()
+            + out[ModelOutput.VALUE_P1].sum()
+            + out[ModelOutput.VALUE_P2].sum()
         )
         loss.backward()
 
@@ -208,19 +216,19 @@ class TestPyRatMLPGradients:
         # Trunk should have gradient (shared)
         assert model.trunk[0].weight.grad is not None
 
-    def test_payout_gradients(self) -> None:
-        """Payout head should receive gradients."""
+    def test_value_gradients(self) -> None:
+        """Value head should receive gradients."""
         obs_dim = 181
         model = PyRatMLP(obs_dim=obs_dim)
 
         x = torch.randn(4, obs_dim)
         out = model(x)
 
-        loss = out[ModelOutput.PAYOUT].sum()
+        loss = out[ModelOutput.VALUE_P1].sum() + out[ModelOutput.VALUE_P2].sum()
         loss.backward()
 
-        assert model.payout_head.weight.grad is not None
-        assert not torch.isnan(model.payout_head.weight.grad).any()
+        assert model.value_head.weight.grad is not None
+        assert not torch.isnan(model.value_head.weight.grad).any()
 
 
 class TestPyRatMLPConsistency:
@@ -250,7 +258,8 @@ class TestPyRatMLPConsistency:
             rtol=1e-5,
             atol=1e-5,
         )
-        torch.testing.assert_close(fwd[ModelOutput.PAYOUT], pred[ModelOutput.PAYOUT])
+        torch.testing.assert_close(fwd[ModelOutput.VALUE_P1], pred[ModelOutput.VALUE_P1])
+        torch.testing.assert_close(fwd[ModelOutput.VALUE_P2], pred[ModelOutput.VALUE_P2])
 
     def test_deterministic_in_eval_mode(self) -> None:
         """Same input should produce same output in eval mode."""
@@ -292,8 +301,8 @@ class TestPyRatMLPInitialization:
         assert (p1.mean(dim=0) - uniform).abs().max() < 0.1
         assert (p2.mean(dim=0) - uniform).abs().max() < 0.1
 
-    def test_initial_payout_near_zero(self) -> None:
-        """Fresh model should predict payouts near zero.
+    def test_initial_values_near_zero(self) -> None:
+        """Fresh model should predict values near zero.
 
         This reflects uncertainty / predicting draws initially.
         """
@@ -305,9 +314,12 @@ class TestPyRatMLPInitialization:
         with torch.no_grad():
             out = model.predict(x)
 
-        payout = out[ModelOutput.PAYOUT]
+        value_p1 = out[ModelOutput.VALUE_P1]
+        value_p2 = out[ModelOutput.VALUE_P2]
 
-        # Mean payout should be near zero
-        assert payout.mean().abs() < 1.0
+        # Mean value should be small (softplus of near-zero gives ~0.69)
+        assert value_p1.mean().abs() < 2.0
+        assert value_p2.mean().abs() < 2.0
         # Individual predictions shouldn't be extreme
-        assert payout.abs().max() < 5.0
+        assert value_p1.max() < 5.0
+        assert value_p2.max() < 5.0

@@ -22,7 +22,6 @@ def create_synthetic_numpy_batch(
     np.ndarray,
     np.ndarray,
     np.ndarray,
-    np.ndarray,
 ]:
     """Create synthetic batch as numpy arrays (simulating shard data)."""
     obs_dim = width * height * 7 + 6
@@ -32,7 +31,6 @@ def create_synthetic_numpy_batch(
     policy_p2 = np.random.dirichlet(np.ones(5), batch_size).astype(np.float32)
     p1_value = np.random.randn(batch_size, 1).astype(np.float32)
     p2_value = np.random.randn(batch_size, 1).astype(np.float32)
-    payout_matrix = np.random.randn(batch_size, 2, 5, 5).astype(np.float32)
     action_p1 = np.random.randint(0, 5, (batch_size, 1), dtype=np.int8)
     action_p2 = np.random.randint(0, 5, (batch_size, 1), dtype=np.int8)
 
@@ -42,7 +40,6 @@ def create_synthetic_numpy_batch(
         policy_p2,
         p1_value,
         p2_value,
-        payout_matrix,
         action_p1,
         action_p2,
     )
@@ -60,7 +57,6 @@ def create_synthetic_torch_batch(
         "policy_p2": torch.softmax(torch.randn(batch_size, 5, device=device), dim=-1),
         "p1_value": torch.randn(batch_size, 1, device=device),
         "p2_value": torch.randn(batch_size, 1, device=device),
-        "payout_matrix": torch.randn(batch_size, 2, 5, 5, device=device),
         "action_p1": torch.randint(0, 5, (batch_size, 1), device=device, dtype=torch.int8),
         "action_p2": torch.randint(0, 5, (batch_size, 1), device=device, dtype=torch.int8),
     }
@@ -78,9 +74,7 @@ def benchmark_per_sample(
     Returns:
         Tuple of (mean_time_ms, std_time_ms).
     """
-    obs, p1, p2, p1_val, p2_val, payout, a1, a2 = create_synthetic_numpy_batch(
-        batch_size, width, height
-    )
+    obs, p1, p2, p1_val, p2_val, a1, a2 = create_synthetic_numpy_batch(batch_size, width, height)
     rng = np.random.default_rng(42)
 
     # Warm-up
@@ -93,7 +87,6 @@ def benchmark_per_sample(
                     p2[j],
                     p1_val[j : j + 1],
                     p2_val[j : j + 1],
-                    payout[j],
                     a1[j : j + 1],
                     a2[j : j + 1],
                     width,
@@ -104,7 +97,7 @@ def benchmark_per_sample(
     times = []
     for _ in range(n_trials):
         # Fresh data each trial
-        obs, p1, p2, p1_val, p2_val, payout, a1, a2 = create_synthetic_numpy_batch(
+        obs, p1, p2, p1_val, p2_val, a1, a2 = create_synthetic_numpy_batch(
             batch_size, width, height
         )
         rng = np.random.default_rng(42)
@@ -118,7 +111,6 @@ def benchmark_per_sample(
                     p2[j],
                     p1_val[j : j + 1],
                     p2_val[j : j + 1],
-                    payout[j],
                     a1[j : j + 1],
                     a2[j : j + 1],
                     width,

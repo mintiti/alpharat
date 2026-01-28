@@ -27,17 +27,16 @@ from alpharat.nn.training.keys import ModelOutput
 
 
 class LocalValueMLP(nn.Module):
-    """MLP with ownership prediction and payout matrix head.
+    """MLP with ownership prediction and scalar value heads.
 
     Architecture:
         observation[obs_dim] → trunk[Linear→BN→ReLU→Drop]×2 →
             ├─ policy_p1[5] (log_softmax for training, softmax for inference)
             ├─ policy_p2[5] (log_softmax for training, softmax for inference)
-            ├─ payout_head → [5, 5] payout matrix
+            ├─ value_head → (v1, v2) scalar values
             └─ ownership_head → logits[H, W, 4] (auxiliary task)
 
-    The payout matrix head predicts expected value for each action pair,
-    same as PyRatMLP. This is what MCTS uses.
+    The value head predicts expected remaining score for each player.
 
     The ownership head is an auxiliary task that helps the model learn
     cheese dynamics. It predicts 4-class outcomes per cell:
@@ -96,8 +95,8 @@ class LocalValueMLP(nn.Module):
         self.policy_p1_head = nn.Linear(hidden_dim, num_actions)
         self.policy_p2_head = nn.Linear(hidden_dim, num_actions)
 
-        # Payout matrix head: 2×5×5 bimatrix (P1 and P2 payoffs)
-        self.payout_head = nn.Linear(hidden_dim, 2 * num_actions * num_actions)
+        # Value head: 2 scalars (v1, v2)
+        self.value_head = nn.Linear(hidden_dim, 2)
 
         # Ownership head: predict 4-class distribution per cell (auxiliary task)
         # Architecture: trunk → hidden → per-cell logits
@@ -117,7 +116,7 @@ class LocalValueMLP(nn.Module):
 
         - Trunk layers: Kaiming normal (accounts for ReLU)
         - Policy heads: Small scale for near-uniform initial policy
-        - Payout head: Small scale for near-zero initial predictions
+        - Value head: Small scale for near-zero initial predictions
         - Ownership head: Small scale for near-uniform initial predictions
         - BatchNorm: Default (gamma=1, beta=0) is already correct
         """
@@ -133,9 +132,9 @@ class LocalValueMLP(nn.Module):
             nn.init.normal_(head.weight, std=0.01)
             nn.init.zeros_(head.bias)
 
-        # Payout head: small init → predictions start near zero
-        nn.init.normal_(self.payout_head.weight, std=0.01)
-        nn.init.zeros_(self.payout_head.bias)
+        # Value head: small init → predictions start near zero
+        nn.init.normal_(self.value_head.weight, std=0.01)
+        nn.init.zeros_(self.value_head.bias)
 
         # Ownership head: small init → predictions start near uniform
         for module in self.ownership_head.modules():
@@ -149,7 +148,7 @@ class LocalValueMLP(nn.Module):
         x: torch.Tensor,
         **kwargs: object,
     ) -> dict[str, torch.Tensor]:
-        """Forward pass returning logits, payout matrix, and ownership predictions.
+        """Forward pass returning logits, values, and ownership predictions.
 
         Args:
             x: Observation tensor of shape (batch, obs_dim).
@@ -160,7 +159,8 @@ class LocalValueMLP(nn.Module):
             Dict with:
                 - ModelOutput.LOGITS_P1: Raw logits for P1 policy, shape (batch, 5).
                 - ModelOutput.LOGITS_P2: Raw logits for P2 policy, shape (batch, 5).
-                - ModelOutput.PAYOUT: Predicted payout values, shape (batch, 2, 5, 5).
+                - ModelOutput.VALUE_P1: Predicted value for P1, shape (batch,).
+                - ModelOutput.VALUE_P2: Predicted value for P2, shape (batch,).
                 - ModelOutput.OWNERSHIP_LOGITS: Per-cell ownership logits, shape (batch, H, W, 4).
                 - ModelOutput.OWNERSHIP_VALUE: Derived value from ownership, shape (batch,).
         """
@@ -171,9 +171,12 @@ class LocalValueMLP(nn.Module):
         logits_p1 = self.policy_p1_head(features)
         logits_p2 = self.policy_p2_head(features)
 
-        # Payout matrix head (bimatrix: 2×5×5)
-        payout_flat = self.payout_head(features)
-        payout_matrix = payout_flat.view(-1, 2, self.num_actions, self.num_actions)
+        # Value head (scalar values for each player)
+        values = self.value_head(features)  # (batch, 2)
+        # Use softplus to ensure non-negative values
+        values = F.softplus(values)
+        value_p1 = values[:, 0]
+        value_p2 = values[:, 1]
 
         # Ownership head (auxiliary task)
         ownership_flat = self.ownership_head(features)  # (batch, H*W*4)
@@ -195,7 +198,8 @@ class LocalValueMLP(nn.Module):
         return {
             ModelOutput.LOGITS_P1: logits_p1,
             ModelOutput.LOGITS_P2: logits_p2,
-            ModelOutput.PAYOUT: payout_matrix,
+            ModelOutput.VALUE_P1: value_p1,
+            ModelOutput.VALUE_P2: value_p2,
             ModelOutput.OWNERSHIP_LOGITS: ownership_logits,
             ModelOutput.OWNERSHIP_VALUE: ownership_value,
         }
@@ -218,7 +222,8 @@ class LocalValueMLP(nn.Module):
             Dict with:
                 - ModelOutput.POLICY_P1: Probabilities for P1, shape (batch, 5).
                 - ModelOutput.POLICY_P2: Probabilities for P2, shape (batch, 5).
-                - ModelOutput.PAYOUT: Predicted payout values, shape (batch, 2, 5, 5).
+                - ModelOutput.VALUE_P1: Predicted value for P1, shape (batch,).
+                - ModelOutput.VALUE_P2: Predicted value for P2, shape (batch,).
                 - ModelOutput.OWNERSHIP_PROBS: Per-cell probabilities, shape (batch, H, W, 4).
                 - ModelOutput.OWNERSHIP_VALUE: Derived value from ownership, shape (batch,).
         """
@@ -227,7 +232,8 @@ class LocalValueMLP(nn.Module):
         return {
             ModelOutput.POLICY_P1: F.softmax(output[ModelOutput.LOGITS_P1], dim=-1),
             ModelOutput.POLICY_P2: F.softmax(output[ModelOutput.LOGITS_P2], dim=-1),
-            ModelOutput.PAYOUT: output[ModelOutput.PAYOUT],
+            ModelOutput.VALUE_P1: output[ModelOutput.VALUE_P1],
+            ModelOutput.VALUE_P2: output[ModelOutput.VALUE_P2],
             ModelOutput.OWNERSHIP_PROBS: F.softmax(output[ModelOutput.OWNERSHIP_LOGITS], dim=-1),
             ModelOutput.OWNERSHIP_VALUE: output[ModelOutput.OWNERSHIP_VALUE],
         }

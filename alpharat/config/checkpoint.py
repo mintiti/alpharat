@@ -114,7 +114,7 @@ def make_predict_fn(
     width: int,
     height: int,
     device: str,
-) -> Callable[[Any], tuple[np.ndarray, np.ndarray, np.ndarray]]:
+) -> Callable[[Any], tuple[np.ndarray, np.ndarray, float, float]]:
     """Create predict_fn closure for MCTS that reads from simulator.
 
     The closure captures the simulator reference. The tree mutates the simulator
@@ -129,7 +129,7 @@ def make_predict_fn(
         device: Device for inference ("cpu", "cuda", "mps").
 
     Returns:
-        Function that returns (policy_p1, policy_p2, payout) predictions.
+        Function that returns (policy_p1, policy_p2, v1, v2) predictions.
     """
     from alpharat.data.maze import build_maze_array
     from alpharat.nn.extraction import from_pyrat_game
@@ -137,7 +137,7 @@ def make_predict_fn(
     maze = build_maze_array(simulator, width, height)
     max_turns = simulator.max_turns
 
-    def predict_fn(_observation: Any) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    def predict_fn(_observation: Any) -> tuple[np.ndarray, np.ndarray, float, float]:
         """Run NN inference on current simulator state."""
         obs_input = from_pyrat_game(simulator, maze, max_turns)
         obs = builder.build(obs_input)
@@ -149,8 +149,9 @@ def make_predict_fn(
             # Dict interface - all models now return dicts
             policy_p1 = result["policy_p1"].squeeze(0).cpu().numpy()
             policy_p2 = result["policy_p2"].squeeze(0).cpu().numpy()
-            payout = result["payout"].squeeze(0).cpu().numpy()
+            v1 = result["value_p1"].item()
+            v2 = result["value_p2"].item()
 
-        return policy_p1, policy_p2, payout
+        return policy_p1, policy_p2, v1, v2
 
     return predict_fn
