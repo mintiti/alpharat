@@ -7,43 +7,107 @@ The strategy is configured at MCTS search time, not at sharding time.
 
 from __future__ import annotations
 
-from typing import Annotated, Literal, Protocol
+from typing import TYPE_CHECKING, Annotated, Literal, Protocol
 
 import numpy as np
 from pydantic import Discriminator, Field
 
 from alpharat.config.base import StrictBaseModel
+from alpharat.mcts.forced_playouts import compute_pruning_adjustment, prune_visit_counts
+from alpharat.mcts.nash import compute_nash_from_reduced
+from alpharat.mcts.payout_filter import filter_low_visit_payout
+
+if TYPE_CHECKING:
+    from alpharat.mcts.node import MCTSNode
 
 
 class PolicyStrategy(Protocol):
     """Derives policy from MCTS search outputs.
 
     Applied inside _make_result() to determine SearchResult policies.
+    Each strategy owns its full computation, including forced visit pruning
+    if applicable.
     """
 
-    def derive_policy(
+    def derive_policies(
         self,
-        marginal_visits: np.ndarray,  # (n,) marginal visit counts for one player
-        nash_policy: np.ndarray,  # (n,) Nash equilibrium for same player
-    ) -> np.ndarray:
-        """Return final policy (n,) for this player."""
+        node: MCTSNode,
+    ) -> tuple[np.ndarray, np.ndarray]:
+        """Return final policies (p1, p2) in reduced space."""
         ...
 
 
-class NashPolicyStrategy:
-    """Use Nash equilibrium directly (default behavior).
+def _get_effective_visits(
+    node: MCTSNode,
+    force_k: float,
+    c_puct: float,
+) -> np.ndarray:
+    """Get effective visits, optionally with forced playout pruning.
 
-    Returns the Nash equilibrium policy computed by MCTS.
+    Args:
+        node: Node to get visits from.
+        force_k: Forced playout coefficient. 0 = no pruning.
+        c_puct: PUCT exploration constant.
+
+    Returns:
+        Visit counts [n1, n2] in reduced space.
+    """
+    if force_k <= 0:
+        return node._visits.copy()
+
+    # Compute pruning adjustments
+    q1, q2 = node.compute_marginal_q_reduced()
+    n1, n2 = node.compute_marginal_visits_reduced()
+    n_total = node.total_visits
+
+    delta_p1 = compute_pruning_adjustment(q1, node.prior_p1_reduced, n1, n_total, c_puct)
+    delta_p2 = compute_pruning_adjustment(q2, node.prior_p2_reduced, n2, n_total, c_puct)
+
+    return prune_visit_counts(
+        node._visits.copy(),
+        delta_p1,
+        delta_p2,
+        node.prior_p1_reduced,
+        node.prior_p2_reduced,
+    )
+
+
+class NashPolicyStrategy:
+    """Use Nash equilibrium computed from node's payout matrix.
+
+    Reads node, filters payout by visits, computes Nash equilibrium.
     Game-theoretically optimal but can be sharp/overconfident.
     """
 
-    def derive_policy(
+    def __init__(self, force_k: float = 0.0, c_puct: float = 1.5) -> None:
+        """Initialize Nash policy strategy.
+
+        Args:
+            force_k: Forced playout coefficient for visit pruning. 0 = no pruning.
+            c_puct: PUCT exploration constant used in pruning calculation.
+        """
+        self._force_k = force_k
+        self._c_puct = c_puct
+
+    def derive_policies(
         self,
-        marginal_visits: np.ndarray,
-        nash_policy: np.ndarray,
-    ) -> np.ndarray:
-        """Return Nash equilibrium policy (n,)."""
-        return nash_policy.copy()
+        node: MCTSNode,
+    ) -> tuple[np.ndarray, np.ndarray]:
+        """Compute Nash equilibrium from node's payout matrix.
+
+        Returns:
+            (p1_policy, p2_policy) in reduced space [n1], [n2].
+        """
+        visits = _get_effective_visits(node, self._force_k, self._c_puct)
+        payout = node.get_reduced_payout()
+        filtered = filter_low_visit_payout(payout, visits, min_visits=2)
+
+        return compute_nash_from_reduced(
+            filtered,
+            reduced_prior_p1=node.prior_p1_reduced,
+            reduced_prior_p2=node.prior_p2_reduced,
+            reduced_visits=visits,
+        )
 
 
 class VisitPolicyStrategy:
@@ -51,6 +115,7 @@ class VisitPolicyStrategy:
 
     Derives policy from marginal visit counts instead of Nash.
     Preserves MCTS uncertainty and avoids sharp distributions.
+    Skips Nash computation entirely.
     """
 
     def __init__(
@@ -59,24 +124,55 @@ class VisitPolicyStrategy:
         temperature_only_below_prob: float,
         prune_threshold: float,
         subtract_visits: float,
+        force_k: float = 0.0,
+        c_puct: float = 1.5,
     ) -> None:
+        """Initialize visit policy strategy.
+
+        Args:
+            temperature: Temperature for softening. 1.0 = proportional to visits.
+            temperature_only_below_prob: Only apply temperature to moves below this prob.
+            prune_threshold: Zero out moves with fewer than this many visits.
+            subtract_visits: Subtract this constant from all visits.
+            force_k: Forced playout coefficient for visit pruning. 0 = no pruning.
+            c_puct: PUCT exploration constant used in pruning calculation.
+        """
         self.temperature = temperature
         self.temperature_only_below_prob = temperature_only_below_prob
         self.prune_threshold = prune_threshold
         self.subtract_visits = subtract_visits
+        self._force_k = force_k
+        self._c_puct = c_puct
 
-    def derive_policy(
+    def derive_policies(
         self,
-        marginal_visits: np.ndarray,
-        nash_policy: np.ndarray,
-    ) -> np.ndarray:
-        """Return visit-based policy (n,) with KataGo temperature."""
-        return apply_katago_temperature(
-            marginal_visits,
-            self.temperature,
-            self.temperature_only_below_prob,
-            self.prune_threshold,
-            self.subtract_visits,
+        node: MCTSNode,
+    ) -> tuple[np.ndarray, np.ndarray]:
+        """Derive policy from marginal visit counts with KataGo temperature.
+
+        Returns:
+            (p1_policy, p2_policy) in reduced space [n1], [n2].
+        """
+        visits = _get_effective_visits(node, self._force_k, self._c_puct)
+
+        marginal_p1 = visits.sum(axis=1)  # [n1]
+        marginal_p2 = visits.sum(axis=0)  # [n2]
+
+        return (
+            apply_katago_temperature(
+                marginal_p1,
+                self.temperature,
+                self.temperature_only_below_prob,
+                self.prune_threshold,
+                self.subtract_visits,
+            ),
+            apply_katago_temperature(
+                marginal_p2,
+                self.temperature,
+                self.temperature_only_below_prob,
+                self.prune_threshold,
+                self.subtract_visits,
+            ),
         )
 
 
@@ -169,9 +265,14 @@ class NashPolicyConfig(StrictBaseModel):
 
     strategy: Literal["nash"] = "nash"
 
-    def build(self) -> PolicyStrategy:
-        """Build the Nash policy strategy."""
-        return NashPolicyStrategy()
+    def build(self, force_k: float = 0.0, c_puct: float = 1.5) -> PolicyStrategy:
+        """Build the Nash policy strategy.
+
+        Args:
+            force_k: Forced playout coefficient for visit pruning.
+            c_puct: PUCT exploration constant.
+        """
+        return NashPolicyStrategy(force_k=force_k, c_puct=c_puct)
 
 
 class VisitPolicyConfig(StrictBaseModel):
@@ -224,13 +325,20 @@ class VisitPolicyConfig(StrictBaseModel):
         ),
     )
 
-    def build(self) -> PolicyStrategy:
-        """Build the visit policy strategy."""
+    def build(self, force_k: float = 0.0, c_puct: float = 1.5) -> PolicyStrategy:
+        """Build the visit policy strategy.
+
+        Args:
+            force_k: Forced playout coefficient for visit pruning.
+            c_puct: PUCT exploration constant.
+        """
         return VisitPolicyStrategy(
             temperature=self.temperature,
             temperature_only_below_prob=self.temperature_only_below_prob,
             prune_threshold=self.prune_threshold,
             subtract_visits=self.subtract_visits,
+            force_k=force_k,
+            c_puct=c_puct,
         )
 
 
