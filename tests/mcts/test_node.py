@@ -1,9 +1,38 @@
-"""Tests for MCTS Node implementation with decoupled UCT."""
+"""Tests for MCTS Node implementation with LC0-style scalar values."""
 
 import numpy as np
 import pytest
 
 from alpharat.mcts.node import MCTSNode
+
+
+def add_child(
+    parent: MCTSNode,
+    idx1: int,
+    idx2: int,
+    v1: float,
+    v2: float,
+    edge_r1: float = 0.0,
+    edge_r2: float = 0.0,
+) -> MCTSNode:
+    """Helper to add a child node for testing Q computation.
+
+    Sets child._visits = 1 to mark it as visited (otherwise get_q_values uses FPU).
+    Also sets edge rewards for Q = edge_r + gamma * V computation.
+    """
+    child = MCTSNode(
+        game_state=None,
+        prior_policy_p1=np.ones(parent.n1) / parent.n1,
+        prior_policy_p2=np.ones(parent.n2) / parent.n2,
+        nn_value_p1=v1,
+        nn_value_p2=v2,
+        parent=parent,
+    )
+    child._visits = 1  # Mark as visited
+    child._edge_r1 = edge_r1
+    child._edge_r2 = edge_r2
+    parent.children[(idx1, idx2)] = child
+    return child
 
 
 @pytest.fixture
@@ -97,14 +126,16 @@ def node_both_in_mud() -> MCTSNode:
 class TestNodeBackup:
     """Tests for the backup method with decoupled incremental mean updates.
 
-    Backup updates marginal Q1[idx1] and Q2[idx2] independently using incremental mean.
+    Backup updates both child.V and self.V:
+    - child.V updated with child_value (child's expected return)
+    - self.V updated with self_value (discounted return Q = r + gamma * child.V)
     """
 
     def test_basic_backup_single_visit(self, simple_node: MCTSNode) -> None:
         """Test backing up a single value to an unvisited action pair.
 
-        Incremental mean formula: Q_new = Q_old + (G - Q_old) / (n + 1)
-        With Q_old = 0, n = 0: Q_new = 0 + (value - 0) / 1 = value
+        Incremental mean formula: V_new = V_old + (value - V_old) / (n + 1)
+        With V_old = 0, n = 0: V_new = 0 + (value - 0) / 1 = value
         """
         q1, q2 = simple_node.get_q_values()
         n1, n2 = simple_node.get_visit_counts()
@@ -115,8 +146,9 @@ class TestNodeBackup:
         assert q1[1] == 0.0
         assert q2[2] == 0.0
 
-        # Backup with tuple: (p1_value, p2_value)
-        simple_node.backup(action_p1=1, action_p2=2, value=(5.0, 3.0))
+        # Backup: child_value is child's V, self_value is Q = r + gamma * V
+        # For unit test without child, only self_value matters
+        simple_node.backup(action_p1=1, action_p2=2, child_value=(0.0, 0.0), self_value=(5.0, 3.0))
 
         q1, q2 = simple_node.get_q_values()
         n1, n2 = simple_node.get_visit_counts()
@@ -151,7 +183,9 @@ class TestNodeBackup:
     ) -> None:
         """Test incremental mean update over multiple backups for both players."""
         for p1_value, p2_value in backups:
-            simple_node.backup(action_p1=0, action_p2=0, value=(p1_value, p2_value))
+            simple_node.backup(
+                action_p1=0, action_p2=0, child_value=(0.0, 0.0), self_value=(p1_value, p2_value)
+            )
 
         q1, q2 = simple_node.get_q_values()
         n1, n2 = simple_node.get_visit_counts()
@@ -170,7 +204,9 @@ class TestNodeBackup:
         assert node_p1_in_mud.n1 == 1
         assert node_p1_in_mud.n2 == 3
 
-        node_p1_in_mud.backup(action_p1=0, action_p2=1, value=(4.0, 2.0))
+        node_p1_in_mud.backup(
+            action_p1=0, action_p2=1, child_value=(0.0, 0.0), self_value=(4.0, 2.0)
+        )
 
         q1, q2 = node_p1_in_mud.get_q_values()
         n1, n2 = node_p1_in_mud.get_visit_counts()
@@ -186,7 +222,9 @@ class TestNodeBackup:
         assert node_p2_in_mud.n1 == 3
         assert node_p2_in_mud.n2 == 1
 
-        node_p2_in_mud.backup(action_p1=2, action_p2=0, value=(7.0, 3.0))
+        node_p2_in_mud.backup(
+            action_p1=2, action_p2=0, child_value=(0.0, 0.0), self_value=(7.0, 3.0)
+        )
 
         q1, q2 = node_p2_in_mud.get_q_values()
         n1, n2 = node_p2_in_mud.get_visit_counts()
@@ -201,7 +239,9 @@ class TestNodeBackup:
         assert node_both_in_mud.n1 == 1
         assert node_both_in_mud.n2 == 1
 
-        node_both_in_mud.backup(action_p1=0, action_p2=0, value=(3.0, 1.0))
+        node_both_in_mud.backup(
+            action_p1=0, action_p2=0, child_value=(0.0, 0.0), self_value=(3.0, 1.0)
+        )
 
         q1, q2 = node_both_in_mud.get_q_values()
         n1, n2 = node_both_in_mud.get_visit_counts()
@@ -211,41 +251,55 @@ class TestNodeBackup:
         assert n1[0] == 1
         assert n2[0] == 1
 
-    def test_preserves_nn_prediction_until_visited(
-        self, node_with_nn_predictions: MCTSNode
-    ) -> None:
-        """Test that Q is initialized to NN value until visited."""
+    def test_fpu_uses_node_value(self, node_with_nn_predictions: MCTSNode) -> None:
+        """Test that FPU (first play urgency) uses node's current value.
+
+        LC0-style: Q for unvisited outcomes = node's v1/v2 (not original NN value).
+        """
         q1, q2 = node_with_nn_predictions.get_q_values()
 
-        # Initially Q = NN value = (5.0, 2.5)
+        # Initially Q = FPU = node's v1/v2 = (5.0, 2.5)
         np.testing.assert_array_almost_equal(q1, [5.0, 5.0, 5.0])
         np.testing.assert_array_almost_equal(q2, [2.5, 2.5, 2.5])
 
-        # After backing up to action 1, only that outcome updates
-        # P1: Q = 5.0 + (100.0 - 5.0) / 1 = 100.0
-        # P2: Q = 2.5 + (50.0 - 2.5) / 1 = 50.0
-        node_with_nn_predictions.backup(action_p1=1, action_p2=1, value=(100.0, 50.0))
+        # Add a child and back up through it
+        child = add_child(node_with_nn_predictions, idx1=1, idx2=1, v1=100.0, v2=50.0)
+        node_with_nn_predictions.backup(
+            action_p1=1, action_p2=1, child_value=(100.0, 50.0), self_value=(100.0, 50.0)
+        )
 
         q1, q2 = node_with_nn_predictions.get_q_values()
 
+        # Q for visited outcome comes from child
         assert q1[1] == pytest.approx(100.0)
         assert q2[1] == pytest.approx(50.0)
+        assert child.visits == 2  # add_child sets _visits=1, backup increments to 2
 
-        # Other outcomes still have NN predictions
-        assert q1[0] == pytest.approx(5.0)
-        assert q1[2] == pytest.approx(5.0)
-        assert q2[0] == pytest.approx(2.5)
-        assert q2[2] == pytest.approx(2.5)
+        # FPU for unvisited outcomes = node's updated v1/v2 = (100.0, 50.0)
+        assert q1[0] == pytest.approx(100.0)
+        assert q1[2] == pytest.approx(100.0)
+        assert q2[0] == pytest.approx(50.0)
+        assert q2[2] == pytest.approx(50.0)
 
     def test_different_actions_independent(self, simple_node: MCTSNode) -> None:
-        """Test that backing up different action pairs updates independently."""
-        simple_node.backup(action_p1=0, action_p2=0, value=(5.0, 2.0))
-        simple_node.backup(action_p1=1, action_p2=1, value=(10.0, 4.0))
-        simple_node.backup(action_p1=2, action_p2=2, value=(15.0, 6.0))
+        """Test that Q for different outcomes comes from different children."""
+        # Add children for each outcome pair
+        add_child(simple_node, idx1=0, idx2=0, v1=5.0, v2=2.0)
+        add_child(simple_node, idx1=1, idx2=1, v1=10.0, v2=4.0)
+        add_child(simple_node, idx1=2, idx2=2, v1=15.0, v2=6.0)
+
+        # Back up through each child (child_value and self_value same for gamma=1, no reward)
+        simple_node.backup(action_p1=0, action_p2=0, child_value=(5.0, 2.0), self_value=(5.0, 2.0))
+        simple_node.backup(
+            action_p1=1, action_p2=1, child_value=(10.0, 4.0), self_value=(10.0, 4.0)
+        )
+        simple_node.backup(
+            action_p1=2, action_p2=2, child_value=(15.0, 6.0), self_value=(15.0, 6.0)
+        )
 
         q1, q2 = simple_node.get_q_values()
 
-        # Each outcome has its own Q value
+        # Each outcome gets Q from its child
         assert q1[0] == pytest.approx(5.0)
         assert q1[1] == pytest.approx(10.0)
         assert q1[2] == pytest.approx(15.0)
@@ -275,7 +329,9 @@ class TestNodeBackup:
     ) -> None:
         """Test that backup works correctly with negative values."""
         for p1_val, p2_val in values:
-            simple_node.backup(action_p1=0, action_p2=0, value=(p1_val, p2_val))
+            simple_node.backup(
+                action_p1=0, action_p2=0, child_value=(0.0, 0.0), self_value=(p1_val, p2_val)
+            )
 
         q1, q2 = simple_node.get_q_values()
         assert q1[0] == pytest.approx(expected_p1)
@@ -291,16 +347,18 @@ class TestNodeProperties:
 
     def test_total_visits_sums_all_action_visits(self, simple_node: MCTSNode) -> None:
         """Test that total_visits correctly counts simulations."""
-        simple_node.backup(action_p1=0, action_p2=0, value=(1.0, 0.5))
-        simple_node.backup(action_p1=1, action_p2=1, value=(2.0, 1.0))
-        simple_node.backup(action_p1=0, action_p2=0, value=(3.0, 1.5))
+        simple_node.backup(action_p1=0, action_p2=0, child_value=(0.0, 0.0), self_value=(1.0, 0.5))
+        simple_node.backup(action_p1=1, action_p2=1, child_value=(0.0, 0.0), self_value=(2.0, 1.0))
+        simple_node.backup(action_p1=0, action_p2=0, child_value=(0.0, 0.0), self_value=(3.0, 1.5))
 
         # Should have 3 total simulations
         assert simple_node.total_visits == 3
 
     def test_total_visits_with_mud(self, node_p1_in_mud: MCTSNode) -> None:
         """Test that total_visits counts simulations, not matrix cells."""
-        node_p1_in_mud.backup(action_p1=0, action_p2=0, value=(5.0, 2.0))
+        node_p1_in_mud.backup(
+            action_p1=0, action_p2=0, child_value=(0.0, 0.0), self_value=(5.0, 2.0)
+        )
 
         # 1 simulation
         assert node_p1_in_mud.total_visits == 1
@@ -330,10 +388,10 @@ class TestNodeProperties:
         assert simple_node.is_expanded is True
         assert len(simple_node.children) == 1
 
-    def test_init_v1_v2_properties(self, node_with_nn_predictions: MCTSNode) -> None:
-        """Test that init_v1 and init_v2 return NN predictions."""
-        assert node_with_nn_predictions.init_v1 == pytest.approx(5.0)
-        assert node_with_nn_predictions.init_v2 == pytest.approx(2.5)
+    def test_v1_v2_properties(self, node_with_nn_predictions: MCTSNode) -> None:
+        """Test that v1 and v2 return node values (initially NN predictions)."""
+        assert node_with_nn_predictions.v1 == pytest.approx(5.0)
+        assert node_with_nn_predictions.v2 == pytest.approx(2.5)
 
 
 class TestActionEquivalence:
@@ -394,7 +452,9 @@ class TestActionEquivalence:
         self, node_with_p1_wall: MCTSNode
     ) -> None:
         """Backing up action 0 or 4 for P1 should update the same Q1 entry."""
-        node_with_p1_wall.backup(action_p1=0, action_p2=1, value=(10.0, 5.0))
+        node_with_p1_wall.backup(
+            action_p1=0, action_p2=1, child_value=(0.0, 0.0), self_value=(10.0, 5.0)
+        )
 
         q1_before, _ = node_with_p1_wall.get_q_values()
         q1_outcome_for_0 = q1_before[node_with_p1_wall.action_to_outcome(1, 0)]
@@ -410,10 +470,14 @@ class TestActionEquivalence:
     def test_equivalence_incremental_mean(self, node_with_p1_wall: MCTSNode) -> None:
         """Multiple backups via equivalent actions should share the same outcome."""
         # First backup via action 0
-        node_with_p1_wall.backup(action_p1=0, action_p2=0, value=(10.0, 6.0))
+        node_with_p1_wall.backup(
+            action_p1=0, action_p2=0, child_value=(0.0, 0.0), self_value=(10.0, 6.0)
+        )
 
         # Second backup via action 4 (equivalent to 0 for P1)
-        node_with_p1_wall.backup(action_p1=4, action_p2=0, value=(6.0, 2.0))
+        node_with_p1_wall.backup(
+            action_p1=4, action_p2=0, child_value=(0.0, 0.0), self_value=(6.0, 2.0)
+        )
 
         q1, q2 = node_with_p1_wall.get_q_values()
         n1, n2 = node_with_p1_wall.get_visit_counts()
@@ -508,7 +572,9 @@ class TestEquivalenceInvariants:
             a2 = random.randint(0, 4)
             p1_val = random.uniform(-10.0, 10.0)
             p2_val = random.uniform(-5.0, 5.0)
-            node.backup(action_p1=a1, action_p2=a2, value=(p1_val, p2_val))
+            node.backup(
+                action_p1=a1, action_p2=a2, child_value=(0.0, 0.0), self_value=(p1_val, p2_val)
+            )
 
         # Verify that equivalent actions have same outcome index
         assert node.action_to_outcome(1, 0) == node.action_to_outcome(1, 4)
@@ -543,7 +609,9 @@ class TestEquivalenceInvariants:
             a2 = random.randint(0, 4)
             p1_val = random.uniform(-5.0, 5.0)
             p2_val = random.uniform(-3.0, 3.0)
-            node.backup(action_p1=a1, action_p2=a2, value=(p1_val, p2_val))
+            node.backup(
+                action_p1=a1, action_p2=a2, child_value=(0.0, 0.0), self_value=(p1_val, p2_val)
+            )
 
         # P1 should have single outcome
         assert node.n1 == 1
@@ -569,8 +637,8 @@ class TestUpdateEffectiveActions:
         )
 
         # Do some backups
-        node.backup(action_p1=0, action_p2=0, value=(10.0, 5.0))
-        node.backup(action_p1=1, action_p2=1, value=(20.0, 10.0))
+        node.backup(action_p1=0, action_p2=0, child_value=(0.0, 0.0), self_value=(10.0, 5.0))
+        node.backup(action_p1=1, action_p2=1, child_value=(0.0, 0.0), self_value=(20.0, 10.0))
         assert node.total_visits == 2
 
         # Update effective actions (introduce wall for P1)
@@ -679,8 +747,8 @@ class TestMarginalVisitsExpanded:
 
     def test_visits_expanded_correctly(self, simple_node: MCTSNode) -> None:
         """Visits should expand to [5] space correctly."""
-        simple_node.backup(action_p1=1, action_p2=2, value=(5.0, 3.0))
-        simple_node.backup(action_p1=1, action_p2=2, value=(7.0, 4.0))
+        simple_node.backup(action_p1=1, action_p2=2, child_value=(0.0, 0.0), self_value=(5.0, 3.0))
+        simple_node.backup(action_p1=1, action_p2=2, child_value=(0.0, 0.0), self_value=(7.0, 4.0))
 
         n1, n2 = simple_node.get_marginal_visits_expanded()
 
@@ -705,7 +773,7 @@ class TestMarginalVisitsExpanded:
             p2_effective=[0, 1, 2, 3, 4],
         )
 
-        node.backup(action_p1=0, action_p2=0, value=(5.0, 3.0))
+        node.backup(action_p1=0, action_p2=0, child_value=(0.0, 0.0), self_value=(5.0, 3.0))
 
         n1, n2 = node.get_marginal_visits_expanded()
 

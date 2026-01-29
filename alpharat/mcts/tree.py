@@ -132,6 +132,10 @@ class MCTSTree:
         p1_score_after, p2_score_after = self.game.player1_score, self.game.player2_score
         reward = (p1_score_after - p1_score_before, p2_score_after - p2_score_before)
 
+        # Store edge reward on child (used for Q = r + gamma * V computation)
+        child._edge_r1 = reward[0]
+        child._edge_r2 = reward[1]
+
         # Update simulator path
         self._sim_path.append(child)
 
@@ -139,30 +143,35 @@ class MCTSTree:
 
     def backup(
         self,
-        path: list[tuple[MCTSNode, int, int, tuple[float, float]]],
+        path: list[tuple[MCTSNode, int, int]],
         g: tuple[float, float] = (0.0, 0.0),
     ) -> None:
-        """Backup values through the tree with discounting.
+        """Backup discounted returns through the tree.
+
+        Uses edge_r stored on child nodes as the source of truth for rewards.
 
         Args:
-            path: List of (node, action_p1, action_p2, reward) tuples
-                 from the search path, in forward order (root to leaf)
-                 where reward is (p1_reward, p2_reward)
+            path: List of (node, action_p1, action_p2) tuples from the search
+                 path, in forward order (root to leaf).
             g: Leaf value tuple (p1_value, p2_value) from NN estimate.
                Defaults to (0.0, 0.0) for terminal states.
         """
-        value = g
+        child_value = g  # Start with leaf's expected return
 
         # Backup in reverse (from leaf to root)
-        for node, action_p1, action_p2, reward in reversed(path):
-            # Apply discounting to both player values: value = reward + gamma * future
-            value = (
-                reward[0] + self.gamma * value[0],
-                reward[1] + self.gamma * value[1],
+        for node, action_p1, action_p2 in reversed(path):
+            idx1 = int(node._p1_action_to_idx[action_p1])
+            idx2 = int(node._p2_action_to_idx[action_p2])
+            child = node.children[(idx1, idx2)]
+
+            # Q = edge_r + gamma * child_value (edge_r is source of truth)
+            q_value = (
+                child._edge_r1 + self.gamma * child_value[0],
+                child._edge_r2 + self.gamma * child_value[1],
             )
 
-            # Update node statistics
-            node.backup(action_p1, action_p2, value)
+            node.backup(action_p1, action_p2, child_value, q_value)
+            child_value = q_value
 
     def advance_root(self, action_p1: int, action_p2: int) -> None:
         """Advance the tree's root to the child reached by the given actions.
@@ -400,7 +409,7 @@ class MCTSTree:
         prior_p1, prior_p2, v1, v2 = self._predict(self.root.p1_effective, self.root.p2_effective)
         self.root.prior_policy_p1 = prior_p1
         self.root.prior_policy_p2 = prior_p2
-        self.root.set_init_values(v1, v2)
+        self.root.set_values(v1, v2)
 
     def _init_root_effective(self) -> None:
         """Initialize effective action mappings for the root node.

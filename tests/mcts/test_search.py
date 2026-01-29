@@ -425,13 +425,17 @@ class TestBackupWithLeafValue:
     def test_backup_with_g_parameter(self, fake_tree: MCTSTree) -> None:
         """Tree.backup should use g parameter for leaf value."""
         # Create a child
-        child, reward = fake_tree.make_move_from(fake_tree.root, 0, 0)
+        child, _reward = fake_tree.make_move_from(fake_tree.root, 0, 0)
+
+        # Set edge reward on child (simulates reward from make_move_from)
+        child._edge_r1 = 1.0
+        child._edge_r2 = -1.0
 
         # Backup with specific leaf value - tuple (p1_value, p2_value)
-        path = [(fake_tree.root, 0, 0, (1.0, -1.0))]
+        path = [(fake_tree.root, 0, 0)]
         fake_tree.backup(path, g=(5.0, -5.0))
 
-        # Value = reward + gamma * g = (1.0, -1.0) + 1.0 * (5.0, -5.0) = (6.0, -6.0)
+        # Value = edge_r + gamma * g = (1.0, -1.0) + 1.0 * (5.0, -5.0) = (6.0, -6.0)
         # With decoupled UCT, check Q-values instead of payout matrix
         q1, q2 = fake_tree.root.get_q_values()
         assert q1[0] == pytest.approx(6.0)
@@ -453,12 +457,16 @@ class TestBackupWithLeafValue:
         # Create child
         child, _ = tree.make_move_from(root, 1, 1)
 
+        # Set edge reward on child (simulates reward from make_move_from)
+        child._edge_r1 = 2.0
+        child._edge_r2 = -2.0
+
         # Backup with leaf value - tuple (p1_value, p2_value)
-        path = [(root, 1, 1, (2.0, -2.0))]
+        path = [(root, 1, 1)]
         tree.backup(path, g=(10.0, -10.0))
 
-        # Value = reward + gamma * g = (2.0, -2.0) + 0.5 * (10.0, -10.0) = (7.0, -7.0)
-        q1, q2 = root.get_q_values()
+        # Value = edge_r + gamma * g = (2.0, -2.0) + 0.5 * (10.0, -10.0) = (7.0, -7.0)
+        q1, q2 = root.get_q_values(gamma=0.5)
         assert q1[1] == pytest.approx(7.0)
         assert q2[1] == pytest.approx(-7.0)
 
@@ -509,6 +517,6 @@ class TestPureNNMode:
         search = DecoupledPUCTSearch(fake_tree, make_config(0))
         result = search.search()
 
-        # Value estimates should be the initial NN values
-        assert result.value_p1 == pytest.approx(root.init_v1)
-        assert result.value_p2 == pytest.approx(root.init_v2)
+        # Value estimates should be the node's values (NN initial)
+        assert result.value_p1 == pytest.approx(root.v1)
+        assert result.value_p2 == pytest.approx(root.v2)

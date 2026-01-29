@@ -4,7 +4,8 @@ This module implements the core node structure for Monte Carlo Tree Search
 adapted for simultaneous-move games like PyRat. Statistics are indexed by
 unique effective outcomes rather than raw actions, giving O(1) backup.
 
-Each player maintains independent Q-values and visit counts (decoupled UCT).
+Each node stores scalar values (v1, v2) like LC0/KataGo. Marginal Q-values
+for PUCT selection are computed on-the-fly from children.
 """
 
 from __future__ import annotations
@@ -13,9 +14,6 @@ from typing import Any
 
 import numpy as np
 
-from alpharat.mcts.numba_ops import (
-    backup_node_scalar,
-)
 from alpharat.mcts.reduction import (
     expand_prior,
     reduce_prior,
@@ -23,17 +21,17 @@ from alpharat.mcts.reduction import (
 
 
 class MCTSNode:
-    """MCTS node for simultaneous-move games with O(1) backup.
+    """MCTS node for simultaneous-move games (LC0-style scalar values).
 
-    Uses decoupled UCT: each player maintains independent Q-values and visit counts
-    indexed by unique effective outcomes. This makes backup O(1) and simplifies
-    the algorithm compared to joint payout matrices.
+    Each node stores scalar values (v1, v2) representing expected returns.
+    Marginal Q-values for PUCT selection are computed on-the-fly from children,
+    following the LC0/KataGo pattern where Q(action) = child.value.
 
     The node stores:
     - Reduced priors [n1], [n2] where n = count of unique outcomes
-    - Marginal Q-values [n1], [n2] for each player (decoupled)
-    - Marginal visit counts [n1], [n2] for each player
-    - Scalar value estimates (init_v1, init_v2) from NN
+    - Scalar values (v1, v2) - NN estimate initially, updated via backup
+    - Marginal visit counts [n1], [n2] for policy output
+    - Edge visits (_visits) - how many times parent backed up through this node
     - Children keyed by outcome index pairs (i, j)
 
     Attributes:
@@ -147,18 +145,24 @@ class MCTSNode:
         self._expanded_prior_p2 = np.zeros(num_actions, dtype=prior_policy_p2.dtype)
         self._expanded_prior_p2[p2_outcomes_arr] = self.prior_p2_reduced
 
-        # Store NN's scalar value estimates
-        self._init_v1 = nn_value_p1
-        self._init_v2 = nn_value_p2
+        # Node values: NN estimate initially, updated via backup
+        # V = expected future value from this position
+        self._v1 = float(nn_value_p1)
+        self._v2 = float(nn_value_p2)
 
-        # Decoupled UCT: marginal Q-values and visit counts per outcome
-        # Q initialized to NN value, N initialized to 0
-        self._q1 = np.full(self._n1, nn_value_p1, dtype=np.float64)
-        self._q2 = np.full(self._n2, nn_value_p2, dtype=np.float64)
+        # Edge rewards: reward collected when transitioning to this node from parent
+        # Set by make_move_from(), used to compute Q = reward + gamma * V
+        self._edge_r1: float = 0.0
+        self._edge_r2: float = 0.0
+
+        # Edge visits: how many times parent backed up through this node
+        self._visits: int = 0
+
+        # Marginal visit counts for policy output (visit-proportional policy)
         self._n1_visits = np.zeros(self._n1, dtype=np.float64)
         self._n2_visits = np.zeros(self._n2, dtype=np.float64)
 
-        # Cached total visits for O(1) access
+        # Total visits through this node (for incremental averaging)
         self._total_visits: int = 0
 
         # Tree structure - children keyed by outcome index pairs (i, j)
@@ -175,14 +179,19 @@ class MCTSNode:
         return self._n2
 
     @property
-    def init_v1(self) -> float:
-        """NN's initial scalar value estimate for P1."""
-        return self._init_v1
+    def v1(self) -> float:
+        """Scalar value estimate for P1 (NN initial, updated via backup)."""
+        return self._v1
 
     @property
-    def init_v2(self) -> float:
-        """NN's initial scalar value estimate for P2."""
-        return self._init_v2
+    def v2(self) -> float:
+        """Scalar value estimate for P2 (NN initial, updated via backup)."""
+        return self._v2
+
+    @property
+    def visits(self) -> int:
+        """Edge visits: how many times parent backed up through this node."""
+        return self._visits
 
     def outcome_to_effective(self, player: int, outcome_idx: int) -> int:
         """Convert outcome index to effective action value.
@@ -259,12 +268,13 @@ class MCTSNode:
         self._expanded_prior_p1 = expand_prior(self.prior_p1_reduced, self.p1_effective)
         self._expanded_prior_p2 = expand_prior(self.prior_p2_reduced, self.p2_effective)
 
-        # Reinitialize Q and N arrays for new structure
-        self._q1 = np.full(self._n1, self._init_v1, dtype=np.float64)
-        self._q2 = np.full(self._n2, self._init_v2, dtype=np.float64)
+        # Reinitialize visit arrays for new structure (node values stay as-is)
         self._n1_visits = np.zeros(self._n1, dtype=np.float64)
         self._n2_visits = np.zeros(self._n2, dtype=np.float64)
         self._total_visits = 0
+        self._visits = 0
+        self._edge_r1 = 0.0
+        self._edge_r2 = 0.0
 
     @property
     def total_visits(self) -> int:
@@ -298,8 +308,8 @@ class MCTSNode:
         self.prior_p2_reduced = reduce_prior(value, self.p2_effective)
         self._expanded_prior_p2 = expand_prior(self.prior_p2_reduced, self.p2_effective)
 
-    def set_init_values(self, v1: float, v2: float) -> None:
-        """Set initial value estimates and reinitialize Q arrays.
+    def set_values(self, v1: float, v2: float) -> None:
+        """Set scalar value estimates.
 
         Used by MCTSTree._init_root_priors() to set NN predictions.
 
@@ -307,44 +317,92 @@ class MCTSNode:
             v1: Value estimate for P1
             v2: Value estimate for P2
         """
-        self._init_v1 = v1
-        self._init_v2 = v2
-        self._q1 = np.full(self._n1, v1, dtype=np.float64)
-        self._q2 = np.full(self._n2, v2, dtype=np.float64)
+        self._v1 = float(v1)
+        self._v2 = float(v2)
 
-    def backup(self, action_p1: int, action_p2: int, value: tuple[float, float]) -> None:
+    def backup(
+        self,
+        action_p1: int,
+        action_p2: int,
+        child_value: tuple[float, float],
+        self_value: tuple[float, float],
+    ) -> None:
         """Update statistics after visiting a child node.
 
-        O(1) operation - independently updates marginal Q1[idx1] and Q2[idx2].
+        O(1) operation using incremental averaging.
 
         Args:
             action_p1: Player 1's action that led to child (0-4)
             action_p2: Player 2's action that led to child (0-4)
-            value: Tuple of (p1_value, p2_value) representing returns for each player
+            child_value: Child's expected return (updates child.V)
+            self_value: Discounted return Q = r + gamma * child_value (updates self.V)
         """
         idx1 = int(self._p1_action_to_idx[action_p1])
         idx2 = int(self._p2_action_to_idx[action_p2])
-        p1_value, p2_value = value
 
-        self._total_visits = backup_node_scalar(
-            self._q1,
-            self._q2,
-            self._n1_visits,
-            self._n2_visits,
-            idx1,
-            idx2,
-            p1_value,
-            p2_value,
-        )
+        # Update child's V with child's expected return
+        child_key = (idx1, idx2)
+        if child_key in self.children:
+            child = self.children[child_key]
+            child._visits += 1
+            child._v1 += (child_value[0] - child._v1) / child._visits
+            child._v2 += (child_value[1] - child._v2) / child._visits
 
-    def get_q_values(self) -> tuple[np.ndarray, np.ndarray]:
-        """Get Q-values in reduced (outcome-indexed) space.
+        # Update marginal visit counts (for policy output)
+        self._n1_visits[idx1] += 1
+        self._n2_visits[idx2] += 1
+
+        # Update this node's value with the observed return
+        # V = E[Q] = average discounted return from this position
+        self._total_visits += 1
+        self._v1 += (self_value[0] - self._v1) / self._total_visits
+        self._v2 += (self_value[1] - self._v2) / self._total_visits
+
+    def get_q_values(self, gamma: float = 1.0) -> tuple[np.ndarray, np.ndarray]:
+        """Compute marginal Q-values from children (LC0-style).
+
+        Q = reward + gamma * V, where V is the child's value.
+        Q1(i) = weighted average of (r1 + gamma * child.v1) for children (i, *).
+        Q2(j) = weighted average of (r2 + gamma * child.v2) for children (*, j).
+        Weight = child's edge visits.
+        FPU (first play urgency) = this node's v1/v2 for unvisited outcomes.
+
+        Args:
+            gamma: Discount factor for computing Q = r + gamma * V.
 
         Returns:
             Tuple of (q1, q2) where q1[i] is P1's Q-value for outcome i.
             Shapes are [n1] and [n2].
         """
-        return self._q1.copy(), self._q2.copy()
+        # FPU = node's own value for unvisited outcomes
+        q1 = np.full(self._n1, self._v1, dtype=np.float64)
+        q2 = np.full(self._n2, self._v2, dtype=np.float64)
+
+        if not self.children:
+            return q1, q2
+
+        # Accumulate weighted Q values: Q = r + gamma * V
+        w1 = np.zeros(self._n1, dtype=np.float64)
+        w2 = np.zeros(self._n2, dtype=np.float64)
+        n1_sum = np.zeros(self._n1, dtype=np.float64)
+        n2_sum = np.zeros(self._n2, dtype=np.float64)
+
+        for (i, j), child in self.children.items():
+            if child._visits > 0:
+                q1_child = child._edge_r1 + gamma * child._v1
+                q2_child = child._edge_r2 + gamma * child._v2
+                w1[i] += child._visits * q1_child
+                w2[j] += child._visits * q2_child
+                n1_sum[i] += child._visits
+                n2_sum[j] += child._visits
+
+        # Replace FPU where we have data
+        mask1 = n1_sum > 0
+        mask2 = n2_sum > 0
+        q1[mask1] = w1[mask1] / n1_sum[mask1]
+        q2[mask2] = w2[mask2] / n2_sum[mask2]
+
+        return q1, q2
 
     def get_visit_counts(self) -> tuple[np.ndarray, np.ndarray]:
         """Get visit counts in reduced (outcome-indexed) space.

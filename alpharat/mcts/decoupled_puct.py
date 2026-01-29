@@ -85,8 +85,8 @@ class DecoupledPUCTSearch:
         return SearchResult(
             policy_p1=root.prior_policy_p1.copy(),
             policy_p2=root.prior_policy_p2.copy(),
-            value_p1=root.init_v1,
-            value_p2=root.init_v2,
+            value_p1=root.v1,
+            value_p2=root.v2,
         )
 
     def _make_result(self) -> SearchResult:
@@ -104,14 +104,14 @@ class DecoupledPUCTSearch:
         policy_p2 = n2_expanded / n2_sum if n2_sum > 0 else root.prior_policy_p2.copy()
 
         # Compute root value from Q-values weighted by visit counts
-        q1, q2 = root.get_q_values()
+        q1, q2 = root.get_q_values(gamma=self.tree.gamma)
         n1, n2 = root.get_visit_counts()
 
         n1_total = n1.sum()
         n2_total = n2.sum()
 
-        value_p1 = float(np.dot(q1, n1) / n1_total) if n1_total > 0 else root.init_v1
-        value_p2 = float(np.dot(q2, n2) / n2_total) if n2_total > 0 else root.init_v2
+        value_p1 = float(np.dot(q1, n1) / n1_total) if n1_total > 0 else root.v1
+        value_p2 = float(np.dot(q2, n2) / n2_total) if n2_total > 0 else root.v2
 
         return SearchResult(
             policy_p1=policy_p1.astype(np.float64),
@@ -127,7 +127,7 @@ class DecoupledPUCTSearch:
         Expansion: Create child node when reaching unexpanded action pair.
         Backup: Propagate discounted values up the path.
         """
-        path: list[tuple[MCTSNode, int, int, tuple[float, float]]] = []
+        path: list[tuple[MCTSNode, int, int]] = []
         current = self.tree.root
         leaf_child: MCTSNode | None = None
 
@@ -146,10 +146,10 @@ class DecoupledPUCTSearch:
             is_expansion = outcome_pair not in current.children
 
             # Make move (creates child if needed)
-            child, reward = self.tree.make_move_from(current, a1, a2)
+            child, _reward = self.tree.make_move_from(current, a1, a2)
 
             # Record step BEFORE potential expansion
-            path.append((current, a1, a2, reward))
+            path.append((current, a1, a2))
 
             if is_expansion:
                 leaf_child = child
@@ -166,7 +166,7 @@ class DecoupledPUCTSearch:
             g: tuple[float, float] = (0.0, 0.0)
         else:
             # NN's scalar value estimates for the leaf position
-            g = (leaf_child.init_v1, leaf_child.init_v2)
+            g = (leaf_child.v1, leaf_child.v2)
 
         self.tree.backup(path, g=g)
 
@@ -185,7 +185,7 @@ class DecoupledPUCTSearch:
         """
         # Work in reduced space: [n1], [n2] arrays
         # Decoupled UCT: each player has independent Q and N
-        q1, q2 = node.get_q_values()
+        q1, q2 = node.get_q_values(gamma=self.tree.gamma)
         n1, n2 = node.get_visit_counts()
         n_total = node.total_visits
         is_root = node == self.tree.root

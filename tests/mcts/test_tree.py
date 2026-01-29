@@ -387,8 +387,12 @@ class TestBackup:
         idx1 = tree.root.action_to_outcome(1, 0)  # P1's outcome index
         idx2 = tree.root.action_to_outcome(2, 0)  # P2's outcome index
 
-        # Backup path with one step - tuple rewards (p1_reward, p2_reward)
-        path = [(tree.root, 0, 0, (1.0, -0.5))]  # (node, action_p1, action_p2, reward)
+        # Set edge rewards on child (simulates what make_move_from does)
+        child._edge_r1 = 1.0
+        child._edge_r2 = -0.5
+
+        # Backup path with one step (reward is stored on child.edge_r)
+        path = [(tree.root, 0, 0)]  # (node, action_p1, action_p2)
         tree.backup(path)
 
         # Root should have updated Q-values (marginal, per-player)
@@ -396,7 +400,7 @@ class TestBackup:
         q1, q2 = tree.root.get_q_values()
         assert n1[idx1] == 1  # Outcome visited once
         assert n2[idx2] == 1  # Outcome visited once
-        # value = reward + gamma * 0 = (1.0, -0.5) + 1.0 * (0, 0) = (1.0, -0.5)
+        # value = edge_r + gamma * 0 = (1.0, -0.5) + 1.0 * (0, 0) = (1.0, -0.5)
         assert q1[idx1] == pytest.approx(1.0)  # P1's Q-value
         assert q2[idx2] == pytest.approx(-0.5)  # P2's Q-value
 
@@ -405,52 +409,72 @@ class TestBackup:
         # Create tree with gamma < 1
         tree_discounted = MCTSTree(tree.game, tree.root, gamma=0.9)
 
-        # Create path: root → child
+        # Create path: root → child → grandchild
         child, _ = tree_discounted.make_move_from(tree.root, 0, 0)
+        grandchild, _ = tree_discounted.make_move_from(child, 1, 1)
 
         # Get outcome indices
         root_idx1 = tree.root.action_to_outcome(1, 0)
         child_idx1 = child.action_to_outcome(1, 1)
 
-        # Backup path with two steps - tuple rewards (p1_reward, p2_reward)
-        # At child: reward = (0.5, 0.0), future value = (0, 0)
-        # At root: reward = (1.0, 0.0), future value = (0.5, 0.0)
+        # Set edge rewards (simulates what make_move_from does)
+        # At root→child: reward = (1.0, 0.0)
+        # At child→grandchild: reward = (0.5, 0.0)
+        child._edge_r1 = 1.0
+        child._edge_r2 = 0.0
+        grandchild._edge_r1 = 0.5
+        grandchild._edge_r2 = 0.0
+
+        # Backup path with two steps (rewards stored on children's edge_r)
         path = [
-            (tree.root, 0, 0, (1.0, 0.0)),  # reward at root
-            (child, 1, 1, (0.5, 0.0)),  # reward at child
+            (tree.root, 0, 0),  # root → child
+            (child, 1, 1),  # child → grandchild
         ]
         tree_discounted.backup(path)
 
-        # Child: value = (0.5, 0.0) + 0.9 * (0, 0) = (0.5, 0.0)
-        child_q1, child_q2 = child.get_q_values()
+        # Grandchild: value = (0.5, 0.0) + 0.9 * (0, 0) = (0.5, 0.0)
+        child_q1, child_q2 = child.get_q_values(gamma=0.9)
         assert child_q1[child_idx1] == pytest.approx(0.5)  # P1's Q-value
 
         # Root: value = (1.0, 0.0) + 0.9 * (0.5, 0.0) = (1.45, 0.0)
-        root_q1, root_q2 = tree.root.get_q_values()
+        root_q1, root_q2 = tree.root.get_q_values(gamma=0.9)
         assert root_q1[root_idx1] == pytest.approx(1.45)  # P1's Q-value
 
     def test_backup_multiple_visits(self, tree: MCTSTree) -> None:
-        """Multiple backups should use incremental mean."""
+        """Multiple backups should use incremental mean for node values."""
+        # Create a child first
+        child, _ = tree.make_move_from(tree.root, 0, 0)
+
         # Get outcome indices for action 0
         idx1 = tree.root.action_to_outcome(1, 0)
         idx2 = tree.root.action_to_outcome(2, 0)
 
-        # First backup - tuple rewards (p1_reward, p2_reward)
-        path1 = [(tree.root, 0, 0, (10.0, -10.0))]
-        tree.backup(path1)
-        q1, q2 = tree.root.get_q_values()
-        assert q1[idx1] == pytest.approx(10.0)  # P1
-        assert q2[idx2] == pytest.approx(-10.0)  # P2
+        # Set consistent edge reward
+        child._edge_r1 = 1.0
+        child._edge_r2 = -1.0
 
-        # Second backup to same action
-        path2 = [(tree.root, 0, 0, (6.0, -6.0))]
-        tree.backup(path2)
-        # P1: Q = 10.0 + (6.0 - 10.0) / 2 = 8.0
-        # P2: Q = -10.0 + (-6.0 - (-10.0)) / 2 = -8.0
+        # First backup with g=(10.0, -10.0) => Q = 1.0 + 1.0*10.0 = 11.0
+        path1 = [(tree.root, 0, 0)]
+        tree.backup(path1, g=(10.0, -10.0))
+
+        # Second backup with g=(6.0, -6.0) => Q = 1.0 + 1.0*6.0 = 7.0
+        path2 = [(tree.root, 0, 0)]
+        tree.backup(path2, g=(6.0, -6.0))
+
+        # Root's V should be incremental mean of Q values: (11.0 + 7.0) / 2 = 9.0
+        assert tree.root.v1 == pytest.approx(9.0)  # P1
+        assert tree.root.v2 == pytest.approx(-9.0)  # P2
+
+        # Child's V should be incremental mean of g values: (10.0 + 6.0) / 2 = 8.0
+        assert child.v1 == pytest.approx(8.0)  # P1
+        assert child.v2 == pytest.approx(-8.0)  # P2
+
+        # get_q_values() returns Q = edge_r + gamma * child.V = 1.0 + 1.0 * 8.0 = 9.0
         q1, q2 = tree.root.get_q_values()
+        assert q1[idx1] == pytest.approx(9.0)  # P1
+        assert q2[idx2] == pytest.approx(-9.0)  # P2
+
         n1, n2 = tree.root.get_visit_counts()
-        assert q1[idx1] == pytest.approx(8.0)  # P1
-        assert q2[idx2] == pytest.approx(-8.0)  # P2
         assert n1[idx1] == 2  # Outcome visited twice
 
 
