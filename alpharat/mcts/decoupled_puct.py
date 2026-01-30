@@ -14,7 +14,12 @@ from pydantic import Field
 from alpharat.config.base import StrictBaseModel
 from alpharat.mcts.numba_ops import compute_puct_scores, select_max_with_tiebreak
 from alpharat.mcts.payout_filter import filter_low_visit_payout
-from alpharat.mcts.policy_strategy import NashPolicyConfig, PolicyConfig, PolicyStrategy
+from alpharat.mcts.policy_strategy import (
+    NashPolicyConfig,
+    PolicyConfig,
+    PolicyStrategy,
+    get_effective_visits,
+)
 from alpharat.mcts.reduction import expand_payout, expand_prior, expand_visits
 
 if TYPE_CHECKING:
@@ -131,9 +136,8 @@ class DecoupledPUCTSearch:
         learning_p1, learning_p2 = self._learning_strategy.derive_policies(root)
 
         # --- Compute filtered payout for recording (NN training) ---
-        # This is separate from policy strategy — it's about what we record,
-        # not what policy we derive. Always use filtered payout for training.
-        visits_reduced = root._visits  # [n1, n2]
+        # Use pruned visits (same as policy strategies) for consistency.
+        visits_reduced = get_effective_visits(root, self._force_k, self._c_puct)
         payout_reduced = root.get_reduced_payout()  # [2, n1, n2]
         filtered_payout_reduced = filter_low_visit_payout(
             payout_reduced, visits_reduced, min_visits=2

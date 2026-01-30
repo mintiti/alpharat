@@ -37,7 +37,7 @@ class PolicyStrategy(Protocol):
         ...
 
 
-def _get_effective_visits(
+def get_effective_visits(
     node: MCTSNode,
     force_k: float,
     c_puct: float,
@@ -98,7 +98,7 @@ class NashPolicyStrategy:
         Returns:
             (p1_policy, p2_policy) in reduced space [n1], [n2].
         """
-        visits = _get_effective_visits(node, self._force_k, self._c_puct)
+        visits = get_effective_visits(node, self._force_k, self._c_puct)
         payout = node.get_reduced_payout()
         filtered = filter_low_visit_payout(payout, visits, min_visits=2)
 
@@ -153,7 +153,7 @@ class VisitPolicyStrategy:
         Returns:
             (p1_policy, p2_policy) in reduced space [n1], [n2].
         """
-        visits = _get_effective_visits(node, self._force_k, self._c_puct)
+        visits = get_effective_visits(node, self._force_k, self._c_puct)
 
         marginal_p1 = visits.sum(axis=1)  # [n1]
         marginal_p2 = visits.sum(axis=0)  # [n2]
