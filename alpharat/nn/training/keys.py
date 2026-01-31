@@ -83,8 +83,13 @@ class ArchitectureType(StrEnum):
         LOCAL_VALUE: MLP with auxiliary per-cheese ownership prediction head.
             KataGo-inspired: predicts who collects each cheese, derives value
             from ownership. Experimental, sharper gradients for value learning.
+
+        CNN: CNN trunk with DeepSet heads for spatial inductive bias.
+            ResNet blocks process spatial input, then extracts features at player
+            positions. Structural symmetry via weight sharing, no augmentation needed.
     """
 
     MLP = "mlp"
     SYMMETRIC = "symmetric"
     LOCAL_VALUE = "local_value"
+    CNN = "cnn"

@@ -1,0 +1,26 @@
+# CNN training config for 7x7 (standalone, no Hydra defaults)
+name: cnn_7x7
+
+model:
+  architecture: cnn
+  hidden_channels: 64
+  num_blocks: 1
+  player_dim: 32
+  hidden_dim: 64
+  dropout: 0.1
+
+optim:
+  architecture: cnn
+  lr: 1e-3
+  policy_weight: 1.0
+  value_weight: 1.0
+  batch_size: 4096
+  nash_weight: 0.0
+  nash_mode: target
+  constant_sum_weight: 0.0
+
+data:
+  train_dir: experiments/shards/GROUP/UUID/train
+  val_dir: experiments/shards/GROUP/UUID/val
+
+seed: 42
