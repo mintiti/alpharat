@@ -14,9 +14,10 @@ optim:
   lr: 1e-3
   policy_weight: 1.0
   value_weight: 1.0
+  matrix_loss_weight: 0.0
   batch_size: 4096
-  nash_weight: 0.0
-  nash_mode: target
+  nash_weight: 1.0
+  nash_mode: predicted
   constant_sum_weight: 0.0
 
 data:

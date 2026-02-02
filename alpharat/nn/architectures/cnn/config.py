@@ -87,6 +87,7 @@ class CNNOptimConfig(BaseOptimConfig):
     architecture: Literal["cnn"] = "cnn"
 
     # CNN-specific loss weights (same structure as symmetric)
+    matrix_loss_weight: float = 0.0  # Full payout matrix supervision
     nash_weight: float = 0.0
     nash_mode: Literal["target", "predicted"] = "target"
     constant_sum_weight: float = 0.0

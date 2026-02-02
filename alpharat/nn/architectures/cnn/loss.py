@@ -48,6 +48,12 @@ def compute_cnn_losses(
         batch[BatchKey.P2_VALUE],
     )
 
+    # Full matrix loss (NN vs targets with ground truth at played cell)
+    if config.matrix_loss_weight > 0:
+        loss_matrix = F.mse_loss(pred_payout, batch[BatchKey.PAYOUT_MATRIX])
+    else:
+        loss_matrix = torch.tensor(0.0, device=pred_payout.device)
+
     # Nash consistency loss (optional)
     if config.nash_weight > 0:
         if config.nash_mode == "predicted":
@@ -72,6 +78,7 @@ def compute_cnn_losses(
     loss = (
         config.policy_weight * (loss_p1 + loss_p2)
         + config.value_weight * loss_value
+        + config.matrix_loss_weight * loss_matrix
         + config.nash_weight * loss_nash
         + config.constant_sum_weight * loss_csum
     )
@@ -81,6 +88,7 @@ def compute_cnn_losses(
         LossKey.POLICY_P1: loss_p1,
         LossKey.POLICY_P2: loss_p2,
         LossKey.VALUE: loss_value,
+        LossKey.MATRIX: loss_matrix,
         LossKey.NASH: loss_nash,
         LossKey.NASH_INDIFF: loss_indiff,
         LossKey.NASH_DEV: loss_dev,
