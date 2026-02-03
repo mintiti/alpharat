@@ -129,56 +129,234 @@ The selected outcome pair is `(outcome_p1, outcome_p2)`. This determines which e
 
 ---
 
-## Playout Algorithm
+## Core Algorithm
+
+### Main Search Loop
+
+```python
+def search(root, game, num_simulations):
+    """Run MCGS from root for num_simulations playouts."""
+    for _ in range(num_simulations):
+        playout(root, game.clone())
+
+    # Return visit distribution as policy
+    return get_visit_distribution(root)
+
+
+def get_visit_distribution(node):
+    """Extract marginal visit distributions for both players."""
+    total = sum(e.visits for e in node.edges.values())
+    if total == 0:
+        return node.prior_p1, node.prior_p2
+
+    π_p1 = zeros(node.n1)
+    π_p2 = zeros(node.n2)
+    for (i, j), edge in node.edges.items():
+        π_p1[i] += edge.visits
+        π_p2[j] += edge.visits
+
+    return π_p1 / total, π_p2 / total
+```
+
+### Playout (Selection → Expansion → Evaluation → Backup)
 
 ```python
 def playout(node, game):
-    if game.is_over():
-        return  # Terminal, nothing to update
+    """Single MCGS playout. Returns after updating node's Q values."""
 
-    if node.visits == 0:
-        # First visit: evaluate with NN
-        node.U_p1, node.U_p2 = nn_evaluate_value(game)
-        node.prior_p1, node.prior_p2 = nn_evaluate_policy(game)
-        node.Q_p1, node.Q_p2 = node.U_p1, node.U_p2
+    # ---------- TERMINAL CHECK ----------
+    if game.is_over():
+        # Terminal node: Q = actual game outcome
+        # (Could also set Q = 0 if we only care about future rewards)
         return
 
-    # Select outcome pair via decoupled PUCT
-    o1 = puct_select_p1(node)
-    o2 = puct_select_p2(node)
+    # ---------- EVALUATION (first visit) ----------
+    if not node.is_evaluated:
+        evaluate_node(node, game)
+        return  # Stop here on first visit (leaf evaluation)
 
-    # Expand edge if needed
+    # ---------- SELECTION ----------
+    o1 = select_outcome_p1(node)
+    o2 = select_outcome_p2(node)
+
+    # ---------- EXPANSION ----------
     if (o1, o2) not in node.edges:
-        # Make move, observe reward
-        undo, r_p1, r_p2 = game.make_move(o1, o2)
-
-        # Check transposition table
-        state_key = compute_state_key(game)
-        if state_key in transposition_table:
-            child = transposition_table[state_key]
-        else:
-            child = Node()
-            transposition_table[state_key] = child
-
-        node.edges[(o1, o2)] = Edge(child=child, visits=0, r_p1=r_p1, r_p2=r_p2)
-    else:
-        edge = node.edges[(o1, o2)]
-        undo = game.make_move(o1, o2)  # Just for navigation
+        expand_edge(node, game, o1, o2)
 
     edge = node.edges[(o1, o2)]
 
-    # Optional: short-circuit if child has enough visits
-    # if edge.child.visits <= edge.visits:
+    # ---------- RECURSE ----------
+    undo = game.make_move(o1, o2)
     playout(edge.child, game)
-
-    # Increment edge visits
-    edge.visits += 1
-
-    # Recompute Q (idempotent)
-    recompute_Q(node)
-
-    # Undo move for navigation
     game.unmake_move(undo)
+
+    # ---------- BACKUP ----------
+    edge.visits += 1
+    recompute_Q(node)
+```
+
+### Evaluation
+
+```python
+def evaluate_node(node, game):
+    """First-time evaluation of a node via NN (or uniform prior if no NN)."""
+
+    # Get NN predictions
+    if nn is not None:
+        policy_p1, policy_p2, value_p1, value_p2 = nn.predict(game)
+    else:
+        # Uniform prior, zero value (pessimistic)
+        policy_p1 = uniform(node.n1)
+        policy_p2 = uniform(node.n2)
+        value_p1, value_p2 = 0.0, 0.0
+
+    # Store initial estimates (frozen)
+    node.prior_p1 = policy_p1  # Already reduced to outcome space
+    node.prior_p2 = policy_p2
+    node.U_p1 = value_p1
+    node.U_p2 = value_p2
+
+    # Initialize Q to NN estimate
+    node.Q_p1 = value_p1
+    node.Q_p2 = value_p2
+
+    node.is_evaluated = True
+```
+
+### Selection (Decoupled PUCT)
+
+```python
+def select_outcome_p1(node):
+    """Select player 1's outcome via PUCT."""
+
+    total_visits = sum(e.visits for e in node.edges.values())
+
+    # Compute marginal visits per outcome
+    marginal_visits = zeros(node.n1)
+    for (i, j), edge in node.edges.items():
+        marginal_visits[i] += edge.visits
+
+    # Compute marginal Q for each outcome
+    marginal_Q = compute_marginal_Q_p1(node)
+
+    # PUCT score
+    exploration = node.prior_p1 * sqrt(total_visits) / (1 + marginal_visits)
+    scores = marginal_Q + c_puct * exploration
+
+    return argmax(scores)
+
+
+def select_outcome_p2(node):
+    """Select player 2's outcome via PUCT. Symmetric to p1."""
+    # ... symmetric implementation ...
+
+
+def compute_marginal_Q_p1(node):
+    """Compute Q_p1[i] = E_{j~π_2}[r_p1[i,j] + child[i,j].Q_p1]"""
+
+    # Opponent's policy (using prior for now)
+    π_2 = node.prior_p2
+
+    marginal_Q = zeros(node.n1)
+
+    for i in range(node.n1):
+        q_sum = 0.0
+        for j in range(node.n2):
+            if (i, j) in node.edges:
+                edge = node.edges[(i, j)]
+                child_Q = edge.child.Q_p1 if edge.child.is_evaluated else 0.0
+                q_sum += π_2[j] * (edge.r_p1 + child_Q)
+            else:
+                # Unexpanded edge: pessimistic Q = 0
+                q_sum += π_2[j] * 0.0
+        marginal_Q[i] = q_sum
+
+    return marginal_Q
+
+
+def compute_marginal_Q_p2(node):
+    """Symmetric to p1."""
+    # ... symmetric implementation ...
+```
+
+### Expansion
+
+```python
+def expand_edge(node, game, o1, o2):
+    """Expand edge (o1, o2): make move, observe reward, get/create child."""
+
+    # Make the move and observe intermediate rewards
+    undo = game.make_move(o1, o2)
+    r_p1 = undo.cheese_collected_p1  # Immediate reward
+    r_p2 = undo.cheese_collected_p2
+
+    # Check transposition table
+    state_key = compute_state_key(game)
+
+    if state_key in transposition_table:
+        child = transposition_table[state_key]
+    else:
+        child = Node(
+            n1=len(game.effective_outcomes_p1()),
+            n2=len(game.effective_outcomes_p2()),
+        )
+        transposition_table[state_key] = child
+
+    # Create edge (visits starts at 0, incremented after recursion)
+    node.edges[(o1, o2)] = Edge(
+        child=child,
+        visits=0,
+        r_p1=r_p1,
+        r_p2=r_p2,
+    )
+
+    game.unmake_move(undo)
+
+
+def compute_state_key(game):
+    """Compute transposition table key from game state."""
+    return (
+        game.player1_position,
+        game.player2_position,
+        frozenset(game.cheese_positions()),
+        game.player1_mud_turns,
+        game.player2_mud_turns,
+        game.turn,  # Include turn for same-depth-only transpositions
+    )
+```
+
+### Backup (Idempotent Q Recomputation)
+
+```python
+def recompute_Q(node):
+    """Recompute Q from children. Idempotent — result depends only on current state."""
+
+    if not node.is_evaluated:
+        return  # Nothing to do
+
+    total_visits = sum(e.visits for e in node.edges.values())
+
+    if total_visits == 0:
+        # No children visited yet, Q = U (NN estimate)
+        node.Q_p1 = node.U_p1
+        node.Q_p2 = node.U_p2
+        return
+
+    # Weighted sum over visited edges
+    weighted_sum_p1 = 0.0
+    weighted_sum_p2 = 0.0
+
+    for (i, j), edge in node.edges.items():
+        if edge.visits > 0:
+            child_Q_p1 = edge.child.Q_p1 if edge.child.is_evaluated else 0.0
+            child_Q_p2 = edge.child.Q_p2 if edge.child.is_evaluated else 0.0
+
+            weighted_sum_p1 += edge.visits * (edge.r_p1 + child_Q_p1)
+            weighted_sum_p2 += edge.visits * (edge.r_p2 + child_Q_p2)
+
+    # Q = weighted average of U (weight 1) and children (weight = visits)
+    node.Q_p1 = (node.U_p1 + weighted_sum_p1) / (1 + total_visits)
+    node.Q_p2 = (node.U_p2 + weighted_sum_p2) / (1 + total_visits)
 ```
 
 ---
