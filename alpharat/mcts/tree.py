@@ -157,6 +157,7 @@ class MCTSTree:
                Defaults to (0.0, 0.0) for terminal states.
         """
         child_value = g  # Start with leaf's expected return
+        is_leaf = True  # First child in reversed path is the leaf
 
         # Backup in reverse (from leaf to root)
         for node, action_p1, action_p2 in reversed(path):
@@ -164,13 +165,21 @@ class MCTSTree:
             idx2 = int(node._p2_action_to_idx[action_p2])
             child = node.children[(idx1, idx2)]
 
+            # Only update the leaf's value here; intermediate nodes are
+            # updated via node.backup() to avoid double-counting
+            if is_leaf:
+                child._total_visits += 1
+                child._v1 += (child_value[0] - child._v1) / child._total_visits
+                child._v2 += (child_value[1] - child._v2) / child._total_visits
+                is_leaf = False
+
             # Q = edge_r + gamma * child_value (edge_r is source of truth)
             q_value = (
                 child._edge_r1 + self.gamma * child_value[0],
                 child._edge_r2 + self.gamma * child_value[1],
             )
 
-            node.backup(action_p1, action_p2, child_value, q_value)
+            node.backup(action_p1, action_p2, q_value)
             child_value = q_value
 
     def advance_root(self, action_p1: int, action_p2: int) -> None:

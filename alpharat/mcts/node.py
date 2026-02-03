@@ -324,29 +324,27 @@ class MCTSNode:
         self,
         action_p1: int,
         action_p2: int,
-        child_value: tuple[float, float],
-        self_value: tuple[float, float],
+        q_value: tuple[float, float],
     ) -> None:
         """Update statistics after visiting a child node.
 
-        O(1) operation using incremental averaging.
+        O(1) operation using incremental averaging. Updates this node's value
+        and marginal visit counts. Child node values are updated separately
+        in tree.backup() to avoid double-counting.
 
         Args:
             action_p1: Player 1's action that led to child (0-4)
             action_p2: Player 2's action that led to child (0-4)
-            child_value: Child's expected return (updates child.V)
-            self_value: Discounted return Q = r + gamma * child_value (updates self.V)
+            q_value: Discounted return Q = r + gamma * child_value (updates self.V)
         """
         idx1 = int(self._p1_action_to_idx[action_p1])
         idx2 = int(self._p2_action_to_idx[action_p2])
 
-        # Update child's V with child's expected return
+        # Increment child's edge visit count (for weighting in get_q_values)
         child_key = (idx1, idx2)
         if child_key in self.children:
             child = self.children[child_key]
             child._visits += 1
-            child._v1 += (child_value[0] - child._v1) / child._visits
-            child._v2 += (child_value[1] - child._v2) / child._visits
 
         # Update marginal visit counts (for policy output)
         self._n1_visits[idx1] += 1
@@ -355,8 +353,8 @@ class MCTSNode:
         # Update this node's value with the observed return
         # V = E[Q] = average discounted return from this position
         self._total_visits += 1
-        self._v1 += (self_value[0] - self._v1) / self._total_visits
-        self._v2 += (self_value[1] - self._v2) / self._total_visits
+        self._v1 += (q_value[0] - self._v1) / self._total_visits
+        self._v2 += (q_value[1] - self._v2) / self._total_visits
 
     def get_q_values(self, gamma: float = 1.0) -> tuple[np.ndarray, np.ndarray]:
         """Compute marginal Q-values from children (LC0-style).

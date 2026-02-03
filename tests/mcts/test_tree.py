@@ -477,6 +477,126 @@ class TestBackup:
         n1, n2 = tree.root.get_visit_counts()
         assert n1[idx1] == 2  # Outcome visited twice
 
+    def test_backup_multi_level_correctness(self, tree: MCTSTree) -> None:
+        """Test 2-step path verifies correct value averaging.
+
+        This catches the double-update bug where intermediate nodes
+        would get their values updated twice per simulation.
+        """
+        # Create path: root -> node_a -> node_b (leaf)
+        node_a, _ = tree.make_move_from(tree.root, 0, 0)
+        node_b, _ = tree.make_move_from(node_a, 1, 1)
+
+        # Set edge rewards
+        node_a._edge_r1, node_a._edge_r2 = 1.0, -1.0
+        node_b._edge_r1, node_b._edge_r2 = 0.5, -0.5
+
+        path = [(tree.root, 0, 0), (node_a, 1, 1)]
+
+        # Simulation 1: g = (10, -10)
+        # node_b.V = 10
+        # Q_B = 0.5 + 1.0*10 = 10.5 (used to update node_a.V)
+        # Q_A = 1.0 + 1.0*10.5 = 11.5 (used to update root.V)
+        tree.backup(path, g=(10.0, -10.0))
+
+        assert node_b.v1 == pytest.approx(10.0)
+        assert node_a.v1 == pytest.approx(10.5)
+        assert tree.root.v1 == pytest.approx(11.5)
+
+        # Simulation 2: g = (6, -6)
+        # node_b.V = mean(10, 6) = 8
+        # Q_B = 0.5 + 1.0*6 = 6.5
+        # node_a.V = mean(10.5, 6.5) = 8.5  <-- Would be 8.75 with bug
+        # Q_A = 1.0 + 1.0*6.5 = 7.5
+        # root.V = mean(11.5, 7.5) = 9.5
+        tree.backup(path, g=(6.0, -6.0))
+
+        assert node_b.v1 == pytest.approx(8.0)
+        assert node_a.v1 == pytest.approx(8.5)  # Key assertion - fails with bug
+        assert tree.root.v1 == pytest.approx(9.5)
+
+        # Verify visit counts
+        assert node_b._visits == 2
+        assert node_a._visits == 2
+        assert tree.root._total_visits == 2
+
+    def test_get_q_values_matches_average_returns(self, tree: MCTSTree) -> None:
+        """Verify get_q_values returns average of backed-up returns.
+
+        After backup, Q from get_q_values should equal the average of the
+        actual q_values that were computed during backup.
+        """
+        # Create child
+        child, _ = tree.make_move_from(tree.root, 0, 0)
+        child._edge_r1, child._edge_r2 = 2.0, -2.0
+
+        # Track what we back up
+        backed_up_q1 = []
+
+        # Simulation 1: g = (10, -10) → Q = 2 + 1*10 = 12
+        path = [(tree.root, 0, 0)]
+        tree.backup(path, g=(10.0, -10.0))
+        backed_up_q1.append(2.0 + 1.0 * 10.0)  # edge_r + gamma * g
+
+        # Simulation 2: g = (4, -4) → Q = 2 + 1*4 = 6
+        tree.backup(path, g=(4.0, -4.0))
+        backed_up_q1.append(2.0 + 1.0 * 4.0)
+
+        # Simulation 3: g = (7, -7) → Q = 2 + 1*7 = 9
+        tree.backup(path, g=(7.0, -7.0))
+        backed_up_q1.append(2.0 + 1.0 * 7.0)
+
+        # get_q_values should return average: (12 + 6 + 9) / 3 = 9
+        q1, q2 = tree.root.get_q_values(gamma=tree.gamma)
+
+        idx = tree.root.action_to_outcome(1, 0)
+        expected_q1 = sum(backed_up_q1) / len(backed_up_q1)
+        assert q1[idx] == pytest.approx(expected_q1)
+
+    def test_marginal_q_via_tree_backup(self, tree: MCTSTree) -> None:
+        """Verify marginal Q works correctly through tree.backup.
+
+        Create two children sharing the same P1 outcome, back up through
+        both, and verify Q1 is the weighted average.
+        """
+        # Find two P2 actions that map to DIFFERENT outcomes
+        # We need distinct children to test marginalization
+        p2_outcomes = tree.root.p2_outcomes
+        if len(p2_outcomes) < 2:
+            pytest.skip("Need at least 2 unique P2 outcomes for marginalization test")
+
+        # Find P2 actions that map to different outcomes
+        p2_action_a = tree.root.p2_outcomes[0]  # Canonical action for first outcome
+        p2_action_b = tree.root.p2_outcomes[1]  # Canonical action for second outcome
+
+        # Use P1 action 0 for both (same P1 outcome)
+        p1_action = 0
+
+        # Create two distinct children: (p1, p2_a) and (p1, p2_b)
+        child_a, _ = tree.make_move_from(tree.root, p1_action, p2_action_a)
+        child_b, _ = tree.make_move_from(tree.root, p1_action, p2_action_b)
+
+        # Verify they're different children
+        assert child_a is not child_b, "Test requires distinct children"
+
+        # Set edge rewards
+        child_a._edge_r1 = 1.0
+        child_b._edge_r1 = 3.0
+
+        # Back up 2x through child_a with g = (10, ...) → Q = 1 + 10 = 11
+        tree.backup([(tree.root, p1_action, p2_action_a)], g=(10.0, 0.0))
+        tree.backup([(tree.root, p1_action, p2_action_a)], g=(10.0, 0.0))
+
+        # Back up 1x through child_b with g = (20, ...) → Q = 3 + 20 = 23
+        tree.backup([(tree.root, p1_action, p2_action_b)], g=(20.0, 0.0))
+
+        # Q1(p1_outcome) = (2*11 + 1*23) / 3 = 45/3 = 15
+        q1, _ = tree.root.get_q_values(gamma=tree.gamma)
+        idx = tree.root.action_to_outcome(1, p1_action)
+
+        expected = (2 * 11.0 + 1 * 23.0) / 3
+        assert q1[idx] == pytest.approx(expected)
+
 
 class TestMultipleExpansions:
     """Tests for expanding multiple children."""
