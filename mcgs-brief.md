@@ -92,18 +92,46 @@ Two effects worth investigating:
 
 Both are "the search understands the problem space better" rather than "the search runs faster." This matters for playing strength: at equal sim counts, MCGS should produce better policies, not just the same policies cheaper. Worth measuring in Phase 4 tournaments — compare not just sims/s but also win rates at equal sim budgets.
 
+### Insight: scalar value heads may suffice (2026-01-28)
+
+While analyzing how MCGS backup differs from our incremental backup, we realized the NN payout matrix `[2, 5, 5]` may not be game-theoretically necessary — for MCGS or for the current tree MCTS.
+
+**The reframe:** PyRat is approximately constant-sum. Constant-sum games have the **interchangeability property**: all Nash equilibria yield the same value, and players can independently select any Nash strategy. This means V(s) is well-defined as a unique scalar per player — no need for a full action-pair matrix to determine it.
+
+**What the payout matrix actually is:** Not a game-theoretic requirement, but a design choice to learn Q(s, a1, a2) — joint action-values — instead of V(s). This gives MCTS richer initial estimates per outcome pair before search has explored them. It's a warm-start, not a structural necessity.
+
+**What MCGS changes:** In MCGS, each node stores Q_p1, Q_p2 (two scalars). The per-outcome-pair "payout matrix" is derived on demand from children's Q values:
+```
+payout_p1[i, j] = r_p1(i,j) + γ * Q_p1(child(i,j))
+```
+No stored matrix needed. PUCT computes marginal Q from children. Nash at root reconstructs the matrix from children.
+
+**Implication for NN architecture:** The NN could output `(policy_p1[5], policy_p2[5], value_p1, value_p2)` instead of `(policy_p1[5], policy_p2[5], payout[2,5,5])`. Simpler output, fewer parameters, cleaner target construction. The per-cell action-value structure emerges from search rather than being predicted by the NN.
+
+**Open question:** Does the payout matrix warm-start matter for convergence speed? At nodes with few visits, the matrix gives per-action Q estimates from the NN. Without it, PUCT relies solely on priors until children exist. Needs empirical testing. Tracked as GitHub issue (#54).
+
 ## Phase 2: Formalize the Algorithm
 
-Before writing any code, work out the full algorithm on paper. The goal is a complete description of how every component works — selection, expansion, backup, transposition handling — adapted to our simultaneous-move, bimatrix setting.
+Before writing any code, work out the full algorithm on paper. The goal is a complete description of how every component works — selection, expansion, backup, transposition handling — adapted to our simultaneous-move setting.
+
+**Status (2026-02-03):** Draft formalization complete. See `mcgs-formalization.md`.
+
+Key design decisions made:
+- **Value-only approach** — no payout matrices, no Nash equilibrium. Visit distribution is the policy.
+- **Pessimistic Q for unexpanded edges** — `child.Q = 0` if not yet visited. Encourages exploration.
+- **Intermediate rewards stored per-edge** — same child reachable from different parents with different rewards.
+- **Prior-based opponent policy** for marginal Q computation (tentative, may experiment with visit-based).
+
+Still needs: walk through a concrete example to sanity-check.
 
 This means:
-- **Define the node state.** What does each node store? How do edge visits, payout matrices, and the NN utility estimate relate? Write the formulas.
-- **Define the backup rule.** Extend the KataGo idempotent Q formula to bimatrix payouts with two independent policies. Prove (or at least convince ourselves) that it's sound for decoupled PUCT.
+- **Define the node state.** Each node stores: Q_p1, Q_p2 (scalars, recomputed idempotently), U_p1, U_p2 (NN initial estimate), edge visits matrix `[n1, n2]`, child pointers per outcome pair, prior policies.
+- **Define the backup rule.** Idempotent Q recomputation from children. On the playout path, bottom-up: each node recomputes Q as weighted average of its NN estimate (1 virtual visit) and children's Q values (weighted by edge visits). Per-player, summing over outcome pairs.
 - **Define transposition handling.** When a node is reached via a new parent: what gets shared, what stays per-edge? How does outcome indexing interact with shared nodes?
 - **Define navigation.** How does the simulator reach a shared node? Canonical parent? Stored state? Spell out the trade-offs and pick one.
 - **Walk through examples.** Take a concrete 3x3 or 4x4 scenario, trace the algorithm by hand through a few playouts including a transposition. Make sure the formulas produce sensible values.
 
-The output of this phase is a self-contained algorithm description that we're confident in. No code yet — just the math and the logic. If something doesn't work out during formalization (e.g. the bimatrix extension is unsound), we find out here rather than after writing 500 lines.
+The output of this phase is a self-contained algorithm description that we're confident in. No code yet — just the math and the logic. If something doesn't work out during formalization, we find out here rather than after writing 500 lines.
 
 ## Phase 3: Implement
 
@@ -147,20 +175,17 @@ Q(n) = (1/N(n)) * (U(n) + sum over actions a: edge_visits(n,a) * Q(child(n,a)))
 
 This is the **idempotent formulation** from KataGo. It's simpler, easier to reason about, and avoids the staleness correction hacks in Czech et al.
 
-### Adaptation Challenges for Simultaneous Moves
+### Adaptation for Simultaneous Moves
 
-Standard MCGS assumes alternating moves with a single PUCT selection. We have:
-- Two players selecting independently via decoupled PUCT
-- Outcome-indexed storage (reduced matrices)
-- Bimatrix payouts (separate P1/P2 values, not a single Q)
+Standard MCGS assumes alternating moves with a single PUCT selection. We have two players selecting independently via decoupled PUCT with outcome-indexed storage.
 
-**What stays the same:** Decoupled PUCT selection, Nash at root, action equivalence / outcome indexing.
+**What stays the same:** Decoupled PUCT selection, Nash at root, action equivalence / outcome indexing. The idempotent Q formula extends directly — apply per-player, sum over outcome pairs instead of actions. Convergence holds because independent PUCT selection guarantees every outcome pair is tried infinitely often.
 
 **What needs work:**
-- Extending the idempotent Q formula to bimatrix payouts with two independent policies
-- Edge visits become per-outcome-pair, not per-action
+- Edge visits are per-outcome-pair `[n1, n2]`, not per-action
 - Navigation with multiple parents (canonical parent pointer is the likely approach)
-- Turn number in state hash (include or not — measure both)
+- Outcome indexing across parents with different wall configurations
+- Turn number in state hash (include or not — measured both, see Phase 1)
 
 ### Architecture
 
@@ -200,10 +225,12 @@ alpharat/mcgs/           # New graph-based MCGS
 
 ## Open Questions
 
-1. **Is the KataGo derivation sound for two independent policies?** The MCTS-as-policy-optimization framework assumes one agent optimizing one policy. We have two agents each optimizing independently. Need to verify the idempotent Q formula extends correctly to bimatrix payouts with decoupled selection.
+1. ~~**Is the KataGo derivation sound for two independent policies?**~~ **Resolved.** Yes. The idempotent Q formula applies per-player, summing over outcome pairs. Constant-sum + interchangeability means V(s) is well-defined as a scalar. Decoupled PUCT guarantees every pair is explored. No theoretical issue.
 
-2. **Payout matrix backup in shared nodes.** Each parent tracks its own edge visits and sees the same child payout matrix. The value propagated upward depends on which outcome pair the parent selected. This should work naturally, but needs formalization.
+2. ~~**Payout matrix backup in shared nodes.**~~ **Resolved.** MCGS nodes don't store payout matrices. Each node has scalar Q per player, recomputed idempotently from children. The "payout matrix" is derived on demand: `payout_p1[i,j] = r_p1(i,j) + γ * Q_p1(child(i,j))`. Each parent has its own edge visits; child Q is shared. Works naturally.
 
 3. **Outcome indexing across parents.** Different parents might have different effective action mappings. But the shared child node has one set of effective actions determined by its own position. The mapping from parent outcome pair to child state is well-defined — just need to make sure the implementation handles this correctly.
 
 4. **Zobrist hashing.** For performance, we'd want incremental XOR-based hashing rather than recomputing the full state hash at each expansion. Design needed for position/cheese/mud hash components.
+
+5. **Scalar vs matrix NN value heads.** Does the payout matrix warm-start matter for search quality? Tracked as GitHub issue (#54).
