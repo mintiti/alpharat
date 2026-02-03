@@ -9,9 +9,18 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
+from pydantic import Field
+
 from alpharat.config.base import StrictBaseModel
-from alpharat.mcts.nash import compute_nash_equilibrium
 from alpharat.mcts.numba_ops import compute_puct_scores, select_max_with_tiebreak
+from alpharat.mcts.payout_filter import filter_low_visit_payout
+from alpharat.mcts.policy_strategy import (
+    NashPolicyConfig,
+    PolicyConfig,
+    PolicyStrategy,
+    get_effective_visits,
+)
+from alpharat.mcts.reduction import expand_payout, expand_prior, expand_visits
 
 if TYPE_CHECKING:
     import numpy as np
@@ -22,11 +31,23 @@ if TYPE_CHECKING:
 
 @dataclass
 class SearchResult:
-    """Result of MCTS search containing policy and value information."""
+    """Result of MCTS search containing policy and value information.
 
+    Attributes:
+        payout_matrix: Root's payout matrix after search (filtered for low visits).
+        policy_p1: Acting policy for player 1 (agent samples from this).
+        policy_p2: Acting policy for player 2 (agent samples from this).
+        learning_policy_p1: Learning target for player 1 (NN trained on this).
+        learning_policy_p2: Learning target for player 2 (NN trained on this).
+        action_visits: Visit counts per action pair [5, 5].
+    """
+
+    payout_matrix: np.ndarray
     policy_p1: np.ndarray
     policy_p2: np.ndarray
-    payout_matrix: np.ndarray
+    learning_policy_p1: np.ndarray
+    learning_policy_p2: np.ndarray
+    action_visits: np.ndarray
 
 
 class DecoupledPUCTConfig(StrictBaseModel):
@@ -36,6 +57,15 @@ class DecoupledPUCTConfig(StrictBaseModel):
     gamma: float = 1.0
     c_puct: float = 1.5
     force_k: float = 2.0
+    policy: PolicyConfig = Field(
+        default_factory=NashPolicyConfig,
+        description=(
+            "Strategy for deriving policies from search results. "
+            "Configures BOTH acting and learning policies (coupled for simplicity). "
+            "'nash' = Nash equilibrium (default). "
+            "'visits' = marginal visit counts with temperature."
+        ),
+    )
 
     def build(self, tree: MCTSTree) -> DecoupledPUCTSearch:
         """Construct a search instance with these settings."""
@@ -53,17 +83,24 @@ class DecoupledPUCTSearch:
         config: Search configuration
     """
 
-    def __init__(self, tree: MCTSTree, config: DecoupledPUCTConfig):
+    def __init__(self, tree: MCTSTree, config: DecoupledPUCTConfig) -> None:
         self.tree = tree
         self._n_sims = config.simulations
         self._c_puct = config.c_puct
         self._force_k = config.force_k
 
+        # Build strategy with search params (force_k, c_puct)
+        # Agent samples from acting, recorder saves learning targets.
+        # Two slots so they can diverge later without changing the data flow.
+        strategy: PolicyStrategy = config.policy.build(force_k=config.force_k, c_puct=config.c_puct)
+        self._acting_strategy = strategy
+        self._learning_strategy = strategy
+
     def search(self) -> SearchResult:
         """Run MCTS search and return the result.
 
         Returns:
-            SearchResult with Nash policies and payout matrix.
+            SearchResult with policies and payout matrix.
         """
         if self._n_sims == 0:
             return self._pure_nn_result()
@@ -77,26 +114,45 @@ class DecoupledPUCTSearch:
         """Return NN priors directly without tree search."""
         root = self.tree.root
         return SearchResult(
+            payout_matrix=root.payout_matrix.copy(),
             policy_p1=root.prior_policy_p1.copy(),
             policy_p2=root.prior_policy_p2.copy(),
-            payout_matrix=root.payout_matrix.copy(),
+            learning_policy_p1=root.prior_policy_p1.copy(),
+            learning_policy_p2=root.prior_policy_p2.copy(),
+            action_visits=root.action_visits.copy(),
         )
 
     def _make_result(self) -> SearchResult:
-        """Compute Nash equilibrium from root statistics."""
-        root = self.tree.root
-        payout_matrix = root.payout_matrix
+        """Compute policies from root statistics.
 
-        policy_p1, policy_p2 = compute_nash_equilibrium(
-            payout_matrix,
-            root.p1_effective,
-            root.p2_effective,
+        All decision computation (pruning, filtering, Nash, policy derivation)
+        is delegated to the policy strategy. Expansion to 5-action space only
+        at the SearchResult boundary for consumers (recorder, agent, NN).
+        """
+        root = self.tree.root
+
+        # --- Delegate policy computation to strategies ---
+        acting_p1, acting_p2 = self._acting_strategy.derive_policies(root)
+        learning_p1, learning_p2 = self._learning_strategy.derive_policies(root)
+
+        # --- Compute filtered payout for recording (NN training) ---
+        # Use pruned visits (same as policy strategies) for consistency.
+        visits_reduced = get_effective_visits(root, self._force_k, self._c_puct)
+        payout_reduced = root.get_reduced_payout()  # [2, n1, n2]
+        filtered_payout_reduced = filter_low_visit_payout(
+            payout_reduced, visits_reduced, min_visits=2
         )
 
+        # --- Boundary: expand to 5-action space for consumers ---
         return SearchResult(
-            policy_p1=policy_p1,
-            policy_p2=policy_p2,
-            payout_matrix=payout_matrix.copy(),
+            payout_matrix=expand_payout(
+                filtered_payout_reduced, root.p1_effective, root.p2_effective
+            ),
+            policy_p1=expand_prior(acting_p1, root.p1_effective),
+            policy_p2=expand_prior(acting_p2, root.p2_effective),
+            learning_policy_p1=expand_prior(learning_p1, root.p1_effective),
+            learning_policy_p2=expand_prior(learning_p2, root.p2_effective),
+            action_visits=expand_visits(visits_reduced, root.p1_effective, root.p2_effective),
         )
 
     def _simulate(self) -> None:

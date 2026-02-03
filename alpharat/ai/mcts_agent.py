@@ -158,7 +158,7 @@ class MCTSAgent(Agent):
 
         policy = result.policy_p1 if player == 1 else result.policy_p2
 
-        # Use temperature=1.0 for MCTS Nash (proportional), custom temp for pure NN
+        # Use temperature=1.0 for MCTS (proportional), custom temp for pure NN
         if self.mcts_config.simulations > 0:
             return select_action_from_strategy(policy, temperature=1.0)
         else:

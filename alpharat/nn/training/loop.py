@@ -133,6 +133,7 @@ def run_training(
     model_config = config.model
     optim_config = config.optim
     data_config = config.data
+    game_config = config.game
     seed = config.seed
     resume_from = config.resume_from
 
@@ -383,6 +384,7 @@ def run_training(
             "model": model_config.model_dump(),
             "optim": optim_config.model_dump(),
             "data": data_config.model_dump(),
+            "game": game_config.model_dump() if game_config else None,
         }
 
         # Save best model
