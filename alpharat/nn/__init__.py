@@ -7,10 +7,10 @@ from alpharat.nn.metrics import (
     compute_policy_metrics,
     compute_value_metrics,
     explained_variance,
-    payout_correlation,
     policy_entropy,
     target_entropy,
     top_k_accuracy,
+    value_correlation,
 )
 from alpharat.nn.streaming import StreamingDataset
 from alpharat.nn.targets import build_targets
@@ -28,7 +28,7 @@ __all__ = [
     "explained_variance",
     "from_game_arrays",
     "from_pyrat_game",
-    "payout_correlation",
+    "value_correlation",
     "policy_entropy",
     "target_entropy",
     "top_k_accuracy",

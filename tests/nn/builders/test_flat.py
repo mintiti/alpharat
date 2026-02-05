@@ -391,8 +391,8 @@ class TestFlatDataset:
             assert "observation" in item
             assert "policy_p1" in item
             assert "policy_p2" in item
-            assert "p1_value" in item
-            assert "p2_value" in item
+            assert "value_p1" in item
+            assert "value_p2" in item
 
     def test_getitem_observation_shape(self) -> None:
         """Observation should have correct shape."""
@@ -423,8 +423,8 @@ class TestFlatDataset:
 
             item = dataset[0]
 
-            assert item["p1_value"].shape == (1,)
-            assert item["p2_value"].shape == (1,)
+            assert item["value_p1"].shape == (1,)
+            assert item["value_p2"].shape == (1,)
 
     def test_getitem_dtypes(self) -> None:
         """All arrays should be float32."""
@@ -437,8 +437,8 @@ class TestFlatDataset:
             assert item["observation"].dtype == np.float32
             assert item["policy_p1"].dtype == np.float32
             assert item["policy_p2"].dtype == np.float32
-            assert item["p1_value"].dtype == np.float32
-            assert item["p2_value"].dtype == np.float32
+            assert item["value_p1"].dtype == np.float32
+            assert item["value_p2"].dtype == np.float32
 
     def test_obs_shape_property(self) -> None:
         """obs_shape should match builder."""

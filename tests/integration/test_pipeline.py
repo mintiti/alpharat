@@ -182,8 +182,8 @@ def _verify_training_shards(
         with np.load(training_dir / f"shard_{i:04d}.npz") as data:
             all_policies_p1.append(data["policy_p1"])
             all_policies_p2.append(data["policy_p2"])
-            all_p1_values.append(data["p1_value"])
-            all_p2_values.append(data["p2_value"])
+            all_p1_values.append(data["value_p1"])
+            all_p2_values.append(data["value_p2"])
 
     all_policies_p1 = np.concatenate(all_policies_p1)
     all_policies_p2 = np.concatenate(all_policies_p2)

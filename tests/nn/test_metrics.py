@@ -10,10 +10,10 @@ from alpharat.nn.metrics import (
     MetricsAccumulator,
     compute_policy_metrics,
     explained_variance,
-    payout_correlation,
     policy_entropy,
     target_entropy,
     top_k_accuracy,
+    value_correlation,
 )
 
 
@@ -194,14 +194,14 @@ class TestExplainedVariance:
 
 
 class TestPayoutCorrelation:
-    """Tests for payout_correlation()."""
+    """Tests for value_correlation()."""
 
     def test_perfect_correlation(self) -> None:
         """Correlation = 1.0 for identical matrices."""
         pred = torch.tensor([[[1.0, 2.0], [3.0, 4.0]]])
         target = torch.tensor([[[1.0, 2.0], [3.0, 4.0]]])
 
-        result = payout_correlation(pred, target)
+        result = value_correlation(pred, target)
 
         assert result.item() == pytest.approx(1.0)
 
@@ -210,7 +210,7 @@ class TestPayoutCorrelation:
         pred = torch.tensor([[[1.0, 2.0], [3.0, 4.0]]])
         target = torch.tensor([[[-1.0, -2.0], [-3.0, -4.0]]])
 
-        result = payout_correlation(pred, target)
+        result = value_correlation(pred, target)
 
         assert result.item() == pytest.approx(-1.0)
 
@@ -220,7 +220,7 @@ class TestPayoutCorrelation:
         pred = torch.tensor([[[1.0, -1.0], [-1.0, 1.0]]])
         target = torch.tensor([[[1.0, 1.0], [-1.0, -1.0]]])
 
-        result = payout_correlation(pred, target)
+        result = value_correlation(pred, target)
 
         assert result.item() == pytest.approx(0.0, abs=0.1)
 
@@ -229,7 +229,7 @@ class TestPayoutCorrelation:
         pred = torch.tensor([[[1.0, 1.0], [1.0, 1.0]]])
         target = torch.tensor([[[1.0, 2.0], [3.0, 4.0]]])
 
-        result = payout_correlation(pred, target)
+        result = value_correlation(pred, target)
 
         assert result.item() == pytest.approx(0.0)
 

@@ -197,8 +197,8 @@ class FlatDataset:
         observations_list: list[np.ndarray] = []
         policy_p1_list: list[np.ndarray] = []
         policy_p2_list: list[np.ndarray] = []
-        p1_value_list: list[np.ndarray] = []
-        p2_value_list: list[np.ndarray] = []
+        value_p1_list: list[np.ndarray] = []
+        value_p2_list: list[np.ndarray] = []
         action_p1_list: list[np.ndarray] = []
         action_p2_list: list[np.ndarray] = []
 
@@ -208,16 +208,16 @@ class FlatDataset:
                 observations_list.append(data["observations"])
                 policy_p1_list.append(data["policy_p1"])
                 policy_p2_list.append(data["policy_p2"])
-                p1_value_list.append(data["p1_value"])
-                p2_value_list.append(data["p2_value"])
+                value_p1_list.append(data["value_p1"])
+                value_p2_list.append(data["value_p2"])
                 action_p1_list.append(data["action_p1"])
                 action_p2_list.append(data["action_p2"])
 
         self._observations = np.concatenate(observations_list)
         self._policy_p1 = np.concatenate(policy_p1_list)
         self._policy_p2 = np.concatenate(policy_p2_list)
-        self._p1_value = np.concatenate(p1_value_list)
-        self._p2_value = np.concatenate(p2_value_list)
+        self._value_p1 = np.concatenate(value_p1_list)
+        self._value_p2 = np.concatenate(value_p2_list)
         self._action_p1 = np.concatenate(action_p1_list)
         self._action_p2 = np.concatenate(action_p2_list)
 
@@ -228,7 +228,7 @@ class FlatDataset:
 
     def __len__(self) -> int:
         """Return total number of positions."""
-        return len(self._p1_value)
+        return len(self._value_p1)
 
     def __getitem__(self, idx: int) -> dict[str, np.ndarray]:
         """Get single training example.
@@ -241,8 +241,8 @@ class FlatDataset:
                 - "observation": float32 (obs_dim,)
                 - "policy_p1": float32 (5,)
                 - "policy_p2": float32 (5,)
-                - "p1_value": float32 (1,) — P1's actual remaining score
-                - "p2_value": float32 (1,) — P2's actual remaining score
+                - "value_p1": float32 (1,) — P1's actual remaining score
+                - "value_p2": float32 (1,) — P2's actual remaining score
                 - "action_p1": int8 (1,)
                 - "action_p2": int8 (1,)
         """
@@ -250,8 +250,8 @@ class FlatDataset:
             "observation": self._observations[idx],
             "policy_p1": self._policy_p1[idx],
             "policy_p2": self._policy_p2[idx],
-            "p1_value": self._p1_value[idx : idx + 1],  # Keep as 1D for consistency
-            "p2_value": self._p2_value[idx : idx + 1],
+            "value_p1": self._value_p1[idx : idx + 1],  # Keep as 1D for consistency
+            "value_p2": self._value_p2[idx : idx + 1],
             "action_p1": self._action_p1[idx : idx + 1],
             "action_p2": self._action_p2[idx : idx + 1],
         }

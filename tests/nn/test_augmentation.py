@@ -75,8 +75,8 @@ def _make_sample(
     policy_p2 = np.array([0.1, 0.1, 0.2, 0.3, 0.3], dtype=np.float32)
 
     # Non-zero asymmetric values (remaining scores)
-    p1_value = np.array([2.5], dtype=np.float32)
-    p2_value = np.array([1.5], dtype=np.float32)
+    value_p1 = np.array([2.5], dtype=np.float32)
+    value_p2 = np.array([1.5], dtype=np.float32)
 
     # Asymmetric actions
     action_p1 = np.array([0], dtype=np.int8)
@@ -86,8 +86,8 @@ def _make_sample(
         observation,
         policy_p1,
         policy_p2,
-        p1_value,
-        p2_value,
+        value_p1,
+        value_p2,
         action_p1,
         action_p2,
     )
@@ -321,8 +321,8 @@ def _make_batch(batch_size: int = 4, width: int = 5, height: int = 5) -> dict[st
         "observation": torch.from_numpy(np.stack([s[0] for s in samples])),
         "policy_p1": torch.from_numpy(np.stack([s[1] for s in samples])),
         "policy_p2": torch.from_numpy(np.stack([s[2] for s in samples])),
-        "p1_value": torch.from_numpy(np.stack([s[3] for s in samples])),
-        "p2_value": torch.from_numpy(np.stack([s[4] for s in samples])),
+        "value_p1": torch.from_numpy(np.stack([s[3] for s in samples])),
+        "value_p2": torch.from_numpy(np.stack([s[4] for s in samples])),
         "action_p1": torch.from_numpy(np.stack([s[5] for s in samples])),
         "action_p2": torch.from_numpy(np.stack([s[6] for s in samples])),
     }
@@ -346,8 +346,8 @@ class TestSwapPlayerPerspectiveBatch:
             "observation": torch.from_numpy(obs[np.newaxis, :].copy()),
             "policy_p1": torch.from_numpy(p1[np.newaxis, :].copy()),
             "policy_p2": torch.from_numpy(p2[np.newaxis, :].copy()),
-            "p1_value": torch.from_numpy(p1_val[np.newaxis, :].copy()),
-            "p2_value": torch.from_numpy(p2_val[np.newaxis, :].copy()),
+            "value_p1": torch.from_numpy(p1_val[np.newaxis, :].copy()),
+            "value_p2": torch.from_numpy(p2_val[np.newaxis, :].copy()),
             "action_p1": torch.from_numpy(a1[np.newaxis, :].copy()),
             "action_p2": torch.from_numpy(a2[np.newaxis, :].copy()),
         }
@@ -359,8 +359,8 @@ class TestSwapPlayerPerspectiveBatch:
         np.testing.assert_array_almost_equal(result["observation"][0].numpy(), s_obs)
         np.testing.assert_array_almost_equal(result["policy_p1"][0].numpy(), s_p1)
         np.testing.assert_array_almost_equal(result["policy_p2"][0].numpy(), s_p2)
-        np.testing.assert_array_almost_equal(result["p1_value"][0].numpy(), s_p1_val)
-        np.testing.assert_array_almost_equal(result["p2_value"][0].numpy(), s_p2_val)
+        np.testing.assert_array_almost_equal(result["value_p1"][0].numpy(), s_p1_val)
+        np.testing.assert_array_almost_equal(result["value_p2"][0].numpy(), s_p2_val)
         np.testing.assert_array_equal(result["action_p1"][0].numpy(), s_a1)
         np.testing.assert_array_equal(result["action_p2"][0].numpy(), s_a2)
 
@@ -405,8 +405,8 @@ class TestSwapPlayerPerspectiveBatch:
 
         # Samples 1 and 3 should be changed
         # Check value swap as a simple indicator
-        assert batch["p1_value"][1, 0] == pytest.approx(original["p2_value"][1, 0].item())
-        assert batch["p1_value"][3, 0] == pytest.approx(original["p2_value"][3, 0].item())
+        assert batch["value_p1"][1, 0] == pytest.approx(original["value_p2"][1, 0].item())
+        assert batch["value_p1"][3, 0] == pytest.approx(original["value_p2"][3, 0].item())
 
     def test_batch_empty_mask(self) -> None:
         """All-False mask leaves batch unchanged."""
@@ -457,15 +457,15 @@ class TestBatchAugmentation:
         """p_swap=1 transforms all samples."""
         width, height = 5, 5
         batch = _make_batch(batch_size=4, width=width, height=height)
-        original_p1_values = batch["p1_value"].clone()
-        original_p2_values = batch["p2_value"].clone()
+        original_value_p1s = batch["value_p1"].clone()
+        original_value_p2s = batch["value_p2"].clone()
 
         augment = BatchAugmentation(width, height, p_swap=1.0)
         augment(batch)
 
         # All values should be swapped
-        torch.testing.assert_close(batch["p1_value"], original_p2_values)
-        torch.testing.assert_close(batch["p2_value"], original_p1_values)
+        torch.testing.assert_close(batch["value_p1"], original_value_p2s)
+        torch.testing.assert_close(batch["value_p2"], original_value_p1s)
 
     def test_call_preserves_device(self) -> None:
         """BatchAugmentation preserves tensor device."""
@@ -490,13 +490,13 @@ class TestBatchAugmentation:
 
         for _ in range(n_trials):
             batch = _make_batch(batch_size=batch_size, width=width, height=height)
-            original_p1_values = batch["p1_value"].clone()
+            original_value_p1s = batch["value_p1"].clone()
 
             augment(batch)
 
             # Count how many were swapped (augmented)
-            # Since p1_value != p2_value, a swap changes p1_value
-            augmented = int((batch["p1_value"] != original_p1_values).any(dim=-1).sum().item())
+            # Since value_p1 != value_p2, a swap changes value_p1
+            augmented = int((batch["value_p1"] != original_value_p1s).any(dim=-1).sum().item())
             total_augmented += augmented
             total_samples += batch_size
 

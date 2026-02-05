@@ -194,8 +194,8 @@ class TestGPUDataset:
             assert "observation" in batch
             assert "policy_p1" in batch
             assert "policy_p2" in batch
-            assert "p1_value" in batch
-            assert "p2_value" in batch
+            assert "value_p1" in batch
+            assert "value_p2" in batch
             assert "action_p1" in batch
             assert "action_p2" in batch
 
@@ -210,8 +210,8 @@ class TestGPUDataset:
             assert batch["observation"].shape == (2, 181)
             assert batch["policy_p1"].shape == (2, 5)
             assert batch["policy_p2"].shape == (2, 5)
-            assert batch["p1_value"].shape == (2, 1)
-            assert batch["p2_value"].shape == (2, 1)
+            assert batch["value_p1"].shape == (2, 1)
+            assert batch["value_p2"].shape == (2, 1)
             assert batch["action_p1"].shape == (2, 1)
             assert batch["action_p2"].shape == (2, 1)
 
@@ -264,8 +264,8 @@ class TestGPUDatasetAugmentation:
             # Values should be swapped when swapped
             for b_no, b_aug in zip(batches_no_aug, batches_aug, strict=True):
                 # All values should be swapped (p_swap=1.0)
-                torch.testing.assert_close(b_no["p1_value"], b_aug["p2_value"])
-                torch.testing.assert_close(b_no["p2_value"], b_aug["p1_value"])
+                torch.testing.assert_close(b_no["value_p1"], b_aug["value_p2"])
+                torch.testing.assert_close(b_no["value_p2"], b_aug["value_p1"])
 
     def test_augment_swaps_policies(self) -> None:
         """Augmentation should swap p1/p2 policies."""
@@ -293,8 +293,8 @@ class TestGPUDatasetAugmentation:
             batches2 = list(dataset.epoch_iter(2, augment=False, shuffle=False))
 
             for b1, b2 in zip(batches1, batches2, strict=True):
-                torch.testing.assert_close(b1["p1_value"], b2["p1_value"])
-                torch.testing.assert_close(b1["p2_value"], b2["p2_value"])
+                torch.testing.assert_close(b1["value_p1"], b2["value_p1"])
+                torch.testing.assert_close(b1["value_p2"], b2["value_p2"])
                 torch.testing.assert_close(b1["policy_p1"], b2["policy_p1"])
 
 

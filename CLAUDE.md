@@ -14,7 +14,7 @@ Reproducibility falls out naturally: when artifacts are saved and stages are dec
 
 ## Project Overview
 
-**alpharat** is a game-theoretic MCTS implementation for simultaneous two-player games, targeting PyRat (a maze game where both players move at the same time). Standard MCTS doesn't work for simultaneous moves — this project uses payout matrices and Nash equilibrium computation instead of single Q-values.
+**alpharat** is an MCTS implementation for simultaneous two-player games, targeting PyRat (a maze game where both players move at the same time). Uses scalar value heads (like LC0/KataGo) for value estimation and visit-proportional policies for action selection.
 
 Python 3.11+, strict mypy, `uv` for package management.
 
@@ -43,7 +43,7 @@ uv run pre-commit run --all-files    # All hooks
 
 ```
 alpharat/
-├── mcts/           # Core MCTS: nodes, tree, search, Nash equilibrium
+├── mcts/           # Core MCTS: nodes, tree, search, value backup
 ├── data/           # Data pipeline: sampling, recording, sharding
 ├── nn/             # Neural network: observation builders, targets, models
 ├── ai/             # Agents: MCTS, random, greedy
@@ -62,10 +62,9 @@ experiments/        # Data folder (NOT in git): batches, shards, runs, benchmark
 |------|---------|
 | `node.py` | `MCTSNode` — outcome-indexed storage for O(1) backup |
 | `tree.py` | `MCTSTree` — efficient navigation via `make_move/unmake_move` |
-| `decoupled_puct.py` | `DecoupledPUCTSearch` — each player picks via PUCT formula, returns Nash at root |
+| `decoupled_puct.py` | `DecoupledPUCTSearch` — each player picks via PUCT formula, returns visit-proportional policy |
 | `reduction.py` | Boundary translation between 5-action and outcome-indexed space |
 | `numba_ops.py` | JIT-compiled hot paths: backup, PUCT scores, marginal Q |
-| `nash.py` | Nash equilibrium computation via nashpy |
 
 ### alpharat/data/
 
@@ -86,7 +85,7 @@ experiments/        # Data folder (NOT in git): batches, shards, runs, benchmark
 |------|---------|
 | `types.py` | `ObservationInput`, `TargetBundle` — source-agnostic data types |
 | `extraction.py` | Build `ObservationInput` from game arrays or live PyRat |
-| `targets.py` | `build_targets()` — Nash policies + value targets |
+| `targets.py` | `build_targets()` — visit-proportional policies + scalar value targets |
 | `streaming.py` | `StreamingDataset` — memory-efficient PyTorch dataset |
 
 **Training configuration (`config.py`):** `TrainConfig` — Pydantic discriminated unions
@@ -106,9 +105,9 @@ Each architecture folder contains `config.py` (ModelConfig, OptimConfig) and `lo
 
 | Architecture | Description |
 |------|---------|
-| `mlp` | Flat observation → shared trunk → policy/payout heads |
+| `mlp` | Flat observation → shared trunk → policy/value heads |
 | `symmetric` | Structural P1/P2 symmetry, no augmentation needed |
-| `local_value` | Per-cell ownership values + global payout |
+| `local_value` | Per-cell ownership values + scalar value heads |
 
 **Models (`models/`):** `PyRatMLP`, `SymmetricMLP`, `LocalValueMLP`
 
@@ -119,7 +118,7 @@ Each architecture folder contains `config.py` (ModelConfig, OptimConfig) and `lo
 | File | Purpose |
 |------|---------|
 | `base.py` | `Agent` ABC — `get_move(game, player) -> int` |
-| `mcts_agent.py` | `MCTSAgent` — uses MCTS search, samples from Nash |
+| `mcts_agent.py` | `MCTSAgent` — uses MCTS search, samples from visit-proportional policy |
 | `random_agent.py` | `RandomAgent` — baseline |
 | `greedy_agent.py` | `GreedyAgent` — moves toward closest cheese |
 
@@ -233,12 +232,12 @@ p1_outcomes = [1, 2, 3, 4]      # 4 unique outcomes (action 0 collapsed into 4)
 
 Nodes store statistics in outcome-indexed space:
 - `prior_p1_reduced[n1]`, `prior_p2_reduced[n2]` — priors over unique outcomes
-- `_payout_p1[n1, n2]`, `_payout_p2[n1, n2]` — payout matrices
-- `_visits[n1, n2]` — visit counts
+- `_v1`, `_v2` — scalar value estimates (running averages)
+- `_visits[n1, n2]` — visit counts per action pair
 - Children keyed by outcome index pairs `(i, j)`, not action pairs
 
 ```python
-# With 4 unique outcomes for P1 and 5 for P2, matrices are [4, 5] not [5, 5]
+# With 4 unique outcomes for P1 and 5 for P2, visit matrix is [4, 5] not [5, 5]
 ```
 
 **3. O(1) Backup (`numba_ops.py:backup_node`)**
@@ -254,8 +253,8 @@ idx2 = node._p2_action_to_idx[action_p2]
 **4. Boundary Translation (`reduction.py`)**
 
 The algorithm operates in outcome space. Boundaries handle translation:
-- **Input**: NN predictions `[5]`, `[5]`, `[2,5,5]` → reduced `[n1]`, `[n2]`, `[2,n1,n2]`
-- **Output**: Nash strategies `[n1]`, `[n2]` → expanded `[5]`, `[5]`
+- **Input**: NN predictions `[5]`, `[5]` → reduced `[n1]`, `[n2]`
+- **Output**: Visit-proportional strategies `[n1]`, `[n2]` → expanded `[5]`, `[5]`
 
 ```python
 # reduce_prior(): sums probabilities of equivalent actions
@@ -265,12 +264,13 @@ The algorithm operates in outcome space. Boundaries handle translation:
 ### Flow Through Training
 
 **Recording (`recorder.py`):**
-- Saves post-MCTS learning policies (which have 0 for blocked actions)
-- Saves the `[2, 5, 5]` payout matrix (separate P1/P2 payoffs, equivalence structure preserved)
+- Saves visit-proportional policies (which have 0 for blocked actions)
+- Saves scalar `value_p1, value_p2` — expected remaining cheese for each player
 
 **Targets (`targets.py`):**
-- Passes through the Nash policies as-is — no additional processing needed
+- Passes through the policies as-is — no additional processing needed
 - The 0s for blocked actions are already baked in
+- Value targets are `final_score - current_score` (remaining cheese to collect)
 
 **NN Training:**
 - The NN sees policy targets where blocked actions have probability 0
@@ -281,7 +281,7 @@ The algorithm operates in outcome space. Boundaries handle translation:
 
 The NN outputs:
 - `policy_p1[5]`, `policy_p2[5]` — should assign ~0 to blocked actions
-- `payout_matrix[2,5,5]` — separate P1/P2 payoffs, should reflect equivalence structure
+- `value_p1`, `value_p2` — scalar estimates of remaining cheese each player will collect
 
 This isn't hard-masked; it's learned behavior. The NN must infer from the observation (maze layout, positions) which actions are valid.
 
@@ -309,9 +309,9 @@ Even if the NN makes mistakes on blocked actions, the tree's child sharing and s
 
 ## Other Architecture Notes
 
-### Payout Matrices, Not Q-Values
+### Scalar Value Heads
 
-Standard MCTS stores one value per action. For simultaneous games, we need the expected value for each *pair* of actions. Internally, nodes store reduced `[n1, n2]` matrices indexed by unique outcomes; these expand to `[2, 5, 5]` at boundaries.
+Each node stores scalar value estimates `v1, v2` representing expected remaining cheese for each player. This is simpler than bimatrix approaches and follows modern AlphaZero-style implementations (LC0, KataGo).
 
 ### make_move / unmake_move
 
@@ -319,13 +319,13 @@ Nodes don't store full game states. The tree owns one PyRat simulator and naviga
 
 ### Decoupled PUCT Selection
 
-The search uses decoupled PUCT (`decoupled_puct.py`): each player selects actions independently via the PUCT formula, maximizing Q + exploration bonus. After search completes, Nash equilibrium is computed at the root for the final policy.
+The search uses decoupled PUCT (`decoupled_puct.py`): each player selects actions independently via the PUCT formula, maximizing Q + exploration bonus. The final policy is visit-proportional (actions selected proportional to visit counts).
 
 ### Value Formulation
 
-Payout matrices store **absolute cheese gains** for each player separately:
-- `payout[0, i, j]` = expected cheese P1 collects from this position
-- `payout[1, i, j]` = expected cheese P2 collects from this position
+Values store **expected remaining cheese** for each player:
+- `v1` = expected cheese P1 will collect from this position
+- `v2` = expected cheese P2 will collect from this position
 
 PyRat is approximately **constant-sum** (not zero-sum): P1 + P2 ≈ remaining_cheese. Exact under infinite horizon; approximate under turn limits (wasted moves reduce total collection).
 
@@ -357,7 +357,7 @@ Line length 100. Enabled: pycodestyle, pyflakes, isort, pep8-naming, pyupgrade, 
 
 ## Dependencies
 
-**Core:** numpy, numba, nashpy, pydantic, pyyaml, pyrat-engine (Rust-backed)
+**Core:** numpy, numba, pydantic, pyyaml, pyrat-engine (Rust-backed)
 
 **Training (optional):** torch, tensorboard
 
@@ -539,7 +539,7 @@ has_cheese = obs.cheese_matrix[x, y] == 1
 
 1. **Equivalence is handled at boundaries** — the core algorithm works in outcome-indexed space. `reduction.py` handles translation to/from 5-action space. You rarely need to think about equivalence directly.
 
-2. **Node statistics are reduced** — payout and visit matrices are `[n1, n2]` where n = unique outcomes. Use `node.payout_matrix` or `node.action_visits` if you need the expanded `[5, 5]` view.
+2. **Node statistics are reduced** — visit matrix is `[n1, n2]` where n = unique outcomes. Use `node.action_visits` if you need the expanded `[5, 5]` view. Values `v1, v2` are scalar running averages.
 
 3. **Don't copy game state** — use `make_move/unmake_move` pattern.
 

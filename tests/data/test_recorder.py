@@ -180,6 +180,8 @@ def make_mock_search_result() -> SearchResult:
         policy_p2=np.ones(5, dtype=np.float64) / 5,
         value_p1=0.0,
         value_p2=0.0,
+        visit_counts_p1=np.ones(5, dtype=np.float64),
+        visit_counts_p2=np.ones(5, dtype=np.float64),
     )
 
 
@@ -682,6 +684,8 @@ class TestRoundtrip:
             policy_p2=policy_p2,
             value_p1=value_p1,
             value_p2=value_p2,
+            visit_counts_p1=visits_p1.astype(np.float64),
+            visit_counts_p2=visits_p2.astype(np.float64),
         )
 
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -691,8 +695,8 @@ class TestRoundtrip:
                     search_result=search_result,
                     prior_p1=prior_p1,
                     prior_p2=prior_p2,
-                    visit_counts_p1=visits_p1,
-                    visit_counts_p2=visits_p2,
+                    visit_counts_p1=search_result.visit_counts_p1,
+                    visit_counts_p2=search_result.visit_counts_p2,
                     action_p1=0,
                     action_p2=0,
                 )
@@ -1179,21 +1183,23 @@ class TestBundleLoading:
                 value_p2 = 1.5
                 policy_p1 = np.array([0.5, 0.2, 0.1, 0.1, 0.1], dtype=np.float32)
                 policy_p2 = np.array([0.1, 0.1, 0.3, 0.3, 0.2], dtype=np.float32)
-                visits_p1 = np.arange(5).astype(np.int32)
-                visits_p2 = np.arange(5, 10).astype(np.int32)
+                visits_p1 = np.arange(5).astype(np.float64)
+                visits_p2 = np.arange(5, 10).astype(np.float64)
                 result = SearchResult(
                     policy_p1=policy_p1,
                     policy_p2=policy_p2,
                     value_p1=value_p1,
                     value_p2=value_p2,
+                    visit_counts_p1=visits_p1,
+                    visit_counts_p2=visits_p2,
                 )
                 recorder.record_position(
                     game=game,
                     search_result=result,
                     prior_p1=np.ones(5) / 5,
                     prior_p2=np.ones(5) / 5,
-                    visit_counts_p1=visits_p1,
-                    visit_counts_p2=visits_p2,
+                    visit_counts_p1=result.visit_counts_p1,
+                    visit_counts_p2=result.visit_counts_p2,
                     action_p1=2,
                     action_p2=3,
                 )

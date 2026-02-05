@@ -90,12 +90,12 @@ def explained_variance(pred: Tensor, target: Tensor) -> Tensor:
     return torch.clamp(ev, min=-1.0)
 
 
-def payout_correlation(pred: Tensor, target: Tensor) -> Tensor:
-    """Compute Pearson correlation between predicted and target payout matrices.
+def value_correlation(pred: Tensor, target: Tensor) -> Tensor:
+    """Compute Pearson correlation between predicted and target values.
 
     Args:
-        pred: Predicted payout matrices, shape (batch, 5, 5).
-        target: Target payout matrices, shape (batch, 5, 5).
+        pred: Predicted values, shape (batch,).
+        target: Target values, shape (batch,).
 
     Returns:
         Scalar tensor with correlation coefficient.
@@ -156,9 +156,9 @@ def compute_value_metrics(
 
     return {
         "p1_explained_variance": explained_variance(pred_v1, target_p1),
-        "p1_correlation": payout_correlation(pred_v1, target_p1),
+        "p1_correlation": value_correlation(pred_v1, target_p1),
         "p2_explained_variance": explained_variance(pred_v2, target_p2),
-        "p2_correlation": payout_correlation(pred_v2, target_p2),
+        "p2_correlation": value_correlation(pred_v2, target_p2),
     }
 
 

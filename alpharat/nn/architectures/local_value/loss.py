@@ -42,8 +42,8 @@ def compute_local_value_losses(
     loss_p2 = F.cross_entropy(logits_p2, batch[BatchKey.POLICY_P2])
 
     # Value losses (MSE on scalar values)
-    target_v1 = batch[BatchKey.P1_VALUE].squeeze(-1)
-    target_v2 = batch[BatchKey.P2_VALUE].squeeze(-1)
+    target_v1 = batch[BatchKey.VALUE_P1].squeeze(-1)
+    target_v2 = batch[BatchKey.VALUE_P2].squeeze(-1)
     loss_v1 = F.mse_loss(pred_v1, target_v1)
     loss_v2 = F.mse_loss(pred_v2, target_v2)
     loss_value = 0.5 * (loss_v1 + loss_v2)

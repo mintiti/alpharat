@@ -10,8 +10,8 @@ def swap_player_perspective(
     observation: np.ndarray,
     policy_p1: np.ndarray,
     policy_p2: np.ndarray,
-    p1_value: np.ndarray,
-    p2_value: np.ndarray,
+    value_p1: np.ndarray,
+    value_p2: np.ndarray,
     action_p1: np.ndarray,
     action_p2: np.ndarray,
     width: int,
@@ -30,8 +30,8 @@ def swap_player_perspective(
         observation: Flat observation tensor from FlatObservationBuilder.
         policy_p1: P1 policy, shape (5,).
         policy_p2: P2 policy, shape (5,).
-        p1_value: P1's remaining score, shape (1,).
-        p2_value: P2's remaining score, shape (1,).
+        value_p1: P1's remaining score, shape (1,).
+        value_p2: P2's remaining score, shape (1,).
         action_p1: P1 action, shape (1,).
         action_p2: P2 action, shape (1,).
         width: Maze width.
@@ -74,8 +74,8 @@ def swap_player_perspective(
     new_policy_p2 = policy_p1.copy()
 
     # Swap values: new P1's value = old P2's value
-    new_p1_value = p2_value.copy()
-    new_p2_value = p1_value.copy()
+    new_value_p1 = value_p2.copy()
+    new_value_p2 = value_p1.copy()
 
     new_action_p1 = action_p2.copy()
     new_action_p2 = action_p1.copy()
@@ -84,8 +84,8 @@ def swap_player_perspective(
         new_obs,
         new_policy_p1,
         new_policy_p2,
-        new_p1_value,
-        new_p2_value,
+        new_value_p1,
+        new_value_p2,
         new_action_p1,
         new_action_p2,
     )
@@ -107,11 +107,11 @@ def swap_player_perspective_batch(
         - observation: swap p1_pos/p2_pos, negate score_diff, swap mud/scores
         - policy_p1/p2: swap
         - action_p1/p2: swap
-        - p1_value/p2_value: swap
+        - value_p1/value_p2: swap
         - cheese_outcomes: swap P1_WIN(0) <-> P2_WIN(3), keep others unchanged
 
     Args:
-        batch: Dict with keys observation, policy_p1, policy_p2, p1_value, p2_value,
+        batch: Dict with keys observation, policy_p1, policy_p2, value_p1, value_p2,
             action_p1, action_p2, cheese_outcomes. Shapes are (N, ...).
         mask: Boolean tensor of shape (N,) indicating which samples to augment.
         width: Maze width.
@@ -175,11 +175,11 @@ def swap_player_perspective_batch(
     batch["action_p2"] = torch.where(mask_2d, a1, a2)
 
     # === Values ===
-    # Swap p1_value and p2_value for swapped samples
-    v1 = batch["p1_value"]
-    v2 = batch["p2_value"]
-    batch["p1_value"] = torch.where(mask_2d, v2, v1)
-    batch["p2_value"] = torch.where(mask_2d, v1, v2)
+    # Swap value_p1 and value_p2 for swapped samples
+    v1 = batch["value_p1"]
+    v2 = batch["value_p2"]
+    batch["value_p1"] = torch.where(mask_2d, v2, v1)
+    batch["value_p2"] = torch.where(mask_2d, v1, v2)
 
     # === Cheese outcomes ===
     # Swap P1_WIN (0) <-> P2_WIN (3), keep SIMULTANEOUS (1), UNCOLLECTED (2), and -1 unchanged
@@ -230,8 +230,8 @@ class BatchAugmentation:
         """Apply augmentations to a batch.
 
         Args:
-            batch: Dict with observation, policy_p1, policy_p2, p1_value,
-                p2_value, action_p1, action_p2 tensors.
+            batch: Dict with observation, policy_p1, policy_p2, value_p1,
+                value_p2, action_p1, action_p2 tensors.
 
         Returns:
             Augmented batch (modified in-place where possible).

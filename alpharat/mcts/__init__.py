@@ -5,14 +5,8 @@ from alpharat.mcts.decoupled_puct import (
     DecoupledPUCTSearch,
     SearchResult,
 )
-from alpharat.mcts.nash import (
-    compute_nash_equilibrium,
-    compute_nash_value,
-    select_action_from_strategy,
-)
+from alpharat.mcts.forced_playouts import compute_pruned_visits
 from alpharat.mcts.node import MCTSNode
-from alpharat.mcts.payout_filter import filter_low_visit_payout
-from alpharat.mcts.policy_strategy import PolicyConfig, PolicyStrategy
 from alpharat.mcts.tree import MCTSTree
 
 __all__ = [
@@ -20,11 +14,6 @@ __all__ = [
     "DecoupledPUCTSearch",
     "MCTSNode",
     "MCTSTree",
-    "PolicyConfig",
-    "PolicyStrategy",
     "SearchResult",
-    "compute_nash_equilibrium",
-    "compute_nash_value",
-    "filter_low_visit_payout",
-    "select_action_from_strategy",
+    "compute_pruned_visits",
 ]

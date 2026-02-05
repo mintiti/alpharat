@@ -12,7 +12,9 @@ from typing import TYPE_CHECKING
 import numpy as np
 
 from alpharat.config.base import StrictBaseModel
+from alpharat.mcts.forced_playouts import compute_pruned_visits
 from alpharat.mcts.numba_ops import compute_puct_scores, select_max_with_tiebreak
+from alpharat.mcts.reduction import expand_prior
 
 if TYPE_CHECKING:
     from alpharat.mcts.node import MCTSNode
@@ -27,12 +29,16 @@ class SearchResult:
     policy_p2: np.ndarray  # [5] visit-proportional policy
     value_p1: float  # Root value estimate for P1
     value_p2: float  # Root value estimate for P2
+    visit_counts_p1: np.ndarray  # [5] pruned visit counts for P1
+    visit_counts_p2: np.ndarray  # [5] pruned visit counts for P2
     """
 
     policy_p1: np.ndarray
     policy_p2: np.ndarray
     value_p1: float
     value_p2: float
+    visit_counts_p1: np.ndarray
+    visit_counts_p2: np.ndarray
 
 
 class DecoupledPUCTConfig(StrictBaseModel):
@@ -87,14 +93,29 @@ class DecoupledPUCTSearch:
             policy_p2=root.prior_policy_p2.copy(),
             value_p1=root.v1,
             value_p2=root.v2,
+            visit_counts_p1=np.zeros(5, dtype=np.float64),
+            visit_counts_p2=np.zeros(5, dtype=np.float64),
         )
 
     def _make_result(self) -> SearchResult:
         """Compute visit-proportional policy from root statistics."""
         root = self.tree.root
 
-        # Get marginal visit counts in expanded [5] space
-        n1_expanded, n2_expanded = root.get_marginal_visits_expanded()
+        # Get Q-values and raw visit counts (reduced space)
+        q1, q2 = root.get_q_values(gamma=self.tree.gamma)
+        n1, n2 = root.get_visit_counts()
+
+        # Prune forced visits (per-player, in reduced space)
+        n1_pruned = compute_pruned_visits(
+            q1, root.prior_p1_reduced, n1, root.total_visits, self._c_puct
+        )
+        n2_pruned = compute_pruned_visits(
+            q2, root.prior_p2_reduced, n2, root.total_visits, self._c_puct
+        )
+
+        # Expand to [5] action space
+        n1_expanded = expand_prior(n1_pruned, root.p1_effective)
+        n2_expanded = expand_prior(n2_pruned, root.p2_effective)
 
         # Normalize to get visit-proportional policy
         n1_sum = n1_expanded.sum()
@@ -103,10 +124,7 @@ class DecoupledPUCTSearch:
         policy_p1 = n1_expanded / n1_sum if n1_sum > 0 else root.prior_policy_p1.copy()
         policy_p2 = n2_expanded / n2_sum if n2_sum > 0 else root.prior_policy_p2.copy()
 
-        # Compute root value from Q-values weighted by visit counts
-        q1, q2 = root.get_q_values(gamma=self.tree.gamma)
-        n1, n2 = root.get_visit_counts()
-
+        # Compute root value from Q-values weighted by (raw) visit counts
         n1_total = n1.sum()
         n2_total = n2.sum()
 
@@ -118,6 +136,8 @@ class DecoupledPUCTSearch:
             policy_p2=policy_p2.astype(np.float64),
             value_p1=value_p1,
             value_p2=value_p2,
+            visit_counts_p1=n1_expanded.astype(np.float64),
+            visit_counts_p2=n2_expanded.astype(np.float64),
         )
 
     def _simulate(self) -> None:

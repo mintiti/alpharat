@@ -47,11 +47,14 @@ class GameRecorder:
                 recorder.record_position(
                     game=game,
                     search_result=result,
-                    prior_p1=root.prior_policy_p1,
-                    prior_p2=root.prior_policy_p2,
-                    visit_counts=root.action_visits,
+                    prior_p1=tree.root.prior_policy_p1,
+                    prior_p2=tree.root.prior_policy_p2,
+                    visit_counts_p1=result.visit_counts_p1,
+                    visit_counts_p2=result.visit_counts_p2,
+                    action_p1=a1,
+                    action_p2=a2,
                 )
-                game.make_move(...)
+                game.make_move(a1, a2)
         # auto-finalize and save on exit
 
     Attributes:
@@ -180,9 +183,9 @@ class GameRecorder:
             visit_counts_p2=visit_counts_p2.copy(),
             prior_p1=prior_p1.copy(),
             prior_p2=prior_p2.copy(),
-            # Save learning policies (for NN training), not acting policies
-            policy_p1=search_result.learning_policy_p1.copy(),
-            policy_p2=search_result.learning_policy_p2.copy(),
+            # Save visit-proportional policies (for NN training)
+            policy_p1=search_result.policy_p1.copy(),
+            policy_p2=search_result.policy_p2.copy(),
             action_p1=action_p1,
             action_p2=action_p2,
         )

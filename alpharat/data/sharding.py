@@ -95,8 +95,8 @@ def prepare_training_set(
         - observations: from builder.save_to_arrays()
         - policy_p1: float32 (N, 5)
         - policy_p2: float32 (N, 5)
-        - p1_value: float32 (N,) — P1's actual remaining score
-        - p2_value: float32 (N,) — P2's actual remaining score
+        - value_p1: float32 (N,) — P1's actual remaining score
+        - value_p2: float32 (N,) — P2's actual remaining score
         - action_p1: int8 (N,)
         - action_p2: int8 (N,)
         - cheese_outcomes: int8 (N, H, W) — position-level ownership targets.
@@ -520,14 +520,12 @@ def _process_games_to_arrays(
     np.ndarray,
     np.ndarray,
     np.ndarray,
-    np.ndarray,
     int,
     int,
 ]:
     """Build observations and targets from a game sequence.
 
     Shared logic for both ref-based and file-based loading paths.
-    Patches each position's played cell with ground truth game outcome.
 
     Args:
         games: Iterator of GameData objects to process.
@@ -535,7 +533,7 @@ def _process_games_to_arrays(
 
     Returns:
         Tuple of (observations, policy_p1, policy_p2, p1_values, p2_values,
-        payout_matrices, action_p1, action_p2, cheese_outcomes, width, height).
+        action_p1, action_p2, cheese_outcomes, width, height).
 
     Raises:
         ValueError: If games have different dimensions or no positions found.
@@ -545,7 +543,6 @@ def _process_games_to_arrays(
     all_policy_p2: list[np.ndarray] = []
     all_p1_values: list[float] = []
     all_p2_values: list[float] = []
-    all_payout_matrices: list[np.ndarray] = []
     all_action_p1: list[int] = []
     all_action_p2: list[int] = []
     all_cheese_outcomes: list[np.ndarray] = []
@@ -570,19 +567,11 @@ def _process_games_to_arrays(
             obs = builder.build(obs_input)
             targets = build_targets(game_data, position)
 
-            # Patch played cell with ground truth game outcome.
-            # The MCTS payout matrix has estimates for all action pairs. For the
-            # actually-played pair, we have the real outcome. Patching here avoids
-            # per-batch cloning during training.
-            targets.payout_matrix[0, targets.action_p1, targets.action_p2] = targets.p1_value
-            targets.payout_matrix[1, targets.action_p1, targets.action_p2] = targets.p2_value
-
             all_observations.append(obs)
             all_policy_p1.append(targets.policy_p1)
             all_policy_p2.append(targets.policy_p2)
             all_p1_values.append(targets.p1_value)
             all_p2_values.append(targets.p2_value)
-            all_payout_matrices.append(targets.payout_matrix)
             all_action_p1.append(targets.action_p1)
             all_action_p2.append(targets.action_p2)
             all_cheese_outcomes.append(targets.cheese_outcomes)
@@ -596,7 +585,6 @@ def _process_games_to_arrays(
         np.stack(all_policy_p2),
         np.array(all_p1_values, dtype=np.float32),
         np.array(all_p2_values, dtype=np.float32),
-        np.stack(all_payout_matrices),
         np.array(all_action_p1, dtype=np.int8),
         np.array(all_action_p2, dtype=np.int8),
         np.stack(all_cheese_outcomes),
@@ -609,7 +597,6 @@ def _load_positions_from_refs(
     refs: list[GameRef],
     builder: ObservationBuilder,
 ) -> tuple[
-    np.ndarray,
     np.ndarray,
     np.ndarray,
     np.ndarray,
@@ -653,8 +640,8 @@ def _load_positions_from_files(
             - observations: float32 (N, obs_dim)
             - policy_p1: float32 (N, 5)
             - policy_p2: float32 (N, 5)
-            - p1_values: float32 (N,) — P1's remaining score (actual game outcome)
-            - p2_values: float32 (N,) — P2's remaining score (actual game outcome)
+            - value_p1: float32 (N,) — P1's remaining score (actual game outcome)
+            - value_p2: float32 (N,) — P2's remaining score (actual game outcome)
             - action_p1: int8 (N,)
             - action_p2: int8 (N,)
             - cheese_outcomes: int8 (N, H, W) — position-level ownership targets.
@@ -821,8 +808,8 @@ def _write_shards(
             observations=observations[start_idx:end_idx],
             policy_p1=policy_p1[start_idx:end_idx],
             policy_p2=policy_p2[start_idx:end_idx],
-            p1_value=p1_values[start_idx:end_idx],
-            p2_value=p2_values[start_idx:end_idx],
+            value_p1=p1_values[start_idx:end_idx],
+            value_p2=p2_values[start_idx:end_idx],
             action_p1=action_p1[start_idx:end_idx],
             action_p2=action_p2[start_idx:end_idx],
             cheese_outcomes=cheese_outcomes[start_idx:end_idx],

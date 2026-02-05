@@ -31,7 +31,8 @@ class TrainableModel(Protocol):
             Dict with at least:
             - ModelOutput.LOGITS_P1: (batch, 5) policy logits for P1
             - ModelOutput.LOGITS_P2: (batch, 5) policy logits for P2
-            - ModelOutput.PAYOUT: (batch, 2, 5, 5) payout matrix
+            - ModelOutput.VALUE_P1: (batch,) scalar value for P1
+            - ModelOutput.VALUE_P2: (batch,) scalar value for P2
 
             May include model-specific outputs (e.g., ownership_logits).
         """
@@ -48,7 +49,8 @@ class TrainableModel(Protocol):
             Dict with at least:
             - ModelOutput.POLICY_P1: (batch, 5) probabilities for P1
             - ModelOutput.POLICY_P2: (batch, 5) probabilities for P2
-            - ModelOutput.PAYOUT: (batch, 2, 5, 5) payout matrix
+            - ModelOutput.VALUE_P1: (batch,) scalar value for P1
+            - ModelOutput.VALUE_P2: (batch,) scalar value for P2
         """
         ...
 

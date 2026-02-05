@@ -66,8 +66,8 @@ def _compute_detailed_metrics(
     all_pred_v2 = torch.cat([d[ModelOutput.VALUE_P2] for d in all_outputs])
     all_policy_p1 = torch.cat([d[BatchKey.POLICY_P1] for d in all_outputs])
     all_policy_p2 = torch.cat([d[BatchKey.POLICY_P2] for d in all_outputs])
-    all_p1_value = torch.cat([d[BatchKey.P1_VALUE] for d in all_outputs])
-    all_p2_value = torch.cat([d[BatchKey.P2_VALUE] for d in all_outputs])
+    all_p1_value = torch.cat([d[BatchKey.VALUE_P1] for d in all_outputs])
+    all_p2_value = torch.cat([d[BatchKey.VALUE_P2] for d in all_outputs])
 
     # Compute metrics on full epoch data
     p1_metrics = compute_policy_metrics(all_logits_p1, all_policy_p1)
@@ -229,8 +229,8 @@ def run_training(
                 BatchKey.OBSERVATION: train[BatchKey.OBSERVATION][batch_idx],
                 BatchKey.POLICY_P1: train[BatchKey.POLICY_P1][batch_idx],
                 BatchKey.POLICY_P2: train[BatchKey.POLICY_P2][batch_idx],
-                BatchKey.P1_VALUE: train[BatchKey.P1_VALUE][batch_idx],
-                BatchKey.P2_VALUE: train[BatchKey.P2_VALUE][batch_idx],
+                BatchKey.VALUE_P1: train[BatchKey.VALUE_P1][batch_idx],
+                BatchKey.VALUE_P2: train[BatchKey.VALUE_P2][batch_idx],
                 BatchKey.ACTION_P1: train[BatchKey.ACTION_P1][batch_idx],
                 BatchKey.ACTION_P2: train[BatchKey.ACTION_P2][batch_idx],
             }
@@ -272,8 +272,8 @@ def run_training(
                         ModelOutput.VALUE_P2: model_output[ModelOutput.VALUE_P2].detach().clone(),
                         BatchKey.POLICY_P1: batch[BatchKey.POLICY_P1],
                         BatchKey.POLICY_P2: batch[BatchKey.POLICY_P2],
-                        BatchKey.P1_VALUE: batch[BatchKey.P1_VALUE],
-                        BatchKey.P2_VALUE: batch[BatchKey.P2_VALUE],
+                        BatchKey.VALUE_P1: batch[BatchKey.VALUE_P1],
+                        BatchKey.VALUE_P2: batch[BatchKey.VALUE_P2],
                     }
                 )
 
@@ -301,8 +301,8 @@ def run_training(
                     BatchKey.OBSERVATION: val[BatchKey.OBSERVATION][start_idx:end_idx],
                     BatchKey.POLICY_P1: val[BatchKey.POLICY_P1][start_idx:end_idx],
                     BatchKey.POLICY_P2: val[BatchKey.POLICY_P2][start_idx:end_idx],
-                    BatchKey.P1_VALUE: val[BatchKey.P1_VALUE][start_idx:end_idx],
-                    BatchKey.P2_VALUE: val[BatchKey.P2_VALUE][start_idx:end_idx],
+                    BatchKey.VALUE_P1: val[BatchKey.VALUE_P1][start_idx:end_idx],
+                    BatchKey.VALUE_P2: val[BatchKey.VALUE_P2][start_idx:end_idx],
                     BatchKey.ACTION_P1: val[BatchKey.ACTION_P1][start_idx:end_idx],
                     BatchKey.ACTION_P2: val[BatchKey.ACTION_P2][start_idx:end_idx],
                 }
@@ -332,8 +332,8 @@ def run_training(
                             ModelOutput.VALUE_P2: model_output[ModelOutput.VALUE_P2].clone(),
                             BatchKey.POLICY_P1: val_batch[BatchKey.POLICY_P1],
                             BatchKey.POLICY_P2: val_batch[BatchKey.POLICY_P2],
-                            BatchKey.P1_VALUE: val_batch[BatchKey.P1_VALUE],
-                            BatchKey.P2_VALUE: val_batch[BatchKey.P2_VALUE],
+                            BatchKey.VALUE_P1: val_batch[BatchKey.VALUE_P1],
+                            BatchKey.VALUE_P2: val_batch[BatchKey.VALUE_P2],
                         }
                     )
 

@@ -148,8 +148,8 @@ class TestStreamingDataset:
             assert "observation" in sample
             assert "policy_p1" in sample
             assert "policy_p2" in sample
-            assert "p1_value" in sample
-            assert "p2_value" in sample
+            assert "value_p1" in sample
+            assert "value_p2" in sample
 
     def test_sample_shapes_match_flat_dataset(self) -> None:
         """Sample shapes should match FlatDataset format."""
@@ -162,8 +162,8 @@ class TestStreamingDataset:
             assert sample["observation"].shape == (181,)
             assert sample["policy_p1"].shape == (5,)
             assert sample["policy_p2"].shape == (5,)
-            assert sample["p1_value"].shape == (1,)
-            assert sample["p2_value"].shape == (1,)
+            assert sample["value_p1"].shape == (1,)
+            assert sample["value_p2"].shape == (1,)
 
     def test_samples_are_tensors(self) -> None:
         """Samples should be torch tensors."""
@@ -176,8 +176,8 @@ class TestStreamingDataset:
             assert isinstance(sample["observation"], torch.Tensor)
             assert isinstance(sample["policy_p1"], torch.Tensor)
             assert isinstance(sample["policy_p2"], torch.Tensor)
-            assert isinstance(sample["p1_value"], torch.Tensor)
-            assert isinstance(sample["p2_value"], torch.Tensor)
+            assert isinstance(sample["value_p1"], torch.Tensor)
+            assert isinstance(sample["value_p2"], torch.Tensor)
 
     def test_iterates_all_positions(self) -> None:
         """Full iteration should yield all positions."""
@@ -275,8 +275,8 @@ class TestStreamingDatasetWithDataLoader:
             assert batches[0]["observation"].shape == (2, 181)
             assert batches[0]["policy_p1"].shape == (2, 5)
             assert batches[0]["policy_p2"].shape == (2, 5)
-            assert batches[0]["p1_value"].shape == (2, 1)
-            assert batches[0]["p2_value"].shape == (2, 1)
+            assert batches[0]["value_p1"].shape == (2, 1)
+            assert batches[0]["value_p2"].shape == (2, 1)
 
     def test_works_with_dataloader_partial_batch(self) -> None:
         """Should handle partial final batch."""
@@ -353,7 +353,7 @@ class TestStreamingDatasetVsFlatDataset:
                 assert sample["observation"].shape == (181,)
                 assert sample["policy_p1"].shape == (5,)
                 assert sample["policy_p2"].shape == (5,)
-                assert sample["p1_value"].shape == (1,)
-                assert sample["p2_value"].shape == (1,)
+                assert sample["value_p1"].shape == (1,)
+                assert sample["value_p2"].shape == (1,)
                 assert sample["action_p1"].shape == (1,)
                 assert sample["action_p2"].shape == (1,)

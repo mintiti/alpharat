@@ -59,8 +59,8 @@ class GPUDataset:
             "observation": [],
             "policy_p1": [],
             "policy_p2": [],
-            "p1_value": [],
-            "p2_value": [],
+            "value_p1": [],
+            "value_p2": [],
             "action_p1": [],
             "action_p2": [],
             "cheese_outcomes": [],
@@ -71,8 +71,8 @@ class GPUDataset:
                 arrays["observation"].append(np.array(data["observations"]))
                 arrays["policy_p1"].append(np.array(data["policy_p1"]))
                 arrays["policy_p2"].append(np.array(data["policy_p2"]))
-                arrays["p1_value"].append(np.array(data["p1_value"]))
-                arrays["p2_value"].append(np.array(data["p2_value"]))
+                arrays["value_p1"].append(np.array(data["value_p1"]))
+                arrays["value_p2"].append(np.array(data["value_p2"]))
                 arrays["action_p1"].append(np.array(data["action_p1"]))
                 arrays["action_p2"].append(np.array(data["action_p2"]))
                 # cheese_outcomes: int8 with -1=inactive, 0-3=outcome class
@@ -85,10 +85,10 @@ class GPUDataset:
             self._data[key] = torch.from_numpy(concat).to(device)
 
         # Ensure values and actions have shape (N, 1) for consistency
-        if self._data["p1_value"].dim() == 1:
-            self._data["p1_value"] = self._data["p1_value"].unsqueeze(-1)
-        if self._data["p2_value"].dim() == 1:
-            self._data["p2_value"] = self._data["p2_value"].unsqueeze(-1)
+        if self._data["value_p1"].dim() == 1:
+            self._data["value_p1"] = self._data["value_p1"].unsqueeze(-1)
+        if self._data["value_p2"].dim() == 1:
+            self._data["value_p2"] = self._data["value_p2"].unsqueeze(-1)
         if self._data["action_p1"].dim() == 1:
             self._data["action_p1"] = self._data["action_p1"].unsqueeze(-1)
         if self._data["action_p2"].dim() == 1:
@@ -132,8 +132,8 @@ class GPUDataset:
             shuffle: Whether to shuffle data order.
 
         Yields:
-            Batch dicts with observation, policy_p1, policy_p2, p1_value,
-            p2_value, action_p1, action_p2 tensors.
+            Batch dicts with observation, policy_p1, policy_p2, value_p1,
+            value_p2, action_p1, action_p2 tensors.
         """
         # Apply augmentation to entire dataset (in-place)
         if augment:
@@ -162,8 +162,8 @@ class GPUDataset:
                 "observation": self._data["observation"][batch_indices],
                 "policy_p1": self._data["policy_p1"][batch_indices],
                 "policy_p2": self._data["policy_p2"][batch_indices],
-                "p1_value": self._data["p1_value"][batch_indices],
-                "p2_value": self._data["p2_value"][batch_indices],
+                "value_p1": self._data["value_p1"][batch_indices],
+                "value_p2": self._data["value_p2"][batch_indices],
                 "action_p1": self._data["action_p1"][batch_indices],
                 "action_p2": self._data["action_p2"][batch_indices],
                 "cheese_outcomes": self._data["cheese_outcomes"][batch_indices],

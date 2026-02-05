@@ -49,9 +49,8 @@ def _make_mlp_batch(batch_size: int = 4) -> dict[str, torch.Tensor]:
         "policy_p2": torch.softmax(torch.randn(batch_size, 5), dim=-1),
         "action_p1": torch.randint(0, 5, (batch_size, 1)),
         "action_p2": torch.randint(0, 5, (batch_size, 1)),
-        "p1_value": torch.rand(batch_size) * 5,
-        "p2_value": torch.rand(batch_size) * 5,
-        "payout_matrix": torch.rand(batch_size, 2, 5, 5) * 5,
+        "value_p1": torch.rand(batch_size, 1) * 5,
+        "value_p2": torch.rand(batch_size, 1) * 5,
     }
 
 

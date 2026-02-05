@@ -94,14 +94,14 @@ class StreamingDataset(IterableDataset[dict[str, torch.Tensor]]):
                     future = executor.submit(_load_shard, self._shard_paths[next_idx])
 
                 # Yield each sample from this shard
-                n_samples = len(shard_data["p1_value"])
+                n_samples = len(shard_data["value_p1"])
                 for j in range(n_samples):
                     yield {
                         "observation": torch.from_numpy(shard_data["observations"][j].copy()),
                         "policy_p1": torch.from_numpy(shard_data["policy_p1"][j].copy()),
                         "policy_p2": torch.from_numpy(shard_data["policy_p2"][j].copy()),
-                        "p1_value": torch.from_numpy(shard_data["p1_value"][j : j + 1].copy()),
-                        "p2_value": torch.from_numpy(shard_data["p2_value"][j : j + 1].copy()),
+                        "value_p1": torch.from_numpy(shard_data["value_p1"][j : j + 1].copy()),
+                        "value_p2": torch.from_numpy(shard_data["value_p2"][j : j + 1].copy()),
                         "action_p1": torch.from_numpy(shard_data["action_p1"][j : j + 1].copy()),
                         "action_p2": torch.from_numpy(shard_data["action_p2"][j : j + 1].copy()),
                         # cheese_outcomes: int8 with -1=inactive, 0-3=outcome class
@@ -135,8 +135,8 @@ def _load_shard(path: Path) -> dict[str, np.ndarray]:
             "observations": np.array(data["observations"]),
             "policy_p1": np.array(data["policy_p1"]),
             "policy_p2": np.array(data["policy_p2"]),
-            "p1_value": np.array(data["p1_value"]),
-            "p2_value": np.array(data["p2_value"]),
+            "value_p1": np.array(data["value_p1"]),
+            "value_p2": np.array(data["value_p2"]),
             "action_p1": np.array(data["action_p1"]),
             "action_p2": np.array(data["action_p2"]),
             "cheese_outcomes": np.array(data["cheese_outcomes"]),

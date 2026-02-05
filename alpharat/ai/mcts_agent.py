@@ -8,9 +8,9 @@ from typing import TYPE_CHECKING, Any
 import numpy as np
 
 from alpharat.ai.base import Agent
+from alpharat.ai.utils import select_action_from_strategy
 from alpharat.config.checkpoint import make_predict_fn
 from alpharat.mcts.decoupled_puct import DecoupledPUCTConfig
-from alpharat.mcts.nash import select_action_from_strategy
 from alpharat.mcts.node import MCTSNode
 from alpharat.mcts.tree import MCTSTree
 

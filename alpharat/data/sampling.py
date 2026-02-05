@@ -10,13 +10,13 @@ from typing import TYPE_CHECKING, Any
 
 import numpy as np
 
+from alpharat.ai.utils import select_action_from_strategy
 from alpharat.config.base import StrictBaseModel
 from alpharat.config.checkpoint import make_predict_fn
 from alpharat.config.game import GameConfig  # noqa: TC001
 from alpharat.data.recorder import GameBundler, GameRecorder
 from alpharat.eval.game import is_terminal
 from alpharat.mcts import DecoupledPUCTConfig  # noqa: TC001
-from alpharat.mcts.nash import select_action_from_strategy
 from alpharat.mcts.node import MCTSNode
 from alpharat.mcts.tree import MCTSTree
 
@@ -320,14 +320,14 @@ def play_and_record_game(
             a2 = select_action_from_strategy(result.policy_p2)
 
             # Record position before making move
-            visit_counts_p1, visit_counts_p2 = tree.root.get_marginal_visits_expanded()
+            # Use pruned visit counts from SearchResult (forced visits removed)
             recorder.record_position(
                 game=game,
                 search_result=result,
                 prior_p1=tree.root.prior_policy_p1,
                 prior_p2=tree.root.prior_policy_p2,
-                visit_counts_p1=visit_counts_p1,
-                visit_counts_p2=visit_counts_p2,
+                visit_counts_p1=result.visit_counts_p1,
+                visit_counts_p2=result.visit_counts_p2,
                 action_p1=a1,
                 action_p2=a2,
             )
