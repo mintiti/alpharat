@@ -1,0 +1,28 @@
+# AlphaZero iteration for 7x7 scalar value heads
+# Usage: alpharat-iterate configs/iterate_7x7_scalar.yaml --prefix scalar_7x7
+
+defaults:
+  - /game: 7x7_open
+  - /mcts: 7x7_scalar_tuned
+  - /model: symmetric
+  - _self_
+
+# Per-iteration settings
+iteration:
+  games: 50000         # games per iteration
+  epochs: 300          # training epochs (increased from 100)
+  checkpoint_every: 10
+
+# Sampling settings
+sampling:
+  workers: 4
+
+# Sharding settings
+sharding:
+  val_ratio: 0.1
+  positions_per_shard: 3000000
+
+# Benchmark settings (when enabled)
+benchmark:
+  games_per_matchup: 50
+  workers: 4
