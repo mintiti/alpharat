@@ -146,8 +146,9 @@ class MCTSTree:
         path: list[tuple[MCTSNode, int, int]],
         g: tuple[float, float] = (0.0, 0.0),
     ) -> None:
-        """Backup discounted returns through the tree.
+        """Backup discounted returns through the tree (LC0-style).
 
+        Finalize the leaf first, then propagate returns up the path.
         Uses edge_r stored on child nodes as the source of truth for rewards.
 
         Args:
@@ -156,24 +157,20 @@ class MCTSTree:
             g: Leaf value tuple (p1_value, p2_value) from NN estimate.
                Defaults to (0.0, 0.0) for terminal states.
         """
-        child_value = g  # Start with leaf's expected return
-        is_leaf = True  # First child in reversed path is the leaf
+        # Finalize leaf value (LC0: FinalizeScoreUpdate starts at leaf)
+        last_node, last_a1, last_a2 = path[-1]
+        leaf_idx1 = int(last_node._p1_action_to_idx[last_a1])
+        leaf_idx2 = int(last_node._p2_action_to_idx[last_a2])
+        leaf = last_node.children[(leaf_idx1, leaf_idx2)]
+        leaf.finalize_value(g[0], g[1])
 
-        # Backup in reverse (from leaf to root)
+        # Propagate returns up the path
+        child_value = g
         for node, action_p1, action_p2 in reversed(path):
             idx1 = int(node._p1_action_to_idx[action_p1])
             idx2 = int(node._p2_action_to_idx[action_p2])
             child = node.children[(idx1, idx2)]
 
-            # Only update the leaf's value here; intermediate nodes are
-            # updated via node.backup() to avoid double-counting
-            if is_leaf:
-                child._total_visits += 1
-                child._v1 += (child_value[0] - child._v1) / child._total_visits
-                child._v2 += (child_value[1] - child._v2) / child._total_visits
-                is_leaf = False
-
-            # Q = edge_r + gamma * child_value (edge_r is source of truth)
             q_value = (
                 child._edge_r1 + self.gamma * child_value[0],
                 child._edge_r2 + self.gamma * child_value[1],
@@ -314,6 +311,9 @@ class MCTSTree:
 
         # Check if this child represents a terminal state
         child.is_terminal = self._check_terminal()
+        if child.is_terminal:
+            child._v1 = 0.0
+            child._v2 = 0.0
 
         return child
 

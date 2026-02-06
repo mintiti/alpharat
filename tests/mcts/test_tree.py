@@ -845,3 +845,29 @@ class TestPredictionCache:
         # The two nodes should have independent prior arrays
         # (node init uses np.add.at which mutates in place)
         assert _aa.prior_policy_p1 is not _bb.prior_policy_p1
+
+
+class TestTerminalNodes:
+    """Tests for terminal node handling."""
+
+    def test_terminal_node_value_is_zero_at_creation(self) -> None:
+        """Terminal children should have V=(0, 0) immediately after creation."""
+        game = FakeGame()
+        # Set turn to max_turns so next child hits terminal check
+        game.turn = game.max_turns - 1
+
+        root = MCTSNode(
+            game_state=None,
+            prior_policy_p1=np.ones(5) / 5,
+            prior_policy_p2=np.ones(5) / 5,
+            nn_value_p1=0.0,
+            nn_value_p2=0.0,
+        )
+        tree = MCTSTree(game=game, root=root, gamma=1.0)  # type: ignore[arg-type]
+
+        # Create a child — game.turn will be max_turns after make_move
+        child, _ = tree.make_move_from(tree.root, 4, 4)  # STAY/STAY
+
+        assert child.is_terminal
+        assert child._v1 == 0.0
+        assert child._v2 == 0.0

@@ -320,6 +320,19 @@ class MCTSNode:
         self._v1 = float(v1)
         self._v2 = float(v2)
 
+    def finalize_value(self, v1: float, v2: float) -> None:
+        """Update node value with a new observation (LC0-style FinalizeScoreUpdate).
+
+        Incremental mean: V = V + (v - V) / n
+
+        Args:
+            v1: New value observation for P1
+            v2: New value observation for P2
+        """
+        self._total_visits += 1
+        self._v1 += (v1 - self._v1) / self._total_visits
+        self._v2 += (v2 - self._v2) / self._total_visits
+
     def backup(
         self,
         action_p1: int,
@@ -343,18 +356,13 @@ class MCTSNode:
         # Increment child's edge visit count (for weighting in get_q_values)
         child_key = (idx1, idx2)
         if child_key in self.children:
-            child = self.children[child_key]
-            child._edge_visits += 1
+            self.children[child_key]._edge_visits += 1
 
         # Update marginal visit counts (for policy output)
         self._n1_visits[idx1] += 1
         self._n2_visits[idx2] += 1
 
-        # Update this node's value with the observed return
-        # V = E[Q] = average discounted return from this position
-        self._total_visits += 1
-        self._v1 += (q_value[0] - self._v1) / self._total_visits
-        self._v2 += (q_value[1] - self._v2) / self._total_visits
+        self.finalize_value(q_value[0], q_value[1])
 
     def get_q_values(self, gamma: float = 1.0) -> tuple[np.ndarray, np.ndarray]:
         """Compute marginal Q-values from children (LC0-style).
