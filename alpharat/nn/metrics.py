@@ -121,7 +121,7 @@ def compute_policy_metrics(logits: Tensor, target: Tensor) -> dict[str, Tensor]:
 
     Args:
         logits: Raw logits from model, shape (batch, 5).
-        target: Target probabilities (Nash equilibrium), shape (batch, 5).
+        target: Target probabilities (visit-proportional policy), shape (batch, 5).
 
     Returns:
         Dict with top1_accuracy, top2_accuracy, entropy_pred, entropy_target as tensors.

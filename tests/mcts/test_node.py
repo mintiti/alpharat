@@ -17,7 +17,7 @@ def add_child(
 ) -> MCTSNode:
     """Helper to add a child node for testing Q computation.
 
-    Sets child._visits = 1 to mark it as visited (otherwise get_q_values uses FPU).
+    Sets child._edge_visits = 1 to mark it as visited (otherwise get_q_values uses FPU).
     Also sets edge rewards for Q = edge_r + gamma * V computation.
     """
     child = MCTSNode(
@@ -28,7 +28,7 @@ def add_child(
         nn_value_p2=v2,
         parent=parent,
     )
-    child._visits = 1  # Mark as visited
+    child._edge_visits = 1  # Mark as visited
     child._edge_r1 = edge_r1
     child._edge_r2 = edge_r2
     parent.children[(idx1, idx2)] = child
@@ -356,7 +356,7 @@ class TestQValueComputation:
 
         # Simulation 1: q = edge_r + γ * 10 = 1 + 10 = 11
         q1_sim1, q2_sim1 = 11.0, 5.5
-        child._visits = 1
+        child._edge_visits = 1
         child._total_visits = 1
         child._v1, child._v2 = 10.0, 5.0  # Simulated leaf value
         node.backup(action_p1=0, action_p2=0, q_value=(q1_sim1, q2_sim1))
@@ -365,7 +365,7 @@ class TestQValueComputation:
 
         # Simulation 2: q = edge_r + γ * 6 = 1 + 6 = 7
         q1_sim2, q2_sim2 = 7.0, 3.5
-        child._visits = 2
+        child._edge_visits = 2
         child._total_visits = 2
         child._v1, child._v2 = 8.0, 4.0  # Updated: mean(10, 6) = 8
         node.backup(action_p1=0, action_p2=0, q_value=(q1_sim2, q2_sim2))
@@ -406,7 +406,7 @@ class TestQValueComputation:
             parent=node,
         )
         child_00._edge_r1, child_00._edge_r2 = 1.0, 0.5
-        child_00._visits = 2
+        child_00._edge_visits = 2
         child_00._total_visits = 2
         node.children[(0, 0)] = child_00
 
@@ -420,7 +420,7 @@ class TestQValueComputation:
             parent=node,
         )
         child_01._edge_r1, child_01._edge_r2 = 2.0, 1.0
-        child_01._visits = 3
+        child_01._edge_visits = 3
         child_01._total_visits = 3
         node.children[(0, 1)] = child_01
 
@@ -458,7 +458,7 @@ class TestQValueComputation:
             nn_value_p2=50.0,
             parent=node,
         )
-        child_10._visits = 1
+        child_10._edge_visits = 1
         child_10._total_visits = 1
         node.children[(1, 0)] = child_10
 
@@ -471,7 +471,7 @@ class TestQValueComputation:
             nn_value_p2=0.0,
             parent=node,
         )
-        child_11._visits = 99
+        child_11._edge_visits = 99
         child_11._total_visits = 99
         node.children[(1, 1)] = child_11
 

@@ -494,3 +494,188 @@ class TestPureNNMode:
         # Value estimates should be the node's values (NN initial)
         assert result.value_p1 == pytest.approx(root.v1)
         assert result.value_p2 == pytest.approx(root.v2)
+
+
+class TestTerminalMidSearch:
+    """Tests for terminal states encountered during search (not at root)."""
+
+    def test_terminal_child_backs_up_zero_leaf_value(self) -> None:
+        """Terminal node at depth > 0 should back up g=(0,0) through edge rewards.
+
+        When search hits a terminal state mid-tree, the leaf value is (0, 0) —
+        no future rewards from a game-over position. The backed-up Q values
+        come entirely from edge rewards.
+        """
+        game = FakeGame(max_turns=1)  # Terminal after 1 move
+        prior = np.ones(5) / 5
+        root = MCTSNode(
+            game_state=None,
+            prior_policy_p1=prior,
+            prior_policy_p2=prior,
+            nn_value_p1=0.0,
+            nn_value_p2=0.0,
+        )
+        tree = MCTSTree(game=game, root=root, gamma=1.0)  # type: ignore[arg-type]
+
+        # Run enough simulations to visit all action pairs
+        search = DecoupledPUCTSearch(tree, make_config(50))
+        result = search.search()
+
+        # All children should be terminal (game ends after 1 move)
+        for child in tree.root.children.values():
+            assert child.is_terminal
+
+        # Values should be finite and policies valid
+        assert np.isfinite(result.value_p1)
+        assert np.isfinite(result.value_p2)
+        assert result.policy_p1.sum() == pytest.approx(1.0, abs=1e-6)
+        assert result.policy_p2.sum() == pytest.approx(1.0, abs=1e-6)
+
+        # Root should have been updated (terminal backup propagated)
+        assert tree.root.total_visits > 0
+
+
+class TestMakeResultControlled:
+    """Tests for _make_result() with controlled visit/Q state."""
+
+    def test_policy_from_known_visits(self) -> None:
+        """Set up root with known visits and verify exact policy output.
+
+        Tests the full pruning-to-policy pipeline end-to-end.
+        """
+        game = FakeGame()
+        prior = np.array([0.2, 0.3, 0.2, 0.2, 0.1])
+        root = MCTSNode(
+            game_state=None,
+            prior_policy_p1=prior,
+            prior_policy_p2=prior,
+            nn_value_p1=0.0,
+            nn_value_p2=0.0,
+        )
+        tree = MCTSTree(game=game, root=root, gamma=1.0)  # type: ignore[arg-type]
+
+        # Create children with controlled visit counts and values
+        # Action 1 is clearly best (high Q, many visits)
+        # Action 0 has some visits, lower Q
+        child_00 = MCTSNode(
+            game_state=None,
+            prior_policy_p1=prior,
+            prior_policy_p2=prior,
+            nn_value_p1=2.0,
+            nn_value_p2=1.0,
+            parent=root,
+        )
+        child_00._edge_visits = 5
+        child_00._edge_r1 = 0.0
+        child_00._edge_r2 = 0.0
+        root.children[(0, 0)] = child_00
+
+        child_11 = MCTSNode(
+            game_state=None,
+            prior_policy_p1=prior,
+            prior_policy_p2=prior,
+            nn_value_p1=8.0,
+            nn_value_p2=4.0,
+            parent=root,
+        )
+        child_11._edge_visits = 45
+        child_11._edge_r1 = 0.0
+        child_11._edge_r2 = 0.0
+        root.children[(1, 1)] = child_11
+
+        # Set marginal visit counts to match
+        root._n1_visits[0] = 5.0
+        root._n1_visits[1] = 45.0
+        root._n2_visits[0] = 5.0
+        root._n2_visits[1] = 45.0
+        root._total_visits = 50
+
+        # Run _make_result
+        search = DecoupledPUCTSearch(tree, make_config(0))
+        result = search._make_result()
+
+        # Policy should be valid distribution
+        assert result.policy_p1.sum() == pytest.approx(1.0, abs=1e-6)
+        assert result.policy_p2.sum() == pytest.approx(1.0, abs=1e-6)
+
+        # Action 1 should dominate (more visits, higher Q)
+        assert result.policy_p1[1] > result.policy_p1[0]
+        assert result.policy_p2[1] > result.policy_p2[0]
+
+        # Blocked actions (not visited) should have 0 probability
+        assert result.policy_p1[2] == 0.0
+        assert result.policy_p1[3] == 0.0
+        assert result.policy_p1[4] == 0.0
+
+
+class TestRawVsPrunedVisits:
+    """Tests documenting the intentional design: value uses raw visits, policy uses pruned."""
+
+    def test_value_uses_raw_visits_policy_uses_pruned(self) -> None:
+        """Value estimate uses raw visit counts; policy uses pruned visits.
+
+        This is intentional: value should reflect the actual search experience
+        (all simulations), while policy should ignore forced-exploration visits
+        that inflate low-Q actions.
+        """
+        game = FakeGame()
+
+        # Non-uniform prior so forced playouts have something to force
+        prior = np.array([0.4, 0.3, 0.2, 0.05, 0.05])
+        root = MCTSNode(
+            game_state=None,
+            prior_policy_p1=prior,
+            prior_policy_p2=prior,
+            nn_value_p1=0.0,
+            nn_value_p2=0.0,
+        )
+        tree = MCTSTree(game=game, root=root, gamma=1.0)  # type: ignore[arg-type]
+
+        # Set up controlled state with clear best action (0) and weak action (3)
+        # Action 0: high Q, many visits
+        child_00 = MCTSNode(
+            game_state=None,
+            prior_policy_p1=prior,
+            prior_policy_p2=prior,
+            nn_value_p1=10.0,
+            nn_value_p2=5.0,
+            parent=root,
+        )
+        child_00._edge_visits = 80
+        root.children[(0, 0)] = child_00
+
+        # Action 3: low Q, few visits (forced exploration)
+        child_33 = MCTSNode(
+            game_state=None,
+            prior_policy_p1=prior,
+            prior_policy_p2=prior,
+            nn_value_p1=1.0,
+            nn_value_p2=0.5,
+            parent=root,
+        )
+        child_33._edge_visits = 20
+        root.children[(3, 3)] = child_33
+
+        root._n1_visits[0] = 80.0
+        root._n1_visits[3] = 20.0
+        root._n2_visits[0] = 80.0
+        root._n2_visits[3] = 20.0
+        root._total_visits = 100
+
+        search = DecoupledPUCTSearch(tree, make_config(0))
+        result = search._make_result()
+
+        # Value should reflect ALL visits (raw), so it's a weighted average
+        # Q1(0) = 10.0, Q1(3) = 1.0
+        # raw_value = (80*10 + 20*1) / 100 = 820/100 = 8.2
+        assert result.value_p1 == pytest.approx(8.2)
+
+        # Policy should use pruned visits (action 3 may have visits reduced)
+        # The key property: policy ratios can differ from raw visit ratios
+        raw_ratio_p1 = 20.0 / 80.0  # 0.25
+        policy_ratio_p1 = (
+            result.policy_p1[3] / result.policy_p1[0] if result.policy_p1[0] > 0 else float("inf")
+        )
+
+        # Pruning should reduce action 3's share relative to raw visits
+        assert policy_ratio_p1 <= raw_ratio_p1

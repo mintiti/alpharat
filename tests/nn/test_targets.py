@@ -76,7 +76,7 @@ class TestBuildTargets:
     """Tests for build_targets()."""
 
     def test_policy_targets_from_position(self) -> None:
-        """Policy targets should come from Nash equilibrium in position."""
+        """Policy targets should come from visit-proportional policy in position."""
         policy_p1 = np.array([0.6, 0.1, 0.1, 0.1, 0.1], dtype=np.float32)
         policy_p2 = np.array([0.2, 0.4, 0.2, 0.1, 0.1], dtype=np.float32)
 

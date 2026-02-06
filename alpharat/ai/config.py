@@ -123,7 +123,7 @@ class MCTSAgentConfig(AgentConfigBase):
     variant: Literal["mcts"] = "mcts"
     mcts: DecoupledPUCTConfig
     checkpoint: str | None = None
-    temperature: float = 1.0  # For action sampling (Nash uses 1.0)
+    temperature: float = 1.0  # Softmax temperature for action sampling
 
     def build(self, device: str = "cpu") -> Agent:
         """Build an MCTSAgent."""

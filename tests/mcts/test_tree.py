@@ -516,8 +516,8 @@ class TestBackup:
         assert tree.root.v1 == pytest.approx(9.5)
 
         # Verify visit counts
-        assert node_b._visits == 2
-        assert node_a._visits == 2
+        assert node_b._edge_visits == 2
+        assert node_a._edge_visits == 2
         assert tree.root._total_visits == 2
 
     def test_get_q_values_matches_average_returns(self, tree: MCTSTree) -> None:

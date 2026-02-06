@@ -31,7 +31,7 @@ class MCTSNode:
     - Reduced priors [n1], [n2] where n = count of unique outcomes
     - Scalar values (v1, v2) - NN estimate initially, updated via backup
     - Marginal visit counts [n1], [n2] for policy output
-    - Edge visits (_visits) - how many times parent backed up through this node
+    - Edge visits (_edge_visits) - how many times parent backed up through this node
     - Children keyed by outcome index pairs (i, j)
 
     Attributes:
@@ -156,7 +156,7 @@ class MCTSNode:
         self._edge_r2: float = 0.0
 
         # Edge visits: how many times parent backed up through this node
-        self._visits: int = 0
+        self._edge_visits: int = 0
 
         # Marginal visit counts for policy output (visit-proportional policy)
         self._n1_visits = np.zeros(self._n1, dtype=np.float64)
@@ -191,7 +191,7 @@ class MCTSNode:
     @property
     def visits(self) -> int:
         """Edge visits: how many times parent backed up through this node."""
-        return self._visits
+        return self._edge_visits
 
     def outcome_to_effective(self, player: int, outcome_idx: int) -> int:
         """Convert outcome index to effective action value.
@@ -272,7 +272,7 @@ class MCTSNode:
         self._n1_visits = np.zeros(self._n1, dtype=np.float64)
         self._n2_visits = np.zeros(self._n2, dtype=np.float64)
         self._total_visits = 0
-        self._visits = 0
+        self._edge_visits = 0
         self._edge_r1 = 0.0
         self._edge_r2 = 0.0
 
@@ -344,7 +344,7 @@ class MCTSNode:
         child_key = (idx1, idx2)
         if child_key in self.children:
             child = self.children[child_key]
-            child._visits += 1
+            child._edge_visits += 1
 
         # Update marginal visit counts (for policy output)
         self._n1_visits[idx1] += 1
@@ -386,13 +386,13 @@ class MCTSNode:
         n2_sum = np.zeros(self._n2, dtype=np.float64)
 
         for (i, j), child in self.children.items():
-            if child._visits > 0:
+            if child._edge_visits > 0:
                 q1_child = child._edge_r1 + gamma * child._v1
                 q2_child = child._edge_r2 + gamma * child._v2
-                w1[i] += child._visits * q1_child
-                w2[j] += child._visits * q2_child
-                n1_sum[i] += child._visits
-                n2_sum[j] += child._visits
+                w1[i] += child._edge_visits * q1_child
+                w2[j] += child._edge_visits * q2_child
+                n1_sum[i] += child._edge_visits
+                n2_sum[j] += child._edge_visits
 
         # Replace FPU where we have data
         mask1 = n1_sum > 0
