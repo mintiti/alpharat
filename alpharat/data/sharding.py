@@ -15,9 +15,11 @@ from tqdm import tqdm
 
 from alpharat.config.base import StrictBaseModel
 from alpharat.data.loader import is_bundle_file, iter_games_from_bundle, load_game_data
+from alpharat.data.types import GameFileKey
 from alpharat.experiments.paths import batch_id_from_path
 from alpharat.nn.extraction import from_game_arrays
 from alpharat.nn.targets import build_targets
+from alpharat.nn.training.keys import BatchKey
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
@@ -92,7 +94,7 @@ def prepare_training_set(
             ...
 
     Each shard contains:
-        - observations: from builder.save_to_arrays()
+        - observation: from builder.save_to_arrays()
         - policy_p1: float32 (N, 5)
         - policy_p2: float32 (N, 5)
         - value_p1: float32 (N,) — P1's actual remaining score
@@ -427,7 +429,7 @@ def _collect_game_refs(batch_dirs: list[Path]) -> list[GameRef]:
             if is_bundle_file(game_file):
                 # Count games in bundle without loading full data
                 with np.load(game_file) as data:
-                    n_games = len(data["game_lengths"])
+                    n_games = len(data[GameFileKey.GAME_LENGTHS])
                 for i in range(n_games):
                     game_refs.append(GameRef(game_file, bundle_index=i))
             else:
@@ -637,7 +639,7 @@ def _load_positions_from_files(
 
     Returns:
         Tuple of:
-            - observations: float32 (N, obs_dim)
+            - observation: float32 (N, obs_dim)
             - policy_p1: float32 (N, 5)
             - policy_p2: float32 (N, 5)
             - value_p1: float32 (N,) — P1's remaining score (actual game outcome)
@@ -803,17 +805,17 @@ def _write_shards(
         end_idx = min(start_idx + positions_per_shard, n_positions)
 
         shard_path = training_set_dir / f"shard_{shard_count:04d}.npz"
-        np.savez_compressed(
-            shard_path,
-            observations=observations[start_idx:end_idx],
-            policy_p1=policy_p1[start_idx:end_idx],
-            policy_p2=policy_p2[start_idx:end_idx],
-            value_p1=p1_values[start_idx:end_idx],
-            value_p2=p2_values[start_idx:end_idx],
-            action_p1=action_p1[start_idx:end_idx],
-            action_p2=action_p2[start_idx:end_idx],
-            cheese_outcomes=cheese_outcomes[start_idx:end_idx],
-        )
+        shard_arrays: dict[str, np.ndarray] = {
+            BatchKey.OBSERVATION: observations[start_idx:end_idx],
+            BatchKey.POLICY_P1: policy_p1[start_idx:end_idx],
+            BatchKey.POLICY_P2: policy_p2[start_idx:end_idx],
+            BatchKey.VALUE_P1: p1_values[start_idx:end_idx],
+            BatchKey.VALUE_P2: p2_values[start_idx:end_idx],
+            BatchKey.ACTION_P1: action_p1[start_idx:end_idx],
+            BatchKey.ACTION_P2: action_p2[start_idx:end_idx],
+            BatchKey.CHEESE_OUTCOMES: cheese_outcomes[start_idx:end_idx],
+        }
+        np.savez_compressed(shard_path, **shard_arrays)  # type: ignore[arg-type]
         shard_count += 1
 
     return shard_count

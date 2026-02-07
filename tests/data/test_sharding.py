@@ -239,7 +239,7 @@ class TestPrepareTrainingSet:
             shard_path = list(result_dir.glob("shard_*.npz"))[0]
             with np.load(shard_path) as data:
                 expected_keys = {
-                    "observations",
+                    "observation",
                     "policy_p1",
                     "policy_p2",
                     "value_p1",
@@ -270,7 +270,7 @@ class TestPrepareTrainingSet:
             shard_path = list(result_dir.glob("shard_*.npz"))[0]
             with np.load(shard_path) as data:
                 n = 3  # 1 game × 3 positions
-                assert data["observations"].shape == (n, 181)  # 5×5 flat obs
+                assert data["observation"].shape == (n, 181)  # 5×5 flat obs
                 assert data["policy_p1"].shape == (n, 5)
                 assert data["policy_p2"].shape == (n, 5)
                 assert data["value_p1"].shape == (n,)
@@ -298,7 +298,7 @@ class TestPrepareTrainingSet:
 
             shard_path = list(result_dir.glob("shard_*.npz"))[0]
             with np.load(shard_path) as data:
-                assert data["observations"].dtype == np.float32
+                assert data["observation"].dtype == np.float32
                 assert data["policy_p1"].dtype == np.float32
                 assert data["policy_p2"].dtype == np.float32
                 assert data["value_p1"].dtype == np.float32
@@ -391,7 +391,7 @@ class TestPrepareTrainingSet:
                 np.load(list(result_dir1.glob("shard_*.npz"))[0]) as d1,
                 np.load(list(result_dir2.glob("shard_*.npz"))[0]) as d2,
             ):
-                np.testing.assert_array_equal(d1["observations"], d2["observations"])
+                np.testing.assert_array_equal(d1["observation"], d2["observation"])
 
     def test_different_seed_different_order(self) -> None:
         """Different seeds should give different shuffles."""

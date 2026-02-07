@@ -25,7 +25,6 @@ import torch
 from torch.optim import AdamW
 from torch.utils.tensorboard import SummaryWriter
 
-from alpharat.nn.gpu_dataset import GPUDataset
 from alpharat.nn.metrics import (
     GPUMetricsAccumulator,
     compute_policy_metrics,
@@ -151,6 +150,8 @@ def run_training(
     # Load data
     train_dir = Path(data_config.train_dir)
     val_dir = Path(data_config.val_dir)
+
+    from alpharat.nn.gpu_dataset import GPUDataset
 
     logger.info(f"Loading training data from {train_dir}")
     train_dataset = GPUDataset(train_dir, torch_device)

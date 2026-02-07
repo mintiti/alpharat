@@ -10,6 +10,8 @@ import numpy as np
 import torch
 from torch.utils.data import IterableDataset
 
+from alpharat.nn.training.keys import BatchKey
+
 if TYPE_CHECKING:
     from collections.abc import Iterator
 
@@ -94,19 +96,32 @@ class StreamingDataset(IterableDataset[dict[str, torch.Tensor]]):
                     future = executor.submit(_load_shard, self._shard_paths[next_idx])
 
                 # Yield each sample from this shard
-                n_samples = len(shard_data["value_p1"])
+                n_samples = len(shard_data[BatchKey.VALUE_P1])
                 for j in range(n_samples):
                     yield {
-                        "observation": torch.from_numpy(shard_data["observations"][j].copy()),
-                        "policy_p1": torch.from_numpy(shard_data["policy_p1"][j].copy()),
-                        "policy_p2": torch.from_numpy(shard_data["policy_p2"][j].copy()),
-                        "value_p1": torch.from_numpy(shard_data["value_p1"][j : j + 1].copy()),
-                        "value_p2": torch.from_numpy(shard_data["value_p2"][j : j + 1].copy()),
-                        "action_p1": torch.from_numpy(shard_data["action_p1"][j : j + 1].copy()),
-                        "action_p2": torch.from_numpy(shard_data["action_p2"][j : j + 1].copy()),
-                        # cheese_outcomes: int8 with -1=inactive, 0-3=outcome class
-                        "cheese_outcomes": torch.from_numpy(
-                            shard_data["cheese_outcomes"][j].copy()
+                        BatchKey.OBSERVATION: torch.from_numpy(
+                            shard_data[BatchKey.OBSERVATION][j].copy()
+                        ),
+                        BatchKey.POLICY_P1: torch.from_numpy(
+                            shard_data[BatchKey.POLICY_P1][j].copy()
+                        ),
+                        BatchKey.POLICY_P2: torch.from_numpy(
+                            shard_data[BatchKey.POLICY_P2][j].copy()
+                        ),
+                        BatchKey.VALUE_P1: torch.from_numpy(
+                            shard_data[BatchKey.VALUE_P1][j : j + 1].copy()
+                        ),
+                        BatchKey.VALUE_P2: torch.from_numpy(
+                            shard_data[BatchKey.VALUE_P2][j : j + 1].copy()
+                        ),
+                        BatchKey.ACTION_P1: torch.from_numpy(
+                            shard_data[BatchKey.ACTION_P1][j : j + 1].copy()
+                        ),
+                        BatchKey.ACTION_P2: torch.from_numpy(
+                            shard_data[BatchKey.ACTION_P2][j : j + 1].copy()
+                        ),
+                        BatchKey.CHEESE_OUTCOMES: torch.from_numpy(
+                            shard_data[BatchKey.CHEESE_OUTCOMES][j].copy()
                         ),
                     }
 
@@ -127,17 +142,17 @@ def _load_shard(path: Path) -> dict[str, np.ndarray]:
         path: Path to shard npz file.
 
     Returns:
-        Dict with observations, policies, p1/p2 values, actions, cheese_outcomes.
+        Dict with observation, policies, p1/p2 values, actions, cheese_outcomes.
         cheese_outcomes uses -1 sentinel for inactive cells, 0-3 for outcome classes.
     """
     with np.load(path) as data:
         return {
-            "observations": np.array(data["observations"]),
-            "policy_p1": np.array(data["policy_p1"]),
-            "policy_p2": np.array(data["policy_p2"]),
-            "value_p1": np.array(data["value_p1"]),
-            "value_p2": np.array(data["value_p2"]),
-            "action_p1": np.array(data["action_p1"]),
-            "action_p2": np.array(data["action_p2"]),
-            "cheese_outcomes": np.array(data["cheese_outcomes"]),
+            BatchKey.OBSERVATION: np.array(data[BatchKey.OBSERVATION]),
+            BatchKey.POLICY_P1: np.array(data[BatchKey.POLICY_P1]),
+            BatchKey.POLICY_P2: np.array(data[BatchKey.POLICY_P2]),
+            BatchKey.VALUE_P1: np.array(data[BatchKey.VALUE_P1]),
+            BatchKey.VALUE_P2: np.array(data[BatchKey.VALUE_P2]),
+            BatchKey.ACTION_P1: np.array(data[BatchKey.ACTION_P1]),
+            BatchKey.ACTION_P2: np.array(data[BatchKey.ACTION_P2]),
+            BatchKey.CHEESE_OUTCOMES: np.array(data[BatchKey.CHEESE_OUTCOMES]),
         }

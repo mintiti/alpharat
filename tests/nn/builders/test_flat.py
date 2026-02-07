@@ -186,10 +186,10 @@ class TestFlatObservationBuilderSerialization:
 
         arrays = builder.save_to_arrays([obs1, obs2])
 
-        assert "observations" in arrays
-        assert arrays["observations"].shape == (2, 69)
-        assert arrays["observations"][0, 0] == 1.0
-        assert arrays["observations"][1, 0] == 2.0
+        assert "observation" in arrays
+        assert arrays["observation"].shape == (2, 69)
+        assert arrays["observation"][0, 0] == 1.0
+        assert arrays["observation"][1, 0] == 2.0
 
     def test_load_from_arrays(self) -> None:
         """Test loading observation from arrays."""

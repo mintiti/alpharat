@@ -5,6 +5,8 @@ from __future__ import annotations
 import numpy as np  # noqa: TC002 - needed at runtime
 import torch
 
+from alpharat.nn.training.keys import BatchKey
+
 
 def swap_player_perspective(
     observation: np.ndarray,
@@ -140,7 +142,7 @@ def swap_player_perspective_batch(
 
     # === Observation ===
     # Build fully-swapped observation, then select with torch.where
-    obs = batch["observation"]
+    obs = batch[BatchKey.OBSERVATION]
     swapped_obs = obs.clone()
 
     # Swap p1_pos and p2_pos (copy from original to avoid read-after-write issues)
@@ -158,34 +160,34 @@ def swap_player_perspective_batch(
     swapped_obs[:, scalars_start + 4] = obs[:, scalars_start + 5]
     swapped_obs[:, scalars_start + 5] = obs[:, scalars_start + 4]
 
-    batch["observation"] = torch.where(mask_2d, swapped_obs, obs)
+    batch[BatchKey.OBSERVATION] = torch.where(mask_2d, swapped_obs, obs)
 
     # === Policies ===
     # Swap p1 and p2 policies based on mask
-    p1 = batch["policy_p1"]
-    p2 = batch["policy_p2"]
-    batch["policy_p1"] = torch.where(mask_2d, p2, p1)
-    batch["policy_p2"] = torch.where(mask_2d, p1, p2)
+    p1 = batch[BatchKey.POLICY_P1]
+    p2 = batch[BatchKey.POLICY_P2]
+    batch[BatchKey.POLICY_P1] = torch.where(mask_2d, p2, p1)
+    batch[BatchKey.POLICY_P2] = torch.where(mask_2d, p1, p2)
 
     # === Actions ===
     # Swap p1 and p2 actions based on mask
-    a1 = batch["action_p1"]
-    a2 = batch["action_p2"]
-    batch["action_p1"] = torch.where(mask_2d, a2, a1)
-    batch["action_p2"] = torch.where(mask_2d, a1, a2)
+    a1 = batch[BatchKey.ACTION_P1]
+    a2 = batch[BatchKey.ACTION_P2]
+    batch[BatchKey.ACTION_P1] = torch.where(mask_2d, a2, a1)
+    batch[BatchKey.ACTION_P2] = torch.where(mask_2d, a1, a2)
 
     # === Values ===
     # Swap value_p1 and value_p2 for swapped samples
-    v1 = batch["value_p1"]
-    v2 = batch["value_p2"]
-    batch["value_p1"] = torch.where(mask_2d, v2, v1)
-    batch["value_p2"] = torch.where(mask_2d, v1, v2)
+    v1 = batch[BatchKey.VALUE_P1]
+    v2 = batch[BatchKey.VALUE_P2]
+    batch[BatchKey.VALUE_P1] = torch.where(mask_2d, v2, v1)
+    batch[BatchKey.VALUE_P2] = torch.where(mask_2d, v1, v2)
 
     # === Cheese outcomes ===
     # Swap P1_WIN (0) <-> P2_WIN (3), keep SIMULTANEOUS (1), UNCOLLECTED (2), and -1 unchanged
     # This is an involution: swap(swap(x)) = x
-    if "cheese_outcomes" in batch:
-        outcomes = batch["cheese_outcomes"]  # (N, H, W), int8 with values -1, 0, 1, 2, 3
+    if BatchKey.CHEESE_OUTCOMES in batch:
+        outcomes = batch[BatchKey.CHEESE_OUTCOMES]  # (N, H, W), int8 with values -1, 0, 1, 2, 3
         # Build swapped version: 0->3, 3->0, others unchanged
         swapped_outcomes = outcomes.clone()
         swapped_outcomes = torch.where(
@@ -194,7 +196,7 @@ def swap_player_perspective_batch(
         swapped_outcomes = torch.where(
             outcomes == 3, torch.tensor(0, device=outcomes.device), swapped_outcomes
         )
-        batch["cheese_outcomes"] = torch.where(mask_3d, swapped_outcomes, outcomes)
+        batch[BatchKey.CHEESE_OUTCOMES] = torch.where(mask_3d, swapped_outcomes, outcomes)
 
     return batch
 
@@ -236,8 +238,8 @@ class BatchAugmentation:
         Returns:
             Augmented batch (modified in-place where possible).
         """
-        n = batch["observation"].shape[0]
-        device = batch["observation"].device
+        n = batch[BatchKey.OBSERVATION].shape[0]
+        device = batch[BatchKey.OBSERVATION].device
 
         # Generate augmentation mask for entire batch at once
         mask = torch.rand(n, device=device) < self.p_swap
@@ -272,8 +274,8 @@ class PlayerSwapStrategy:
         height: int,
     ) -> dict[str, torch.Tensor]:
         """Apply player swap augmentation."""
-        n = batch["observation"].shape[0]
-        device = batch["observation"].device
+        n = batch[BatchKey.OBSERVATION].shape[0]
+        device = batch[BatchKey.OBSERVATION].device
         mask = torch.rand(n, device=device) < self.p_swap
 
         if mask.any():
