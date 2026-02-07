@@ -2,7 +2,7 @@
 
 Experimental AlphaZero-style MCTS for simultaneous two-player games.
 
-Standard MCTS assumes players take turns. PyRat (the target game here) has both players moving at the same time, which breaks that assumption. This project tries using payout matrices instead of single Q-values, and computing Nash equilibrium instead of just picking the best action.
+Standard MCTS assumes players take turns. PyRat (the target game here) has both players moving at the same time, which breaks that assumption. This project uses scalar value heads (like LC0/KataGo) with decoupled PUCT selection and visit-proportional policies.
 
 Still figuring out if it actually works.
 
@@ -90,7 +90,7 @@ alpharat-manifest runs     # See training runs + which shards they used
 
 ## What's here
 
-- `alpharat/mcts/` — Tree search with 5×5 payout matrices per node, handles action equivalence, computes Nash at root
+- `alpharat/mcts/` — Tree search with scalar value heads, handles action equivalence, visit-proportional policies
 - `alpharat/data/` — Self-play sampling, game recording, training set sharding
 - `alpharat/nn/` — Observation encoding, training targets, MLP model
 - `alpharat/ai/` — Agents (MCTS, random, greedy baselines)
@@ -98,9 +98,9 @@ alpharat-manifest runs     # See training runs + which shards they used
 
 ## The approach
 
-When both players move at once, you can't just maximize — the opponent is choosing too. So each node stores expected values for all 25 action pairs, and action selection uses Nash equilibrium.
+When both players move at once, you can't just maximize — the opponent is choosing too. Each node stores scalar value estimates (expected remaining cheese per player), and action selection uses decoupled PUCT where each player independently picks via exploration bonus. The final policy is visit-proportional.
 
-There's also a subtlety where multiple actions can be equivalent (hitting a wall = staying put). The tree shares branches for those and reduces the matrix before computing Nash.
+There's also a subtlety where multiple actions can be equivalent (hitting a wall = staying put). The tree shares branches for those and reduces the visit/Q matrices accordingly.
 
 See [CLAUDE.md](CLAUDE.md) for implementation details.
 

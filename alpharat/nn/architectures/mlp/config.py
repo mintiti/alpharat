@@ -72,8 +72,3 @@ class MLPOptimConfig(BaseOptimConfig):
 
     # Discriminator for Pydantic union dispatch
     architecture: Literal["mlp"] = "mlp"
-
-    # MLP-specific loss weights
-    nash_weight: float = 0.0
-    nash_mode: Literal["target", "predicted"] = "target"
-    constant_sum_weight: float = 0.0

@@ -175,14 +175,13 @@ class TestDirectionHelpers:
 
 def make_mock_search_result() -> SearchResult:
     """Create a mock SearchResult for testing."""
-    uniform = np.ones(5, dtype=np.float64) / 5
     return SearchResult(
-        payout_matrix=np.zeros((2, 5, 5), dtype=np.float64),
-        policy_p1=uniform.copy(),
-        policy_p2=uniform.copy(),
-        learning_policy_p1=uniform.copy(),
-        learning_policy_p2=uniform.copy(),
-        action_visits=np.zeros((5, 5), dtype=np.int32),
+        policy_p1=np.ones(5, dtype=np.float64) / 5,
+        policy_p2=np.ones(5, dtype=np.float64) / 5,
+        value_p1=0.0,
+        value_p2=0.0,
+        visit_counts_p1=np.ones(5, dtype=np.float64),
+        visit_counts_p2=np.ones(5, dtype=np.float64),
     )
 
 
@@ -250,7 +249,8 @@ class TestGameRecorder:
                     search_result=result,
                     prior_p1=np.ones(5) / 5,
                     prior_p2=np.ones(5) / 5,
-                    visit_counts=np.zeros((5, 5), dtype=np.int32),
+                    visit_counts_p1=np.zeros(5, dtype=np.int32),
+                    visit_counts_p2=np.zeros(5, dtype=np.int32),
                     action_p1=0,
                     action_p2=0,
                 )
@@ -269,7 +269,8 @@ class TestGameRecorder:
                 search_result=result,
                 prior_p1=np.ones(5) / 5,
                 prior_p2=np.ones(5) / 5,
-                visit_counts=np.zeros((5, 5), dtype=np.int32),
+                visit_counts_p1=np.zeros(5, dtype=np.int32),
+                visit_counts_p2=np.zeros(5, dtype=np.int32),
                 action_p1=0,
                 action_p2=0,
             )
@@ -284,7 +285,8 @@ class TestGameRecorder:
                 search_result=result,
                 prior_p1=np.ones(5) / 5,
                 prior_p2=np.ones(5) / 5,
-                visit_counts=np.zeros((5, 5), dtype=np.int32),
+                visit_counts_p1=np.zeros(5, dtype=np.int32),
+                visit_counts_p2=np.zeros(5, dtype=np.int32),
                 action_p1=0,
                 action_p2=0,
             )
@@ -303,7 +305,8 @@ class TestGameRecorder:
                     search_result=result,
                     prior_p1=np.ones(5) / 5,
                     prior_p2=np.ones(5) / 5,
-                    visit_counts=np.zeros((5, 5), dtype=np.int32),
+                    visit_counts_p1=np.zeros(5, dtype=np.int32),
+                    visit_counts_p2=np.zeros(5, dtype=np.int32),
                     action_p1=0,
                     action_p2=0,
                 )
@@ -324,7 +327,8 @@ class TestGameRecorder:
                     search_result=result,
                     prior_p1=np.ones(5) / 5,
                     prior_p2=np.ones(5) / 5,
-                    visit_counts=np.zeros((5, 5), dtype=np.int32),
+                    visit_counts_p1=np.zeros(5, dtype=np.int32),
+                    visit_counts_p2=np.zeros(5, dtype=np.int32),
                     action_p1=0,
                     action_p2=0,
                 )
@@ -348,7 +352,8 @@ class TestGameRecorder:
                     search_result=result,
                     prior_p1=np.ones(5) / 5,
                     prior_p2=np.ones(5) / 5,
-                    visit_counts=np.zeros((5, 5), dtype=np.int32),
+                    visit_counts_p1=np.zeros(5, dtype=np.int32),
+                    visit_counts_p2=np.zeros(5, dtype=np.int32),
                     action_p1=0,
                     action_p2=0,
                 )
@@ -381,7 +386,8 @@ class TestGameRecorder:
                         search_result=result,
                         prior_p1=np.ones(5) / 5,
                         prior_p2=np.ones(5) / 5,
-                        visit_counts=np.zeros((5, 5), dtype=np.int32),
+                        visit_counts_p1=np.zeros(5, dtype=np.int32),
+                        visit_counts_p2=np.zeros(5, dtype=np.int32),
                         action_p1=0,
                         action_p2=0,
                     )
@@ -407,7 +413,8 @@ class TestSavedArrays:
                     search_result=result,
                     prior_p1=np.ones(5) / 5,
                     prior_p2=np.ones(5) / 5,
-                    visit_counts=np.zeros((5, 5), dtype=np.int32),
+                    visit_counts_p1=np.zeros(5, dtype=np.int32),
+                    visit_counts_p2=np.zeros(5, dtype=np.int32),
                     action_p1=0,
                     action_p2=0,
                 )
@@ -432,8 +439,10 @@ class TestSavedArrays:
                 "p2_mud",
                 "cheese_mask",
                 "turn",
-                "payout_matrix",
-                "visit_counts",
+                "value_p1",
+                "value_p2",
+                "visit_counts_p1",
+                "visit_counts_p2",
                 "prior_p1",
                 "prior_p2",
                 "policy_p1",
@@ -460,7 +469,8 @@ class TestSavedArrays:
                         search_result=result,
                         prior_p1=np.ones(5) / 5,
                         prior_p2=np.ones(5) / 5,
-                        visit_counts=np.zeros((5, 5), dtype=np.int32),
+                        visit_counts_p1=np.zeros(5, dtype=np.int32),
+                        visit_counts_p2=np.zeros(5, dtype=np.int32),
                         action_p1=0,
                         action_p2=0,
                     )
@@ -482,8 +492,10 @@ class TestSavedArrays:
             assert data["p2_mud"].shape == (3,)
             assert data["cheese_mask"].shape == (3, 4, 5)
             assert data["turn"].shape == (3,)
-            assert data["payout_matrix"].shape == (3, 2, 5, 5)
-            assert data["visit_counts"].shape == (3, 5, 5)
+            assert data["value_p1"].shape == (3,)
+            assert data["value_p2"].shape == (3,)
+            assert data["visit_counts_p1"].shape == (3, 5)
+            assert data["visit_counts_p2"].shape == (3, 5)
             assert data["prior_p1"].shape == (3, 5)
             assert data["prior_p2"].shape == (3, 5)
             assert data["policy_p1"].shape == (3, 5)
@@ -501,7 +513,8 @@ class TestSavedArrays:
                     search_result=result,
                     prior_p1=np.ones(5) / 5,
                     prior_p2=np.ones(5) / 5,
-                    visit_counts=np.zeros((5, 5), dtype=np.int32),
+                    visit_counts_p1=np.zeros(5, dtype=np.int32),
+                    visit_counts_p2=np.zeros(5, dtype=np.int32),
                     action_p1=0,
                     action_p2=0,
                 )
@@ -526,8 +539,10 @@ class TestSavedArrays:
             assert data["p2_mud"].dtype == np.int8
             assert data["cheese_mask"].dtype == bool
             assert data["turn"].dtype == np.int16
-            assert data["payout_matrix"].dtype == np.float32
-            assert data["visit_counts"].dtype == np.int32
+            assert data["value_p1"].dtype == np.float32
+            assert data["value_p2"].dtype == np.float32
+            assert data["visit_counts_p1"].dtype == np.float32
+            assert data["visit_counts_p2"].dtype == np.float32
             assert data["prior_p1"].dtype == np.float32
             assert data["prior_p2"].dtype == np.float32
             assert data["policy_p1"].dtype == np.float32
@@ -558,7 +573,8 @@ class TestRoundtrip:
                     search_result=result,
                     prior_p1=np.ones(5) / 5,
                     prior_p2=np.ones(5) / 5,
-                    visit_counts=np.zeros((5, 5), dtype=np.int32),
+                    visit_counts_p1=np.zeros(5, dtype=np.int32),
+                    visit_counts_p2=np.zeros(5, dtype=np.int32),
                     action_p1=0,
                     action_p2=0,
                 )
@@ -592,7 +608,8 @@ class TestRoundtrip:
                     search_result=result,
                     prior_p1=np.ones(5) / 5,
                     prior_p2=np.ones(5) / 5,
-                    visit_counts=np.zeros((5, 5), dtype=np.int32),
+                    visit_counts_p1=np.zeros(5, dtype=np.int32),
+                    visit_counts_p2=np.zeros(5, dtype=np.int32),
                     action_p1=0,
                     action_p2=0,
                 )
@@ -628,7 +645,8 @@ class TestRoundtrip:
                     search_result=result,
                     prior_p1=np.ones(5) / 5,
                     prior_p2=np.ones(5) / 5,
-                    visit_counts=np.zeros((5, 5), dtype=np.int32),
+                    visit_counts_p1=np.zeros(5, dtype=np.int32),
+                    visit_counts_p2=np.zeros(5, dtype=np.int32),
                     action_p1=0,
                     action_p2=0,
                 )
@@ -651,50 +669,23 @@ class TestRoundtrip:
         """MCTS outputs should survive roundtrip with correct values."""
         game = FakeGame(width=5, height=5)
 
-        # Create non-trivial MCTS data (bimatrix: P1 and P2 payoffs)
-        payout = np.array(
-            [
-                # P1's payoffs
-                [
-                    [0.1, 0.2, 0.3, 0.4, 0.5],
-                    [-0.1, -0.2, -0.3, -0.4, -0.5],
-                    [1.0, 0.0, -1.0, 0.5, -0.5],
-                    [0.0, 0.0, 0.0, 0.0, 0.0],
-                    [0.9, 0.8, 0.7, 0.6, 0.55],
-                ],
-                # P2's payoffs
-                [
-                    [-0.1, -0.2, -0.3, -0.4, -0.5],
-                    [0.1, 0.2, 0.3, 0.4, 0.5],
-                    [-1.0, 0.0, 1.0, -0.5, 0.5],
-                    [0.0, 0.0, 0.0, 0.0, 0.0],
-                    [-0.9, -0.8, -0.7, -0.6, -0.55],
-                ],
-            ],
-            dtype=np.float64,
-        )
+        # Create non-trivial MCTS data (scalar values for each player)
+        value_p1 = 2.5
+        value_p2 = 1.5
         policy_p1 = np.array([0.5, 0.2, 0.1, 0.1, 0.1], dtype=np.float64)
         policy_p2 = np.array([0.1, 0.1, 0.1, 0.2, 0.5], dtype=np.float64)
         prior_p1 = np.array([0.2, 0.2, 0.2, 0.2, 0.2], dtype=np.float64)
         prior_p2 = np.array([0.25, 0.25, 0.25, 0.25, 0.0], dtype=np.float64)
-        visits = np.array(
-            [
-                [10, 5, 3, 2, 1],
-                [8, 12, 4, 1, 0],
-                [6, 7, 15, 3, 2],
-                [4, 3, 2, 20, 5],
-                [2, 1, 1, 4, 25],
-            ],
-            dtype=np.int32,
-        )
+        visits_p1 = np.array([10, 8, 6, 4, 2], dtype=np.int32)
+        visits_p2 = np.array([5, 12, 7, 3, 1], dtype=np.int32)
 
         search_result = SearchResult(
-            payout_matrix=payout,
             policy_p1=policy_p1,
             policy_p2=policy_p2,
-            learning_policy_p1=policy_p1.copy(),
-            learning_policy_p2=policy_p2.copy(),
-            action_visits=visits,
+            value_p1=value_p1,
+            value_p2=value_p2,
+            visit_counts_p1=visits_p1.astype(np.float64),
+            visit_counts_p2=visits_p2.astype(np.float64),
         )
 
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -704,7 +695,8 @@ class TestRoundtrip:
                     search_result=search_result,
                     prior_p1=prior_p1,
                     prior_p2=prior_p2,
-                    visit_counts=visits,
+                    visit_counts_p1=search_result.visit_counts_p1,
+                    visit_counts_p2=search_result.visit_counts_p2,
                     action_p1=0,
                     action_p2=0,
                 )
@@ -715,12 +707,14 @@ class TestRoundtrip:
         pos = loaded.positions[0]
 
         # Check values match (with float32 precision)
-        np.testing.assert_allclose(pos.payout_matrix, payout, rtol=1e-6)
+        assert pos.value_p1 == pytest.approx(value_p1, rel=1e-6)
+        assert pos.value_p2 == pytest.approx(value_p2, rel=1e-6)
         np.testing.assert_allclose(pos.policy_p1, policy_p1, rtol=1e-6)
         np.testing.assert_allclose(pos.policy_p2, policy_p2, rtol=1e-6)
         np.testing.assert_allclose(pos.prior_p1, prior_p1, rtol=1e-6)
         np.testing.assert_allclose(pos.prior_p2, prior_p2, rtol=1e-6)
-        np.testing.assert_array_equal(pos.visit_counts, visits)
+        np.testing.assert_array_equal(pos.visit_counts_p1, visits_p1)
+        np.testing.assert_array_equal(pos.visit_counts_p2, visits_p2)
 
     def test_roundtrip_multiple_positions(self) -> None:
         """Multiple positions should survive roundtrip in order."""
@@ -737,7 +731,8 @@ class TestRoundtrip:
                     search_result=result,
                     prior_p1=np.ones(5) / 5,
                     prior_p2=np.ones(5) / 5,
-                    visit_counts=np.ones((5, 5), dtype=np.int32),
+                    visit_counts_p1=np.ones(5, dtype=np.int32),
+                    visit_counts_p2=np.ones(5, dtype=np.int32),
                     action_p1=0,
                     action_p2=0,
                 )
@@ -751,7 +746,8 @@ class TestRoundtrip:
                     search_result=result,
                     prior_p1=np.ones(5) / 5,
                     prior_p2=np.ones(5) / 5,
-                    visit_counts=np.ones((5, 5), dtype=np.int32) * 2,
+                    visit_counts_p1=np.ones(5, dtype=np.int32) * 2,
+                    visit_counts_p2=np.ones(5, dtype=np.int32) * 2,
                     action_p1=0,
                     action_p2=0,
                 )
@@ -764,7 +760,8 @@ class TestRoundtrip:
                     search_result=result,
                     prior_p1=np.ones(5) / 5,
                     prior_p2=np.ones(5) / 5,
-                    visit_counts=np.ones((5, 5), dtype=np.int32) * 3,
+                    visit_counts_p1=np.ones(5, dtype=np.int32) * 3,
+                    visit_counts_p2=np.ones(5, dtype=np.int32) * 3,
                     action_p1=0,
                     action_p2=0,
                 )
@@ -785,9 +782,9 @@ class TestRoundtrip:
         assert loaded.positions[2].p1_pos == (2, 0)
 
         # Verify visit counts are distinct per position
-        assert loaded.positions[0].visit_counts[0, 0] == 1
-        assert loaded.positions[1].visit_counts[0, 0] == 2
-        assert loaded.positions[2].visit_counts[0, 0] == 3
+        assert loaded.positions[0].visit_counts_p1[0] == 1
+        assert loaded.positions[1].visit_counts_p1[0] == 2
+        assert loaded.positions[2].visit_counts_p1[0] == 3
 
     def test_roundtrip_p2_wins(self) -> None:
         """P2 win result should survive roundtrip."""
@@ -803,7 +800,8 @@ class TestRoundtrip:
                     search_result=result,
                     prior_p1=np.ones(5) / 5,
                     prior_p2=np.ones(5) / 5,
-                    visit_counts=np.zeros((5, 5), dtype=np.int32),
+                    visit_counts_p1=np.zeros(5, dtype=np.int32),
+                    visit_counts_p2=np.zeros(5, dtype=np.int32),
                     action_p1=0,
                     action_p2=0,
                 )
@@ -845,7 +843,8 @@ class TestGameBundler:
                     search_result=result,
                     prior_p1=np.ones(5) / 5,
                     prior_p2=np.ones(5) / 5,
-                    visit_counts=np.ones((5, 5), dtype=np.int32) * (i + 1),
+                    visit_counts_p1=np.ones(5, dtype=np.int32) * (i + 1),
+                    visit_counts_p2=np.ones(5, dtype=np.int32) * (i + 1),
                     action_p1=i % 5,
                     action_p2=(i + 1) % 5,
                 )
@@ -932,7 +931,10 @@ class TestGameBundler:
             # Position-level arrays should have shape (5, ...) total
             total_positions = 3 + 2
             assert data["p1_pos"].shape == (total_positions, 2)
-            assert data["payout_matrix"].shape == (total_positions, 2, 5, 5)
+            assert data["value_p1"].shape == (total_positions,)
+            assert data["value_p2"].shape == (total_positions,)
+            assert data["visit_counts_p1"].shape == (total_positions, 5)
+            assert data["visit_counts_p2"].shape == (total_positions, 5)
 
     def test_auto_flush_on_threshold(self) -> None:
         """Should auto-flush when buffer exceeds threshold."""
@@ -970,7 +972,8 @@ class TestGameBundler:
                     search_result=result,
                     prior_p1=np.ones(5) / 5,
                     prior_p2=np.ones(5) / 5,
-                    visit_counts=np.ones((5, 5), dtype=np.int32),
+                    visit_counts_p1=np.ones(5, dtype=np.int32),
+                    visit_counts_p2=np.ones(5, dtype=np.int32),
                     action_p1=0,
                     action_p2=0,
                 )
@@ -1046,8 +1049,10 @@ def _make_dummy_position() -> PositionData:
         p2_mud=0,
         cheese_positions=[],
         turn=0,
-        payout_matrix=np.zeros((2, 5, 5), dtype=np.float32),
-        visit_counts=np.zeros((5, 5), dtype=np.int32),
+        value_p1=0.0,
+        value_p2=0.0,
+        visit_counts_p1=np.zeros(5, dtype=np.int32),
+        visit_counts_p2=np.zeros(5, dtype=np.int32),
         prior_p1=np.ones(5, dtype=np.float32) / 5,
         prior_p2=np.ones(5, dtype=np.float32) / 5,
         policy_p1=np.ones(5, dtype=np.float32) / 5,
@@ -1086,7 +1091,8 @@ class TestBundleLoading:
                         search_result=result,
                         prior_p1=np.ones(5) / 5,
                         prior_p2=np.ones(5) / 5,
-                        visit_counts=np.ones((5, 5), dtype=np.int32) * (j + 1),
+                        visit_counts_p1=np.ones(5, dtype=np.int32) * (j + 1),
+                        visit_counts_p2=np.ones(5, dtype=np.int32) * (j + 1),
                         action_p1=j % 5,
                         action_p2=0,
                     )
@@ -1119,7 +1125,8 @@ class TestBundleLoading:
                     search_result=result,
                     prior_p1=np.ones(5) / 5,
                     prior_p2=np.ones(5) / 5,
-                    visit_counts=np.ones((5, 5), dtype=np.int32),
+                    visit_counts_p1=np.ones(5, dtype=np.int32),
+                    visit_counts_p2=np.ones(5, dtype=np.int32),
                     action_p1=0,
                     action_p2=0,
                 )
@@ -1172,24 +1179,27 @@ class TestBundleLoading:
             game.player2_position = Coordinates(1, 2)
 
             with GameRecorder(game, tmpdir, width=5, height=5, auto_save=False) as recorder:
-                payout = np.random.rand(2, 5, 5).astype(np.float32)
+                value_p1 = 2.5
+                value_p2 = 1.5
                 policy_p1 = np.array([0.5, 0.2, 0.1, 0.1, 0.1], dtype=np.float32)
                 policy_p2 = np.array([0.1, 0.1, 0.3, 0.3, 0.2], dtype=np.float32)
-                visits = np.arange(25).reshape(5, 5).astype(np.int32)
+                visits_p1 = np.arange(5).astype(np.float64)
+                visits_p2 = np.arange(5, 10).astype(np.float64)
                 result = SearchResult(
-                    payout_matrix=payout,
                     policy_p1=policy_p1,
                     policy_p2=policy_p2,
-                    learning_policy_p1=policy_p1.copy(),
-                    learning_policy_p2=policy_p2.copy(),
-                    action_visits=visits,
+                    value_p1=value_p1,
+                    value_p2=value_p2,
+                    visit_counts_p1=visits_p1,
+                    visit_counts_p2=visits_p2,
                 )
                 recorder.record_position(
                     game=game,
                     search_result=result,
                     prior_p1=np.ones(5) / 5,
                     prior_p2=np.ones(5) / 5,
-                    visit_counts=visits,
+                    visit_counts_p1=result.visit_counts_p1,
+                    visit_counts_p2=result.visit_counts_p2,
                     action_p1=2,
                     action_p2=3,
                 )
@@ -1215,9 +1225,12 @@ class TestBundleLoading:
             assert pos.p2_pos == (1, 2)
             assert pos.action_p1 == 2
             assert pos.action_p2 == 3
-            np.testing.assert_allclose(pos.payout_matrix, payout, rtol=1e-6)
+            assert pos.value_p1 == pytest.approx(value_p1, rel=1e-6)
+            assert pos.value_p2 == pytest.approx(value_p2, rel=1e-6)
             np.testing.assert_allclose(pos.policy_p1, policy_p1, rtol=1e-6)
             np.testing.assert_allclose(pos.policy_p2, policy_p2, rtol=1e-6)
+            np.testing.assert_array_equal(pos.visit_counts_p1, visits_p1)
+            np.testing.assert_array_equal(pos.visit_counts_p2, visits_p2)
 
     def test_bundle_not_single_game_raises(self) -> None:
         """Loading single game file with bundle loader should raise."""
@@ -1235,7 +1248,8 @@ class TestBundleLoading:
                     search_result=result,
                     prior_p1=np.ones(5) / 5,
                     prior_p2=np.ones(5) / 5,
-                    visit_counts=np.ones((5, 5), dtype=np.int32),
+                    visit_counts_p1=np.ones(5, dtype=np.int32),
+                    visit_counts_p2=np.ones(5, dtype=np.int32),
                     action_p1=0,
                     action_p2=0,
                 )

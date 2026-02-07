@@ -30,7 +30,6 @@ optim:
   policy_weight: 1.0
   value_weight: 1.0
   # Architecture-specific:
-  nash_weight: 0.0   # mlp/symmetric
   ownership_weight: 1.0  # local_value only
 
 data:
@@ -45,9 +44,9 @@ resume_from: null  # or path to checkpoint
 
 | Architecture | Description | Augmentation |
 |--------------|-------------|--------------|
-| `mlp` | Flat observation, shared trunk, separate policy/payout heads | Player swap |
+| `mlp` | Flat observation, shared trunk, separate policy/value heads | Player swap |
 | `symmetric` | Structural P1/P2 symmetry in network design | None needed |
-| `local_value` | Per-cell ownership logits + global payout matrix | Player swap |
+| `local_value` | Per-cell ownership logits + scalar value heads | Player swap |
 
 ## Module Structure
 
@@ -78,9 +77,6 @@ nn/
 │   └── local_value.py # LocalValueMLP
 │
 ├── losses/            # Shared loss utilities (imported via __init__)
-│   ├── sparse_payout.py     # sparse_payout_loss()
-│   ├── nash_consistency.py  # nash_consistency_loss()
-│   ├── constant_sum.py      # constant_sum_loss()
 │   └── ownership.py         # compute_ownership_loss()
 │
 ├── builders/          # Observation builders
@@ -192,8 +188,8 @@ resume_from: checkpoints/train_20260101_120000/best_model.pt
 ## Key Protocols
 
 Models must implement `TrainableModel`:
-- `forward(x, **kwargs) -> dict[str, Tensor]` — returns logits + payout
-- `predict(x, **kwargs) -> dict[str, Tensor]` — returns probs + payout
+- `forward(x, **kwargs) -> dict[str, Tensor]` — returns logits + value
+- `predict(x, **kwargs) -> dict[str, Tensor]` — returns probs + value
 
 Loss functions must return `dict[str, Tensor]` with at least `LossKey.TOTAL`.
 

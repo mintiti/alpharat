@@ -8,13 +8,12 @@ import torch
 
 from alpharat.nn.metrics import (
     MetricsAccumulator,
-    compute_payout_metrics,
     compute_policy_metrics,
     explained_variance,
-    payout_correlation,
     policy_entropy,
     target_entropy,
     top_k_accuracy,
+    value_correlation,
 )
 
 
@@ -195,14 +194,14 @@ class TestExplainedVariance:
 
 
 class TestPayoutCorrelation:
-    """Tests for payout_correlation()."""
+    """Tests for value_correlation()."""
 
     def test_perfect_correlation(self) -> None:
         """Correlation = 1.0 for identical matrices."""
         pred = torch.tensor([[[1.0, 2.0], [3.0, 4.0]]])
         target = torch.tensor([[[1.0, 2.0], [3.0, 4.0]]])
 
-        result = payout_correlation(pred, target)
+        result = value_correlation(pred, target)
 
         assert result.item() == pytest.approx(1.0)
 
@@ -211,7 +210,7 @@ class TestPayoutCorrelation:
         pred = torch.tensor([[[1.0, 2.0], [3.0, 4.0]]])
         target = torch.tensor([[[-1.0, -2.0], [-3.0, -4.0]]])
 
-        result = payout_correlation(pred, target)
+        result = value_correlation(pred, target)
 
         assert result.item() == pytest.approx(-1.0)
 
@@ -221,7 +220,7 @@ class TestPayoutCorrelation:
         pred = torch.tensor([[[1.0, -1.0], [-1.0, 1.0]]])
         target = torch.tensor([[[1.0, 1.0], [-1.0, -1.0]]])
 
-        result = payout_correlation(pred, target)
+        result = value_correlation(pred, target)
 
         assert result.item() == pytest.approx(0.0, abs=0.1)
 
@@ -230,7 +229,7 @@ class TestPayoutCorrelation:
         pred = torch.tensor([[[1.0, 1.0], [1.0, 1.0]]])
         target = torch.tensor([[[1.0, 2.0], [3.0, 4.0]]])
 
-        result = payout_correlation(pred, target)
+        result = value_correlation(pred, target)
 
         assert result.item() == pytest.approx(0.0)
 
@@ -256,33 +255,6 @@ class TestComputePolicyMetrics:
         target = torch.tensor([[0.8, 0.1, 0.05, 0.03, 0.02]])
 
         result = compute_policy_metrics(logits, target)
-
-        for key, value in result.items():
-            assert isinstance(value, torch.Tensor), f"{key} is not Tensor"
-            assert value.dim() == 0, f"{key} is not a scalar tensor"
-
-
-class TestComputePayoutMetrics:
-    """Tests for compute_payout_metrics()."""
-
-    def test_returns_all_metrics(self) -> None:
-        """Should return dict with per-player explained_variance and correlation."""
-        pred = torch.randn(4, 2, 5, 5)
-        target = torch.randn(4, 2, 5, 5)
-
-        result = compute_payout_metrics(pred, target)
-
-        assert "p1_explained_variance" in result
-        assert "p1_correlation" in result
-        assert "p2_explained_variance" in result
-        assert "p2_correlation" in result
-
-    def test_returns_tensors(self) -> None:
-        """All values should be scalar tensors (for GPU-efficient accumulation)."""
-        pred = torch.randn(4, 2, 5, 5)
-        target = torch.randn(4, 2, 5, 5)
-
-        result = compute_payout_metrics(pred, target)
 
         for key, value in result.items():
             assert isinstance(value, torch.Tensor), f"{key} is not Tensor"

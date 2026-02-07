@@ -8,9 +8,9 @@ from typing import TYPE_CHECKING, Any
 import numpy as np
 
 from alpharat.ai.base import Agent
+from alpharat.ai.utils import select_action_from_strategy
 from alpharat.config.checkpoint import make_predict_fn
 from alpharat.mcts.decoupled_puct import DecoupledPUCTConfig
-from alpharat.mcts.nash import select_action_from_strategy
 from alpharat.mcts.node import MCTSNode
 from alpharat.mcts.tree import MCTSTree
 
@@ -140,7 +140,8 @@ class MCTSAgent(Agent):
             game_state=None,
             prior_policy_p1=dummy,
             prior_policy_p2=dummy,
-            nn_payout_prediction=np.zeros((2, 5, 5)),
+            nn_value_p1=0.0,
+            nn_value_p2=0.0,
             parent=None,
             p1_mud_turns_remaining=p1_mud,
             p2_mud_turns_remaining=p2_mud,

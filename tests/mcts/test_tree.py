@@ -122,12 +122,12 @@ def fake_tree(fake_game: FakeGame) -> MCTSTree:
     """Tree backed by FakeGame."""
     prior_p1 = np.ones(5) / 5
     prior_p2 = np.ones(5) / 5
-    nn_payout = np.zeros((2, 5, 5))  # Bimatrix format: [p1_payoffs, p2_payoffs]
     root = MCTSNode(
         game_state=None,
         prior_policy_p1=prior_p1,
         prior_policy_p2=prior_p2,
-        nn_payout_prediction=nn_payout,
+        nn_value_p1=0.0,
+        nn_value_p2=0.0,
         parent=None,
     )
     return MCTSTree(game=fake_game, root=root, gamma=1.0)  # type: ignore[arg-type]
@@ -144,13 +144,13 @@ def root_node() -> MCTSNode:
     """Create a root node with uniform priors."""
     prior_p1 = np.ones(5) / 5
     prior_p2 = np.ones(5) / 5
-    nn_payout = np.zeros((2, 5, 5))  # Bimatrix format: [p1_payoffs, p2_payoffs]
 
     return MCTSNode(
         game_state=None,
         prior_policy_p1=prior_p1,
         prior_policy_p2=prior_p2,
-        nn_payout_prediction=nn_payout,
+        nn_value_p1=0.0,
+        nn_value_p2=0.0,
         parent=None,
         move_undo=None,
     )
@@ -383,55 +383,219 @@ class TestBackup:
         # Create a child
         child, _ = tree.make_move_from(tree.root, 0, 0)
 
-        # Backup path with one step - tuple rewards (p1_reward, p2_reward)
-        path = [(tree.root, 0, 0, (1.0, -0.5))]  # (node, action_p1, action_p2, reward)
+        # Get outcome indices for the action (handles wall-blocked actions)
+        idx1 = tree.root.action_to_outcome(1, 0)  # P1's outcome index
+        idx2 = tree.root.action_to_outcome(2, 0)  # P2's outcome index
+
+        # Set edge rewards on child (simulates what make_move_from does)
+        child._edge_r1 = 1.0
+        child._edge_r2 = -0.5
+
+        # Backup path with one step (reward is stored on child.edge_r)
+        path = [(tree.root, 0, 0)]  # (node, action_p1, action_p2)
         tree.backup(path)
 
-        # Root should have updated Q-value for both players
-        assert tree.root.action_visits[0, 0] == 1
-        # value = reward + gamma * 0 = (1.0, -0.5) + 1.0 * (0, 0) = (1.0, -0.5)
-        assert tree.root.payout_matrix[0, 0, 0] == pytest.approx(1.0)  # P1's payout
-        assert tree.root.payout_matrix[1, 0, 0] == pytest.approx(-0.5)  # P2's payout
+        # Root should have updated Q-values (marginal, per-player)
+        n1, n2 = tree.root.get_visit_counts()
+        q1, q2 = tree.root.get_q_values()
+        assert n1[idx1] == 1  # Outcome visited once
+        assert n2[idx2] == 1  # Outcome visited once
+        # value = edge_r + gamma * 0 = (1.0, -0.5) + 1.0 * (0, 0) = (1.0, -0.5)
+        assert q1[idx1] == pytest.approx(1.0)  # P1's Q-value
+        assert q2[idx2] == pytest.approx(-0.5)  # P2's Q-value
 
     def test_backup_with_discount_factor(self, tree: MCTSTree) -> None:
         """Backup should apply gamma discounting."""
         # Create tree with gamma < 1
         tree_discounted = MCTSTree(tree.game, tree.root, gamma=0.9)
 
-        # Create path: root → child
+        # Create path: root → child → grandchild
         child, _ = tree_discounted.make_move_from(tree.root, 0, 0)
+        grandchild, _ = tree_discounted.make_move_from(child, 1, 1)
 
-        # Backup path with two steps - tuple rewards (p1_reward, p2_reward)
-        # At child: reward = (0.5, 0.0), future value = (0, 0)
-        # At root: reward = (1.0, 0.0), future value = (0.5, 0.0)
+        # Get outcome indices
+        root_idx1 = tree.root.action_to_outcome(1, 0)
+        child_idx1 = child.action_to_outcome(1, 1)
+
+        # Set edge rewards (simulates what make_move_from does)
+        # At root→child: reward = (1.0, 0.0)
+        # At child→grandchild: reward = (0.5, 0.0)
+        child._edge_r1 = 1.0
+        child._edge_r2 = 0.0
+        grandchild._edge_r1 = 0.5
+        grandchild._edge_r2 = 0.0
+
+        # Backup path with two steps (rewards stored on children's edge_r)
         path = [
-            (tree.root, 0, 0, (1.0, 0.0)),  # reward at root
-            (child, 1, 1, (0.5, 0.0)),  # reward at child
+            (tree.root, 0, 0),  # root → child
+            (child, 1, 1),  # child → grandchild
         ]
         tree_discounted.backup(path)
 
-        # Child: value = (0.5, 0.0) + 0.9 * (0, 0) = (0.5, 0.0)
-        assert child.payout_matrix[0, 1, 1] == pytest.approx(0.5)  # P1's payout
+        # Grandchild: value = (0.5, 0.0) + 0.9 * (0, 0) = (0.5, 0.0)
+        child_q1, child_q2 = child.get_q_values(gamma=0.9)
+        assert child_q1[child_idx1] == pytest.approx(0.5)  # P1's Q-value
 
         # Root: value = (1.0, 0.0) + 0.9 * (0.5, 0.0) = (1.45, 0.0)
-        assert tree.root.payout_matrix[0, 0, 0] == pytest.approx(1.45)  # P1's payout
+        root_q1, root_q2 = tree.root.get_q_values(gamma=0.9)
+        assert root_q1[root_idx1] == pytest.approx(1.45)  # P1's Q-value
 
     def test_backup_multiple_visits(self, tree: MCTSTree) -> None:
-        """Multiple backups should use incremental mean."""
-        # First backup - tuple rewards (p1_reward, p2_reward)
-        path1 = [(tree.root, 0, 0, (10.0, -10.0))]
-        tree.backup(path1)
-        assert tree.root.payout_matrix[0, 0, 0] == pytest.approx(10.0)  # P1
-        assert tree.root.payout_matrix[1, 0, 0] == pytest.approx(-10.0)  # P2
+        """Multiple backups should use incremental mean for node values."""
+        # Create a child first
+        child, _ = tree.make_move_from(tree.root, 0, 0)
 
-        # Second backup to same action
-        path2 = [(tree.root, 0, 0, (6.0, -6.0))]
-        tree.backup(path2)
-        # P1: Q = 10.0 + (6.0 - 10.0) / 2 = 8.0
-        # P2: Q = -10.0 + (-6.0 - (-10.0)) / 2 = -8.0
-        assert tree.root.payout_matrix[0, 0, 0] == pytest.approx(8.0)  # P1
-        assert tree.root.payout_matrix[1, 0, 0] == pytest.approx(-8.0)  # P2
-        assert tree.root.action_visits[0, 0] == 2
+        # Get outcome indices for action 0
+        idx1 = tree.root.action_to_outcome(1, 0)
+        idx2 = tree.root.action_to_outcome(2, 0)
+
+        # Set consistent edge reward
+        child._edge_r1 = 1.0
+        child._edge_r2 = -1.0
+
+        # First backup with g=(10.0, -10.0) => Q = 1.0 + 1.0*10.0 = 11.0
+        path1 = [(tree.root, 0, 0)]
+        tree.backup(path1, g=(10.0, -10.0))
+
+        # Second backup with g=(6.0, -6.0) => Q = 1.0 + 1.0*6.0 = 7.0
+        path2 = [(tree.root, 0, 0)]
+        tree.backup(path2, g=(6.0, -6.0))
+
+        # Root's V should be incremental mean of Q values: (11.0 + 7.0) / 2 = 9.0
+        assert tree.root.v1 == pytest.approx(9.0)  # P1
+        assert tree.root.v2 == pytest.approx(-9.0)  # P2
+
+        # Child's V should be incremental mean of g values: (10.0 + 6.0) / 2 = 8.0
+        assert child.v1 == pytest.approx(8.0)  # P1
+        assert child.v2 == pytest.approx(-8.0)  # P2
+
+        # get_q_values() returns Q = edge_r + gamma * child.V = 1.0 + 1.0 * 8.0 = 9.0
+        q1, q2 = tree.root.get_q_values()
+        assert q1[idx1] == pytest.approx(9.0)  # P1
+        assert q2[idx2] == pytest.approx(-9.0)  # P2
+
+        n1, n2 = tree.root.get_visit_counts()
+        assert n1[idx1] == 2  # Outcome visited twice
+
+    def test_backup_multi_level_correctness(self, tree: MCTSTree) -> None:
+        """Test 2-step path verifies correct value averaging.
+
+        This catches the double-update bug where intermediate nodes
+        would get their values updated twice per simulation.
+        """
+        # Create path: root -> node_a -> node_b (leaf)
+        node_a, _ = tree.make_move_from(tree.root, 0, 0)
+        node_b, _ = tree.make_move_from(node_a, 1, 1)
+
+        # Set edge rewards
+        node_a._edge_r1, node_a._edge_r2 = 1.0, -1.0
+        node_b._edge_r1, node_b._edge_r2 = 0.5, -0.5
+
+        path = [(tree.root, 0, 0), (node_a, 1, 1)]
+
+        # Simulation 1: g = (10, -10)
+        # node_b.V = 10
+        # Q_B = 0.5 + 1.0*10 = 10.5 (used to update node_a.V)
+        # Q_A = 1.0 + 1.0*10.5 = 11.5 (used to update root.V)
+        tree.backup(path, g=(10.0, -10.0))
+
+        assert node_b.v1 == pytest.approx(10.0)
+        assert node_a.v1 == pytest.approx(10.5)
+        assert tree.root.v1 == pytest.approx(11.5)
+
+        # Simulation 2: g = (6, -6)
+        # node_b.V = mean(10, 6) = 8
+        # Q_B = 0.5 + 1.0*6 = 6.5
+        # node_a.V = mean(10.5, 6.5) = 8.5  <-- Would be 8.75 with bug
+        # Q_A = 1.0 + 1.0*6.5 = 7.5
+        # root.V = mean(11.5, 7.5) = 9.5
+        tree.backup(path, g=(6.0, -6.0))
+
+        assert node_b.v1 == pytest.approx(8.0)
+        assert node_a.v1 == pytest.approx(8.5)  # Key assertion - fails with bug
+        assert tree.root.v1 == pytest.approx(9.5)
+
+        # Verify visit counts
+        assert node_b._edge_visits == 2
+        assert node_a._edge_visits == 2
+        assert tree.root._total_visits == 2
+
+    def test_get_q_values_matches_average_returns(self, tree: MCTSTree) -> None:
+        """Verify get_q_values returns average of backed-up returns.
+
+        After backup, Q from get_q_values should equal the average of the
+        actual q_values that were computed during backup.
+        """
+        # Create child
+        child, _ = tree.make_move_from(tree.root, 0, 0)
+        child._edge_r1, child._edge_r2 = 2.0, -2.0
+
+        # Track what we back up
+        backed_up_q1 = []
+
+        # Simulation 1: g = (10, -10) → Q = 2 + 1*10 = 12
+        path = [(tree.root, 0, 0)]
+        tree.backup(path, g=(10.0, -10.0))
+        backed_up_q1.append(2.0 + 1.0 * 10.0)  # edge_r + gamma * g
+
+        # Simulation 2: g = (4, -4) → Q = 2 + 1*4 = 6
+        tree.backup(path, g=(4.0, -4.0))
+        backed_up_q1.append(2.0 + 1.0 * 4.0)
+
+        # Simulation 3: g = (7, -7) → Q = 2 + 1*7 = 9
+        tree.backup(path, g=(7.0, -7.0))
+        backed_up_q1.append(2.0 + 1.0 * 7.0)
+
+        # get_q_values should return average: (12 + 6 + 9) / 3 = 9
+        q1, q2 = tree.root.get_q_values(gamma=tree.gamma)
+
+        idx = tree.root.action_to_outcome(1, 0)
+        expected_q1 = sum(backed_up_q1) / len(backed_up_q1)
+        assert q1[idx] == pytest.approx(expected_q1)
+
+    def test_marginal_q_via_tree_backup(self, tree: MCTSTree) -> None:
+        """Verify marginal Q works correctly through tree.backup.
+
+        Create two children sharing the same P1 outcome, back up through
+        both, and verify Q1 is the weighted average.
+        """
+        # Find two P2 actions that map to DIFFERENT outcomes
+        # We need distinct children to test marginalization
+        p2_outcomes = tree.root.p2_outcomes
+        if len(p2_outcomes) < 2:
+            pytest.skip("Need at least 2 unique P2 outcomes for marginalization test")
+
+        # Find P2 actions that map to different outcomes
+        p2_action_a = tree.root.p2_outcomes[0]  # Canonical action for first outcome
+        p2_action_b = tree.root.p2_outcomes[1]  # Canonical action for second outcome
+
+        # Use P1 action 0 for both (same P1 outcome)
+        p1_action = 0
+
+        # Create two distinct children: (p1, p2_a) and (p1, p2_b)
+        child_a, _ = tree.make_move_from(tree.root, p1_action, p2_action_a)
+        child_b, _ = tree.make_move_from(tree.root, p1_action, p2_action_b)
+
+        # Verify they're different children
+        assert child_a is not child_b, "Test requires distinct children"
+
+        # Set edge rewards
+        child_a._edge_r1 = 1.0
+        child_b._edge_r1 = 3.0
+
+        # Back up 2x through child_a with g = (10, ...) → Q = 1 + 10 = 11
+        tree.backup([(tree.root, p1_action, p2_action_a)], g=(10.0, 0.0))
+        tree.backup([(tree.root, p1_action, p2_action_a)], g=(10.0, 0.0))
+
+        # Back up 1x through child_b with g = (20, ...) → Q = 3 + 20 = 23
+        tree.backup([(tree.root, p1_action, p2_action_b)], g=(20.0, 0.0))
+
+        # Q1(p1_outcome) = (2*11 + 1*23) / 3 = 45/3 = 15
+        q1, _ = tree.root.get_q_values(gamma=tree.gamma)
+        idx = tree.root.action_to_outcome(1, p1_action)
+
+        expected = (2 * 11.0 + 1 * 23.0) / 3
+        assert q1[idx] == pytest.approx(expected)
 
 
 class TestMultipleExpansions:
@@ -566,16 +730,16 @@ class TestPredictionCache:
     @staticmethod
     def _counting_predict_fn() -> tuple[
         list[int],
-        Callable[[object], tuple[np.ndarray, np.ndarray, np.ndarray]],
+        Callable[[object], tuple[np.ndarray, np.ndarray, float, float]],
     ]:
         """Create a predict_fn that counts how many times it's called."""
         call_count = [0]
 
         def predict_fn(
             observation: object,
-        ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+        ) -> tuple[np.ndarray, np.ndarray, float, float]:
             call_count[0] += 1
-            return np.ones(5) / 5, np.ones(5) / 5, np.zeros((2, 5, 5))
+            return np.ones(5) / 5, np.ones(5) / 5, 0.0, 0.0
 
         return call_count, predict_fn
 
@@ -588,7 +752,8 @@ class TestPredictionCache:
             game_state=None,
             prior_policy_p1=np.ones(5) / 5,
             prior_policy_p2=np.ones(5) / 5,
-            nn_payout_prediction=np.zeros((2, 5, 5)),
+            nn_value_p1=0.0,
+            nn_value_p2=0.0,
         )
         tree = MCTSTree(game=game, root=root, gamma=1.0, predict_fn=predict_fn)  # type: ignore[arg-type]
 
@@ -620,7 +785,8 @@ class TestPredictionCache:
             game_state=None,
             prior_policy_p1=np.ones(5) / 5,
             prior_policy_p2=np.ones(5) / 5,
-            nn_payout_prediction=np.zeros((2, 5, 5)),
+            nn_value_p1=0.0,
+            nn_value_p2=0.0,
         )
         tree = MCTSTree(game=game, root=root, gamma=1.0, predict_fn=predict_fn)  # type: ignore[arg-type]
         assert call_count[0] == 1  # Root init
@@ -640,7 +806,8 @@ class TestPredictionCache:
             game_state=None,
             prior_policy_p1=np.ones(5) / 5,
             prior_policy_p2=np.ones(5) / 5,
-            nn_payout_prediction=np.zeros((2, 5, 5)),
+            nn_value_p1=0.0,
+            nn_value_p2=0.0,
         )
         tree = MCTSTree(game=game, root=root, gamma=1.0)  # type: ignore[arg-type]
 
@@ -660,7 +827,8 @@ class TestPredictionCache:
             game_state=None,
             prior_policy_p1=np.ones(5) / 5,
             prior_policy_p2=np.ones(5) / 5,
-            nn_payout_prediction=np.zeros((2, 5, 5)),
+            nn_value_p1=0.0,
+            nn_value_p2=0.0,
         )
         tree = MCTSTree(game=game, root=root, gamma=1.0, predict_fn=predict_fn)  # type: ignore[arg-type]
 
@@ -677,3 +845,29 @@ class TestPredictionCache:
         # The two nodes should have independent prior arrays
         # (node init uses np.add.at which mutates in place)
         assert _aa.prior_policy_p1 is not _bb.prior_policy_p1
+
+
+class TestTerminalNodes:
+    """Tests for terminal node handling."""
+
+    def test_terminal_node_value_is_zero_at_creation(self) -> None:
+        """Terminal children should have V=(0, 0) immediately after creation."""
+        game = FakeGame()
+        # Set turn to max_turns so next child hits terminal check
+        game.turn = game.max_turns - 1
+
+        root = MCTSNode(
+            game_state=None,
+            prior_policy_p1=np.ones(5) / 5,
+            prior_policy_p2=np.ones(5) / 5,
+            nn_value_p1=0.0,
+            nn_value_p2=0.0,
+        )
+        tree = MCTSTree(game=game, root=root, gamma=1.0)  # type: ignore[arg-type]
+
+        # Create a child — game.turn will be max_turns after make_move
+        child, _ = tree.make_move_from(tree.root, 4, 4)  # STAY/STAY
+
+        assert child.is_terminal
+        assert child._v1 == 0.0
+        assert child._v2 == 0.0

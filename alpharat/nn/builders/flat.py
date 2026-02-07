@@ -7,6 +7,8 @@ from typing import TYPE_CHECKING
 
 import numpy as np
 
+from alpharat.nn.training.keys import BatchKey
+
 if TYPE_CHECKING:
     from alpharat.data.sharding import TrainingSetManifest
     from alpharat.nn.types import ObservationInput
@@ -139,9 +141,9 @@ class FlatObservationBuilder:
             observations: List of observation arrays from build().
 
         Returns:
-            Dict with single "observations" key containing stacked array.
+            Dict with single "observation" key containing stacked array.
         """
-        return {"observations": np.stack(observations)}
+        return {BatchKey.OBSERVATION: np.stack(observations)}
 
     def load_from_arrays(self, arrays: dict[str, np.ndarray], idx: int) -> np.ndarray:
         """Load single observation from arrays.
@@ -153,7 +155,7 @@ class FlatObservationBuilder:
         Returns:
             Observation array at index.
         """
-        obs: np.ndarray = arrays["observations"][idx]
+        obs: np.ndarray = arrays[BatchKey.OBSERVATION][idx]
         return obs
 
 
@@ -197,30 +199,27 @@ class FlatDataset:
         observations_list: list[np.ndarray] = []
         policy_p1_list: list[np.ndarray] = []
         policy_p2_list: list[np.ndarray] = []
-        p1_value_list: list[np.ndarray] = []
-        p2_value_list: list[np.ndarray] = []
-        payout_matrix_list: list[np.ndarray] = []
+        value_p1_list: list[np.ndarray] = []
+        value_p2_list: list[np.ndarray] = []
         action_p1_list: list[np.ndarray] = []
         action_p2_list: list[np.ndarray] = []
 
         for i in range(self._manifest.shard_count):
             shard_path = training_set_dir / f"shard_{i:04d}.npz"
             with np.load(shard_path) as data:
-                observations_list.append(data["observations"])
-                policy_p1_list.append(data["policy_p1"])
-                policy_p2_list.append(data["policy_p2"])
-                p1_value_list.append(data["p1_value"])
-                p2_value_list.append(data["p2_value"])
-                payout_matrix_list.append(data["payout_matrix"])
-                action_p1_list.append(data["action_p1"])
-                action_p2_list.append(data["action_p2"])
+                observations_list.append(data[BatchKey.OBSERVATION])
+                policy_p1_list.append(data[BatchKey.POLICY_P1])
+                policy_p2_list.append(data[BatchKey.POLICY_P2])
+                value_p1_list.append(data[BatchKey.VALUE_P1])
+                value_p2_list.append(data[BatchKey.VALUE_P2])
+                action_p1_list.append(data[BatchKey.ACTION_P1])
+                action_p2_list.append(data[BatchKey.ACTION_P2])
 
         self._observations = np.concatenate(observations_list)
         self._policy_p1 = np.concatenate(policy_p1_list)
         self._policy_p2 = np.concatenate(policy_p2_list)
-        self._p1_value = np.concatenate(p1_value_list)
-        self._p2_value = np.concatenate(p2_value_list)
-        self._payout_matrix = np.concatenate(payout_matrix_list)
+        self._value_p1 = np.concatenate(value_p1_list)
+        self._value_p2 = np.concatenate(value_p2_list)
         self._action_p1 = np.concatenate(action_p1_list)
         self._action_p2 = np.concatenate(action_p2_list)
 
@@ -231,7 +230,7 @@ class FlatDataset:
 
     def __len__(self) -> int:
         """Return total number of positions."""
-        return len(self._p1_value)
+        return len(self._value_p1)
 
     def __getitem__(self, idx: int) -> dict[str, np.ndarray]:
         """Get single training example.
@@ -244,21 +243,19 @@ class FlatDataset:
                 - "observation": float32 (obs_dim,)
                 - "policy_p1": float32 (5,)
                 - "policy_p2": float32 (5,)
-                - "p1_value": float32 (1,) — P1's actual remaining score
-                - "p2_value": float32 (1,) — P2's actual remaining score
-                - "payout_matrix": float32 (2, 5, 5)
+                - "value_p1": float32 (1,) — P1's actual remaining score
+                - "value_p2": float32 (1,) — P2's actual remaining score
                 - "action_p1": int8 (1,)
                 - "action_p2": int8 (1,)
         """
         return {
-            "observation": self._observations[idx],
-            "policy_p1": self._policy_p1[idx],
-            "policy_p2": self._policy_p2[idx],
-            "p1_value": self._p1_value[idx : idx + 1],  # Keep as 1D for consistency
-            "p2_value": self._p2_value[idx : idx + 1],
-            "payout_matrix": self._payout_matrix[idx],
-            "action_p1": self._action_p1[idx : idx + 1],
-            "action_p2": self._action_p2[idx : idx + 1],
+            BatchKey.OBSERVATION: self._observations[idx],
+            BatchKey.POLICY_P1: self._policy_p1[idx],
+            BatchKey.POLICY_P2: self._policy_p2[idx],
+            BatchKey.VALUE_P1: self._value_p1[idx : idx + 1],  # Keep as 1D for consistency
+            BatchKey.VALUE_P2: self._value_p2[idx : idx + 1],
+            BatchKey.ACTION_P1: self._action_p1[idx : idx + 1],
+            BatchKey.ACTION_P2: self._action_p2[idx : idx + 1],
         }
 
     @property

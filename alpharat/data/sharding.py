@@ -15,9 +15,11 @@ from tqdm import tqdm
 
 from alpharat.config.base import StrictBaseModel
 from alpharat.data.loader import is_bundle_file, iter_games_from_bundle, load_game_data
+from alpharat.data.types import GameFileKey
 from alpharat.experiments.paths import batch_id_from_path
 from alpharat.nn.extraction import from_game_arrays
 from alpharat.nn.targets import build_targets
+from alpharat.nn.training.keys import BatchKey
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
@@ -92,12 +94,11 @@ def prepare_training_set(
             ...
 
     Each shard contains:
-        - observations: from builder.save_to_arrays()
+        - observation: from builder.save_to_arrays()
         - policy_p1: float32 (N, 5)
         - policy_p2: float32 (N, 5)
-        - p1_value: float32 (N,) — P1's actual remaining score
-        - p2_value: float32 (N,) — P2's actual remaining score
-        - payout_matrix: float32 (N, 2, 5, 5)
+        - value_p1: float32 (N,) — P1's actual remaining score
+        - value_p2: float32 (N,) — P2's actual remaining score
         - action_p1: int8 (N,)
         - action_p2: int8 (N,)
         - cheese_outcomes: int8 (N, H, W) — position-level ownership targets.
@@ -127,7 +128,6 @@ def prepare_training_set(
         all_policy_p2,
         all_p1_values,
         all_p2_values,
-        all_payout_matrices,
         all_action_p1,
         all_action_p2,
         all_cheese_outcomes,
@@ -148,7 +148,6 @@ def prepare_training_set(
     all_policy_p2 = all_policy_p2[indices]
     all_p1_values = all_p1_values[indices]
     all_p2_values = all_p2_values[indices]
-    all_payout_matrices = all_payout_matrices[indices]
     all_action_p1 = all_action_p1[indices]
     all_action_p2 = all_action_p2[indices]
     all_cheese_outcomes = all_cheese_outcomes[indices]
@@ -166,7 +165,6 @@ def prepare_training_set(
         all_policy_p2,
         all_p1_values,
         all_p2_values,
-        all_payout_matrices,
         all_action_p1,
         all_action_p2,
         all_cheese_outcomes,
@@ -334,7 +332,6 @@ def _process_game_refs_to_shards(
         policy_p2_array,
         p1_values_array,
         p2_values_array,
-        payout_array,
         action_p1_array,
         action_p2_array,
         cheese_outcomes_array,
@@ -353,7 +350,6 @@ def _process_game_refs_to_shards(
     policy_p2_array = policy_p2_array[indices]
     p1_values_array = p1_values_array[indices]
     p2_values_array = p2_values_array[indices]
-    payout_array = payout_array[indices]
     action_p1_array = action_p1_array[indices]
     action_p2_array = action_p2_array[indices]
     cheese_outcomes_array = cheese_outcomes_array[indices]
@@ -366,7 +362,6 @@ def _process_game_refs_to_shards(
         policy_p2_array,
         p1_values_array,
         p2_values_array,
-        payout_array,
         action_p1_array,
         action_p2_array,
         cheese_outcomes_array,
@@ -434,7 +429,7 @@ def _collect_game_refs(batch_dirs: list[Path]) -> list[GameRef]:
             if is_bundle_file(game_file):
                 # Count games in bundle without loading full data
                 with np.load(game_file) as data:
-                    n_games = len(data["game_lengths"])
+                    n_games = len(data[GameFileKey.GAME_LENGTHS])
                 for i in range(n_games):
                     game_refs.append(GameRef(game_file, bundle_index=i))
             else:
@@ -527,14 +522,12 @@ def _process_games_to_arrays(
     np.ndarray,
     np.ndarray,
     np.ndarray,
-    np.ndarray,
     int,
     int,
 ]:
     """Build observations and targets from a game sequence.
 
     Shared logic for both ref-based and file-based loading paths.
-    Patches each position's played cell with ground truth game outcome.
 
     Args:
         games: Iterator of GameData objects to process.
@@ -542,7 +535,7 @@ def _process_games_to_arrays(
 
     Returns:
         Tuple of (observations, policy_p1, policy_p2, p1_values, p2_values,
-        payout_matrices, action_p1, action_p2, cheese_outcomes, width, height).
+        action_p1, action_p2, cheese_outcomes, width, height).
 
     Raises:
         ValueError: If games have different dimensions or no positions found.
@@ -552,7 +545,6 @@ def _process_games_to_arrays(
     all_policy_p2: list[np.ndarray] = []
     all_p1_values: list[float] = []
     all_p2_values: list[float] = []
-    all_payout_matrices: list[np.ndarray] = []
     all_action_p1: list[int] = []
     all_action_p2: list[int] = []
     all_cheese_outcomes: list[np.ndarray] = []
@@ -577,19 +569,11 @@ def _process_games_to_arrays(
             obs = builder.build(obs_input)
             targets = build_targets(game_data, position)
 
-            # Patch played cell with ground truth game outcome.
-            # The MCTS payout matrix has estimates for all action pairs. For the
-            # actually-played pair, we have the real outcome. Patching here avoids
-            # per-batch cloning during training.
-            targets.payout_matrix[0, targets.action_p1, targets.action_p2] = targets.p1_value
-            targets.payout_matrix[1, targets.action_p1, targets.action_p2] = targets.p2_value
-
             all_observations.append(obs)
             all_policy_p1.append(targets.policy_p1)
             all_policy_p2.append(targets.policy_p2)
             all_p1_values.append(targets.p1_value)
             all_p2_values.append(targets.p2_value)
-            all_payout_matrices.append(targets.payout_matrix)
             all_action_p1.append(targets.action_p1)
             all_action_p2.append(targets.action_p2)
             all_cheese_outcomes.append(targets.cheese_outcomes)
@@ -603,7 +587,6 @@ def _process_games_to_arrays(
         np.stack(all_policy_p2),
         np.array(all_p1_values, dtype=np.float32),
         np.array(all_p2_values, dtype=np.float32),
-        np.stack(all_payout_matrices),
         np.array(all_action_p1, dtype=np.int8),
         np.array(all_action_p2, dtype=np.int8),
         np.stack(all_cheese_outcomes),
@@ -616,7 +599,6 @@ def _load_positions_from_refs(
     refs: list[GameRef],
     builder: ObservationBuilder,
 ) -> tuple[
-    np.ndarray,
     np.ndarray,
     np.ndarray,
     np.ndarray,
@@ -644,19 +626,106 @@ def _load_positions_from_files(
     np.ndarray,
     np.ndarray,
     np.ndarray,
-    np.ndarray,
     int,
     int,
 ]:
-    """Load and process positions from game files into stacked arrays."""
-    return _process_games_to_arrays(_iter_games_from_files(game_files), builder)
+    """Load and process positions from game files into stacked arrays.
+
+    Handles both single-game .npz files and bundled .npz files.
+
+    Args:
+        game_files: List of game npz files to process (single or bundled).
+        builder: ObservationBuilder to use.
+
+    Returns:
+        Tuple of:
+            - observation: float32 (N, obs_dim)
+            - policy_p1: float32 (N, 5)
+            - policy_p2: float32 (N, 5)
+            - value_p1: float32 (N,) — P1's remaining score (actual game outcome)
+            - value_p2: float32 (N,) — P2's remaining score (actual game outcome)
+            - action_p1: int8 (N,)
+            - action_p2: int8 (N,)
+            - cheese_outcomes: int8 (N, H, W) — position-level ownership targets.
+                Values: -1=inactive (no cheese), 0-3=outcome class.
+            - width: int
+            - height: int
+
+    Raises:
+        ValueError: If game files have different dimensions or no positions found.
+    """
+    all_observations: list[np.ndarray] = []
+    all_policy_p1: list[np.ndarray] = []
+    all_policy_p2: list[np.ndarray] = []
+    all_p1_values: list[float] = []
+    all_p2_values: list[float] = []
+    all_action_p1: list[int] = []
+    all_action_p2: list[int] = []
+    all_cheese_outcomes: list[np.ndarray] = []
+
+    width: int | None = None
+    height: int | None = None
+
+    def process_game(game_data: GameData, source_file: Path) -> None:
+        """Process a single game and append to result lists."""
+        nonlocal width, height
+
+        # Validate dimensions
+        if width is None:
+            width = game_data.width
+            height = game_data.height
+        elif game_data.width != width or game_data.height != height:
+            raise ValueError(
+                f"Dimension mismatch: expected ({width}, {height}), "
+                f"got ({game_data.width}, {game_data.height}) in {source_file}"
+            )
+
+        # Process each position
+        for position in game_data.positions:
+            obs_input = from_game_arrays(game_data, position)
+            obs = builder.build(obs_input)
+            targets = build_targets(game_data, position)
+
+            all_observations.append(obs)
+            all_policy_p1.append(targets.policy_p1)
+            all_policy_p2.append(targets.policy_p2)
+            all_p1_values.append(targets.p1_value)
+            all_p2_values.append(targets.p2_value)
+            all_action_p1.append(targets.action_p1)
+            all_action_p2.append(targets.action_p2)
+            all_cheese_outcomes.append(targets.cheese_outcomes)
+
+    for game_file in tqdm(game_files, desc="Loading files", unit="file"):
+        if is_bundle_file(game_file):
+            # Bundle file: iterate over all games in the bundle
+            for game_data in iter_games_from_bundle(game_file):
+                process_game(game_data, game_file)
+        else:
+            # Single-game file
+            game_data = load_game_data(game_file)
+            process_game(game_data, game_file)
+
+    if width is None or height is None:
+        raise ValueError("No positions found in game files")
+
+    return (
+        np.stack(all_observations),
+        np.stack(all_policy_p1),
+        np.stack(all_policy_p2),
+        np.array(all_p1_values, dtype=np.float32),
+        np.array(all_p2_values, dtype=np.float32),
+        np.array(all_action_p1, dtype=np.int8),
+        np.array(all_action_p2, dtype=np.int8),
+        np.stack(all_cheese_outcomes),
+        width,
+        height,
+    )
 
 
 def _load_all_positions(
     batch_dirs: list[Path],
     builder: ObservationBuilder,
 ) -> tuple[
-    np.ndarray,
     np.ndarray,
     np.ndarray,
     np.ndarray,
@@ -700,7 +769,6 @@ def _write_shards(
     policy_p2: np.ndarray,
     p1_values: np.ndarray,
     p2_values: np.ndarray,
-    payout_matrices: np.ndarray,
     action_p1: np.ndarray,
     action_p2: np.ndarray,
     cheese_outcomes: np.ndarray,
@@ -715,7 +783,6 @@ def _write_shards(
         policy_p2: All P2 policies, shape (N, 5).
         p1_values: P1's remaining scores, shape (N,).
         p2_values: P2's remaining scores, shape (N,).
-        payout_matrices: All payout matrices, shape (N, 2, 5, 5).
         action_p1: All P1 actions, shape (N,).
         action_p2: All P2 actions, shape (N,).
         cheese_outcomes: Position-level ownership targets, shape (N, H, W).
@@ -738,18 +805,17 @@ def _write_shards(
         end_idx = min(start_idx + positions_per_shard, n_positions)
 
         shard_path = training_set_dir / f"shard_{shard_count:04d}.npz"
-        np.savez_compressed(
-            shard_path,
-            observations=observations[start_idx:end_idx],
-            policy_p1=policy_p1[start_idx:end_idx],
-            policy_p2=policy_p2[start_idx:end_idx],
-            p1_value=p1_values[start_idx:end_idx],
-            p2_value=p2_values[start_idx:end_idx],
-            payout_matrix=payout_matrices[start_idx:end_idx],
-            action_p1=action_p1[start_idx:end_idx],
-            action_p2=action_p2[start_idx:end_idx],
-            cheese_outcomes=cheese_outcomes[start_idx:end_idx],
-        )
+        shard_arrays: dict[str, np.ndarray] = {
+            BatchKey.OBSERVATION: observations[start_idx:end_idx],
+            BatchKey.POLICY_P1: policy_p1[start_idx:end_idx],
+            BatchKey.POLICY_P2: policy_p2[start_idx:end_idx],
+            BatchKey.VALUE_P1: p1_values[start_idx:end_idx],
+            BatchKey.VALUE_P2: p2_values[start_idx:end_idx],
+            BatchKey.ACTION_P1: action_p1[start_idx:end_idx],
+            BatchKey.ACTION_P2: action_p2[start_idx:end_idx],
+            BatchKey.CHEESE_OUTCOMES: cheese_outcomes[start_idx:end_idx],
+        }
+        np.savez_compressed(shard_path, **shard_arrays)  # type: ignore[arg-type]
         shard_count += 1
 
     return shard_count

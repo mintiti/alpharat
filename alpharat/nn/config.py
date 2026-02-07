@@ -64,7 +64,6 @@ class TrainConfig(StrictBaseModel):
         optim:
           architecture: mlp
           lr: 1e-3
-          nash_weight: 0.0
 
         data:
           train_dir: data/train

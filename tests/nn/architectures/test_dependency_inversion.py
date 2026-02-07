@@ -49,9 +49,8 @@ def _make_mlp_batch(batch_size: int = 4) -> dict[str, torch.Tensor]:
         "policy_p2": torch.softmax(torch.randn(batch_size, 5), dim=-1),
         "action_p1": torch.randint(0, 5, (batch_size, 1)),
         "action_p2": torch.randint(0, 5, (batch_size, 1)),
-        "p1_value": torch.rand(batch_size) * 5,
-        "p2_value": torch.rand(batch_size) * 5,
-        "payout_matrix": torch.rand(batch_size, 2, 5, 5) * 5,
+        "value_p1": torch.rand(batch_size, 1) * 5,
+        "value_p2": torch.rand(batch_size, 1) * 5,
     }
 
 
@@ -264,7 +263,12 @@ class TestSelfConsistency:
             output = model(batch["observation"])
 
         # All models must have these core keys
-        required_keys = [ModelOutput.LOGITS_P1, ModelOutput.LOGITS_P2, ModelOutput.PAYOUT]
+        required_keys = [
+            ModelOutput.LOGITS_P1,
+            ModelOutput.LOGITS_P2,
+            ModelOutput.VALUE_P1,
+            ModelOutput.VALUE_P2,
+        ]
         for key in required_keys:
             assert key in output, f"{arch_type}: model output missing {key}"
 
@@ -284,7 +288,12 @@ class TestSelfConsistency:
             output = model.predict(batch["observation"])
 
         # All models must have these core keys
-        required_keys = [ModelOutput.POLICY_P1, ModelOutput.POLICY_P2, ModelOutput.PAYOUT]
+        required_keys = [
+            ModelOutput.POLICY_P1,
+            ModelOutput.POLICY_P2,
+            ModelOutput.VALUE_P1,
+            ModelOutput.VALUE_P2,
+        ]
         for key in required_keys:
             assert key in output, f"{arch_type}: model predict output missing {key}"
 

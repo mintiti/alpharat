@@ -186,10 +186,10 @@ class TestFlatObservationBuilderSerialization:
 
         arrays = builder.save_to_arrays([obs1, obs2])
 
-        assert "observations" in arrays
-        assert arrays["observations"].shape == (2, 69)
-        assert arrays["observations"][0, 0] == 1.0
-        assert arrays["observations"][1, 0] == 2.0
+        assert "observation" in arrays
+        assert arrays["observation"].shape == (2, 69)
+        assert arrays["observation"][0, 0] == 1.0
+        assert arrays["observation"][1, 0] == 2.0
 
     def test_load_from_arrays(self) -> None:
         """Test loading observation from arrays."""
@@ -301,8 +301,10 @@ def _create_game_npz(
 
     turn = np.arange(n, dtype=np.int16)
 
-    payout_matrix = np.zeros((n, 2, 5, 5), dtype=np.float32)
-    visit_counts = np.ones((n, 5, 5), dtype=np.int32) * 10
+    value_p1 = np.zeros(n, dtype=np.float32)
+    value_p2 = np.zeros(n, dtype=np.float32)
+    visit_counts_p1 = np.ones((n, 5), dtype=np.int32) * 10
+    visit_counts_p2 = np.ones((n, 5), dtype=np.int32) * 10
 
     prior_p1 = np.ones((n, 5), dtype=np.float32) / 5
     prior_p2 = np.ones((n, 5), dtype=np.float32) / 5
@@ -329,8 +331,10 @@ def _create_game_npz(
         p2_mud=p2_mud,
         cheese_mask=cheese_mask,
         turn=turn,
-        payout_matrix=payout_matrix,
-        visit_counts=visit_counts,
+        value_p1=value_p1,
+        value_p2=value_p2,
+        visit_counts_p1=visit_counts_p1,
+        visit_counts_p2=visit_counts_p2,
         prior_p1=prior_p1,
         prior_p2=prior_p2,
         policy_p1=policy_p1,
@@ -387,8 +391,8 @@ class TestFlatDataset:
             assert "observation" in item
             assert "policy_p1" in item
             assert "policy_p2" in item
-            assert "p1_value" in item
-            assert "p2_value" in item
+            assert "value_p1" in item
+            assert "value_p2" in item
 
     def test_getitem_observation_shape(self) -> None:
         """Observation should have correct shape."""
@@ -419,8 +423,8 @@ class TestFlatDataset:
 
             item = dataset[0]
 
-            assert item["p1_value"].shape == (1,)
-            assert item["p2_value"].shape == (1,)
+            assert item["value_p1"].shape == (1,)
+            assert item["value_p2"].shape == (1,)
 
     def test_getitem_dtypes(self) -> None:
         """All arrays should be float32."""
@@ -433,8 +437,8 @@ class TestFlatDataset:
             assert item["observation"].dtype == np.float32
             assert item["policy_p1"].dtype == np.float32
             assert item["policy_p2"].dtype == np.float32
-            assert item["p1_value"].dtype == np.float32
-            assert item["p2_value"].dtype == np.float32
+            assert item["value_p1"].dtype == np.float32
+            assert item["value_p2"].dtype == np.float32
 
     def test_obs_shape_property(self) -> None:
         """obs_shape should match builder."""

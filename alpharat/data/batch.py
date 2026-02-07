@@ -11,6 +11,7 @@ import numpy as np
 
 from alpharat.config.base import StrictBaseModel
 from alpharat.config.game import GameConfig  # noqa: TC001
+from alpharat.data.types import GameFileKey
 from alpharat.mcts import DecoupledPUCTConfig  # noqa: TC001
 
 # --- Batch Metadata ---
@@ -106,6 +107,6 @@ def get_batch_stats(batch_dir: Path | str) -> BatchStats:
     for game_file in games_dir.glob("*.npz"):
         game_count += 1
         with np.load(game_file) as data:
-            total_positions += int(data["num_positions"])
+            total_positions += int(data[GameFileKey.NUM_POSITIONS])
 
     return BatchStats(game_count=game_count, total_positions=total_positions)

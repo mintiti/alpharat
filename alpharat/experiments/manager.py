@@ -408,7 +408,7 @@ class ExperimentManager:
         the name (e.g., mlp_v1 → mlp_v1_run2). If configs differ, raises an error.
 
         Args:
-            name: Human-readable run name (e.g., "bimatrix_mlp_v1").
+            name: Human-readable run name (e.g., "mlp_v1").
             config: Training configuration dict (will be saved as config.yaml).
             source_shards: Shard ID used for training.
             parent_checkpoint: Optional path to checkpoint being resumed from.

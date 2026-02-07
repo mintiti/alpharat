@@ -154,7 +154,7 @@ Training runs with checkpoints, configs, and notes.
 
 ```
 runs/
-└── {run_name}/           # Human-readable name (e.g., "bimatrix_mlp_v1")
+└── {run_name}/           # Human-readable name (e.g., "mlp_v1")
     ├── config.yaml       # Frozen training config
     ├── notes.txt         # Experiment notes (Goal/Observations/Results)
     └── checkpoints/
@@ -179,7 +179,7 @@ Freeform notes with prompts:
 ```python
 exp = ExperimentManager()
 run_dir = exp.create_run(
-    name="bimatrix_mlp_v1",
+    name="mlp_v1",
     config=train_config,
     source_shards="xyz789",
 )
@@ -216,7 +216,7 @@ exp = ExperimentManager()
 bench_dir = exp.create_benchmark(
     name="tournament_001",
     config=tournament_config,
-    checkpoints=["bimatrix_mlp_v1"],
+    checkpoints=["mlp_v1"],
 )
 exp.save_benchmark_results(name="tournament_001", results=elo_result)
 ```

@@ -20,8 +20,9 @@ class ModelOutput(StrEnum):
     POLICY_P1 = "policy_p1"
     POLICY_P2 = "policy_p2"
 
-    # Payout matrix [batch, 2, 5, 5]
-    PAYOUT = "payout"
+    # Scalar value outputs
+    VALUE_P1 = "value_p1"
+    VALUE_P2 = "value_p2"
 
     # LocalValueMLP-specific
     OWNERSHIP_LOGITS = "ownership_logits"
@@ -39,16 +40,12 @@ class LossKey(StrEnum):
     POLICY_P1 = "loss_p1"
     POLICY_P2 = "loss_p2"
 
-    # Value/payout losses
+    # Value losses
     VALUE = "loss_value"
-    PAYOUT = "loss_payout"
-    MATRIX = "loss_matrix"
+    VALUE_P1 = "loss_value_p1"
+    VALUE_P2 = "loss_value_p2"
 
     # Auxiliary losses
-    NASH = "loss_nash"
-    NASH_INDIFF = "loss_indiff"
-    NASH_DEV = "loss_dev"
-    CONSTANT_SUM = "loss_constant_sum"
     OWNERSHIP = "loss_ownership"
 
 
@@ -60,9 +57,8 @@ class BatchKey(StrEnum):
     POLICY_P2 = "policy_p2"
     ACTION_P1 = "action_p1"
     ACTION_P2 = "action_p2"
-    P1_VALUE = "p1_value"
-    P2_VALUE = "p2_value"
-    PAYOUT_MATRIX = "payout_matrix"
+    VALUE_P1 = "value_p1"
+    VALUE_P2 = "value_p2"
     CHEESE_OUTCOMES = "cheese_outcomes"
 
 

@@ -37,7 +37,7 @@ class MCTSTree:
         game: PyRat,
         root: MCTSNode,
         gamma: float = 1.0,
-        predict_fn: Callable[[Any], tuple[np.ndarray, np.ndarray, np.ndarray]] | None = None,
+        predict_fn: Callable[[Any], tuple[np.ndarray, np.ndarray, float, float]] | None = None,
     ):
         """Initialize MCTS tree.
 
@@ -46,7 +46,7 @@ class MCTSTree:
             root: Root node of the tree
             gamma: Discount factor (1.0 = no discounting)
             predict_fn: Callable taking an observation and returning
-                        (prior_p1, prior_p2, payout_matrix) as numpy arrays.
+                        (prior_p1, prior_p2, v1, v2) as numpy arrays and floats.
         """
         self.game = game
         self.root = root
@@ -54,7 +54,7 @@ class MCTSTree:
         self._predict_fn = predict_fn
 
         # Cache NN predictions keyed on game state (skip redundant forward passes)
-        self._prediction_cache: dict[tuple, tuple[np.ndarray, np.ndarray, np.ndarray]] = {}
+        self._prediction_cache: dict[tuple, tuple[np.ndarray, np.ndarray, float, float]] = {}
 
         # Track where simulator currently is
         self._sim_path: list[MCTSNode] = [root]
@@ -132,6 +132,10 @@ class MCTSTree:
         p1_score_after, p2_score_after = self.game.player1_score, self.game.player2_score
         reward = (p1_score_after - p1_score_before, p2_score_after - p2_score_before)
 
+        # Store edge reward on child (used for Q = r + gamma * V computation)
+        child._edge_r1 = reward[0]
+        child._edge_r2 = reward[1]
+
         # Update simulator path
         self._sim_path.append(child)
 
@@ -139,30 +143,41 @@ class MCTSTree:
 
     def backup(
         self,
-        path: list[tuple[MCTSNode, int, int, tuple[float, float]]],
+        path: list[tuple[MCTSNode, int, int]],
         g: tuple[float, float] = (0.0, 0.0),
     ) -> None:
-        """Backup values through the tree with discounting.
+        """Backup discounted returns through the tree (LC0-style).
+
+        Finalize the leaf first, then propagate returns up the path.
+        Uses edge_r stored on child nodes as the source of truth for rewards.
 
         Args:
-            path: List of (node, action_p1, action_p2, reward) tuples
-                 from the search path, in forward order (root to leaf)
-                 where reward is (p1_reward, p2_reward)
+            path: List of (node, action_p1, action_p2) tuples from the search
+                 path, in forward order (root to leaf).
             g: Leaf value tuple (p1_value, p2_value) from NN estimate.
                Defaults to (0.0, 0.0) for terminal states.
         """
-        value = g
+        # Finalize leaf value (LC0: FinalizeScoreUpdate starts at leaf)
+        last_node, last_a1, last_a2 = path[-1]
+        leaf_idx1 = int(last_node._p1_action_to_idx[last_a1])
+        leaf_idx2 = int(last_node._p2_action_to_idx[last_a2])
+        leaf = last_node.children[(leaf_idx1, leaf_idx2)]
+        leaf.finalize_value(g[0], g[1])
 
-        # Backup in reverse (from leaf to root)
-        for node, action_p1, action_p2, reward in reversed(path):
-            # Apply discounting to both player values: value = reward + gamma * future
-            value = (
-                reward[0] + self.gamma * value[0],
-                reward[1] + self.gamma * value[1],
+        # Propagate returns up the path
+        child_value = g
+        for node, action_p1, action_p2 in reversed(path):
+            idx1 = int(node._p1_action_to_idx[action_p1])
+            idx2 = int(node._p2_action_to_idx[action_p2])
+            child = node.children[(idx1, idx2)]
+
+            q_value = (
+                child._edge_r1 + self.gamma * child_value[0],
+                child._edge_r2 + self.gamma * child_value[1],
             )
 
-            # Update node statistics
-            node.backup(action_p1, action_p2, value)
+            node.backup(action_p1, action_p2, q_value)
+            child_value = q_value
 
     def advance_root(self, action_p1: int, action_p2: int) -> None:
         """Advance the tree's root to the child reached by the given actions.
@@ -276,14 +291,15 @@ class MCTSTree:
         p1_effective = self._compute_effective_actions(self.game.player1_position)
         p2_effective = self._compute_effective_actions(self.game.player2_position)
 
-        # Get priors (smart uniform uses effective mappings)
-        prior_p1, prior_p2, nn_payout = self._predict(p1_effective, p2_effective)
+        # Get priors and values (smart uniform uses effective mappings)
+        prior_p1, prior_p2, v1, v2 = self._predict(p1_effective, p2_effective)
 
         child = MCTSNode(
             game_state=None,  # Don't store game state
             prior_policy_p1=prior_p1,
             prior_policy_p2=prior_p2,
-            nn_payout_prediction=nn_payout,
+            nn_value_p1=v1,
+            nn_value_p2=v2,
             parent=parent,
             p1_mud_turns_remaining=p1_mud,
             p2_mud_turns_remaining=p2_mud,
@@ -295,6 +311,9 @@ class MCTSTree:
 
         # Check if this child represents a terminal state
         child.is_terminal = self._check_terminal()
+        if child.is_terminal:
+            child._v1 = 0.0
+            child._v2 = 0.0
 
         return child
 
@@ -321,8 +340,8 @@ class MCTSTree:
         self,
         p1_effective: list[int] | None = None,
         p2_effective: list[int] | None = None,
-    ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-        """Run policy/value network to obtain priors and payout prediction.
+    ) -> tuple[np.ndarray, np.ndarray, float, float]:
+        """Run policy/value network to obtain priors and value prediction.
 
         Uses a transposition cache to skip redundant NN calls when the same
         game state is reached via different move sequences.
@@ -332,24 +351,23 @@ class MCTSTree:
             p2_effective: Effective action mapping for P2 (used for smart uniform priors).
 
         Returns:
-            Tuple of (prior_p1, prior_p2, payout) where payout has shape (2, 5, 5)
+            Tuple of (prior_p1, prior_p2, v1, v2) where v1, v2 are scalar values.
         """
         if self._predict_fn is None:
             # Smart uniform: only spread probability over actions that do different things
             prior_p1 = self._smart_uniform_prior(p1_effective)
             prior_p2 = self._smart_uniform_prior(p2_effective)
-            payout = np.zeros((2, 5, 5))  # Separate payoffs for P1 and P2
-            return prior_p1, prior_p2, payout
+            return prior_p1, prior_p2, 0.0, 0.0
 
         key = self._make_state_key()
         cached = self._prediction_cache.get(key)
         if cached is not None:
-            # Return copies — node init mutates arrays via np.add.at
-            return cached[0].copy(), cached[1].copy(), cached[2].copy()
+            # Return copies of arrays — node init mutates arrays via np.add.at
+            return cached[0].copy(), cached[1].copy(), cached[2], cached[3]
 
         result = self._predict_fn(self._get_observation())
         self._prediction_cache[key] = result
-        return result
+        return result[0], result[1], result[2], result[3]
 
     def _smart_uniform_prior(self, effective: list[int] | None) -> np.ndarray:
         """Create uniform prior over unique effective actions only.
@@ -391,18 +409,16 @@ class MCTSTree:
         """Initialize root node with NN predictions.
 
         Called during tree initialization to ensure root has proper
-        policy priors and payout predictions from the neural network,
+        policy priors and value predictions from the neural network,
         consistent with how child nodes are created.
 
         Note: Must be called after _init_root_effective so smart uniform
         priors can use the effective action mappings.
         """
-        prior_p1, prior_p2, nn_payout = self._predict(
-            self.root.p1_effective, self.root.p2_effective
-        )
+        prior_p1, prior_p2, v1, v2 = self._predict(self.root.p1_effective, self.root.p2_effective)
         self.root.prior_policy_p1 = prior_p1
         self.root.prior_policy_p2 = prior_p2
-        self.root.payout_matrix = nn_payout.copy()
+        self.root.set_values(v1, v2)
 
     def _init_root_effective(self) -> None:
         """Initialize effective action mappings for the root node.

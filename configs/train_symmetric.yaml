@@ -1,0 +1,14 @@
+# Training configuration for SymmetricMLP
+# Usage: alpharat-train configs/train_symmetric.yaml --name run_name --shards GROUP/UUID
+
+defaults:
+  - /model: symmetric
+  - _self_
+
+name: default
+
+data:
+  train_dir: experiments/shards/GROUP/UUID/train
+  val_dir: experiments/shards/GROUP/UUID/val
+
+seed: 42

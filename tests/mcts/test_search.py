@@ -1,4 +1,4 @@
-"""Tests for MCTS Search implementation."""
+"""Tests for MCTS Search implementation with decoupled UCT."""
 
 import numpy as np
 import pytest
@@ -103,12 +103,12 @@ def fake_game() -> FakeGame:
 def uniform_root() -> MCTSNode:
     """Create root node with uniform priors."""
     prior = np.ones(5) / 5
-    nn_payout = np.zeros((2, 5, 5))  # Bimatrix format: [p1_payoffs, p2_payoffs]
     return MCTSNode(
         game_state=None,
         prior_policy_p1=prior,
         prior_policy_p2=prior,
-        nn_payout_prediction=nn_payout,
+        nn_value_p1=0.0,
+        nn_value_p2=0.0,
     )
 
 
@@ -132,9 +132,11 @@ class TestSearchBasics:
         result = search.search()
 
         assert isinstance(result, SearchResult)
-        assert isinstance(result.payout_matrix, np.ndarray)
         assert isinstance(result.policy_p1, np.ndarray)
         assert isinstance(result.policy_p2, np.ndarray)
+        # New API returns scalar values
+        assert isinstance(result.value_p1, float)
+        assert isinstance(result.value_p2, float)
 
     def test_search_updates_root_visits(self, fake_tree: MCTSTree) -> None:
         """Search should increase visit counts on root."""
@@ -146,7 +148,7 @@ class TestSearchBasics:
         # Visits should have increased
         assert fake_tree.root.total_visits > initial_visits
 
-    def test_search_returns_valid_nash(self, fake_tree: MCTSTree) -> None:
+    def test_search_returns_valid_policies(self, fake_tree: MCTSTree) -> None:
         """Returned policies should be valid probability distributions."""
         search = DecoupledPUCTSearch(fake_tree, make_config(10))
         result = search.search()
@@ -171,13 +173,13 @@ class TestTerminalHandling:
         """Search on terminal root should return current state without simulations."""
         # Create terminal root node
         prior = np.ones(5) / 5
-        nn_payout_full = np.zeros((2, 5, 5))  # Bimatrix format
 
         root = MCTSNode(
             game_state=None,
             prior_policy_p1=prior,
             prior_policy_p2=prior,
-            nn_payout_prediction=nn_payout_full,
+            nn_value_p1=0.0,
+            nn_value_p2=0.0,
         )
         root.is_terminal = True
 
@@ -232,25 +234,23 @@ class TestLeafValue:
 
     def test_leaf_value_uses_nn_prediction(self) -> None:
         """Backup should use NN's expected value for non-terminal leaf."""
-        # Create root with specific payout prediction
+        # Create root with specific scalar value
         prior = np.array([0.5, 0.5, 0.0, 0.0, 0.0])  # Only first two actions
-        # Bimatrix: P1 gets +10, P2 gets -10 (zero-sum for simplicity)
-        nn_payout = np.zeros((2, 5, 5))
-        nn_payout[0] = 10.0  # P1's payoffs
-        nn_payout[1] = -10.0  # P2's payoffs
 
         root = MCTSNode(
             game_state=None,
             prior_policy_p1=prior,
             prior_policy_p2=prior,
-            nn_payout_prediction=np.zeros((2, 5, 5)),  # Root starts at 0
+            nn_value_p1=0.0,
+            nn_value_p2=0.0,
         )
 
         # Create game and tree with custom predict_fn
         game = FakeGame()
 
-        def predict_fn(_: object) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-            return prior, prior, nn_payout
+        def predict_fn(_: object) -> tuple[np.ndarray, np.ndarray, float, float]:
+            # Return scalar values (v1=10.0, v2=-10.0)
+            return prior, prior, 10.0, -10.0
 
         tree = MCTSTree(game=game, root=root, gamma=1.0, predict_fn=predict_fn)  # type: ignore[arg-type]
 
@@ -258,11 +258,12 @@ class TestLeafValue:
         search = DecoupledPUCTSearch(tree, make_config(1))
         search.search()
 
-        # The root payout should have been updated with a value backed up from leaf
+        # The root Q-values should have been updated with a value backed up from leaf
         assert tree.root.total_visits > 0
 
-        # At least one action pair should have non-zero payout
-        assert np.any(tree.root.payout_matrix != 0)
+        # At least one outcome should have non-zero Q-value
+        q1, q2 = tree.root.get_q_values()
+        assert np.any(q1 != 0) or np.any(q2 != 0)
 
 
 class TestWithRealGame:
@@ -277,12 +278,12 @@ class TestWithRealGame:
     def real_tree(self, real_game: PyRat) -> MCTSTree:
         """Tree with real PyRat game."""
         prior = np.ones(5) / 5
-        nn_payout = np.zeros((2, 5, 5))  # Bimatrix format
         root = MCTSNode(
             game_state=None,
             prior_policy_p1=prior,
             prior_policy_p2=prior,
-            nn_payout_prediction=nn_payout,
+            nn_value_p1=0.0,
+            nn_value_p2=0.0,
         )
         return MCTSTree(game=real_game, root=root, gamma=0.99)
 
@@ -301,7 +302,7 @@ class TestWithRealGame:
         search = DecoupledPUCTSearch(real_tree, make_config(50))
         result = search.search()
 
-        # Blocked actions should have 0 probability in Nash result
+        # Blocked actions should have 0 probability in result
         for i in range(5):
             if real_tree.root.p1_effective[i] != i:
                 # This action is blocked (maps to STAY)
@@ -315,14 +316,15 @@ class TestMakeResultIntegration:
     """Integration tests for _make_result() — full search pipeline."""
 
     def test_search_result_shapes(self) -> None:
-        """SearchResult arrays have correct shapes after a real search."""
+        """SearchResult has correct shapes after a real search."""
         game = PyRat(width=5, height=5, cheese_count=3, seed=42)
         prior = np.ones(5) / 5
         root = MCTSNode(
             game_state=None,
             prior_policy_p1=prior,
             prior_policy_p2=prior,
-            nn_payout_prediction=np.zeros((2, 5, 5)),
+            nn_value_p1=0.0,
+            nn_value_p2=0.0,
         )
         tree = MCTSTree(game=game, root=root, gamma=0.99)
         search = DecoupledPUCTSearch(tree, DecoupledPUCTConfig(simulations=50))
@@ -330,18 +332,19 @@ class TestMakeResultIntegration:
 
         assert result.policy_p1.shape == (5,)
         assert result.policy_p2.shape == (5,)
-        assert result.payout_matrix.shape == (2, 5, 5)
-        assert result.action_visits.shape == (5, 5)
+        assert isinstance(result.value_p1, float)
+        assert isinstance(result.value_p2, float)
 
     def test_policies_sum_to_one(self) -> None:
-        """Both acting and learning policies sum to ~1.0."""
+        """Policies sum to ~1.0."""
         game = PyRat(width=5, height=5, cheese_count=3, seed=42)
         prior = np.ones(5) / 5
         root = MCTSNode(
             game_state=None,
             prior_policy_p1=prior,
             prior_policy_p2=prior,
-            nn_payout_prediction=np.zeros((2, 5, 5)),
+            nn_value_p1=0.0,
+            nn_value_p2=0.0,
         )
         tree = MCTSTree(game=game, root=root, gamma=0.99)
         search = DecoupledPUCTSearch(tree, DecoupledPUCTConfig(simulations=50))
@@ -349,8 +352,6 @@ class TestMakeResultIntegration:
 
         assert result.policy_p1.sum() == pytest.approx(1.0, abs=1e-6)
         assert result.policy_p2.sum() == pytest.approx(1.0, abs=1e-6)
-        assert result.learning_policy_p1.sum() == pytest.approx(1.0, abs=1e-6)
-        assert result.learning_policy_p2.sum() == pytest.approx(1.0, abs=1e-6)
 
     def test_blocked_actions_get_zero_probability(self) -> None:
         """Blocked actions get 0 probability in search result policies."""
@@ -360,7 +361,8 @@ class TestMakeResultIntegration:
             game_state=None,
             prior_policy_p1=prior,
             prior_policy_p2=prior,
-            nn_payout_prediction=np.zeros((2, 5, 5)),
+            nn_value_p1=0.0,
+            nn_value_p2=0.0,
         )
         tree = MCTSTree(game=game, root=root, gamma=0.99)
         search = DecoupledPUCTSearch(tree, DecoupledPUCTConfig(simulations=50))
@@ -369,53 +371,26 @@ class TestMakeResultIntegration:
         for i in range(5):
             if root.p1_effective[i] != i:
                 assert result.policy_p1[i] == 0.0
-                assert result.learning_policy_p1[i] == 0.0
             if root.p2_effective[i] != i:
                 assert result.policy_p2[i] == 0.0
-                assert result.learning_policy_p2[i] == 0.0
 
-    def test_payout_zeros_for_low_visits(self) -> None:
-        """Payout matrix has zeros where visit count was too low."""
+    def test_values_are_finite(self) -> None:
+        """Search should produce finite value estimates."""
         game = PyRat(width=5, height=5, cheese_count=3, seed=42)
         prior = np.ones(5) / 5
         root = MCTSNode(
             game_state=None,
             prior_policy_p1=prior,
             prior_policy_p2=prior,
-            nn_payout_prediction=np.zeros((2, 5, 5)),
+            nn_value_p1=0.0,
+            nn_value_p2=0.0,
         )
         tree = MCTSTree(game=game, root=root, gamma=0.99)
-        # Few simulations so some pairs will have < 2 visits
-        search = DecoupledPUCTSearch(tree, DecoupledPUCTConfig(simulations=10))
+        search = DecoupledPUCTSearch(tree, DecoupledPUCTConfig(simulations=50))
         result = search.search()
 
-        # Cells with 0 visits in the expanded visit matrix should have 0 payout
-        for i in range(5):
-            for j in range(5):
-                if result.action_visits[i, j] == 0:
-                    assert result.payout_matrix[0, i, j] == 0.0
-                    assert result.payout_matrix[1, i, j] == 0.0
-
-    def test_forced_playouts_produce_valid_visits(self) -> None:
-        """With force_k > 0, search produces valid non-negative visit counts."""
-        game = PyRat(width=5, height=5, cheese_count=3, seed=42)
-        prior = np.ones(5) / 5
-        root = MCTSNode(
-            game_state=None,
-            prior_policy_p1=prior,
-            prior_policy_p2=prior,
-            nn_payout_prediction=np.zeros((2, 5, 5)),
-        )
-        tree = MCTSTree(game=game, root=root, gamma=0.99)
-
-        config = DecoupledPUCTConfig(simulations=50, force_k=2.0)
-        search = DecoupledPUCTSearch(tree, config)
-        result = search.search()
-
-        # Pruned visits should be non-negative and have some mass
-        assert np.all(result.action_visits >= 0)
-        assert result.action_visits.sum() > 0
-        assert result.action_visits.shape == (5, 5)
+        assert np.isfinite(result.value_p1)
+        assert np.isfinite(result.value_p2)
 
 
 class TestBackupWithLeafValue:
@@ -424,15 +399,21 @@ class TestBackupWithLeafValue:
     def test_backup_with_g_parameter(self, fake_tree: MCTSTree) -> None:
         """Tree.backup should use g parameter for leaf value."""
         # Create a child
-        child, reward = fake_tree.make_move_from(fake_tree.root, 0, 0)
+        child, _reward = fake_tree.make_move_from(fake_tree.root, 0, 0)
+
+        # Set edge reward on child (simulates reward from make_move_from)
+        child._edge_r1 = 1.0
+        child._edge_r2 = -1.0
 
         # Backup with specific leaf value - tuple (p1_value, p2_value)
-        path = [(fake_tree.root, 0, 0, (1.0, -1.0))]
+        path = [(fake_tree.root, 0, 0)]
         fake_tree.backup(path, g=(5.0, -5.0))
 
-        # Value = reward + gamma * g = (1.0, -1.0) + 1.0 * (5.0, -5.0) = (6.0, -6.0)
-        assert fake_tree.root.payout_matrix[0, 0, 0] == pytest.approx(6.0)  # P1
-        assert fake_tree.root.payout_matrix[1, 0, 0] == pytest.approx(-6.0)  # P2
+        # Value = edge_r + gamma * g = (1.0, -1.0) + 1.0 * (5.0, -5.0) = (6.0, -6.0)
+        # With decoupled UCT, check Q-values instead of payout matrix
+        q1, q2 = fake_tree.root.get_q_values()
+        assert q1[0] == pytest.approx(6.0)
+        assert q2[0] == pytest.approx(-6.0)
 
     def test_backup_with_discount(self) -> None:
         """Backup should apply gamma to leaf value."""
@@ -442,20 +423,26 @@ class TestBackupWithLeafValue:
             game_state=None,
             prior_policy_p1=prior,
             prior_policy_p2=prior,
-            nn_payout_prediction=np.zeros((2, 5, 5)),  # Bimatrix format
+            nn_value_p1=0.0,
+            nn_value_p2=0.0,
         )
         tree = MCTSTree(game=game, root=root, gamma=0.5)  # type: ignore[arg-type]
 
         # Create child
         child, _ = tree.make_move_from(root, 1, 1)
 
+        # Set edge reward on child (simulates reward from make_move_from)
+        child._edge_r1 = 2.0
+        child._edge_r2 = -2.0
+
         # Backup with leaf value - tuple (p1_value, p2_value)
-        path = [(root, 1, 1, (2.0, -2.0))]
+        path = [(root, 1, 1)]
         tree.backup(path, g=(10.0, -10.0))
 
-        # Value = reward + gamma * g = (2.0, -2.0) + 0.5 * (10.0, -10.0) = (7.0, -7.0)
-        assert root.payout_matrix[0, 1, 1] == pytest.approx(7.0)  # P1
-        assert root.payout_matrix[1, 1, 1] == pytest.approx(-7.0)  # P2
+        # Value = edge_r + gamma * g = (2.0, -2.0) + 0.5 * (10.0, -10.0) = (7.0, -7.0)
+        q1, q2 = root.get_q_values(gamma=0.5)
+        assert q1[1] == pytest.approx(7.0)
+        assert q2[1] == pytest.approx(-7.0)
 
 
 class TestPureNNMode:
@@ -497,15 +484,198 @@ class TestPureNNMode:
         # Still zero visits
         assert fake_tree.root.total_visits == 0
 
-    def test_returns_nn_payout_matrix(self, fake_tree: MCTSTree) -> None:
-        """n_sims=0 returns the NN payout prediction unchanged."""
+    def test_returns_nn_values(self, fake_tree: MCTSTree) -> None:
+        """n_sims=0 returns the NN value predictions."""
         root = fake_tree.root
-
-        # The root's payout_matrix should be the NN prediction
-        original_payout = root.payout_matrix.copy()
 
         search = DecoupledPUCTSearch(fake_tree, make_config(0))
         result = search.search()
 
-        # Payout matrix should be unchanged (no MCTS backup)
-        np.testing.assert_array_almost_equal(result.payout_matrix, original_payout)
+        # Value estimates should be the node's values (NN initial)
+        assert result.value_p1 == pytest.approx(root.v1)
+        assert result.value_p2 == pytest.approx(root.v2)
+
+
+class TestTerminalMidSearch:
+    """Tests for terminal states encountered during search (not at root)."""
+
+    def test_terminal_child_backs_up_zero_leaf_value(self) -> None:
+        """Terminal node at depth > 0 should back up g=(0,0) through edge rewards.
+
+        When search hits a terminal state mid-tree, the leaf value is (0, 0) —
+        no future rewards from a game-over position. The backed-up Q values
+        come entirely from edge rewards.
+        """
+        game = FakeGame(max_turns=1)  # Terminal after 1 move
+        prior = np.ones(5) / 5
+        root = MCTSNode(
+            game_state=None,
+            prior_policy_p1=prior,
+            prior_policy_p2=prior,
+            nn_value_p1=0.0,
+            nn_value_p2=0.0,
+        )
+        tree = MCTSTree(game=game, root=root, gamma=1.0)  # type: ignore[arg-type]
+
+        # Run enough simulations to visit all action pairs
+        search = DecoupledPUCTSearch(tree, make_config(50))
+        result = search.search()
+
+        # All children should be terminal (game ends after 1 move)
+        for child in tree.root.children.values():
+            assert child.is_terminal
+
+        # Values should be finite and policies valid
+        assert np.isfinite(result.value_p1)
+        assert np.isfinite(result.value_p2)
+        assert result.policy_p1.sum() == pytest.approx(1.0, abs=1e-6)
+        assert result.policy_p2.sum() == pytest.approx(1.0, abs=1e-6)
+
+        # Root should have been updated (terminal backup propagated)
+        assert tree.root.total_visits > 0
+
+
+class TestMakeResultControlled:
+    """Tests for _make_result() with controlled visit/Q state."""
+
+    def test_policy_from_known_visits(self) -> None:
+        """Set up root with known visits and verify exact policy output.
+
+        Tests the full pruning-to-policy pipeline end-to-end.
+        """
+        game = FakeGame()
+        prior = np.array([0.2, 0.3, 0.2, 0.2, 0.1])
+        root = MCTSNode(
+            game_state=None,
+            prior_policy_p1=prior,
+            prior_policy_p2=prior,
+            nn_value_p1=0.0,
+            nn_value_p2=0.0,
+        )
+        tree = MCTSTree(game=game, root=root, gamma=1.0)  # type: ignore[arg-type]
+
+        # Create children with controlled visit counts and values
+        # Action 1 is clearly best (high Q, many visits)
+        # Action 0 has some visits, lower Q
+        child_00 = MCTSNode(
+            game_state=None,
+            prior_policy_p1=prior,
+            prior_policy_p2=prior,
+            nn_value_p1=2.0,
+            nn_value_p2=1.0,
+            parent=root,
+        )
+        child_00._edge_visits = 5
+        child_00._edge_r1 = 0.0
+        child_00._edge_r2 = 0.0
+        root.children[(0, 0)] = child_00
+
+        child_11 = MCTSNode(
+            game_state=None,
+            prior_policy_p1=prior,
+            prior_policy_p2=prior,
+            nn_value_p1=8.0,
+            nn_value_p2=4.0,
+            parent=root,
+        )
+        child_11._edge_visits = 45
+        child_11._edge_r1 = 0.0
+        child_11._edge_r2 = 0.0
+        root.children[(1, 1)] = child_11
+
+        # Set marginal visit counts to match
+        root._n1_visits[0] = 5.0
+        root._n1_visits[1] = 45.0
+        root._n2_visits[0] = 5.0
+        root._n2_visits[1] = 45.0
+        root._total_visits = 50
+
+        # Run _make_result
+        search = DecoupledPUCTSearch(tree, make_config(0))
+        result = search._make_result()
+
+        # Policy should be valid distribution
+        assert result.policy_p1.sum() == pytest.approx(1.0, abs=1e-6)
+        assert result.policy_p2.sum() == pytest.approx(1.0, abs=1e-6)
+
+        # Action 1 should dominate (more visits, higher Q)
+        assert result.policy_p1[1] > result.policy_p1[0]
+        assert result.policy_p2[1] > result.policy_p2[0]
+
+        # Blocked actions (not visited) should have 0 probability
+        assert result.policy_p1[2] == 0.0
+        assert result.policy_p1[3] == 0.0
+        assert result.policy_p1[4] == 0.0
+
+
+class TestRawVsPrunedVisits:
+    """Tests documenting the intentional design: value uses raw visits, policy uses pruned."""
+
+    def test_value_uses_raw_visits_policy_uses_pruned(self) -> None:
+        """Value estimate uses raw visit counts; policy uses pruned visits.
+
+        This is intentional: value should reflect the actual search experience
+        (all simulations), while policy should ignore forced-exploration visits
+        that inflate low-Q actions.
+        """
+        game = FakeGame()
+
+        # Non-uniform prior so forced playouts have something to force
+        prior = np.array([0.4, 0.3, 0.2, 0.05, 0.05])
+        root = MCTSNode(
+            game_state=None,
+            prior_policy_p1=prior,
+            prior_policy_p2=prior,
+            nn_value_p1=0.0,
+            nn_value_p2=0.0,
+        )
+        tree = MCTSTree(game=game, root=root, gamma=1.0)  # type: ignore[arg-type]
+
+        # Set up controlled state with clear best action (0) and weak action (3)
+        # Action 0: high Q, many visits
+        child_00 = MCTSNode(
+            game_state=None,
+            prior_policy_p1=prior,
+            prior_policy_p2=prior,
+            nn_value_p1=10.0,
+            nn_value_p2=5.0,
+            parent=root,
+        )
+        child_00._edge_visits = 80
+        root.children[(0, 0)] = child_00
+
+        # Action 3: low Q, few visits (forced exploration)
+        child_33 = MCTSNode(
+            game_state=None,
+            prior_policy_p1=prior,
+            prior_policy_p2=prior,
+            nn_value_p1=1.0,
+            nn_value_p2=0.5,
+            parent=root,
+        )
+        child_33._edge_visits = 20
+        root.children[(3, 3)] = child_33
+
+        root._n1_visits[0] = 80.0
+        root._n1_visits[3] = 20.0
+        root._n2_visits[0] = 80.0
+        root._n2_visits[3] = 20.0
+        root._total_visits = 100
+
+        search = DecoupledPUCTSearch(tree, make_config(0))
+        result = search._make_result()
+
+        # Value should reflect ALL visits (raw), so it's a weighted average
+        # Q1(0) = 10.0, Q1(3) = 1.0
+        # raw_value = (80*10 + 20*1) / 100 = 820/100 = 8.2
+        assert result.value_p1 == pytest.approx(8.2)
+
+        # Policy should use pruned visits (action 3 may have visits reduced)
+        # The key property: policy ratios can differ from raw visit ratios
+        raw_ratio_p1 = 20.0 / 80.0  # 0.25
+        policy_ratio_p1 = (
+            result.policy_p1[3] / result.policy_p1[0] if result.policy_p1[0] > 0 else float("inf")
+        )
+
+        # Pruning should reduce action 3's share relative to raw visits
+        assert policy_ratio_p1 <= raw_ratio_p1

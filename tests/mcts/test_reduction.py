@@ -5,12 +5,10 @@ import pytest
 
 from alpharat.mcts.reduction import (
     build_action_to_outcome_map,
-    expand_payout,
     expand_prior,
     expand_visits,
     get_unique_outcomes,
     outcome_to_effective,
-    reduce_payout,
     reduce_prior,
 )
 
@@ -125,94 +123,6 @@ class TestReducePrior:
         np.testing.assert_array_almost_equal(result, [0.3, 0.2, 0.5])
 
 
-class TestReducePayout:
-    """Tests for reduce_payout."""
-
-    def test_no_equivalence(self) -> None:
-        """No reduction when no equivalence."""
-        payout = np.random.rand(2, 5, 5)
-        p1_eff = [0, 1, 2, 3, 4]
-        p2_eff = [0, 1, 2, 3, 4]
-        result = reduce_payout(payout, p1_eff, p2_eff)
-        np.testing.assert_array_almost_equal(result, payout)
-
-    def test_p1_equivalence_averages(self) -> None:
-        """P1 has equivalence - should average equivalent rows."""
-        payout = np.zeros((2, 5, 5))
-        # Row 0 and row 4 are equivalent (both map to STAY outcome)
-        # Give them different values to test averaging
-        payout[0, 0, :] = [1.0, 2.0, 3.0, 4.0, 5.0]  # action 0
-        payout[0, 4, :] = [3.0, 4.0, 5.0, 6.0, 7.0]  # action 4 (STAY)
-        # Other rows
-        payout[0, 1, :] = [10.0, 10.0, 10.0, 10.0, 10.0]
-        payout[0, 2, :] = [20.0, 20.0, 20.0, 20.0, 20.0]
-        payout[0, 3, :] = [30.0, 30.0, 30.0, 30.0, 30.0]
-
-        p1_eff = [4, 1, 2, 3, 4]  # 0 → 4
-        p2_eff = [0, 1, 2, 3, 4]
-
-        result = reduce_payout(payout, p1_eff, p2_eff)
-        assert result.shape == (2, 4, 5)
-
-        # Outcome 3 (STAY) should be average of rows 0 and 4
-        expected_stay_row = (payout[0, 0, :] + payout[0, 4, :]) / 2
-        np.testing.assert_array_almost_equal(result[0, 3, :], expected_stay_row)
-
-    def test_both_equivalence_averages_all(self) -> None:
-        """Both players have equivalence - averages all 25 cells."""
-        payout = np.zeros((2, 5, 5))
-        # Fill with different values
-        payout[0, :, :] = np.arange(25).reshape(5, 5).astype(float)
-        payout[1, :, :] = np.arange(25, 50).reshape(5, 5).astype(float)
-
-        p1_eff = [4, 4, 4, 4, 4]  # All → 4
-        p2_eff = [4, 4, 4, 4, 4]
-
-        result = reduce_payout(payout, p1_eff, p2_eff)
-        assert result.shape == (2, 1, 1)
-
-        # Should be average of all 25 values
-        assert result[0, 0, 0] == pytest.approx(payout[0].mean())
-        assert result[1, 0, 0] == pytest.approx(payout[1].mean())
-
-    def test_noisy_nn_prediction_averaged(self) -> None:
-        """Noisy NN predictions are averaged for equivalent pairs."""
-        # Simulate noisy NN that doesn't perfectly respect equivalence
-        payout = np.zeros((2, 5, 5))
-
-        # Action 0 is blocked (maps to STAY=4)
-        # NN gives slightly different values for equivalent pairs
-        payout[0, 0, 2] = 5.0  # (UP, DOWN) - blocked
-        payout[0, 4, 2] = 5.2  # (STAY, DOWN) - effective
-        payout[1, 0, 2] = 3.0
-        payout[1, 4, 2] = 3.4
-
-        p1_eff = [4, 1, 2, 3, 4]  # 0 → 4
-        p2_eff = [0, 1, 2, 3, 4]
-
-        result = reduce_payout(payout, p1_eff, p2_eff)
-
-        # Outcome (STAY, DOWN) should average the noisy values
-        # STAY outcome is index 3 in reduced (outcomes = [1,2,3,4])
-        assert result[0, 3, 2] == pytest.approx(5.1)  # (5.0 + 5.2) / 2
-        assert result[1, 3, 2] == pytest.approx(3.2)  # (3.0 + 3.4) / 2
-
-    def test_identical_values_unchanged(self) -> None:
-        """When equivalent pairs already have identical values, result is same."""
-        payout = np.zeros((2, 5, 5))
-        # Set up so equivalent pairs have identical values (like after backup)
-        payout[0, 0, :] = [5.0, 5.0, 5.0, 5.0, 5.0]
-        payout[0, 4, :] = [5.0, 5.0, 5.0, 5.0, 5.0]  # Same as row 0
-
-        p1_eff = [4, 1, 2, 3, 4]  # 0 → 4
-        p2_eff = [0, 1, 2, 3, 4]
-
-        result = reduce_payout(payout, p1_eff, p2_eff)
-
-        # Average of identical values = same value
-        np.testing.assert_array_almost_equal(result[0, 3, :], [5.0, 5.0, 5.0, 5.0, 5.0])
-
-
 class TestExpandPrior:
     """Tests for expand_prior."""
 
@@ -252,48 +162,6 @@ class TestExpandPrior:
         assert result[1] == 0.0
         assert result[2] == 0.0
         assert result[3] == 0.0
-
-
-class TestExpandPayout:
-    """Tests for expand_payout."""
-
-    def test_no_equivalence(self) -> None:
-        """No expansion when no equivalence."""
-        payout = np.random.rand(2, 5, 5)
-        p1_eff = [0, 1, 2, 3, 4]
-        p2_eff = [0, 1, 2, 3, 4]
-        result = expand_payout(payout, p1_eff, p2_eff)
-        np.testing.assert_array_almost_equal(result, payout)
-
-    def test_equivalent_pairs_get_same_value(self) -> None:
-        """Equivalent action pairs all get the same payout value."""
-        payout_n1n2 = np.zeros((2, 4, 5))
-        payout_n1n2[0, 3, 2] = 7.0  # Outcome (3, 2) = effective (4, 2)
-        payout_n1n2[1, 3, 2] = 3.5
-
-        p1_eff = [4, 1, 2, 3, 4]  # 0, 4 → 4 (outcome 3)
-        p2_eff = [0, 1, 2, 3, 4]
-
-        result = expand_payout(payout_n1n2, p1_eff, p2_eff)
-
-        # Both (0, 2) and (4, 2) should have the same value
-        assert result[0, 0, 2] == 7.0
-        assert result[0, 4, 2] == 7.0
-        assert result[1, 0, 2] == 3.5
-        assert result[1, 4, 2] == 3.5
-
-    def test_mud_single_value_expanded(self) -> None:
-        """Single outcome value expanded to all 25 pairs."""
-        payout_n1n2 = np.array([[[10.0]], [[5.0]]])
-
-        p1_eff = [4, 4, 4, 4, 4]
-        p2_eff = [4, 4, 4, 4, 4]
-
-        result = expand_payout(payout_n1n2, p1_eff, p2_eff)
-
-        assert result.shape == (2, 5, 5)
-        np.testing.assert_array_equal(result[0], np.full((5, 5), 10.0))
-        np.testing.assert_array_equal(result[1], np.full((5, 5), 5.0))
 
 
 class TestExpandVisits:
@@ -352,58 +220,6 @@ class TestRoundTrip:
         assert expanded[3] == pytest.approx(0.2)
         # Total still sums to 1
         assert expanded.sum() == pytest.approx(1.0)
-
-    def test_payout_roundtrip_equivalence_invariant(self) -> None:
-        """Payout roundtrip preserves equivalence structure.
-
-        When payout matrix already respects equivalence (equivalent pairs have
-        identical values), roundtrip should be exact.
-        """
-        # Create payout that respects equivalence:
-        # Actions 0 and 4 (both → STAY) have identical rows
-        payout = np.zeros((2, 5, 5))
-        for a1 in range(5):
-            for a2 in range(5):
-                payout[0, a1, a2] = a1 * 10 + a2
-                payout[1, a1, a2] = a1 * 10 + a2 + 100
-
-        p1_eff = [4, 1, 2, 3, 4]
-        p2_eff = [0, 1, 2, 3, 4]
-
-        # Make rows 0 and 4 identical (equivalence invariant)
-        payout[:, 0, :] = payout[:, 4, :]
-
-        reduced = reduce_payout(payout, p1_eff, p2_eff)
-        expanded = expand_payout(reduced, p1_eff, p2_eff)
-
-        np.testing.assert_array_almost_equal(expanded, payout)
-
-    def test_payout_roundtrip_noisy_input(self) -> None:
-        """Payout roundtrip averages noisy equivalent pairs.
-
-        When input doesn't respect equivalence (NN noise), roundtrip
-        produces a matrix where equivalent pairs ARE identical.
-        """
-        # Create noisy payout that doesn't respect equivalence
-        payout = np.zeros((2, 5, 5))
-        payout[0, 0, :] = [1.0, 2.0, 3.0, 4.0, 5.0]  # Row 0
-        payout[0, 4, :] = [3.0, 4.0, 5.0, 6.0, 7.0]  # Row 4 (different!)
-        payout[0, 1, :] = [10.0] * 5
-        payout[0, 2, :] = [20.0] * 5
-        payout[0, 3, :] = [30.0] * 5
-
-        p1_eff = [4, 1, 2, 3, 4]  # 0 → 4
-        p2_eff = [0, 1, 2, 3, 4]
-
-        reduced = reduce_payout(payout, p1_eff, p2_eff)
-        expanded = expand_payout(reduced, p1_eff, p2_eff)
-
-        # After roundtrip, rows 0 and 4 should be identical (averaged)
-        np.testing.assert_array_almost_equal(expanded[0, 0, :], expanded[0, 4, :])
-
-        # The averaged value
-        expected_avg = (payout[0, 0, :] + payout[0, 4, :]) / 2
-        np.testing.assert_array_almost_equal(expanded[0, 0, :], expected_avg)
 
     def test_visits_roundtrip(self) -> None:
         """Visit counts roundtrip preserves equivalence structure."""

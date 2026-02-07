@@ -9,6 +9,7 @@ import numpy as np
 import torch
 
 from alpharat.nn.augmentation import swap_player_perspective_batch
+from alpharat.nn.training.keys import BatchKey
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
@@ -55,48 +56,30 @@ class GPUDataset:
             self._data_dir / f"shard_{i:04d}.npz" for i in range(self._manifest.shard_count)
         ]
 
-        arrays: dict[str, list[np.ndarray]] = {
-            "observation": [],
-            "policy_p1": [],
-            "policy_p2": [],
-            "p1_value": [],
-            "p2_value": [],
-            "payout_matrix": [],
-            "action_p1": [],
-            "action_p2": [],
-            "cheese_outcomes": [],
-        }
+        arrays: dict[str, list[np.ndarray]] = {str(k): [] for k in BatchKey}
 
         for path in shard_paths:
             with np.load(path) as data:
-                arrays["observation"].append(np.array(data["observations"]))
-                arrays["policy_p1"].append(np.array(data["policy_p1"]))
-                arrays["policy_p2"].append(np.array(data["policy_p2"]))
-                arrays["p1_value"].append(np.array(data["p1_value"]))
-                arrays["p2_value"].append(np.array(data["p2_value"]))
-                arrays["payout_matrix"].append(np.array(data["payout_matrix"]))
-                arrays["action_p1"].append(np.array(data["action_p1"]))
-                arrays["action_p2"].append(np.array(data["action_p2"]))
-                # cheese_outcomes: int8 with -1=inactive, 0-3=outcome class
-                arrays["cheese_outcomes"].append(np.array(data["cheese_outcomes"]))
+                for key in BatchKey:
+                    arrays[key].append(np.array(data[key]))
 
         # Concatenate and move to GPU
         self._data: dict[str, torch.Tensor] = {}
-        for key, arrs in arrays.items():
+        for k, arrs in arrays.items():
             concat = np.concatenate(arrs, axis=0)
-            self._data[key] = torch.from_numpy(concat).to(device)
+            self._data[k] = torch.from_numpy(concat).to(device)
 
         # Ensure values and actions have shape (N, 1) for consistency
-        if self._data["p1_value"].dim() == 1:
-            self._data["p1_value"] = self._data["p1_value"].unsqueeze(-1)
-        if self._data["p2_value"].dim() == 1:
-            self._data["p2_value"] = self._data["p2_value"].unsqueeze(-1)
-        if self._data["action_p1"].dim() == 1:
-            self._data["action_p1"] = self._data["action_p1"].unsqueeze(-1)
-        if self._data["action_p2"].dim() == 1:
-            self._data["action_p2"] = self._data["action_p2"].unsqueeze(-1)
+        if self._data[BatchKey.VALUE_P1].dim() == 1:
+            self._data[BatchKey.VALUE_P1] = self._data[BatchKey.VALUE_P1].unsqueeze(-1)
+        if self._data[BatchKey.VALUE_P2].dim() == 1:
+            self._data[BatchKey.VALUE_P2] = self._data[BatchKey.VALUE_P2].unsqueeze(-1)
+        if self._data[BatchKey.ACTION_P1].dim() == 1:
+            self._data[BatchKey.ACTION_P1] = self._data[BatchKey.ACTION_P1].unsqueeze(-1)
+        if self._data[BatchKey.ACTION_P2].dim() == 1:
+            self._data[BatchKey.ACTION_P2] = self._data[BatchKey.ACTION_P2].unsqueeze(-1)
 
-        self._n_samples = self._data["observation"].shape[0]
+        self._n_samples = self._data[BatchKey.OBSERVATION].shape[0]
 
     def __len__(self) -> int:
         """Total number of samples."""
@@ -134,8 +117,8 @@ class GPUDataset:
             shuffle: Whether to shuffle data order.
 
         Yields:
-            Batch dicts with observation, policy_p1, policy_p2, value,
-            payout_matrix, action_p1, action_p2 tensors.
+            Batch dicts with observation, policy_p1, policy_p2, value_p1,
+            value_p2, action_p1, action_p2 tensors.
         """
         # Apply augmentation to entire dataset (in-place)
         if augment:
@@ -160,14 +143,4 @@ class GPUDataset:
             end = start + batch_size
             batch_indices = indices[start:end]
 
-            yield {
-                "observation": self._data["observation"][batch_indices],
-                "policy_p1": self._data["policy_p1"][batch_indices],
-                "policy_p2": self._data["policy_p2"][batch_indices],
-                "p1_value": self._data["p1_value"][batch_indices],
-                "p2_value": self._data["p2_value"][batch_indices],
-                "payout_matrix": self._data["payout_matrix"][batch_indices],
-                "action_p1": self._data["action_p1"][batch_indices],
-                "action_p2": self._data["action_p2"][batch_indices],
-                "cheese_outcomes": self._data["cheese_outcomes"][batch_indices],
-            }
+            yield {k: self._data[k][batch_indices] for k in BatchKey}

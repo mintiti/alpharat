@@ -3,11 +3,52 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from enum import IntEnum
+from enum import IntEnum, StrEnum
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     import numpy as np
+
+
+class GameFileKey(StrEnum):
+    """Keys for game/bundle npz files.
+
+    Used by GameRecorder (write) and loader (read) to ensure
+    consistent key naming in the serialization format.
+    """
+
+    # Game-level
+    MAZE = "maze"
+    INITIAL_CHEESE = "initial_cheese"
+    CHEESE_OUTCOMES = "cheese_outcomes"
+    MAX_TURNS = "max_turns"
+    RESULT = "result"
+    FINAL_P1_SCORE = "final_p1_score"
+    FINAL_P2_SCORE = "final_p2_score"
+    NUM_POSITIONS = "num_positions"
+
+    # Bundle metadata
+    GAME_LENGTHS = "game_lengths"
+
+    # Position-level
+    P1_POS = "p1_pos"
+    P2_POS = "p2_pos"
+    P1_SCORE = "p1_score"
+    P2_SCORE = "p2_score"
+    P1_MUD = "p1_mud"
+    P2_MUD = "p2_mud"
+    CHEESE_MASK = "cheese_mask"
+    TURN = "turn"
+    VALUE_P1 = "value_p1"
+    VALUE_P2 = "value_p2"
+    VISIT_COUNTS_P1 = "visit_counts_p1"
+    VISIT_COUNTS_P2 = "visit_counts_p2"
+    PRIOR_P1 = "prior_p1"
+    PRIOR_P2 = "prior_p2"
+    POLICY_P1 = "policy_p1"
+    POLICY_P2 = "policy_p2"
+    ACTION_P1 = "action_p1"
+    ACTION_P2 = "action_p2"
 
 
 class CheeseOutcome(IntEnum):
@@ -42,12 +83,14 @@ class PositionData:
     p2_mud: int
     cheese_positions: list[tuple[int, int]]
     turn: int
-    payout_matrix: np.ndarray  # (2, 5, 5) — bimatrix: [0]=P1's payoffs, [1]=P2's
-    visit_counts: np.ndarray  # (5, 5)
+    value_p1: float  # MCTS root value estimate for P1
+    value_p2: float  # MCTS root value estimate for P2
+    visit_counts_p1: np.ndarray  # (5,) marginal visit counts for P1
+    visit_counts_p2: np.ndarray  # (5,) marginal visit counts for P2
     prior_p1: np.ndarray  # (5,)
     prior_p2: np.ndarray  # (5,)
-    policy_p1: np.ndarray  # (5,)
-    policy_p2: np.ndarray  # (5,)
+    policy_p1: np.ndarray  # (5,) visit-proportional policy
+    policy_p2: np.ndarray  # (5,) visit-proportional policy
     action_p1: int  # action taken by player 1 (0-4)
     action_p2: int  # action taken by player 2 (0-4)
 

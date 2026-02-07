@@ -59,8 +59,10 @@ def _make_position_data(
         p2_mud=0,
         cheese_positions=[(2, 2)],
         turn=turn,
-        payout_matrix=np.zeros((2, 5, 5), dtype=np.float32),
-        visit_counts=np.zeros((5, 5), dtype=np.int32),
+        value_p1=0.0,
+        value_p2=0.0,
+        visit_counts_p1=np.zeros(5, dtype=np.int32),
+        visit_counts_p2=np.zeros(5, dtype=np.int32),
         prior_p1=np.ones(5, dtype=np.float32) / 5,
         prior_p2=np.ones(5, dtype=np.float32) / 5,
         policy_p1=policy_p1,
@@ -74,7 +76,7 @@ class TestBuildTargets:
     """Tests for build_targets()."""
 
     def test_policy_targets_from_position(self) -> None:
-        """Policy targets should come from Nash equilibrium in position."""
+        """Policy targets should come from visit-proportional policy in position."""
         policy_p1 = np.array([0.6, 0.1, 0.1, 0.1, 0.1], dtype=np.float32)
         policy_p2 = np.array([0.2, 0.4, 0.2, 0.1, 0.1], dtype=np.float32)
 

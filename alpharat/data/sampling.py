@@ -10,13 +10,13 @@ from typing import TYPE_CHECKING, Any
 
 import numpy as np
 
+from alpharat.ai.utils import select_action_from_strategy
 from alpharat.config.base import StrictBaseModel
 from alpharat.config.checkpoint import make_predict_fn
 from alpharat.config.game import GameConfig  # noqa: TC001
 from alpharat.data.recorder import GameBundler, GameRecorder
 from alpharat.eval.game import is_terminal
 from alpharat.mcts import DecoupledPUCTConfig  # noqa: TC001
-from alpharat.mcts.nash import select_action_from_strategy
 from alpharat.mcts.node import MCTSNode
 from alpharat.mcts.tree import MCTSTree
 
@@ -189,7 +189,7 @@ def load_nn_context(checkpoint_path: str, device: str = "cpu") -> NNContext:
 def build_tree(
     game: PyRat,
     gamma: float,
-    predict_fn: Callable[[Any], tuple[np.ndarray, np.ndarray, np.ndarray]] | None = None,
+    predict_fn: Callable[[Any], tuple[np.ndarray, np.ndarray, float, float]] | None = None,
 ) -> MCTSTree:
     """Build fresh MCTS tree for search.
 
@@ -215,7 +215,8 @@ def build_tree(
         game_state=None,
         prior_policy_p1=dummy,
         prior_policy_p2=dummy,
-        nn_payout_prediction=np.zeros((2, 5, 5)),
+        nn_value_p1=0.0,
+        nn_value_p2=0.0,
         parent=None,
         p1_mud_turns_remaining=simulator.player1_mud_turns,
         p2_mud_turns_remaining=simulator.player2_mud_turns,
@@ -296,7 +297,8 @@ def play_and_record_game(
                     game_state=None,
                     prior_policy_p1=dummy,
                     prior_policy_p2=dummy,
-                    nn_payout_prediction=np.zeros((2, 5, 5)),
+                    nn_value_p1=0.0,
+                    nn_value_p2=0.0,
                     parent=None,
                     p1_mud_turns_remaining=simulator.player1_mud_turns,
                     p2_mud_turns_remaining=simulator.player2_mud_turns,
@@ -318,12 +320,14 @@ def play_and_record_game(
             a2 = select_action_from_strategy(result.policy_p2)
 
             # Record position before making move
+            # Use pruned visit counts from SearchResult (forced visits removed)
             recorder.record_position(
                 game=game,
                 search_result=result,
                 prior_p1=tree.root.prior_policy_p1,
                 prior_p2=tree.root.prior_policy_p2,
-                visit_counts=tree.root.action_visits,
+                visit_counts_p1=result.visit_counts_p1,
+                visit_counts_p2=result.visit_counts_p2,
                 action_p1=a1,
                 action_p2=a2,
             )
