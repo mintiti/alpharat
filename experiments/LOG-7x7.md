@@ -652,3 +652,129 @@ Not a strong signal either way. Could revisit if iter3 stalls.
 ---
 
 **Note (2026-01-24):** Rebased onto main, picking up fix #46 (correct marginal visit counts for equivalent actions in PUCT). This changes how visits-based policy targets are computed when blocked actions exist. Results from iter3 onwards may not be directly comparable to iter1/iter2.
+
+---
+
+## 2026-01-31: CNN Spatial Encoder — Iteration 0
+
+### Motivation
+
+Test whether spatial inductive bias helps on 7x7. The SymmetricMLP struggled to learn payout matrices (0.10 correlation at iter1). A CNN that processes spatial features might learn better representations.
+
+### Architecture
+
+**PyRatCNN** — CNN trunk with DeepSet heads for structural P1/P2 symmetry:
+- Spatial tensor: 5 channels (maze adjacency 4 + cheese 1)
+- Player positions NOT in spatial tensor (preserves symmetry) — used only for indexing
+- ResNet trunk: stem conv + 1 residual block, 64 channels
+- DeepSet combination: extract features at player positions, sum-aggregate
+- Shared policy and payout heads (weight sharing guarantees symmetry)
+
+Config: `hidden_channels=64, num_blocks=1, player_dim=32, hidden_dim=64, dropout=0.1`
+
+### Training
+
+- Data: Same iter1 shards as SymmetricMLP (`7x7/a590d934`, ~796k positions)
+- Policy targets: Nash (not visits)
+- 100 epochs, batch_size=4096, lr=1e-3
+
+TensorBoard metrics looked much better than SymmetricMLP — faster convergence, smaller train/val gap.
+
+### Results
+
+**Elo ratings:**
+
+| Agent | Elo |
+|-------|-----|
+| mcts+nn | 1012.0 ± 24.6 |
+| greedy | 1000.0 (anchor) |
+| mcts | 917.3 ± 24.7 |
+| nn | 901.4 ± 24.9 |
+| random | 85.2 |
+
+**Head-to-head comparison (W/D/L):**
+
+| Benchmark | mcts+nn vs greedy | mcts+nn vs mcts | mcts+nn vs nn |
+|-----------|-------------------|-----------------|---------------|
+| iter2 (Nash, SymmetricMLP) | 8/38/4 | 18/29/3 | 11/38/1 |
+| visits_iter2 | 9/40/1 | 20/29/1 | 12/35/3 |
+| visits_matrixloss_iter2 | 13/35/2 | 12/38/0 | 17/33/0 |
+| **CNN (iter0)** | 7/39/4 | 16/33/1 | 13/36/1 |
+
+### Observations
+
+1. **CNN iter0 ≈ SymmetricMLP iter2** — Matching Nash-based iter2 performance (1012 vs 1026 Elo, within error bars) without any self-play iteration. Head-to-heads are nearly identical.
+
+2. **Same pattern as SymmetricMLP iter1** — nn Elo (901) matches iter1 baseline (898). The search gap (mcts+nn - nn = 111 Elo) is similar to iter1 (106 Elo).
+
+3. **visits_iter2 still strongest** — The visits-based policy targets after 2 iterations remain the best performers (1059 Elo). CNN hasn't caught up yet, but it's only iter0.
+
+4. **Training metrics better** — TensorBoard showed faster convergence and better generalization. Need to check if payout correlation improved (the key weakness of SymmetricMLP).
+
+### Open Questions
+
+1. **Does CNN learn better payout representations?** Run the payout quality diagnostic to check correlation/explained variance.
+
+2. **Will CNN benefit from self-play?** Nash-based SymmetricMLP stalled at iter2 (+1 Elo). visits-based broke through. What about CNN?
+
+3. **CNN + visits?** The CNN architecture might combine well with visits policy targets — spatial features for better priors, soft targets for exploration.
+
+### Next Steps
+
+1. **Diagnostic** — Check payout correlation for CNN vs SymmetricMLP
+2. **Iteration 1** — Sample with CNN checkpoint, train iter1, benchmark
+3. **Consider CNN + visits** — If iter1 stalls, try visits policy targets
+
+---
+
+## 2026-02-02: CNN + Visits Policy Targets
+
+### Motivation
+
+The original CNN iter0 used Nash policy targets with no nash_weight loss. Comparing to the best SymmetricMLP experiments (which used visits targets + nash_weight=1.0), we needed a fair comparison.
+
+Tested three CNN configurations to isolate what helps:
+
+| Config | Policy targets | nash_weight | matrix_loss_weight |
+|--------|----------------|-------------|--------------------|
+| cnn_7x7_v1 (iter0) | Nash | 0.0 | 0.0 |
+| cnn_7x7_v1_matrixloss | Nash | 0.0 | 1.0 |
+| cnn_7x7_visits | **visits** | **1.0** | 0.0 |
+
+### Results
+
+| Config | mcts+nn Elo | nn Elo | vs greedy (W/D/L) |
+|--------|-------------|--------|-------------------|
+| CNN iter0 (Nash) | 1012 | 901 | 7/39/4 |
+| CNN + matrix_loss | 997 | 905 | 2/45/3 |
+| **CNN + visits** | **1016** | **666** | **8/40/2** |
+
+### Observations
+
+1. **Matrix loss hurt performance** — Adding matrix_loss to CNN made it worse (1012 → 997 Elo, lost to greedy 2-3). The spatial inductive bias might already provide enough structure.
+
+2. **Visits targets work** — CNN + visits achieves best mcts+nn Elo (1016) and beats greedy 8-2. Matches the pattern from SymmetricMLP experiments.
+
+3. **Same nn-collapse pattern** — nn alone dropped from 901 to 666 Elo with visits targets. Exactly what we saw with SymmetricMLP (898 → 630). The softer policies need MCTS to be useful.
+
+4. **Overfitting visible** — Validation losses showed U-shaped curves. Train keeps dropping, val plateaus and rises. The model is memorizing rather than generalizing.
+
+### Comparison to Best SymmetricMLP
+
+| Metric | SymmetricMLP visits_iter2 | CNN visits (iter0) |
+|--------|---------------------------|-------------------|
+| mcts+nn Elo | 1059 | 1016 |
+| nn Elo | 1024 | 666 |
+| hidden_dim | 256 | 64 |
+| iterations | 2 | 0 |
+
+CNN at iter0 is ~40 Elo behind SymmetricMLP at iter2, but with:
+- 4x smaller hidden dimension
+- No self-play iteration yet
+- Matching loss config now
+
+### Next Steps
+
+1. **Iteration 1** — Sample with CNN visits checkpoint, train on NN-guided data
+2. **Address overfitting** — More dropout? Early stopping? More data?
+3. **Check if CNN catches up** — SymmetricMLP gained ~55 Elo from iter1→iter2 with visits
