@@ -3,7 +3,7 @@
 **Status:** Draft
 **Parent:** `mcgs-brief.md`
 
-This document specifies the MCGS algorithm adapted for simultaneous two-player games with intermediate rewards. No payout matrices, no Nash equilibrium — purely visit-distribution based.
+This document specifies the MCGS algorithm adapted for simultaneous two-player games with intermediate rewards. No payout matrices — purely visit-distribution based.
 
 ---
 
@@ -26,36 +26,71 @@ Our adaptation for simultaneous moves:
 
 Each node stores:
 
+**Frozen after evaluation (read-only, thread-safe):**
+
 | Field | Type | Description |
 |-------|------|-------------|
-| `Q_p1`, `Q_p2` | scalar | Expected value for each player from this position. Recomputed idempotently. |
-| `U_p1`, `U_p2` | scalar | NN initial estimates. Frozen after first evaluation. |
+| `is_evaluated` | bool | Whether NN has evaluated this node. |
+| `U_p1`, `U_p2` | scalar | NN initial value estimates. Frozen after first evaluation. |
 | `prior_p1[n1]` | array | NN policy for player 1, reduced to unique outcomes. |
 | `prior_p2[n2]` | array | NN policy for player 2, reduced to unique outcomes. |
-| `edges[(i,j)]` | dict | Maps outcome pair to edge data. See below. |
 
-**Edge data** for outcome pair (i, j):
+**Outcome indexing (frozen after creation):**
 
 | Field | Type | Description |
 |-------|------|-------------|
-| `child` | Node* | Pointer to child node (may be shared via transposition). |
-| `visits` | int | Edge visits — how many times THIS parent selected this outcome pair. |
-| `r_p1`, `r_p2` | scalar | Immediate reward (cheese collected) on this transition. |
+| `n1`, `n2` | int | Number of unique outcomes per player. |
+| `p1_outcomes[n1]` | array | Outcome index → action (Direction value). |
+| `p2_outcomes[n2]` | array | Outcome index → action (Direction value). |
+| `p1_action_to_idx[5]` | array | Action → outcome index. |
+| `p2_action_to_idx[5]` | array | Action → outcome index. |
 
-**Note:** Rewards are per-edge, not per-child. The same child can be reached from different parents with different rewards.
+**Mutable (written during backup, read during selection):**
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `Q_p1`, `Q_p2` | scalar | Expected value for each player. Recomputed idempotently. Future: atomic. |
+| `virtual_losses` | int | 0 for single-threaded. Future: atomic, used during parallel selection. |
+
+**Edge data — stored as arrays `[n1, n2]`:**
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `edge_visits[n1, n2]` | int array | Per-pair visit counts. The fundamental statistic. |
+| `edge_r_p1[n1, n2]` | float array | Immediate reward for player 1 on this transition. |
+| `edge_r_p2[n1, n2]` | float array | Immediate reward for player 2 on this transition. |
+| `edge_children[n1][n2]` | Node array | Child pointers (None if unexpanded). May be shared via transposition. |
+
+**Why arrays, not dicts:** The `(n1, n2)` dimensions are small (typically 3–5) and fixed at creation. Arrays give cache-friendly access, numpy marginal sums, and a clear path to C extensions with atomic operations for future threading.
+
+**Rewards are per-edge, not per-child.** The same child can be reached from different parents with different rewards (different cheese configurations at the parent).
+
+**Threading notes:** Single-threaded for now. The structure is designed so that the threading path is:
+- Make `Q_p1`, `Q_p2`, `virtual_losses`, and `edge_visits` atomic.
+- Add virtual loss increment at selection entry, decrement at backup.
+- Transposition table needs concurrent insert/lookup (e.g. sharded locks).
+- Per-thread playout path tracking (already implicit in the recursive call stack).
 
 ---
 
 ## Derived Quantities
 
-From edge visits, we derive:
+From edge visits, we derive per-player marginal quantities:
 
 ```
-total_visits = Σ_{i,j} edges[i,j].visits
+total_visits = Σ_{i,j} edge_visits[i,j]
 
-marginal_visits_p1[i] = Σ_j edges[i,j].visits
-marginal_visits_p2[j] = Σ_i edges[i,j].visits
+marginal_visits_p1[i] = Σ_j edge_visits[i,j]
+marginal_visits_p2[j] = Σ_i edge_visits[i,j]
 ```
+
+**Mapping to KataGo:** In alternating-move MCGS, one action = one edge = one child, so `edgeVisits` is a scalar per edge. In simultaneous moves, one player-action maps to a *bundle* of edges (one per opponent response). The per-player marginal is the analog of KataGo's `edgeVisits`:
+
+| KataGo (alternating) | Ours (simultaneous) |
+|---|---|
+| `edgeVisits(action)` | `marginal_visits_p1[i] = Σ_j edge_visits[i,j]` |
+| `child.Q` (one child per action) | `marginal_Q_p1[i]` (weighted over opponent responses) |
+| PUCT uses `edgeVisits` | PUCT uses `marginal_visits_p1[i]` |
 
 ---
 
@@ -64,15 +99,38 @@ marginal_visits_p2[j] = Σ_i edges[i,j].visits
 When a node is visited, recompute Q from children:
 
 ```
-Q_p(n) = (U_p(n) + Σ_{i,j} edges[i,j].visits * (edges[i,j].r_p + child_Q_p(i,j)))
+Q_p(n) = (U_p(n) + Σ_{i,j} edge_visits[i,j] * (edge_r_p[i,j] + child_Q_p(i,j)))
          / (1 + total_visits)
 ```
 
 Where:
 - `U_p(n)` is the NN's initial estimate (weight = 1, like a virtual visit)
-- `child_Q_p(i,j) = edges[i,j].child.Q_p` if child exists, else `0` (pessimistic)
+- The sum is only over edges with `edge_visits[i,j] > 0`
+- For visited edges, `child_Q_p(i,j) = edge_children[i][j].Q_p` — always available (see invariant below)
 
-**Pessimistic default:** Unexpanded edges contribute 0 to the Q sum. This encourages exploration — you have to visit a path to get credit for it.
+**Invariant:** When `edge_visits[i,j] > 0`, the child exists and is evaluated. This holds because: expansion creates the child, the playout recurses into it, and if it's new it gets evaluated on first visit. If it's a transposition, it was already evaluated from a prior path.
+
+**FPU is not used in backup.** Unvisited edges have `edge_visits = 0` and contribute nothing to the sum. The formula only considers what we've actually observed.
+
+When KataGo's uncertainty weighting is set to uniform (all weights = 1), their Q formula simplifies to exactly this. The `edgeVisits / childVisits` scaling in KataGo becomes a no-op: `child.weightSum * edgeVisits / childVisits = childVisits * edgeVisits / childVisits = edgeVisits`.
+
+---
+
+## First Play Urgency (FPU)
+
+Unexplored actions need a Q estimate for PUCT selection. Rather than 0 (pessimistic), use the parent's current Q minus an offset:
+
+```
+fpu_Q_p(n) = Q_p(n) - fpu_offset
+```
+
+Where `fpu_offset` is a small positive constant (start with ~0.1, tune empirically).
+
+**Why not 0:** A pessimistic 0 makes unexplored actions look terrible, forcing PUCT to rely solely on the exploration term. FPU gives a warmer estimate: "this unexplored action is probably roughly as good as what I've seen, minus a penalty for uncertainty."
+
+**Where it's used:** Only in marginal Q computation during PUCT selection (for actions where `marginal_visits_p1[i] == 0`). Not used in backup.
+
+**KataGo comparison:** KataGo uses `parentUtility - fpuReductionMax * sqrt(visitedPolicyMass)` — adjusting based on how much of the prior has been explored. Our simpler constant offset is a reasonable starting point.
 
 ---
 
@@ -80,36 +138,51 @@ Where:
 
 Each player selects independently via decoupled PUCT.
 
-### Step 1: Opponent's Policy
+### Step 1: Opponent Weighting for Marginal Q
 
-For computing marginal Q, we need the opponent's policy. Options:
+For computing player 1's marginal Q at action `i`, we need to weight over player 2's responses. The key question: what weights?
 
 **Option A (Prior-based):**
 ```
-π_2[j] = prior_p2[j]
+weight[j] = prior_p2[j]    (always defined, no cold-start)
 ```
 
 **Option B (Visit-based):**
 ```
-π_2[j] = marginal_visits_p2[j] / total_visits  (if total > 0, else prior)
+weight[j] = marginal_visits_p2[j] / total_visits    (if total > 0, else prior)
 ```
 
 **Option C (Blended):**
 ```
-π_2[j] ∝ prior_p2[j] + marginal_visits_p2[j]  (normalized)
+weight[j] ∝ prior_p2[j] + marginal_visits_p2[j]    (normalized)
 ```
 
-Start with Option A (prior-based) for simplicity. The prior is always defined and doesn't have cold-start issues.
+**Option D (Conditional visit proportions) — preferred:**
+```
+When marginal_visits_p1[i] > 0:
+    weight[j] = edge_visits[i,j] / marginal_visits_p1[i]
+
+When marginal_visits_p1[i] == 0:
+    Use FPU directly (no weighting needed, see Step 2)
+```
+
+Option D is "what actually happened when I played action i" — the empirical opponent response distribution conditional on our action. It's the closest analog to KataGo, where `child.Q` inherently reflects the actual play below it. Unvisited opponent responses (within a visited action) naturally get weight 0, so we only average over what we've observed.
+
+**Start with Option D.** Fall back to Option A if empirically problematic.
 
 ### Step 2: Marginal Q
 
 Player 1 computes expected value for each of their outcomes:
 
 ```
-Q_p1[i] = Σ_j π_2[j] * (edges[i,j].r_p1 + child_Q_p1(i,j))
-```
+If marginal_visits_p1[i] > 0:
+    Q_p1[i] = Σ_j (edge_visits[i,j] / marginal_visits_p1[i])
+              * (edge_r_p1[i,j] + edge_children[i][j].Q_p1)
+              (sum only over j where edge_visits[i,j] > 0)
 
-Where `child_Q_p1(i,j) = 0` if edge unexpanded (pessimistic).
+If marginal_visits_p1[i] == 0:
+    Q_p1[i] = fpu_Q_p1 = Q_p1(node) - fpu_offset
+```
 
 Symmetrically for player 2.
 
@@ -145,17 +218,14 @@ def search(root, game, num_simulations):
 
 def get_visit_distribution(node):
     """Extract marginal visit distributions for both players."""
-    total = sum(e.visits for e in node.edges.values())
+    total = node.edge_visits.sum()
     if total == 0:
         return node.prior_p1, node.prior_p2
 
-    π_p1 = zeros(node.n1)
-    π_p2 = zeros(node.n2)
-    for (i, j), edge in node.edges.items():
-        π_p1[i] += edge.visits
-        π_p2[j] += edge.visits
+    π_p1 = node.edge_visits.sum(axis=1) / total  # marginal over j → [n1]
+    π_p2 = node.edge_visits.sum(axis=0) / total  # marginal over i → [n2]
 
-    return π_p1 / total, π_p2 / total
+    return π_p1, π_p2
 ```
 
 ### Playout (Selection → Expansion → Evaluation → Backup)
@@ -166,8 +236,6 @@ def playout(node, game):
 
     # ---------- TERMINAL CHECK ----------
     if game.is_over():
-        # Terminal node: Q = actual game outcome
-        # (Could also set Q = 0 if we only care about future rewards)
         return
 
     # ---------- EVALUATION (first visit) ----------
@@ -176,22 +244,32 @@ def playout(node, game):
         return  # Stop here on first visit (leaf evaluation)
 
     # ---------- SELECTION ----------
-    o1 = select_outcome_p1(node)
-    o2 = select_outcome_p2(node)
+    o1 = select_outcome_p1(node)  # outcome index (0..n1-1)
+    o2 = select_outcome_p2(node)  # outcome index (0..n2-1)
 
     # ---------- EXPANSION ----------
-    if (o1, o2) not in node.edges:
+    if node.edge_children[o1][o2] is None:
         expand_edge(node, game, o1, o2)
 
-    edge = node.edges[(o1, o2)]
+    child = node.edge_children[o1][o2]
 
     # ---------- RECURSE ----------
-    undo = game.make_move(o1, o2)
-    playout(edge.child, game)
+    # Map outcome indices back to game actions for make_move
+    a1 = node.p1_outcomes[o1]  # outcome idx → Direction value
+    a2 = node.p2_outcomes[o2]
+    undo = game.make_move(a1, a2)
+
+    # NOTE: If child is already evaluated (transposition hit), this does NOT
+    # stop at the leaf — it recurses into the child's subtree immediately.
+    # This is the main benefit of MCGS: we skip NN eval and leverage
+    # existing search. First visit through a new edge to a transposed child
+    # can recurse arbitrarily deep.
+    playout(child, game)
+
     game.unmake_move(undo)
 
     # ---------- BACKUP ----------
-    edge.visits += 1
+    node.edge_visits[o1, o2] += 1
     recompute_Q(node)
 ```
 
@@ -201,11 +279,9 @@ def playout(node, game):
 def evaluate_node(node, game):
     """First-time evaluation of a node via NN (or uniform prior if no NN)."""
 
-    # Get NN predictions
     if nn is not None:
         policy_p1, policy_p2, value_p1, value_p2 = nn.predict(game)
     else:
-        # Uniform prior, zero value (pessimistic)
         policy_p1 = uniform(node.n1)
         policy_p2 = uniform(node.n2)
         value_p1, value_p2 = 0.0, 0.0
@@ -229,17 +305,11 @@ def evaluate_node(node, game):
 def select_outcome_p1(node):
     """Select player 1's outcome via PUCT."""
 
-    total_visits = sum(e.visits for e in node.edges.values())
+    total_visits = node.edge_visits.sum()
+    marginal_visits = node.edge_visits.sum(axis=1)  # [n1]
 
-    # Compute marginal visits per outcome
-    marginal_visits = zeros(node.n1)
-    for (i, j), edge in node.edges.items():
-        marginal_visits[i] += edge.visits
-
-    # Compute marginal Q for each outcome
     marginal_Q = compute_marginal_Q_p1(node)
 
-    # PUCT score
     exploration = node.prior_p1 * sqrt(total_visits) / (1 + marginal_visits)
     scores = marginal_Q + c_puct * exploration
 
@@ -247,36 +317,36 @@ def select_outcome_p1(node):
 
 
 def select_outcome_p2(node):
-    """Select player 2's outcome via PUCT. Symmetric to p1."""
+    """Symmetric to p1."""
     # ... symmetric implementation ...
 
 
 def compute_marginal_Q_p1(node):
-    """Compute Q_p1[i] = E_{j~π_2}[r_p1[i,j] + child[i,j].Q_p1]"""
+    """Compute Q_p1[i] — expected value of player 1's action i.
 
-    # Opponent's policy (using prior for now)
-    π_2 = node.prior_p2
-
+    Uses conditional visit proportions (Option D): weight opponent
+    responses by how often they were actually played against action i.
+    """
+    fpu = node.Q_p1 - fpu_offset
     marginal_Q = zeros(node.n1)
 
     for i in range(node.n1):
-        q_sum = 0.0
-        for j in range(node.n2):
-            if (i, j) in node.edges:
-                edge = node.edges[(i, j)]
-                child_Q = edge.child.Q_p1 if edge.child.is_evaluated else 0.0
-                q_sum += π_2[j] * (edge.r_p1 + child_Q)
-            else:
-                # Unexpanded edge: pessimistic Q = 0
-                q_sum += π_2[j] * 0.0
-        marginal_Q[i] = q_sum
+        marginal_i = node.edge_visits[i, :].sum()
+
+        if marginal_i > 0:
+            # Option D: weight by conditional visit proportions
+            q_sum = 0.0
+            for j in range(node.n2):
+                v = node.edge_visits[i, j]
+                if v > 0:
+                    child = node.edge_children[i][j]
+                    q_sum += v * (node.edge_r_p1[i, j] + child.Q_p1)
+            marginal_Q[i] = q_sum / marginal_i
+        else:
+            # Never played action i: use FPU
+            marginal_Q[i] = fpu
 
     return marginal_Q
-
-
-def compute_marginal_Q_p2(node):
-    """Symmetric to p1."""
-    # ... symmetric implementation ...
 ```
 
 ### Expansion
@@ -285,10 +355,14 @@ def compute_marginal_Q_p2(node):
 def expand_edge(node, game, o1, o2):
     """Expand edge (o1, o2): make move, observe reward, get/create child."""
 
+    # Map outcome indices to game actions
+    a1 = node.p1_outcomes[o1]
+    a2 = node.p2_outcomes[o2]
+
     # Make the move and observe intermediate rewards
-    undo = game.make_move(o1, o2)
-    r_p1 = undo.cheese_collected_p1  # Immediate reward
-    r_p2 = undo.cheese_collected_p2
+    undo = game.make_move(a1, a2)
+    node.edge_r_p1[o1, o2] = undo.cheese_collected_p1
+    node.edge_r_p2[o1, o2] = undo.cheese_collected_p2
 
     # Check transposition table
     state_key = compute_state_key(game)
@@ -302,13 +376,7 @@ def expand_edge(node, game, o1, o2):
         )
         transposition_table[state_key] = child
 
-    # Create edge (visits starts at 0, incremented after recursion)
-    node.edges[(o1, o2)] = Edge(
-        child=child,
-        visits=0,
-        r_p1=r_p1,
-        r_p2=r_p2,
-    )
+    node.edge_children[o1][o2] = child
 
     game.unmake_move(undo)
 
@@ -321,7 +389,7 @@ def compute_state_key(game):
         frozenset(game.cheese_positions()),
         game.player1_mud_turns,
         game.player2_mud_turns,
-        game.turn,  # Include turn for same-depth-only transpositions
+        game.turn,  # Include turn — no cycles possible (turn always increases)
     )
 ```
 
@@ -329,39 +397,40 @@ def compute_state_key(game):
 
 ```python
 def recompute_Q(node):
-    """Recompute Q from children. Idempotent — result depends only on current state."""
+    """Recompute Q from children. Idempotent — result depends only on current state.
 
+    Only sums over visited edges (visits > 0). FPU is not used here — it's
+    only for PUCT selection. The backup formula is purely empirical: what did
+    we actually observe?
+    """
     if not node.is_evaluated:
-        return  # Nothing to do
+        return
 
-    total_visits = sum(e.visits for e in node.edges.values())
+    total_visits = node.edge_visits.sum()
 
     if total_visits == 0:
-        # No children visited yet, Q = U (NN estimate)
         node.Q_p1 = node.U_p1
         node.Q_p2 = node.U_p2
         return
 
-    # Weighted sum over visited edges
     weighted_sum_p1 = 0.0
     weighted_sum_p2 = 0.0
 
-    for (i, j), edge in node.edges.items():
-        if edge.visits > 0:
-            child_Q_p1 = edge.child.Q_p1 if edge.child.is_evaluated else 0.0
-            child_Q_p2 = edge.child.Q_p2 if edge.child.is_evaluated else 0.0
+    for i in range(node.n1):
+        for j in range(node.n2):
+            v = node.edge_visits[i, j]
+            if v > 0:
+                child = node.edge_children[i][j]
+                weighted_sum_p1 += v * (node.edge_r_p1[i, j] + child.Q_p1)
+                weighted_sum_p2 += v * (node.edge_r_p2[i, j] + child.Q_p2)
 
-            weighted_sum_p1 += edge.visits * (edge.r_p1 + child_Q_p1)
-            weighted_sum_p2 += edge.visits * (edge.r_p2 + child_Q_p2)
-
-    # Q = weighted average of U (weight 1) and children (weight = visits)
     node.Q_p1 = (node.U_p1 + weighted_sum_p1) / (1 + total_visits)
     node.Q_p2 = (node.U_p2 + weighted_sum_p2) / (1 + total_visits)
 ```
 
 ---
 
-## Final Policy (No Nash)
+## Final Policy
 
 After search completes, the policy IS the visit distribution:
 
@@ -374,7 +443,7 @@ To select a move:
 - Sample from π (with temperature for exploration)
 - Or take argmax (for best play)
 
-No Nash equilibrium computation. The visit distribution is the learned policy.
+The visit distribution is the learned policy.
 
 ---
 
@@ -384,9 +453,11 @@ No Nash equilibrium computation. The visit distribution is the learned policy.
 
 Including turn means we only merge same-turn transpositions. Cross-depth transpositions (same position at different turns) stay separate. This is the conservative choice — different turns may warrant different valuations due to remaining horizon.
 
+**No cycles possible:** Turn always increases, so a playout path can never revisit a node. No cycle detection needed (unlike KataGo, which needs it for Go's ko/superko rules).
+
 **Lookup:** Before creating a new child node, check if state_key exists. If yes, link to existing node.
 
-**Zobrist hashing:** For performance, use incremental XOR-based hashing rather than recomputing the full key. Design TBD.
+**Zobrist hashing:** For performance, use incremental XOR-based hashing rather than recomputing the full key. Design TBD — optimization for later.
 
 ---
 
@@ -408,13 +479,13 @@ This works because:
 
 ## Open Questions
 
-1. **Opponent policy for marginal Q** — Prior vs visits vs blend. Needs experimentation.
+1. **Opponent policy for marginal Q** — Option D (conditional visit proportions) is the current plan. May experiment with prior-based (Option A) if cold-start is problematic.
 
-2. **Short-circuit optimization** — Skip child playout when `child.visits > edge.visits`? KataGo makes this configurable.
+2. **FPU offset value** — Starting with a fixed constant (~0.1). KataGo uses a more sophisticated formula based on explored policy mass. Tune empirically.
 
-3. **Staleness propagation** — Currently only update nodes on playout path. Could also propagate to other parents, but adds complexity.
+3. **Short-circuit optimization** — When `child.total_visits >> edge_visits[i,j]`, skip recursion and just increment edge visits. The child's Q is already well-estimated from other parents' visits. KataGo makes this configurable. Defer to implementation phase.
 
-4. **Virtual loss for parallelism** — Not addressed yet. Needed for multi-threaded search.
+4. **Staleness propagation** — Currently only update nodes on playout path. Other parents of updated children keep stale Q until revisited. KataGo confirms this is fine: PUCT guarantees eventual revisits, and idempotent Q self-corrects on next visit.
 
 ---
 
@@ -425,10 +496,14 @@ This works because:
 | Players | Alternating | Simultaneous |
 | Q values | 1 per node | 2 per node (Q_p1, Q_p2) |
 | Policies | 1 per node | 2 per node |
-| PUCT | Single selection | Decoupled (independent per player) |
+| PUCT | Single selection, `edgeVisits` | Decoupled, `marginal_visits_p[i] = Σ_j edge_visits[i,j]` |
+| Edge Q | `child.Q` directly | Weighted over opponent responses (Option D) |
 | Rewards | Terminal only | Intermediate (cheese per transition) |
+| Edge storage | Per-action child pointer | `[n1, n2]` arrays (action pairs) |
+| NN weights | Uncertainty-based | Uniform (weight = 1) |
+| FPU | `parentQ - offset * sqrt(visitedPolicyMass)` | `parentQ - fpu_offset` (simpler) |
+| Cycle detection | Yes (Go ko/superko) | No (turn in hash, always increases) |
 | Final policy | Visit distribution | Visit distribution (same) |
-| Nash | N/A | Removed (was in tree MCTS) |
 
 ---
 
