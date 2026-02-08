@@ -88,11 +88,12 @@ class DecoupledPUCTSearch:
     def _pure_nn_result(self) -> SearchResult:
         """Return NN priors directly without tree search."""
         root = self.tree.root
+        tc = self.tree.total_cheese
         return SearchResult(
             policy_p1=root.prior_policy_p1.copy(),
             policy_p2=root.prior_policy_p2.copy(),
-            value_p1=root.v1,
-            value_p2=root.v2,
+            value_p1=root.v1 * tc,
+            value_p2=root.v2 * tc,
             visit_counts_p1=np.zeros(5, dtype=np.float64),
             visit_counts_p2=np.zeros(5, dtype=np.float64),
         )
@@ -124,12 +125,14 @@ class DecoupledPUCTSearch:
         policy_p1 = n1_expanded / n1_sum if n1_sum > 0 else root.prior_policy_p1.copy()
         policy_p2 = n2_expanded / n2_sum if n2_sum > 0 else root.prior_policy_p2.copy()
 
-        # Compute root value from Q-values weighted by (raw) visit counts
+        # Compute root value from Q-values weighted by (raw) visit counts.
+        # Q-values are in normalized [0, 1] space; multiply back to raw cheese scale.
+        tc = self.tree.total_cheese
         n1_total = n1.sum()
         n2_total = n2.sum()
 
-        value_p1 = float(np.dot(q1, n1) / n1_total) if n1_total > 0 else root.v1
-        value_p2 = float(np.dot(q2, n2) / n2_total) if n2_total > 0 else root.v2
+        value_p1 = float(np.dot(q1, n1) / n1_total) * tc if n1_total > 0 else root.v1 * tc
+        value_p2 = float(np.dot(q2, n2) / n2_total) * tc if n2_total > 0 else root.v2 * tc
 
         return SearchResult(
             policy_p1=policy_p1.astype(np.float64),
