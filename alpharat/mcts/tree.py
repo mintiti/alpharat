@@ -53,6 +53,9 @@ class MCTSTree:
         self.gamma = gamma
         self._predict_fn = predict_fn
 
+        # Set value scale on root from game state (remaining cheese)
+        self.root.value_scale = float(max(len(game.cheese_positions()), 1))
+
         # Cache NN predictions keyed on game state (skip redundant forward passes)
         self._prediction_cache: dict[tuple, tuple[np.ndarray, np.ndarray, float, float]] = {}
 
@@ -132,7 +135,7 @@ class MCTSTree:
         p1_score_after, p2_score_after = self.game.player1_score, self.game.player2_score
         reward = (p1_score_after - p1_score_before, p2_score_after - p2_score_before)
 
-        # Store edge reward on child (used for Q = r + gamma * V computation)
+        # Store raw edge rewards (PUCT normalization happens at selection time)
         child._edge_r1 = reward[0]
         child._edge_r2 = reward[1]
 
@@ -309,6 +312,9 @@ class MCTSTree:
             p2_effective=p2_effective,
         )
 
+        # Set value scale from current game state (simulator is at child position)
+        child.value_scale = float(max(len(self.game.cheese_positions()), 1))
+
         # Check if this child represents a terminal state
         child.is_terminal = self._check_terminal()
         if child.is_terminal:
@@ -366,8 +372,9 @@ class MCTSTree:
             return cached[0].copy(), cached[1].copy(), cached[2], cached[3]
 
         result = self._predict_fn(self._get_observation())
+        # Cache raw values — PUCT normalization happens at selection time per-node
         self._prediction_cache[key] = result
-        return result[0], result[1], result[2], result[3]
+        return result[0].copy(), result[1].copy(), result[2], result[3]
 
     def _smart_uniform_prior(self, effective: list[int] | None) -> np.ndarray:
         """Create uniform prior over unique effective actions only.

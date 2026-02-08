@@ -1,6 +1,7 @@
-# Scalar MCTS params tuned via Optuna on 7x7 open maze (no walls/mud)
-# 41.5% win rate vs Greedy at 100 games per config
-# See experiments/LOG-scalar-mcts.md for sweep details
-simulations: 593
-c_puct: 1.17
-force_k: 0.012
+# MCTS params tuned via Optuna on 7x7 open maze (no walls/mud)
+# Per-node PUCT normalization (Q / value_scale → [0, 1])
+# 40.0% win rate vs Greedy at 100 games/config, 845 trials
+# See scripts/optuna_sweep.py, results/per_node_puct_7x7.log
+simulations: 629
+c_puct: 0.531
+force_k: 0.067

@@ -33,7 +33,9 @@ def compute_pruned_visits(
         n_min = c * P(i) * sqrt(N) / (PUCT* - Q(i)) - 1
 
     Args:
-        q_values: Marginal Q-values [n] in reduced space.
+        q_values: Marginal Q-values [n] in reduced space. Should be
+            normalized to [0, 1] (e.g., by value_scale) for consistent
+            pruning thresholds.
         prior: Reduced prior probabilities [n].
         visit_counts: Raw marginal visit counts [n].
         total_visits: Total simulations through this node.

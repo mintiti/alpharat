@@ -37,9 +37,9 @@ class BenchmarkConfig(StrictBaseModel):
           workers: 4
           device: cuda
           mcts:
-            simulations: 554
-            c_puct: 8.34
-            force_k: 0.88
+            simulations: 629
+            c_puct: 0.531
+            force_k: 0.067
     """
 
     games_per_matchup: int = 50

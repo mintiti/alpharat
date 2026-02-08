@@ -208,9 +208,9 @@ class TestCompositionSemantics:
         assert config.game.height == 5
 
     def test_sample_yaml_uses_default_mcts(self) -> None:
-        """Main sample.yaml uses 5x5_tuned MCTS by default."""
+        """Main sample.yaml uses 7x7_scalar_tuned MCTS by default."""
         config = load_config(SamplingConfig, CONFIGS, "sample")
-        mcts_config = load_config(DecoupledPUCTConfig, CONFIGS / "mcts", "5x5_tuned")
+        mcts_config = load_config(DecoupledPUCTConfig, CONFIGS / "mcts", "7x7_scalar_tuned")
         assert config.mcts.simulations == mcts_config.simulations
         assert config.mcts.c_puct == mcts_config.c_puct
 

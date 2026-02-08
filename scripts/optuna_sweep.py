@@ -26,24 +26,19 @@ CHEESE_COUNT, MAX_TURNS = 10, 50
 WALL_DENSITY, MUD_DENSITY = 0.0, 0.0
 GAMES_PER_CONFIG = 100
 
-# Known-good configs to seed the search
+# Seed configs for normalized Q-values (Q in [0, 1])
 SEED_CONFIGS = [
-    # Previous Optuna best (pre-pruning)
-    {"n_sims": 554, "c_puct": 8.34, "force_k": 0.88},
-    # KataGo default force_k
-    {"n_sims": 200, "c_puct": 4.73, "force_k": 2.0},
-    # Higher forcing variants (pruning should handle these better now)
-    {"n_sims": 554, "c_puct": 8.34, "force_k": 4.0},
-    {"n_sims": 554, "c_puct": 8.34, "force_k": 8.0},
+    {"n_sims": 200, "c_puct": 1.5, "force_k": 2.0},
+    {"n_sims": 400, "c_puct": 1.0, "force_k": 1.0},
+    {"n_sims": 600, "c_puct": 2.0, "force_k": 0.5},
 ]
 
 
 def objective(trial: optuna.Trial) -> tuple[float, int]:
     """Run games vs Greedy, return win rate."""
     n_sims = trial.suggest_int("n_sims", 200, 1200, log=True)
-    c_puct = trial.suggest_float("c_puct", 0.5, 16.0, log=True)
-    # force_k is under sqrt, so log scale. 0.01 ≈ disabled, 64 = aggressive forcing
-    force_k = trial.suggest_float("force_k", 0.01, 64.0, log=True)
+    c_puct = trial.suggest_float("c_puct", 0.5, 2.0, log=True)
+    force_k = trial.suggest_float("force_k", 0.01, 16.0, log=True)
 
     wins = 0.0
     for game_idx in range(GAMES_PER_CONFIG):
@@ -94,7 +89,7 @@ def enqueue_seed_trials(study: optuna.Study, csv_path: str, top_n: int) -> None:
 def main() -> None:
     parser = argparse.ArgumentParser(description="PUCT parameter sweep with Optuna")
     parser.add_argument("--n-jobs", type=int, default=1, help="Parallel workers")
-    parser.add_argument("--study-name", default="visits_fix_7x7_mo", help="Study name")
+    parser.add_argument("--study-name", default="per_node_puct_7x7", help="Study name")
     parser.add_argument("--seed-from", type=str, help="CSV file to seed trials from")
     parser.add_argument("--seed-top", type=int, default=20, help="Number of top configs to seed")
     args = parser.parse_args()
@@ -102,8 +97,10 @@ def main() -> None:
     # Ensure results directory exists
     Path("results").mkdir(exist_ok=True)
 
-    db_path = f"results/{args.study_name}.db"
-    storage = f"sqlite:///{db_path}"
+    journal_path = f"results/{args.study_name}.log"
+    storage = optuna.storages.JournalStorage(
+        optuna.storages.journal.JournalFileBackend(journal_path),
+    )
 
     study = optuna.create_study(
         study_name=args.study_name,
@@ -111,7 +108,7 @@ def main() -> None:
         directions=["maximize", "minimize"],  # win_rate up, n_sims down
         load_if_exists=True,
     )
-    print(f"Study: {args.study_name}, DB: {db_path}")
+    print(f"Study: {args.study_name}, journal: {journal_path}")
 
     # Seed with known-good configs
     for cfg in SEED_CONFIGS:

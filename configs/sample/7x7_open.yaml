@@ -5,7 +5,7 @@
 
 defaults:
   - /game: 7x7_open
-  - /mcts: 5x5_tuned
+  - /mcts: 7x7_scalar_tuned
   - _self_
 
 group: 7x7_open
