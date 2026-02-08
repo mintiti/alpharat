@@ -3,11 +3,11 @@
 #
 # Composes from sub-configs:
 #   - /game: 5x5_open, 7x7_open, 5x5_open_asymmetric, etc.
-#   - /mcts: 5x5_tuned
+#   - /mcts: 7x7_scalar_tuned
 
 defaults:
   - /game: 5x5_open
-  - /mcts: 5x5_tuned
+  - /mcts: 7x7_scalar_tuned
   - _self_
 
 group: 5x5_open  # Required: batch group name

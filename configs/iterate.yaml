@@ -3,12 +3,12 @@
 #
 # Composes from sub-configs:
 #   - /game: 5x5_open, 7x7_open, etc.
-#   - /mcts: 5x5_tuned
+#   - /mcts: 7x7_scalar_tuned
 #   - /model: mlp, symmetric
 
 defaults:
   - /game: 5x5_open
-  - /mcts: 5x5_tuned
+  - /mcts: 7x7_scalar_tuned
   - /model: symmetric
   - _self_
 

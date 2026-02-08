@@ -44,7 +44,7 @@ Examples:
 
 ### Sample configs
 
-Named after the game config they use. All use the same MCTS params (`5x5_tuned`).
+Named after the game config they use. All use the same MCTS params (`7x7_scalar_tuned`).
 
 ### Model configs
 
