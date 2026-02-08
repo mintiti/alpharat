@@ -53,8 +53,8 @@ class MCTSTree:
         self.gamma = gamma
         self._predict_fn = predict_fn
 
-        # Set remaining cheese on root from game state
-        self.root.remaining_cheese = float(max(len(game.cheese_positions()), 1))
+        # Set value scale on root from game state (remaining cheese)
+        self.root.value_scale = float(max(len(game.cheese_positions()), 1))
 
         # Cache NN predictions keyed on game state (skip redundant forward passes)
         self._prediction_cache: dict[tuple, tuple[np.ndarray, np.ndarray, float, float]] = {}
@@ -312,8 +312,8 @@ class MCTSTree:
             p2_effective=p2_effective,
         )
 
-        # Set remaining cheese from current game state (simulator is at child position)
-        child.remaining_cheese = float(max(len(self.game.cheese_positions()), 1))
+        # Set value scale from current game state (simulator is at child position)
+        child.value_scale = float(max(len(self.game.cheese_positions()), 1))
 
         # Check if this child represents a terminal state
         child.is_terminal = self._check_terminal()

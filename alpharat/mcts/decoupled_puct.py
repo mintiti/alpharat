@@ -106,7 +106,7 @@ class DecoupledPUCTSearch:
         n1, n2 = root.get_visit_counts()
 
         # Normalize Q for pruning (PUCT sees [0, 1] values)
-        rc = root.remaining_cheese
+        rc = root.value_scale
         q1_norm = q1 / rc
         q2_norm = q2 / rc
 
@@ -215,8 +215,8 @@ class DecoupledPUCTSearch:
         n_total = node.total_visits
         is_root = node == self.tree.root
 
-        # Normalize Q by remaining cheese at this node → [0, 1] at every depth
-        rc = node.remaining_cheese
+        # Normalize Q by value_scale at this node → [0, 1] at every depth
+        rc = node.value_scale
         q1_norm = q1 / rc
         q2_norm = q2 / rc
 

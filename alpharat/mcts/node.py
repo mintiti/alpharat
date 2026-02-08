@@ -44,6 +44,7 @@ class MCTSNode:
         p2_mud_turns_remaining: Turns player 2 is stuck in mud
         p1_effective: Maps each P1 action index to its effective action
         p2_effective: Maps each P2 action index to its effective action
+        value_scale: Normalization divisor for Q-values in PUCT (default 1.0, set by tree)
     """
 
     def __init__(
@@ -83,9 +84,9 @@ class MCTSNode:
         self.move_undo = move_undo
         self.parent_action = parent_action
 
-        # Remaining cheese at this position (for per-node PUCT normalization).
+        # Normalization divisor for Q-values in PUCT (e.g. remaining cheese).
         # Default 1.0 = no-op normalization (safe for tests constructing nodes directly).
-        self.remaining_cheese: float = 1.0
+        self.value_scale: float = 1.0
 
         # Calculate depth from parent
         self.depth: int = 0 if parent is None else parent.depth + 1
