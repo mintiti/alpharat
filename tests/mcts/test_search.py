@@ -632,16 +632,14 @@ class TestRawVsPrunedVisits:
         tree = MCTSTree(game=game, root=root, gamma=1.0)  # type: ignore[arg-type]
 
         # Set up controlled state with clear best action (0) and weak action (3)
-        # FakeGame has 3 cheese, so total_cheese = 3.0.
-        # Set child values in normalized scale (divided by total_cheese).
-        tc = tree.total_cheese  # 3.0
+        # Values are raw cheese scale (no normalization in storage).
         # Action 0: high Q, many visits
         child_00 = MCTSNode(
             game_state=None,
             prior_policy_p1=prior,
             prior_policy_p2=prior,
-            nn_value_p1=10.0 / tc,
-            nn_value_p2=5.0 / tc,
+            nn_value_p1=10.0,
+            nn_value_p2=5.0,
             parent=root,
         )
         child_00._edge_visits = 80
@@ -652,8 +650,8 @@ class TestRawVsPrunedVisits:
             game_state=None,
             prior_policy_p1=prior,
             prior_policy_p2=prior,
-            nn_value_p1=1.0 / tc,
-            nn_value_p2=0.5 / tc,
+            nn_value_p1=1.0,
+            nn_value_p2=0.5,
             parent=root,
         )
         child_33._edge_visits = 20
@@ -669,8 +667,8 @@ class TestRawVsPrunedVisits:
         result = search._make_result()
 
         # Value should reflect ALL visits (raw), so it's a weighted average.
-        # Internal Q1(0) = 10/3, Q1(3) = 1/3 (normalized).
-        # _make_result de-normalizes: ((80*10/3 + 20*1/3) / 100) * 3 = 8.2
+        # Q1(0) = 10.0, Q1(3) = 1.0 (raw cheese scale).
+        # value = (80*10 + 20*1) / 100 = 8.2
         assert result.value_p1 == pytest.approx(8.2)
 
         # Policy should use pruned visits (action 3 may have visits reduced)
@@ -685,58 +683,11 @@ class TestRawVsPrunedVisits:
 
 
 class TestNormalization:
-    """Tests for PUCT value normalization."""
+    """Tests for per-node PUCT normalization by remaining cheese."""
 
-    def test_internal_q_values_normalized(self) -> None:
-        """Internal Q-values should be in ~[0, 1] after search on a real game."""
-        game = PyRat(width=5, height=5, cheese_count=3, seed=42)
-        prior = np.ones(5) / 5
-        root = MCTSNode(
-            game_state=None,
-            prior_policy_p1=prior,
-            prior_policy_p2=prior,
-            nn_value_p1=0.0,
-            nn_value_p2=0.0,
-        )
-        tree = MCTSTree(game=game, root=root, gamma=0.99)
-        search = DecoupledPUCTSearch(tree, DecoupledPUCTConfig(simulations=50))
-        search.search()
-
-        # Internal Q-values should be in [0, 1] (normalized by total_cheese)
-        q1, q2 = tree.root.get_q_values(gamma=0.99)
-        for q in [q1, q2]:
-            visited = q[q != 0]
-            if len(visited) > 0:
-                assert np.all(visited >= -0.01), f"Q-values below 0: {visited}"
-                assert np.all(visited <= 1.01), f"Q-values above 1: {visited}"
-
-    def test_output_values_raw_cheese_scale(self) -> None:
-        """Search output values should be in raw cheese scale, not normalized."""
-        game = PyRat(width=5, height=5, cheese_count=5, seed=42)
-        prior = np.ones(5) / 5
-        root = MCTSNode(
-            game_state=None,
-            prior_policy_p1=prior,
-            prior_policy_p2=prior,
-            nn_value_p1=0.0,
-            nn_value_p2=0.0,
-        )
-        tree = MCTSTree(game=game, root=root, gamma=0.99)
-        assert tree.total_cheese == 5.0
-
-        search = DecoupledPUCTSearch(tree, DecoupledPUCTConfig(simulations=100))
-        result = search.search()
-
-        # Output values are de-normalized: could be anywhere in [0, total_cheese]
-        # Just check they're finite and in a reasonable range
-        assert np.isfinite(result.value_p1)
-        assert np.isfinite(result.value_p2)
-
-    def test_total_cheese_computed_correctly(self) -> None:
-        """total_cheese should equal scores + remaining cheese."""
+    def test_remaining_cheese_set_on_root(self) -> None:
+        """Root node gets remaining_cheese from game state."""
         game = FakeGame()
-        game.player1_score = 1.0
-        game.player2_score = 0.5
         # FakeGame has 3 cheese positions
         prior = np.ones(5) / 5
         root = MCTSNode(
@@ -747,14 +698,12 @@ class TestNormalization:
             nn_value_p2=0.0,
         )
         tree = MCTSTree(game=game, root=root, gamma=1.0)  # type: ignore[arg-type]
-        assert tree.total_cheese == 4.5  # 1.0 + 0.5 + 3
+        assert tree.root.remaining_cheese == 3.0
 
-    def test_total_cheese_minimum_one(self) -> None:
-        """total_cheese should be at least 1.0 to avoid division by zero."""
+    def test_remaining_cheese_minimum_one(self) -> None:
+        """remaining_cheese should be at least 1.0 to avoid division by zero."""
         game = FakeGame()
         game._cheese = []  # No cheese
-        game.player1_score = 0.0
-        game.player2_score = 0.0
         prior = np.ones(5) / 5
         root = MCTSNode(
             game_state=None,
@@ -764,4 +713,172 @@ class TestNormalization:
             nn_value_p2=0.0,
         )
         tree = MCTSTree(game=game, root=root, gamma=1.0)  # type: ignore[arg-type]
-        assert tree.total_cheese == 1.0
+        assert tree.root.remaining_cheese == 1.0
+
+    def test_remaining_cheese_set_on_children(self) -> None:
+        """Children get remaining_cheese from game state at their position."""
+        game = FakeGame()
+        prior = np.ones(5) / 5
+        root = MCTSNode(
+            game_state=None,
+            prior_policy_p1=prior,
+            prior_policy_p2=prior,
+            nn_value_p1=0.0,
+            nn_value_p2=0.0,
+        )
+        tree = MCTSTree(game=game, root=root, gamma=1.0)  # type: ignore[arg-type]
+
+        # Create a child — FakeGame doesn't collect cheese, so same count
+        child, _ = tree.make_move_from(root, 0, 0)
+        assert child.remaining_cheese == 3.0
+
+    def test_remaining_cheese_decreases_on_collection(self) -> None:
+        """remaining_cheese decreases when cheese is collected."""
+        game = PyRat(width=5, height=5, cheese_count=3, seed=42)
+        prior = np.ones(5) / 5
+        root = MCTSNode(
+            game_state=None,
+            prior_policy_p1=prior,
+            prior_policy_p2=prior,
+            nn_value_p1=0.0,
+            nn_value_p2=0.0,
+        )
+        tree = MCTSTree(game=game, root=root, gamma=0.99)
+        initial_cheese = tree.root.remaining_cheese
+
+        # Run search — children at depth may collect cheese
+        search = DecoupledPUCTSearch(tree, DecoupledPUCTConfig(simulations=50))
+        search.search()
+
+        # All children should have remaining_cheese <= root's
+        for child in tree.root.children.values():
+            assert child.remaining_cheese <= initial_cheese
+
+    def test_internal_q_raw_cheese_scale(self) -> None:
+        """Internal Q-values are stored in raw cheese scale (not normalized)."""
+        game = PyRat(width=5, height=5, cheese_count=5, seed=42)
+        prior = np.ones(5) / 5
+        root = MCTSNode(
+            game_state=None,
+            prior_policy_p1=prior,
+            prior_policy_p2=prior,
+            nn_value_p1=0.0,
+            nn_value_p2=0.0,
+        )
+        tree = MCTSTree(game=game, root=root, gamma=0.99)
+        search = DecoupledPUCTSearch(tree, DecoupledPUCTConfig(simulations=100))
+        search.search()
+
+        # Raw Q-values can be in [0, remaining_cheese], not necessarily [0, 1]
+        q1, q2 = tree.root.get_q_values(gamma=0.99)
+        rc = tree.root.remaining_cheese
+        for q in [q1, q2]:
+            visited = q[q != 0]
+            if len(visited) > 0:
+                assert np.all(visited >= -0.01), f"Q-values below 0: {visited}"
+                assert np.all(visited <= rc + 0.01), f"Q-values above remaining: {visited}"
+
+    def test_output_values_raw_cheese_scale(self) -> None:
+        """Search output values should be in raw cheese scale."""
+        game = PyRat(width=5, height=5, cheese_count=5, seed=42)
+        prior = np.ones(5) / 5
+        root = MCTSNode(
+            game_state=None,
+            prior_policy_p1=prior,
+            prior_policy_p2=prior,
+            nn_value_p1=0.0,
+            nn_value_p2=0.0,
+        )
+        tree = MCTSTree(game=game, root=root, gamma=0.99)
+
+        search = DecoupledPUCTSearch(tree, DecoupledPUCTConfig(simulations=100))
+        result = search.search()
+
+        # Output values are raw: could be anywhere in [0, remaining_cheese]
+        assert np.isfinite(result.value_p1)
+        assert np.isfinite(result.value_p2)
+
+    def test_normalized_q_in_unit_range_at_every_depth(self) -> None:
+        """Q / remaining_cheese should be in ~[0, 1] at every visited node.
+
+        This is the core behavioral invariant: PUCT sees Q normalized by
+        the cheese available at *that* node, not the global total. At a
+        deep node with 2 of 5 cheese left, Q max is ~2 and rc=2, so
+        Q/rc ≈ 1.0 — exploration and exploitation stay balanced.
+        """
+        game = PyRat(width=5, height=5, cheese_count=5, seed=42)
+        prior = np.ones(5) / 5
+        root = MCTSNode(
+            game_state=None,
+            prior_policy_p1=prior,
+            prior_policy_p2=prior,
+            nn_value_p1=0.0,
+            nn_value_p2=0.0,
+        )
+        tree = MCTSTree(game=game, root=root, gamma=0.99)
+        search = DecoupledPUCTSearch(tree, DecoupledPUCTConfig(simulations=200))
+        search.search()
+
+        # Walk the entire tree and check the invariant at every visited node
+        def check_node(node: MCTSNode) -> None:
+            if node.total_visits == 0:
+                return
+
+            q1, q2 = node.get_q_values(gamma=0.99)
+            rc = node.remaining_cheese
+            assert rc >= 1.0, f"remaining_cheese too small: {rc}"
+
+            q1_norm = q1 / rc
+            q2_norm = q2 / rc
+
+            for label, q_norm in [("P1", q1_norm), ("P2", q2_norm)]:
+                visited = q_norm[q_norm != 0]
+                if len(visited) > 0:
+                    assert np.all(visited >= -0.01), (
+                        f"{label} normalized Q below 0 at depth {node.depth}: {visited} (rc={rc})"
+                    )
+                    assert np.all(visited <= 1.01), (
+                        f"{label} normalized Q above 1 at depth {node.depth}: {visited} (rc={rc})"
+                    )
+
+            for child in node.children.values():
+                check_node(child)
+
+        check_node(tree.root)
+
+    def test_per_node_normalization_differs_from_global(self) -> None:
+        """Per-node normalization should produce different Q/rc than global.
+
+        Construct a scenario: root has 10 cheese, child has 2 (8 collected).
+        With global normalization, child Q=1.5 → Q/10 = 0.15 (exploration dominates).
+        With per-node normalization, child Q=1.5 → Q/2 = 0.75 (balanced).
+        """
+        game = FakeGame()
+        game._cheese = [(i, i) for i in range(10)]  # 10 cheese
+        prior = np.ones(5) / 5
+        root = MCTSNode(
+            game_state=None,
+            prior_policy_p1=prior,
+            prior_policy_p2=prior,
+            nn_value_p1=0.0,
+            nn_value_p2=0.0,
+        )
+        tree = MCTSTree(game=game, root=root, gamma=1.0)  # type: ignore[arg-type]
+        assert tree.root.remaining_cheese == 10.0
+
+        # Create child and simulate cheese being collected
+        child, _ = tree.make_move_from(root, 0, 0)
+        # Manually set child's remaining cheese to simulate 8 cheese collected
+        child.remaining_cheese = 2.0
+        child._v1 = 1.5  # Raw Q value
+        child._v2 = 0.5
+
+        # Per-node: Q/rc = 1.5/2.0 = 0.75
+        # Global (old): Q/total = 1.5/10.0 = 0.15
+        per_node_norm = child._v1 / child.remaining_cheese
+        global_norm = child._v1 / root.remaining_cheese
+
+        assert per_node_norm == pytest.approx(0.75)
+        assert global_norm == pytest.approx(0.15)
+        # Per-node puts Q in the right range — exploitation is properly weighted
+        assert per_node_norm > global_norm

@@ -37,7 +37,7 @@ SEED_CONFIGS = [
 def objective(trial: optuna.Trial) -> tuple[float, int]:
     """Run games vs Greedy, return win rate."""
     n_sims = trial.suggest_int("n_sims", 200, 1200, log=True)
-    c_puct = trial.suggest_float("c_puct", 0.5, 5.0, log=True)
+    c_puct = trial.suggest_float("c_puct", 0.5, 2.0, log=True)
     force_k = trial.suggest_float("force_k", 0.01, 16.0, log=True)
 
     wins = 0.0
@@ -89,7 +89,7 @@ def enqueue_seed_trials(study: optuna.Study, csv_path: str, top_n: int) -> None:
 def main() -> None:
     parser = argparse.ArgumentParser(description="PUCT parameter sweep with Optuna")
     parser.add_argument("--n-jobs", type=int, default=1, help="Parallel workers")
-    parser.add_argument("--study-name", default="normalized_puct_7x7", help="Study name")
+    parser.add_argument("--study-name", default="per_node_puct_7x7", help="Study name")
     parser.add_argument("--seed-from", type=str, help="CSV file to seed trials from")
     parser.add_argument("--seed-top", type=int, default=20, help="Number of top configs to seed")
     args = parser.parse_args()

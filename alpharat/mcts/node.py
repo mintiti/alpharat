@@ -83,6 +83,10 @@ class MCTSNode:
         self.move_undo = move_undo
         self.parent_action = parent_action
 
+        # Remaining cheese at this position (for per-node PUCT normalization).
+        # Default 1.0 = no-op normalization (safe for tests constructing nodes directly).
+        self.remaining_cheese: float = 1.0
+
         # Calculate depth from parent
         self.depth: int = 0 if parent is None else parent.depth + 1
 

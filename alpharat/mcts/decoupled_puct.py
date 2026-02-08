@@ -88,12 +88,11 @@ class DecoupledPUCTSearch:
     def _pure_nn_result(self) -> SearchResult:
         """Return NN priors directly without tree search."""
         root = self.tree.root
-        tc = self.tree.total_cheese
         return SearchResult(
             policy_p1=root.prior_policy_p1.copy(),
             policy_p2=root.prior_policy_p2.copy(),
-            value_p1=root.v1 * tc,
-            value_p2=root.v2 * tc,
+            value_p1=root.v1,
+            value_p2=root.v2,
             visit_counts_p1=np.zeros(5, dtype=np.float64),
             visit_counts_p2=np.zeros(5, dtype=np.float64),
         )
@@ -102,16 +101,21 @@ class DecoupledPUCTSearch:
         """Compute visit-proportional policy from root statistics."""
         root = self.tree.root
 
-        # Get Q-values and raw visit counts (reduced space)
+        # Get raw Q-values and visit counts (reduced space)
         q1, q2 = root.get_q_values(gamma=self.tree.gamma)
         n1, n2 = root.get_visit_counts()
 
+        # Normalize Q for pruning (PUCT sees [0, 1] values)
+        rc = root.remaining_cheese
+        q1_norm = q1 / rc
+        q2_norm = q2 / rc
+
         # Prune forced visits (per-player, in reduced space)
         n1_pruned = compute_pruned_visits(
-            q1, root.prior_p1_reduced, n1, root.total_visits, self._c_puct
+            q1_norm, root.prior_p1_reduced, n1, root.total_visits, self._c_puct
         )
         n2_pruned = compute_pruned_visits(
-            q2, root.prior_p2_reduced, n2, root.total_visits, self._c_puct
+            q2_norm, root.prior_p2_reduced, n2, root.total_visits, self._c_puct
         )
 
         # Expand to [5] action space
@@ -125,14 +129,12 @@ class DecoupledPUCTSearch:
         policy_p1 = n1_expanded / n1_sum if n1_sum > 0 else root.prior_policy_p1.copy()
         policy_p2 = n2_expanded / n2_sum if n2_sum > 0 else root.prior_policy_p2.copy()
 
-        # Compute root value from Q-values weighted by (raw) visit counts.
-        # Q-values are in normalized [0, 1] space; multiply back to raw cheese scale.
-        tc = self.tree.total_cheese
+        # Compute root value from raw Q-values weighted by visit counts
         n1_total = n1.sum()
         n2_total = n2.sum()
 
-        value_p1 = float(np.dot(q1, n1) / n1_total) * tc if n1_total > 0 else root.v1 * tc
-        value_p2 = float(np.dot(q2, n2) / n2_total) * tc if n2_total > 0 else root.v2 * tc
+        value_p1 = float(np.dot(q1, n1) / n1_total) if n1_total > 0 else root.v1
+        value_p2 = float(np.dot(q2, n2) / n2_total) if n2_total > 0 else root.v2
 
         return SearchResult(
             policy_p1=policy_p1.astype(np.float64),
@@ -213,12 +215,17 @@ class DecoupledPUCTSearch:
         n_total = node.total_visits
         is_root = node == self.tree.root
 
+        # Normalize Q by remaining cheese at this node → [0, 1] at every depth
+        rc = node.remaining_cheese
+        q1_norm = q1 / rc
+        q2_norm = q2 / rc
+
         # Compute PUCT in reduced space (JIT-compiled)
         puct1 = compute_puct_scores(
-            q1, node.prior_p1_reduced, n1, n_total, self._c_puct, self._force_k, is_root
+            q1_norm, node.prior_p1_reduced, n1, n_total, self._c_puct, self._force_k, is_root
         )
         puct2 = compute_puct_scores(
-            q2, node.prior_p2_reduced, n2, n_total, self._c_puct, self._force_k, is_root
+            q2_norm, node.prior_p2_reduced, n2, n_total, self._c_puct, self._force_k, is_root
         )
 
         # Select outcome indices (JIT-compiled random tie-break)
