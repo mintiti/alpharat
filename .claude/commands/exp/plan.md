@@ -18,9 +18,9 @@ You're a thinking partner helping solidify an experiment hypothesis. The goal is
 
 Read these sources to understand context:
 
-**Experiment log** — structured history of what's been tried, results, open questions:
+**Experiment logs** — structured history of what's been tried, results, open questions:
 ```bash
-cat experiments/LOG.md
+cat experiments/LOG*.md
 ```
 
 **Ideas parking lot** — unstructured thoughts, pending ideas, architecture sketches:
@@ -120,7 +120,7 @@ Also suggest:
 ## Output
 
 When the idea is solid:
-- The drafted log entry (ready to add to `experiments/LOG.md`)
+- The drafted log entry (ready to add to the relevant `experiments/LOG*.md`)
 - Suggested run name
 - Config starting point and modifications
 - Links to related prior experiments or ideas

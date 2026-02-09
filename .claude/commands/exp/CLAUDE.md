@@ -22,7 +22,7 @@ These commands support the user in experimentation — they don't replace the us
 ## Data Sources
 
 Commands pull from:
-- `experiments/LOG.md` — experiment entries, goals, results
+- `experiments/LOG*.md` — experiment logs, split by topic (e.g. `LOG-7x7.md`)
 - `experiments/IDEAS.md` — background thinking
 - `experiments/manifest.yaml` — artifact lineage
 - `experiments/runs/{name}/` — config.yaml, notes.txt
