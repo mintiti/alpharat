@@ -18,9 +18,9 @@ You're helping close the loop on an experiment. The goal is to capture what happ
 
 Identify which experiment we're discussing. Read relevant sources:
 
-**Experiment log** — find the entry for this experiment:
+**Experiment logs** — find the entry for this experiment:
 ```bash
-cat experiments/LOG.md
+cat experiments/LOG*.md
 ```
 
 **Manifest / lineage** — understand what this experiment was built on:
@@ -136,7 +136,7 @@ Convergent findings across experiments are worth noting — if three different a
 
 ## Output
 
-- The completed log entry (ready to paste into `experiments/LOG.md`)
+- The completed log entry (ready to paste into the relevant `experiments/LOG*.md`)
 - Any suggested updates to ideas.md
 - Suggested next experiment if there's a clear thread to pull
 

@@ -37,9 +37,9 @@ cat experiments/runs/$RUN_A/notes.txt 2>/dev/null
 cat experiments/benchmarks/$BENCHMARK/results.json 2>/dev/null
 ```
 
-**Experiment log** — what was the original goal/hypothesis?
+**Experiment logs** — what was the original goal/hypothesis?
 ```bash
-cat experiments/LOG.md
+cat experiments/LOG*.md
 ```
 
 **Ideas doc** — any related background thinking?
@@ -67,7 +67,7 @@ Lay out the comparison clearly:
 | Val loss | | |
 
 **Prior context:**
-- What the LOG.md said about each experiment's goal
+- What the LOG*.md files said about each experiment's goal
 - Any relevant ideas from IDEAS.md
 
 ### 3. Be a Thinking Partner
@@ -85,7 +85,7 @@ But don't lead. Follow their thread.
 - The gathered context, organized for easy scanning
 - Config diff (what changed, what didn't)
 - Results side-by-side
-- Relevant prior context from LOG.md and IDEAS.md
+- Relevant prior context from LOG*.md and IDEAS.md
 - Then: engage with whatever direction the user takes
 
 ## Remember

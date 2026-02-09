@@ -17,8 +17,8 @@ Give a fast situational snapshot. The user wants to know "where are we" without 
 ### 1. Read the Sources
 
 ```bash
-# Experiment log — roadmap, phases, recent entries
-cat experiments/LOG.md
+# Experiment logs — roadmap, phases, recent entries
+cat experiments/LOG*.md
 ```
 
 ```bash
