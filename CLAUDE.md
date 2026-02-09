@@ -639,7 +639,7 @@ The `/exp:*` commands support the experiment lifecycle:
 | `/exp:status` | Anytime — quick dashboard of where we are |
 
 **Context files in `experiments/`:**
-- `LOG.md` — the official record: roadmap, decisions, experiment entries with results
+- `LOG*.md` — experiment logs: roadmap, decisions, results (split by topic, e.g. `LOG-7x7.md`)
 - `IDEAS.md` — parking lot for fuzzy thinking, unstructured ideas
 
 The commands pull from these files automatically. When helping with experiments, read them first.
