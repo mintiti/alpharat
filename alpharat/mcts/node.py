@@ -369,25 +369,39 @@ class MCTSNode:
 
         self.finalize_value(q_value[0], q_value[1])
 
-    def get_q_values(self, gamma: float = 1.0) -> tuple[np.ndarray, np.ndarray]:
+    def get_q_values(
+        self, gamma: float = 1.0, fpu_reduction: float = 0.0
+    ) -> tuple[np.ndarray, np.ndarray]:
         """Compute marginal Q-values from children (LC0-style).
 
         Q = reward + gamma * V, where V is the child's value.
         Q1(i) = weighted average of (r1 + gamma * child.v1) for children (i, *).
         Q2(j) = weighted average of (r2 + gamma * child.v2) for children (*, j).
         Weight = child's edge visits.
-        FPU (first play urgency) = this node's v1/v2 for unvisited outcomes.
+        FPU (first play urgency) = node value minus pessimistic reduction for
+        unvisited outcomes. Following LC0/KataGo:
+            FPU_Q = V - fpu_reduction * value_scale * sqrt(visited_policy_mass)
 
         Args:
             gamma: Discount factor for computing Q = r + gamma * V.
+            fpu_reduction: Pessimistic reduction for unvisited outcomes (0 = no reduction).
 
         Returns:
             Tuple of (q1, q2) where q1[i] is P1's Q-value for outcome i.
             Shapes are [n1] and [n2].
         """
-        # FPU = node's own value for unvisited outcomes
-        q1 = np.full(self._n1, self._v1, dtype=np.float64)
-        q2 = np.full(self._n2, self._v2, dtype=np.float64)
+        # Compute FPU with optional pessimistic reduction
+        if fpu_reduction > 0.0:
+            visited_p1 = self.prior_p1_reduced[self._n1_visits > 0].sum()
+            visited_p2 = self.prior_p2_reduced[self._n2_visits > 0].sum()
+            fpu_q1 = self._v1 - fpu_reduction * self.value_scale * np.sqrt(visited_p1)
+            fpu_q2 = self._v2 - fpu_reduction * self.value_scale * np.sqrt(visited_p2)
+        else:
+            fpu_q1 = self._v1
+            fpu_q2 = self._v2
+
+        q1 = np.full(self._n1, fpu_q1, dtype=np.float64)
+        q2 = np.full(self._n2, fpu_q2, dtype=np.float64)
 
         if not self.children:
             return q1, q2

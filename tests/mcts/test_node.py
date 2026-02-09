@@ -915,3 +915,139 @@ class TestMarginalVisitsExpanded:
         assert n1[0] == 0  # Not canonical
         assert n1[4] == 1  # Canonical
         assert n2[0] == 1
+
+
+class TestFPUReduction:
+    """Tests for FPU reduction (LC0/KataGo-style pessimistic unvisited Q)."""
+
+    def test_zero_reduction_preserves_current_behavior(self) -> None:
+        """fpu_reduction=0.0 should give identical results to the default."""
+        prior = np.ones(5) / 5
+        node = MCTSNode(
+            game_state=None,
+            prior_policy_p1=prior,
+            prior_policy_p2=prior,
+            nn_value_p1=5.0,
+            nn_value_p2=2.5,
+        )
+
+        q_default_1, q_default_2 = node.get_q_values()
+        q_zero_1, q_zero_2 = node.get_q_values(fpu_reduction=0.0)
+
+        np.testing.assert_array_equal(q_default_1, q_zero_1)
+        np.testing.assert_array_equal(q_default_2, q_zero_2)
+
+    def test_no_visited_outcomes_no_reduction(self) -> None:
+        """When nothing is visited, visited_policy_mass=0, so sqrt(0)=0 → no reduction."""
+        prior = np.ones(5) / 5
+        node = MCTSNode(
+            game_state=None,
+            prior_policy_p1=prior,
+            prior_policy_p2=prior,
+            nn_value_p1=5.0,
+            nn_value_p2=2.5,
+        )
+
+        q1, q2 = node.get_q_values(fpu_reduction=0.3)
+
+        # No visits → visited_policy_mass = 0 → sqrt(0) = 0 → FPU = node value
+        np.testing.assert_array_almost_equal(q1, [5.0] * 5)
+        np.testing.assert_array_almost_equal(q2, [2.5] * 5)
+
+    def test_reduction_applied_to_unvisited_outcomes(self) -> None:
+        """Unvisited outcomes should get reduced FPU, visited outcomes use child Q."""
+        prior = np.array([0.4, 0.3, 0.2, 0.05, 0.05])
+        node = MCTSNode(
+            game_state=None,
+            prior_policy_p1=prior,
+            prior_policy_p2=prior,
+            nn_value_p1=5.0,
+            nn_value_p2=2.5,
+        )
+        node.value_scale = 3.0  # Simulates 3 cheese remaining
+
+        # Add a visited child at outcome (0, 0)
+        add_child(node, idx1=0, idx2=0, v1=6.0, v2=3.0)
+        node.backup(action_p1=0, action_p2=0, q_value=(6.0, 3.0))
+
+        q1, q2 = node.get_q_values(fpu_reduction=0.2)
+
+        # Visited outcome 0 should use child Q, not FPU
+        assert q1[0] == pytest.approx(6.0)
+        assert q2[0] == pytest.approx(3.0)
+
+        # Unvisited outcomes should be reduced:
+        # visited_p1_mass = prior[0] = 0.4 (outcome 0 has been visited)
+        # FPU_Q1 = 6.0 - 0.2 * 3.0 * sqrt(0.4) ≈ 6.0 - 0.3795 ≈ 5.6205
+        # (node._v1 is now 6.0 after backup with initial=5.0 → (5+6)/... actually
+        #  after one backup: v1 = 5.0 + (6.0 - 5.0)/1 = 6.0)
+        expected_fpu_q1 = 6.0 - 0.2 * 3.0 * np.sqrt(0.4)
+        expected_fpu_q2 = 3.0 - 0.2 * 3.0 * np.sqrt(0.4)
+
+        for i in range(1, 5):
+            assert q1[i] == pytest.approx(expected_fpu_q1)
+            assert q2[i] == pytest.approx(expected_fpu_q2)
+
+    def test_reduction_increases_with_visited_mass(self) -> None:
+        """More visited policy mass → larger reduction for unvisited outcomes."""
+        prior = np.array([0.5, 0.3, 0.2, 0.0, 0.0])
+        node = MCTSNode(
+            game_state=None,
+            prior_policy_p1=prior,
+            prior_policy_p2=prior,
+            nn_value_p1=5.0,
+            nn_value_p2=2.5,
+        )
+        node.value_scale = 4.0
+
+        # Visit outcome 0 (prior=0.5)
+        add_child(node, idx1=0, idx2=0, v1=5.0, v2=2.5)
+        node.backup(action_p1=0, action_p2=0, q_value=(5.0, 2.5))
+        q1_after_one, _ = node.get_q_values(fpu_reduction=0.2)
+        fpu_after_one = q1_after_one[1]  # Unvisited outcome
+
+        # Visit outcome 1 as well (prior=0.3, total visited mass = 0.8)
+        add_child(node, idx1=1, idx2=1, v1=5.0, v2=2.5)
+        node.backup(action_p1=1, action_p2=1, q_value=(5.0, 2.5))
+        q1_after_two, _ = node.get_q_values(fpu_reduction=0.2)
+        fpu_after_two = q1_after_two[2]  # Still-unvisited outcome
+
+        # More visited mass → more pessimistic FPU
+        assert fpu_after_two < fpu_after_one
+
+    def test_reduction_scales_with_value_scale(self) -> None:
+        """FPU reduction should scale with value_scale (remaining cheese)."""
+        prior = np.array([0.5, 0.5, 0.0, 0.0, 0.0])
+
+        # Same node setup but different value_scale
+        node_small = MCTSNode(
+            game_state=None,
+            prior_policy_p1=prior,
+            prior_policy_p2=prior,
+            nn_value_p1=2.0,
+            nn_value_p2=1.0,
+        )
+        node_small.value_scale = 2.0
+
+        node_large = MCTSNode(
+            game_state=None,
+            prior_policy_p1=prior,
+            prior_policy_p2=prior,
+            nn_value_p1=2.0,
+            nn_value_p2=1.0,
+        )
+        node_large.value_scale = 10.0
+
+        # Visit outcome 0 on both
+        add_child(node_small, idx1=0, idx2=0, v1=2.0, v2=1.0)
+        node_small.backup(action_p1=0, action_p2=0, q_value=(2.0, 1.0))
+        add_child(node_large, idx1=0, idx2=0, v1=2.0, v2=1.0)
+        node_large.backup(action_p1=0, action_p2=0, q_value=(2.0, 1.0))
+
+        q1_small, _ = node_small.get_q_values(fpu_reduction=0.2)
+        q1_large, _ = node_large.get_q_values(fpu_reduction=0.2)
+
+        # Larger value_scale → larger absolute reduction
+        reduction_small = node_small._v1 - q1_small[1]
+        reduction_large = node_large._v1 - q1_large[1]
+        assert reduction_large > reduction_small

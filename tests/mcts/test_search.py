@@ -957,3 +957,57 @@ class TestNormalization:
                 check_node(child)
 
         check_node(tree.root)
+
+
+class TestFPUReductionSearch:
+    """Tests for FPU reduction wired through the search."""
+
+    def test_fpu_reduction_config_default(self) -> None:
+        """Default config has fpu_reduction=0.2."""
+        config = DecoupledPUCTConfig()
+        assert config.fpu_reduction == 0.2
+
+    def test_fpu_reduction_zero_matches_no_reduction(self) -> None:
+        """fpu_reduction=0 should produce valid results (legacy behavior)."""
+        game = PyRat(width=5, height=5, cheese_count=3, seed=42)
+        prior = np.ones(5) / 5
+        root = MCTSNode(
+            game_state=None,
+            prior_policy_p1=prior,
+            prior_policy_p2=prior,
+            nn_value_p1=0.0,
+            nn_value_p2=0.0,
+        )
+        tree = MCTSTree(game=game, root=root, gamma=0.99)
+
+        config = DecoupledPUCTConfig(simulations=50, fpu_reduction=0.0)
+        search = DecoupledPUCTSearch(tree, config)
+        result = search.search()
+
+        assert np.isclose(result.policy_p1.sum(), 1.0)
+        assert np.isclose(result.policy_p2.sum(), 1.0)
+        assert np.isfinite(result.value_p1)
+        assert np.isfinite(result.value_p2)
+
+    def test_fpu_reduction_produces_valid_search(self) -> None:
+        """Search with fpu_reduction > 0 produces valid policies and values."""
+        game = PyRat(width=5, height=5, cheese_count=3, seed=42)
+        prior = np.ones(5) / 5
+        root = MCTSNode(
+            game_state=None,
+            prior_policy_p1=prior,
+            prior_policy_p2=prior,
+            nn_value_p1=0.0,
+            nn_value_p2=0.0,
+        )
+        tree = MCTSTree(game=game, root=root, gamma=0.99)
+
+        config = DecoupledPUCTConfig(simulations=50, fpu_reduction=0.3)
+        search = DecoupledPUCTSearch(tree, config)
+        result = search.search()
+
+        assert result.policy_p1.sum() == pytest.approx(1.0, abs=1e-6)
+        assert result.policy_p2.sum() == pytest.approx(1.0, abs=1e-6)
+        assert np.isfinite(result.value_p1)
+        assert np.isfinite(result.value_p2)
+        assert tree.root.total_visits > 0

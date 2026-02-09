@@ -48,6 +48,7 @@ class DecoupledPUCTConfig(StrictBaseModel):
     gamma: float = 1.0
     c_puct: float = 1.5
     force_k: float = 2.0
+    fpu_reduction: float = 0.2
 
     def build(self, tree: MCTSTree) -> DecoupledPUCTSearch:
         """Construct a search instance with these settings."""
@@ -70,6 +71,7 @@ class DecoupledPUCTSearch:
         self._n_sims = config.simulations
         self._c_puct = config.c_puct
         self._force_k = config.force_k
+        self._fpu_reduction = config.fpu_reduction
 
     def search(self) -> SearchResult:
         """Run MCTS search and return the result.
@@ -102,7 +104,7 @@ class DecoupledPUCTSearch:
         root = self.tree.root
 
         # Get raw Q-values and visit counts (reduced space)
-        q1, q2 = root.get_q_values(gamma=self.tree.gamma)
+        q1, q2 = root.get_q_values(gamma=self.tree.gamma, fpu_reduction=self._fpu_reduction)
         n1, n2 = root.get_visit_counts()
 
         # Normalize Q for pruning (PUCT sees [0, 1] values)
@@ -210,7 +212,7 @@ class DecoupledPUCTSearch:
         """
         # Work in reduced space: [n1], [n2] arrays
         # Decoupled UCT: each player has independent Q and N
-        q1, q2 = node.get_q_values(gamma=self.tree.gamma)
+        q1, q2 = node.get_q_values(gamma=self.tree.gamma, fpu_reduction=self._fpu_reduction)
         n1, n2 = node.get_visit_counts()
         n_total = node.total_visits
         is_root = node == self.tree.root

@@ -5,3 +5,4 @@
 simulations: 629
 c_puct: 0.531
 force_k: 0.067
+fpu_reduction: 0.2

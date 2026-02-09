@@ -27,23 +27,41 @@ WALL_DENSITY, MUD_DENSITY = 0.0, 0.0
 GAMES_PER_CONFIG = 100
 
 # Seed configs for normalized Q-values (Q in [0, 1])
-SEED_CONFIGS = [
-    {"n_sims": 200, "c_puct": 1.5, "force_k": 2.0},
-    {"n_sims": 400, "c_puct": 1.0, "force_k": 1.0},
-    {"n_sims": 600, "c_puct": 2.0, "force_k": 0.5},
+# Pareto front from per_node_puct_7x7 sweep (847 trials, no FPU reduction).
+# Each config seeded at both KataGo (0.2) and LC0 (0.33) FPU values.
+_PARETO_FRONT = [
+    {"n_sims": 200, "c_puct": 0.548, "force_k": 1.184},
+    {"n_sims": 206, "c_puct": 0.507, "force_k": 0.064},
+    {"n_sims": 213, "c_puct": 0.507, "force_k": 0.064},
+    {"n_sims": 224, "c_puct": 0.531, "force_k": 0.178},
+    {"n_sims": 272, "c_puct": 0.531, "force_k": 2.201},
+    {"n_sims": 381, "c_puct": 0.612, "force_k": 0.018},
+    {"n_sims": 400, "c_puct": 0.643, "force_k": 0.432},
+    {"n_sims": 409, "c_puct": 0.507, "force_k": 0.011},
+    {"n_sims": 420, "c_puct": 0.507, "force_k": 0.011},
+    {"n_sims": 545, "c_puct": 0.507, "force_k": 0.145},
+    {"n_sims": 591, "c_puct": 0.686, "force_k": 0.067},
+    {"n_sims": 629, "c_puct": 0.531, "force_k": 0.067},
+    {"n_sims": 711, "c_puct": 0.612, "force_k": 0.307},
+    {"n_sims": 855, "c_puct": 0.576, "force_k": 0.099},
+    {"n_sims": 1007, "c_puct": 0.505, "force_k": 0.265},
 ]
+SEED_CONFIGS = [{**cfg, "fpu_reduction": fpu} for cfg in _PARETO_FRONT for fpu in (0.2, 0.33)]
 
 
 def objective(trial: optuna.Trial) -> tuple[float, int]:
     """Run games vs Greedy, return win rate."""
     n_sims = trial.suggest_int("n_sims", 200, 1200, log=True)
     c_puct = trial.suggest_float("c_puct", 0.5, 2.0, log=True)
-    force_k = trial.suggest_float("force_k", 0.01, 16.0, log=True)
+    force_k = trial.suggest_float("force_k", 0.01, 5.0, log=True)
+    fpu_reduction = trial.suggest_float("fpu_reduction", 0.1, 0.5)
 
     wins = 0.0
     for game_idx in range(GAMES_PER_CONFIG):
         seed = game_idx  # Same mazes for all configs
-        mcts_config = DecoupledPUCTConfig(simulations=n_sims, c_puct=c_puct, force_k=force_k)
+        mcts_config = DecoupledPUCTConfig(
+            simulations=n_sims, c_puct=c_puct, force_k=force_k, fpu_reduction=fpu_reduction
+        )
         agent = MCTSAgent(mcts_config=mcts_config)
         opponent = GreedyAgent()
 
@@ -76,13 +94,14 @@ def enqueue_seed_trials(study: optuna.Study, csv_path: str, top_n: int) -> None:
     df = df.sort_values(["Value", "Param n_sims"], ascending=[False, True]).head(top_n)
 
     for _, row in df.iterrows():
-        study.enqueue_trial(
-            {
-                "n_sims": int(row["Param n_sims"]),
-                "c_puct": float(row["Param c_puct"]),
-                "force_k": float(row["Param force_k"]),
-            }
-        )
+        params: dict[str, int | float] = {
+            "n_sims": int(row["Param n_sims"]),
+            "c_puct": float(row["Param c_puct"]),
+            "force_k": float(row["Param force_k"]),
+        }
+        if "Param fpu_reduction" in row.index:
+            params["fpu_reduction"] = float(row["Param fpu_reduction"])
+        study.enqueue_trial(params)
     print(f"Enqueued {len(df)} seed trials from {csv_path}")
 
 
