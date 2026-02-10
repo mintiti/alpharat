@@ -201,12 +201,12 @@ pub struct Node {
 }
 
 impl Node {
-    pub fn new(p1: HalfNode, p2: HalfNode, v1: f32, v2: f32) -> Self {
+    pub fn new(p1: HalfNode, p2: HalfNode) -> Self {
         Self {
             p1,
             p2,
-            v1,
-            v2,
+            v1: 0.0,
+            v2: 0.0,
             total_visits: 0,
             value_scale: 0.0,
             edge_r1: 0.0,
@@ -494,14 +494,25 @@ mod tests {
         }
     }
 
-    // ---- Node Welford update ----
+    // ---- Node value: LC0-style (NN eval = visit 1) ----
 
     #[test]
-    fn node_welford_single() {
-        let h1 = HalfNode::new([0.2; 5], [0, 1, 2, 3, 4]);
-        let h2 = HalfNode::new([0.2; 5], [0, 1, 2, 3, 4]);
-        let mut node = Node::new(h1, h2, 0.0, 0.0);
+    fn node_starts_unvisited() {
+        let h = HalfNode::new([0.2; 5], [0, 1, 2, 3, 4]);
+        let node = Node::new(h, h);
 
+        assert_eq!(node.total_visits(), 0);
+        assert_eq!(node.v1(), 0.0);
+        assert_eq!(node.v2(), 0.0);
+    }
+
+    #[test]
+    fn nn_eval_counts_as_first_visit() {
+        // LC0 pattern: NN evaluation goes through update_value, counts as visit 1.
+        let h = HalfNode::new([0.2; 5], [0, 1, 2, 3, 4]);
+        let mut node = Node::new(h, h);
+
+        // NN predicts v1=3.0, v2=5.0
         node.update_value(3.0, 5.0);
         assert_eq!(node.total_visits(), 1);
         assert!((node.v1() - 3.0).abs() < 1e-6);
@@ -509,10 +520,28 @@ mod tests {
     }
 
     #[test]
+    fn backup_averages_with_nn_value() {
+        // The NN value is the first data point, not a seed that gets replaced.
+        // Backup values average with it.
+        let h = HalfNode::new([0.2; 5], [0, 1, 2, 3, 4]);
+        let mut node = Node::new(h, h);
+
+        // Visit 1: NN evaluation
+        node.update_value(5.0, 3.0);
+        // Visit 2: backup from subtree
+        node.update_value(3.0, 7.0);
+
+        assert_eq!(node.total_visits(), 2);
+        // Mean of [5, 3] = 4.0 — NN value contributes equally
+        assert!((node.v1() - 4.0).abs() < 1e-6);
+        // Mean of [3, 7] = 5.0
+        assert!((node.v2() - 5.0).abs() < 1e-6);
+    }
+
+    #[test]
     fn node_welford_sequence() {
-        let h1 = HalfNode::new([0.2; 5], [0, 1, 2, 3, 4]);
-        let h2 = HalfNode::new([0.2; 5], [0, 1, 2, 3, 4]);
-        let mut node = Node::new(h1, h2, 0.0, 0.0);
+        let h = HalfNode::new([0.2; 5], [0, 1, 2, 3, 4]);
+        let mut node = Node::new(h, h);
 
         let values = [(2.0, 1.0), (4.0, 3.0), (6.0, 5.0), (8.0, 7.0)];
         for (q1, q2) in &values {
@@ -526,7 +555,7 @@ mod tests {
         assert!((node.v2() - 4.0).abs() < 1e-5);
     }
 
-    // ---- HalfEdge Welford ----
+    // ---- HalfEdge: marginal Q accumulator ----
 
     #[test]
     fn edge_welford_sequence() {
@@ -539,6 +568,33 @@ mod tests {
         assert!((edge.q - 20.0).abs() < 1e-5);
     }
 
+    #[test]
+    fn edge_marginal_q_across_opponent_actions() {
+        // HalfEdge[i] accumulates the marginal Q for P1's outcome i,
+        // averaged across different P2 actions (different children).
+        //
+        // Scenario: P1 outcome i leads to two children depending on P2:
+        //   child (i, j=0): edge_r=1.0, child_v=4.0 → Q = 1.0 + 4.0 = 5.0
+        //   child (i, j=1): edge_r=0.5, child_v=4.0 → Q = 0.5 + 4.0 = 4.5
+        //     (0.5 because cheese was split with P2)
+        //
+        // After 3 visits: 2× to (i,0) and 1× to (i,1)
+        let mut edge = HalfEdge::default();
+        let gamma = 1.0;
+
+        // Visit child (i, 0): Q = r + gamma * v = 1.0 + 4.0
+        edge.update(1.0 + gamma * 4.0);
+        // Visit child (i, 1): Q = 0.5 + 4.0 (cheese split)
+        edge.update(0.5 + gamma * 4.0);
+        // Visit child (i, 0) again: same Q
+        edge.update(1.0 + gamma * 4.0);
+
+        assert_eq!(edge.visits, 3);
+        // Marginal Q = (5.0 + 4.5 + 5.0) / 3 = 14.5 / 3
+        let expected = (5.0 + 4.5 + 5.0) / 3.0;
+        assert!((edge.q - expected).abs() < 1e-5);
+    }
+
     // ---- NodeArena ----
 
     #[test]
@@ -547,8 +603,12 @@ mod tests {
         assert!(arena.is_empty());
 
         let h = HalfNode::new([0.2; 5], [0, 1, 2, 3, 4]);
-        let idx0 = arena.alloc(Node::new(h, h, 1.0, 2.0));
-        let idx1 = arena.alloc(Node::new(h, h, 3.0, 4.0));
+        let idx0 = arena.alloc(Node::new(h, h));
+        let idx1 = arena.alloc(Node::new(h, h));
+
+        // Distinguish nodes via update_value.
+        arena[idx0].update_value(1.0, 2.0);
+        arena[idx1].update_value(3.0, 4.0);
 
         assert_eq!(arena.len(), 2);
         assert!((arena[idx0].v1() - 1.0).abs() < 1e-6);
@@ -559,7 +619,7 @@ mod tests {
     fn arena_index_mut() {
         let mut arena = NodeArena::new();
         let h = HalfNode::new([0.2; 5], [0, 1, 2, 3, 4]);
-        let idx = arena.alloc(Node::new(h, h, 0.0, 0.0));
+        let idx = arena.alloc(Node::new(h, h));
 
         arena[idx].update_value(5.0, 10.0);
         assert!((arena[idx].v1() - 5.0).abs() < 1e-6);
@@ -579,9 +639,13 @@ mod tests {
         let mut arena = NodeArena::new();
         let h = HalfNode::new([0.2; 5], [0, 1, 2, 3, 4]);
 
-        let parent_idx = arena.alloc(Node::new(h, h, 0.0, 0.0));
-        let child0_idx = arena.alloc(Node::new(h, h, 1.0, 0.0));
-        let child1_idx = arena.alloc(Node::new(h, h, 2.0, 0.0));
+        let parent_idx = arena.alloc(Node::new(h, h));
+        let child0_idx = arena.alloc(Node::new(h, h));
+        let child1_idx = arena.alloc(Node::new(h, h));
+
+        // Give children distinct values (NN eval).
+        arena[child0_idx].update_value(1.0, 0.0);
+        arena[child1_idx].update_value(2.0, 0.0);
 
         // Wire: parent → child0 → child1
         arena[parent_idx].set_first_child(Some(child0_idx));
