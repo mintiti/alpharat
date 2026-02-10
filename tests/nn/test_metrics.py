@@ -15,6 +15,8 @@ from alpharat.nn.metrics import (
     top_k_accuracy,
     value_correlation,
 )
+from alpharat.nn.training.keys import BatchKey, ModelOutput
+from alpharat.nn.training.loop import _compute_detailed_metrics
 
 
 class TestTopKAccuracy:
@@ -324,3 +326,76 @@ class TestMetricsAccumulator:
         result = acc.compute()
 
         assert result == {}
+
+
+class TestComputeDetailedMetrics:
+    """Tests for _compute_detailed_metrics — ensures predictions and targets stay separate."""
+
+    def test_value_metrics_distinguish_pred_from_target(self) -> None:
+        """Value EV and correlation should NOT be 1.0 when predictions differ from targets.
+
+        Regression test for key collision bug: ModelOutput.VALUE_P1 and BatchKey.VALUE_P1
+        are both "value_p1", so using them as dict keys caused the target to overwrite the
+        prediction, making metrics always report 1.0.
+        """
+        batch_size = 64
+        num_actions = 5
+        torch.manual_seed(42)
+
+        # Predictions: random noise (bad predictions)
+        pred_v1 = torch.randn(batch_size)
+        pred_v2 = torch.randn(batch_size)
+
+        # Targets: different values
+        target_v1 = torch.rand(batch_size) * 3
+        target_v2 = torch.rand(batch_size) * 3
+
+        outputs = [
+            {
+                ModelOutput.LOGITS_P1: torch.randn(batch_size, num_actions),
+                ModelOutput.LOGITS_P2: torch.randn(batch_size, num_actions),
+                "pred_value_p1": pred_v1,
+                "pred_value_p2": pred_v2,
+                BatchKey.POLICY_P1: torch.softmax(torch.randn(batch_size, num_actions), dim=-1),
+                BatchKey.POLICY_P2: torch.softmax(torch.randn(batch_size, num_actions), dim=-1),
+                "target_value_p1": target_v1,
+                "target_value_p2": target_v2,
+            }
+        ]
+
+        metrics = _compute_detailed_metrics(outputs)
+
+        # With random pred vs target, EV should be well below 1.0
+        assert metrics["value/p1_explained_variance"] < 0.5
+        assert metrics["value/p2_explained_variance"] < 0.5
+        assert metrics["value/p1_correlation"] < 0.5
+        assert metrics["value/p2_correlation"] < 0.5
+
+    def test_value_metrics_perfect_when_pred_equals_target(self) -> None:
+        """Sanity check: metrics should be 1.0 when predictions match targets exactly."""
+        batch_size = 64
+        num_actions = 5
+        torch.manual_seed(42)
+
+        values_v1 = torch.rand(batch_size) * 3
+        values_v2 = torch.rand(batch_size) * 3
+
+        outputs = [
+            {
+                ModelOutput.LOGITS_P1: torch.randn(batch_size, num_actions),
+                ModelOutput.LOGITS_P2: torch.randn(batch_size, num_actions),
+                "pred_value_p1": values_v1.clone(),
+                "pred_value_p2": values_v2.clone(),
+                BatchKey.POLICY_P1: torch.softmax(torch.randn(batch_size, num_actions), dim=-1),
+                BatchKey.POLICY_P2: torch.softmax(torch.randn(batch_size, num_actions), dim=-1),
+                "target_value_p1": values_v1.clone(),
+                "target_value_p2": values_v2.clone(),
+            }
+        ]
+
+        metrics = _compute_detailed_metrics(outputs)
+
+        assert metrics["value/p1_explained_variance"] == pytest.approx(1.0)
+        assert metrics["value/p2_explained_variance"] == pytest.approx(1.0)
+        assert metrics["value/p1_correlation"] == pytest.approx(1.0)
+        assert metrics["value/p2_correlation"] == pytest.approx(1.0)

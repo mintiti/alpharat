@@ -59,14 +59,17 @@ def _compute_detailed_metrics(
         Dict of metric name -> value.
     """
     # Concatenate all batch outputs
+    # Note: predictions use "pred_" prefix and targets use "target_" prefix for value
+    # keys to avoid collision — ModelOutput.VALUE_P1 and BatchKey.VALUE_P1 are both
+    # the string "value_p1".
     all_logits_p1 = torch.cat([d[ModelOutput.LOGITS_P1] for d in all_outputs])
     all_logits_p2 = torch.cat([d[ModelOutput.LOGITS_P2] for d in all_outputs])
-    all_pred_v1 = torch.cat([d[ModelOutput.VALUE_P1] for d in all_outputs])
-    all_pred_v2 = torch.cat([d[ModelOutput.VALUE_P2] for d in all_outputs])
+    all_pred_v1 = torch.cat([d["pred_value_p1"] for d in all_outputs])
+    all_pred_v2 = torch.cat([d["pred_value_p2"] for d in all_outputs])
     all_policy_p1 = torch.cat([d[BatchKey.POLICY_P1] for d in all_outputs])
     all_policy_p2 = torch.cat([d[BatchKey.POLICY_P2] for d in all_outputs])
-    all_p1_value = torch.cat([d[BatchKey.VALUE_P1] for d in all_outputs])
-    all_p2_value = torch.cat([d[BatchKey.VALUE_P2] for d in all_outputs])
+    all_p1_value = torch.cat([d["target_value_p1"] for d in all_outputs])
+    all_p2_value = torch.cat([d["target_value_p2"] for d in all_outputs])
 
     # Compute metrics on full epoch data
     p1_metrics = compute_policy_metrics(all_logits_p1, all_policy_p1)
@@ -269,12 +272,12 @@ def run_training(
                     {
                         ModelOutput.LOGITS_P1: model_output[ModelOutput.LOGITS_P1].detach().clone(),
                         ModelOutput.LOGITS_P2: model_output[ModelOutput.LOGITS_P2].detach().clone(),
-                        ModelOutput.VALUE_P1: model_output[ModelOutput.VALUE_P1].detach().clone(),
-                        ModelOutput.VALUE_P2: model_output[ModelOutput.VALUE_P2].detach().clone(),
+                        "pred_value_p1": model_output[ModelOutput.VALUE_P1].detach().clone(),
+                        "pred_value_p2": model_output[ModelOutput.VALUE_P2].detach().clone(),
                         BatchKey.POLICY_P1: batch[BatchKey.POLICY_P1],
                         BatchKey.POLICY_P2: batch[BatchKey.POLICY_P2],
-                        BatchKey.VALUE_P1: batch[BatchKey.VALUE_P1],
-                        BatchKey.VALUE_P2: batch[BatchKey.VALUE_P2],
+                        "target_value_p1": batch[BatchKey.VALUE_P1],
+                        "target_value_p2": batch[BatchKey.VALUE_P2],
                     }
                 )
 
@@ -329,12 +332,12 @@ def run_training(
                         {
                             ModelOutput.LOGITS_P1: model_output[ModelOutput.LOGITS_P1].clone(),
                             ModelOutput.LOGITS_P2: model_output[ModelOutput.LOGITS_P2].clone(),
-                            ModelOutput.VALUE_P1: model_output[ModelOutput.VALUE_P1].clone(),
-                            ModelOutput.VALUE_P2: model_output[ModelOutput.VALUE_P2].clone(),
+                            "pred_value_p1": model_output[ModelOutput.VALUE_P1].clone(),
+                            "pred_value_p2": model_output[ModelOutput.VALUE_P2].clone(),
                             BatchKey.POLICY_P1: val_batch[BatchKey.POLICY_P1],
                             BatchKey.POLICY_P2: val_batch[BatchKey.POLICY_P2],
-                            BatchKey.VALUE_P1: val_batch[BatchKey.VALUE_P1],
-                            BatchKey.VALUE_P2: val_batch[BatchKey.VALUE_P2],
+                            "target_value_p1": val_batch[BatchKey.VALUE_P1],
+                            "target_value_p2": val_batch[BatchKey.VALUE_P2],
                         }
                     )
 
