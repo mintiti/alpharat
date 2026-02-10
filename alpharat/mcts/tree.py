@@ -19,6 +19,21 @@ if TYPE_CHECKING:
     from pyrat_engine.core.game import PyRat
 
 
+def _apply_dirichlet_noise(prior: np.ndarray, alpha: float, epsilon: float) -> np.ndarray:
+    """Mix Dirichlet noise into a prior distribution.
+
+    Args:
+        prior: Original prior distribution [N].
+        alpha: Dirichlet concentration parameter.
+        epsilon: Mixing weight (0 = no noise, 1 = all noise).
+
+    Returns:
+        Noised prior: (1 - epsilon) * prior + epsilon * Dir(alpha).
+    """
+    noise = np.random.dirichlet([alpha] * len(prior))
+    return (1 - epsilon) * prior + epsilon * noise
+
+
 class MCTSTree:
     """Manages MCTS tree structure and game state navigation.
 
@@ -38,6 +53,8 @@ class MCTSTree:
         root: MCTSNode,
         gamma: float = 1.0,
         predict_fn: Callable[[Any], tuple[np.ndarray, np.ndarray, float, float]] | None = None,
+        dirichlet_alpha: float = 0.0,
+        dirichlet_epsilon: float = 0.25,
     ):
         """Initialize MCTS tree.
 
@@ -47,11 +64,15 @@ class MCTSTree:
             gamma: Discount factor (1.0 = no discounting)
             predict_fn: Callable taking an observation and returning
                         (prior_p1, prior_p2, v1, v2) as numpy arrays and floats.
+            dirichlet_alpha: Dirichlet noise concentration parameter. 0 = disabled.
+            dirichlet_epsilon: Mixing weight for noise (0 = no noise, 1 = all noise).
         """
         self.game = game
         self.root = root
         self.gamma = gamma
         self._predict_fn = predict_fn
+        self._dirichlet_alpha = dirichlet_alpha
+        self._dirichlet_epsilon = dirichlet_epsilon
 
         # Set value scale on root from game state (remaining cheese)
         self.root.value_scale = float(max(len(game.cheese_positions()), 1))
@@ -413,16 +434,29 @@ class MCTSTree:
         return self.game.get_observation(is_player_one=True)
 
     def _init_root_priors(self) -> None:
-        """Initialize root node with NN predictions.
+        """Initialize root node with NN predictions and optional Dirichlet noise.
 
         Called during tree initialization to ensure root has proper
         policy priors and value predictions from the neural network,
         consistent with how child nodes are created.
 
+        When dirichlet_alpha > 0, applies noise to [5]-space priors before
+        they are reduced by the prior_policy setters. Each player gets an
+        independent Dirichlet draw.
+
         Note: Must be called after _init_root_effective so smart uniform
         priors can use the effective action mappings.
         """
         prior_p1, prior_p2, v1, v2 = self._predict(self.root.p1_effective, self.root.p2_effective)
+
+        if self._dirichlet_alpha > 0:
+            prior_p1 = _apply_dirichlet_noise(
+                prior_p1, self._dirichlet_alpha, self._dirichlet_epsilon
+            )
+            prior_p2 = _apply_dirichlet_noise(
+                prior_p2, self._dirichlet_alpha, self._dirichlet_epsilon
+            )
+
         self.root.prior_policy_p1 = prior_p1
         self.root.prior_policy_p2 = prior_p2
         self.root.set_values(v1, v2)

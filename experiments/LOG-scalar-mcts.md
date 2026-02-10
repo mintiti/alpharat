@@ -147,6 +147,113 @@ alpharat-iterate configs/iterate.yaml \
 
 ---
 
+### 2026-02-09: Dirichlet Noise for Data Diversity
+
+**Goal:** Does adding Dirichlet noise to MCTS root priors during sampling reduce value function overfitting and produce a stronger checkpoint?
+
+**Hypothesis:** The value head overfits because self-play positions lack diversity — symmetric play, same openings, same cheese paths. Dirichlet noise at the root forces MCTS to explore suboptimal moves sometimes, producing more varied positions. This should reduce the train/val gap on value loss and possibly improve mcts+nn Elo through better value estimates.
+
+**Setup:**
+
+| | Baseline | Dirichlet |
+|--|----------|-----------|
+| MCTS | 475 sims, c_puct=0.529, force_k=0.017, fpu=0.264 | Same + Dirichlet noise at root |
+| Game | 7×7 open, 10 cheese, 50 turns | Same |
+| Model | SymmetricMLP (hidden=256, dropout=0.1) | Same |
+| Data | 50k games, 1 iteration (no NN prior) | Same |
+| Training | policy=1.0, value=1.0, 300 epochs | Same |
+
+**Dirichlet params (AlphaZero-style):**
+- `noise_alpha`: TBD (AlphaZero used 0.03 for Go, 0.3 for chess — fewer actions → larger alpha)
+- `noise_epsilon`: 0.25 (standard — 75% prior, 25% noise)
+- Applied at root only, during sampling only
+
+**Baseline:** `scalar_baseline_7x7` — one iteration, no noise
+
+**Success criteria:**
+- Confirm if: val value loss lower (less overfitting), mcts+nn Elo ≥ baseline
+- Deny if: Elo drops or val loss unchanged
+
+**Metrics to compare:**
+- Train vs val value loss curves (the overfitting signal)
+- mcts+nn vs greedy W/D/L
+- Head-to-head: Dirichlet checkpoint vs baseline checkpoint
+- Sampling stats: draw rate, avg game length, cheese collected (diversity proxies)
+
+**Type:** hypothesis_test
+
+**Commands:**
+```bash
+# Step 1: Baseline (no noise)
+alpharat-iterate configs/iterate_7x7.yaml \
+  --prefix scalar_baseline_7x7 \
+  --iterations 1
+
+# Step 2: Implement Dirichlet noise in MCTS root (code change)
+
+# Step 3: Dirichlet iteration (config TBD after implementation)
+alpharat-iterate configs/iterate_7x7.yaml \
+  --prefix scalar_dirichlet_7x7 \
+  --iterations 1
+```
+
+#### Baseline Results (iter0, no noise, 300 epochs)
+
+| Rank | Agent | W | D | L | Pts | AvgCheese | Elo |
+|------|-------|---|---|---|-----|-----------|-----|
+| 1 | mcts+nn | 91 | 106 | 3 | 144.0 | 5.4 | 1020 |
+| 2 | greedy | 88 | 104 | 8 | 140.0 | 5.4 | 1000 |
+| 3 | mcts | 58 | 102 | 40 | 109.0 | 5.0 | 897 |
+| 4 | nn | 59 | 92 | 49 | 105.0 | 4.9 | 882 |
+| 5 | random | 0 | 4 | 196 | 2.0 | 1.4 | 216 |
+
+**mcts+nn vs greedy:** 5/43/2 — strong, only 2 losses. +20 Elo over greedy anchor.
+
+**Head-to-head highlights:**
+- mcts+nn dominates nn (20/30/0) — MCTS search adds a lot on top of the NN
+- greedy vs mcts (16/33/1) — greedy still beats pure MCTS most of the time
+- nn barely edges mcts (8/33/9 vs 9/33/8) — they're close without search
+
+**Note:** These results use the new MCTS params from Optuna (475 sims, c_puct=0.529, force_k=0.017, fpu_reduction=0.264) which differ from the earlier iter0 (593 sims, c_puct=1.17, force_k=0.012). Direct Elo comparison to the earlier iter0 (1013.8) isn't meaningful — different params, different tournament.
+
+**Next:** Run Dirichlet noise variant with same setup to test diversity hypothesis.
+
+#### Dirichlet Results (iter0, alpha=2.0, epsilon=0.25, 300 epochs)
+
+| Rank | Agent | W | D | L | Pts | AvgCheese | Elo |
+|------|-------|---|---|---|-----|-----------|-----|
+| 1 | greedy | 101 | 95 | 4 | 148.5 | 5.4 | 1000 |
+| 2 | mcts+nn | 89 | 100 | 11 | 139.0 | 5.4 | 972 |
+| 3 | mcts | 62 | 93 | 45 | 108.5 | 5.0 | 864 |
+| 4 | nn | 54 | 95 | 51 | 101.5 | 4.8 | 839 |
+| 5 | random | 1 | 3 | 196 | 2.5 | 1.3 | 208 |
+
+**mcts+nn vs greedy:** 3/38/9 — worse than baseline (5/43/2). 9 losses vs 2.
+
+**Dirichlet alpha:** 2.0 (following AlphaZero's ~10/N_actions scaling: 0.03 for Go/361, 0.3 for chess/30, 2.0 for PyRat/5).
+
+#### Comparison: Baseline vs Dirichlet
+
+| Agent | Baseline Elo | Dirichlet Elo | Delta |
+|-------|-------------|---------------|-------|
+| mcts+nn | 1020 | 972 | **-48** |
+| greedy | 1000 | 1000 | (anchor) |
+| mcts | 897 | 864 | -33 |
+| nn | 882 | 839 | -43 |
+
+**Conclusion:** Dirichlet noise hurt at iter0. Hypothesis denied for this setting.
+
+**Observations:**
+- Training curves were much smoother with Dirichlet (loss, accuracy — all monotonic, less epoch-to-epoch variance). More diverse data reduces batch variance, but the NN converges to a weaker checkpoint.
+- The NN seems to learn a "blurry" policy — averaging over noisy and clean play — rather than a sharp one. Smoother learning ≠ better learning.
+- Both nn and mcts+nn dropped by similar amounts (~43-48 Elo), suggesting the damage is in the learned policy/value quality, not in how MCTS uses it.
+
+**Caveat:** This is iter0 — uniform priors, no NN. Dirichlet noise is designed to perturb a *learned* prior to maintain exploration. Adding noise on top of uniform priors is noise-on-noise. The real test would be iter1+ where there's a sharp prior worth diversifying. But the iter0 signal is negative enough that this isn't a priority.
+
+**Next:** Move forward with the baseline (no noise) for iter1. Dirichlet might be worth revisiting once we have multi-iteration runs where overfitting becomes the bottleneck.
+
+---
+
 ## Open Questions
 
 1. Does scalar value MCTS match payout matrix MCTS at the same sim budget?

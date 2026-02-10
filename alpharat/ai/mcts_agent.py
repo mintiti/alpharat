@@ -152,6 +152,8 @@ class MCTSAgent(Agent):
             root=root,
             gamma=self.mcts_config.gamma,
             predict_fn=predict_fn,
+            dirichlet_alpha=self.mcts_config.dirichlet_alpha,
+            dirichlet_epsilon=self.mcts_config.dirichlet_epsilon,
         )
 
         search = self._build_search(tree)

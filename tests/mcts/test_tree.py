@@ -847,6 +847,150 @@ class TestPredictionCache:
         assert _aa.prior_policy_p1 is not _bb.prior_policy_p1
 
 
+class TestDirichletNoise:
+    """Tests for Dirichlet noise on root priors."""
+
+    def test_alpha_zero_leaves_priors_unchanged(self) -> None:
+        """With alpha=0 (default), priors should match predict_fn output exactly."""
+        game = FakeGame()
+        prior = np.array([0.1, 0.2, 0.3, 0.15, 0.25])
+
+        def predict_fn(obs: object) -> tuple[np.ndarray, np.ndarray, float, float]:
+            return prior.copy(), prior.copy(), 1.0, 2.0
+
+        root = MCTSNode(
+            game_state=None,
+            prior_policy_p1=np.ones(5) / 5,
+            prior_policy_p2=np.ones(5) / 5,
+            nn_value_p1=0.0,
+            nn_value_p2=0.0,
+        )
+        tree = MCTSTree(
+            game=game,  # type: ignore[arg-type]
+            root=root,
+            gamma=1.0,
+            predict_fn=predict_fn,
+            dirichlet_alpha=0.0,
+        )
+
+        np.testing.assert_array_almost_equal(tree.root.prior_policy_p1, prior)
+        np.testing.assert_array_almost_equal(tree.root.prior_policy_p2, prior)
+
+    def test_alpha_positive_modifies_priors(self) -> None:
+        """With alpha>0, priors should differ from the raw predict_fn output."""
+        game = FakeGame()
+        prior = np.array([0.1, 0.2, 0.3, 0.15, 0.25])
+
+        def predict_fn(obs: object) -> tuple[np.ndarray, np.ndarray, float, float]:
+            return prior.copy(), prior.copy(), 1.0, 2.0
+
+        np.random.seed(42)
+        root = MCTSNode(
+            game_state=None,
+            prior_policy_p1=np.ones(5) / 5,
+            prior_policy_p2=np.ones(5) / 5,
+            nn_value_p1=0.0,
+            nn_value_p2=0.0,
+        )
+        tree = MCTSTree(
+            game=game,  # type: ignore[arg-type]
+            root=root,
+            gamma=1.0,
+            predict_fn=predict_fn,
+            dirichlet_alpha=0.5,
+            dirichlet_epsilon=0.25,
+        )
+
+        # At least one player's prior should differ (overwhelmingly likely with seed 42)
+        p1_changed = not np.allclose(tree.root.prior_policy_p1, prior)
+        p2_changed = not np.allclose(tree.root.prior_policy_p2, prior)
+        assert p1_changed or p2_changed
+
+    def test_noised_priors_sum_to_one(self) -> None:
+        """Noised priors should still be valid probability distributions."""
+        game = FakeGame()
+        prior = np.array([0.1, 0.2, 0.3, 0.15, 0.25])
+
+        def predict_fn(obs: object) -> tuple[np.ndarray, np.ndarray, float, float]:
+            return prior.copy(), prior.copy(), 0.0, 0.0
+
+        root = MCTSNode(
+            game_state=None,
+            prior_policy_p1=np.ones(5) / 5,
+            prior_policy_p2=np.ones(5) / 5,
+            nn_value_p1=0.0,
+            nn_value_p2=0.0,
+        )
+        tree = MCTSTree(
+            game=game,  # type: ignore[arg-type]
+            root=root,
+            gamma=1.0,
+            predict_fn=predict_fn,
+            dirichlet_alpha=1.0,
+            dirichlet_epsilon=0.25,
+        )
+
+        assert tree.root.prior_policy_p1.sum() == pytest.approx(1.0)
+        assert tree.root.prior_policy_p2.sum() == pytest.approx(1.0)
+
+    def test_noise_independent_per_player(self) -> None:
+        """P1 and P2 should get independent Dirichlet draws."""
+        game = FakeGame()
+        prior = np.array([0.2, 0.2, 0.2, 0.2, 0.2])
+
+        def predict_fn(obs: object) -> tuple[np.ndarray, np.ndarray, float, float]:
+            return prior.copy(), prior.copy(), 0.0, 0.0
+
+        np.random.seed(123)
+        root = MCTSNode(
+            game_state=None,
+            prior_policy_p1=np.ones(5) / 5,
+            prior_policy_p2=np.ones(5) / 5,
+            nn_value_p1=0.0,
+            nn_value_p2=0.0,
+        )
+        tree = MCTSTree(
+            game=game,  # type: ignore[arg-type]
+            root=root,
+            gamma=1.0,
+            predict_fn=predict_fn,
+            dirichlet_alpha=0.5,
+            dirichlet_epsilon=0.25,
+        )
+
+        # With independent draws, P1 and P2 priors should differ
+        assert not np.allclose(tree.root.prior_policy_p1, tree.root.prior_policy_p2)
+
+    def test_noise_without_predict_fn(self) -> None:
+        """Noise should also work with smart uniform priors (no NN)."""
+        game = FakeGame()
+
+        np.random.seed(99)
+        root = MCTSNode(
+            game_state=None,
+            prior_policy_p1=np.ones(5) / 5,
+            prior_policy_p2=np.ones(5) / 5,
+            nn_value_p1=0.0,
+            nn_value_p2=0.0,
+        )
+        tree = MCTSTree(
+            game=game,  # type: ignore[arg-type]
+            root=root,
+            gamma=1.0,
+            dirichlet_alpha=0.5,
+            dirichlet_epsilon=0.25,
+        )
+
+        # Should still sum to 1
+        assert tree.root.prior_policy_p1.sum() == pytest.approx(1.0)
+        assert tree.root.prior_policy_p2.sum() == pytest.approx(1.0)
+
+        # Smart uniform for FakeGame (no walls) gives [0.2, 0.2, 0.2, 0.2, 0.2]
+        # With noise, at least one should deviate
+        uniform = np.ones(5) / 5
+        assert not np.allclose(tree.root.prior_policy_p1, uniform)
+
+
 class TestTerminalNodes:
     """Tests for terminal node handling."""
 

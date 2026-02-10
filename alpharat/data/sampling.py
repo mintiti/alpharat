@@ -190,6 +190,8 @@ def build_tree(
     game: PyRat,
     gamma: float,
     predict_fn: Callable[[Any], tuple[np.ndarray, np.ndarray, float, float]] | None = None,
+    dirichlet_alpha: float = 0.0,
+    dirichlet_epsilon: float = 0.25,
 ) -> MCTSTree:
     """Build fresh MCTS tree for search.
 
@@ -201,6 +203,8 @@ def build_tree(
         game: Current game state (will be deep-copied for simulation).
         gamma: Discount factor for value backup.
         predict_fn: Optional NN prediction function for priors.
+        dirichlet_alpha: Dirichlet noise concentration. 0 = disabled.
+        dirichlet_epsilon: Mixing weight for noise.
 
     Returns:
         MCTSTree ready for search.
@@ -222,7 +226,14 @@ def build_tree(
         p2_mud_turns_remaining=simulator.player2_mud_turns,
     )
 
-    return MCTSTree(game=simulator, root=root, gamma=gamma, predict_fn=predict_fn)
+    return MCTSTree(
+        game=simulator,
+        root=root,
+        gamma=gamma,
+        predict_fn=predict_fn,
+        dirichlet_alpha=dirichlet_alpha,
+        dirichlet_epsilon=dirichlet_epsilon,
+    )
 
 
 def create_game(config: GameConfig, seed: int) -> PyRat:
@@ -304,10 +315,20 @@ def play_and_record_game(
                     p2_mud_turns_remaining=simulator.player2_mud_turns,
                 )
                 tree = MCTSTree(
-                    game=simulator, root=root, gamma=config.mcts.gamma, predict_fn=predict_fn
+                    game=simulator,
+                    root=root,
+                    gamma=config.mcts.gamma,
+                    predict_fn=predict_fn,
+                    dirichlet_alpha=config.mcts.dirichlet_alpha,
+                    dirichlet_epsilon=config.mcts.dirichlet_epsilon,
                 )
             else:
-                tree = build_tree(game, config.mcts.gamma)
+                tree = build_tree(
+                    game,
+                    config.mcts.gamma,
+                    dirichlet_alpha=config.mcts.dirichlet_alpha,
+                    dirichlet_epsilon=config.mcts.dirichlet_epsilon,
+                )
 
             search = config.mcts.build(tree)
             result = search.search()

@@ -49,6 +49,8 @@ class DecoupledPUCTConfig(StrictBaseModel):
     c_puct: float = 1.5
     force_k: float = 2.0
     fpu_reduction: float = 0.2
+    dirichlet_alpha: float = 0.0  # 0 = disabled (no noise)
+    dirichlet_epsilon: float = 0.25  # mixing weight
 
     def build(self, tree: MCTSTree) -> DecoupledPUCTSearch:
         """Construct a search instance with these settings."""
