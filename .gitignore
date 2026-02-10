@@ -214,6 +214,9 @@ DOGFOOD.md
 # macOS
 .DS_Store
 
+# Rust build artifacts
+/target
+
 # Project data/output directories (leading / = root-level only)
 /batches/
 /checkpoints/
