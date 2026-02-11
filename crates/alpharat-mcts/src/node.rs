@@ -124,6 +124,17 @@ impl HalfNode {
         }
         out
     }
+
+    /// Expand outcome-indexed priors back to 5-action space.
+    ///
+    /// Canonical actions get their outcome's prior; blocked actions get 0.
+    pub fn expand_prior(&self) -> [f32; 5] {
+        let mut out = [0.0f32; 5];
+        for idx in 0..self.n_outcomes() {
+            out[self.outcomes[idx] as usize] = self.prior[idx];
+        }
+        out
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -325,6 +336,10 @@ impl NodeArena {
 
     pub fn get_mut(&mut self, idx: NodeIndex) -> &mut Node {
         &mut self.nodes[idx.as_usize()]
+    }
+
+    pub fn clear(&mut self) {
+        self.nodes.clear();
     }
 
     pub fn len(&self) -> usize {
@@ -593,6 +608,89 @@ mod tests {
         // Marginal Q = (5.0 + 4.5 + 5.0) / 3 = 14.5 / 3
         let expected = (5.0 + 4.5 + 5.0) / 3.0;
         assert!((edge.q - expected).abs() < 1e-5);
+    }
+
+    // ---- expand_prior ----
+
+    #[test]
+    fn expand_prior_one_wall() {
+        // Non-uniform prior, UP blocked → reduce then expand should preserve
+        // canonical action probs and zero blocked actions.
+        let prior_5 = [0.1, 0.3, 0.2, 0.15, 0.25];
+        let effective = [4, 1, 2, 3, 4]; // UP blocked
+        let half = HalfNode::new(prior_5, effective);
+
+        let expanded = half.expand_prior();
+        // Action 0 (UP) is blocked → 0
+        assert_eq!(expanded[0], 0.0);
+        // Actions 1, 2, 3 keep their original priors
+        assert!((expanded[1] - 0.3).abs() < 1e-6);
+        assert!((expanded[2] - 0.2).abs() < 1e-6);
+        assert!((expanded[3] - 0.15).abs() < 1e-6);
+        // Action 4 (STAY) gets merged prior: 0.1 + 0.25 = 0.35
+        assert!((expanded[4] - 0.35).abs() < 1e-6);
+
+        let total: f32 = expanded.iter().sum();
+        assert!((total - 1.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn expand_prior_open_identity() {
+        // No walls: reduce then expand is identity.
+        let prior_5 = [0.2; 5];
+        let effective = [0, 1, 2, 3, 4];
+        let half = HalfNode::new(prior_5, effective);
+
+        let expanded = half.expand_prior();
+        for a in 0..5 {
+            assert!((expanded[a] - 0.2).abs() < 1e-6);
+        }
+    }
+
+    #[test]
+    fn expand_prior_mud() {
+        // All actions → STAY: all mass on action 4, zeros elsewhere.
+        let prior_5 = [0.1, 0.2, 0.3, 0.15, 0.25];
+        let effective = [4, 4, 4, 4, 4];
+        let half = HalfNode::new(prior_5, effective);
+
+        let expanded = half.expand_prior();
+        for a in 0..4 {
+            assert_eq!(expanded[a], 0.0);
+        }
+        assert!((expanded[4] - 1.0).abs() < 1e-6);
+    }
+
+    // ---- expand_visits: mud ----
+
+    #[test]
+    fn expand_visits_mud() {
+        // All actions → STAY (mud): single outcome, only action 4 gets visits.
+        let prior_5 = [0.2; 5];
+        let effective = [4, 4, 4, 4, 4];
+        let mut half = HalfNode::new(prior_5, effective);
+
+        half.edges[0].visits = 42;
+
+        let expanded = half.expand_visits();
+        assert_eq!(expanded[4], 42.0);
+        for a in 0..4 {
+            assert_eq!(expanded[a], 0.0);
+        }
+    }
+
+    // ---- outcomes: corridor ----
+
+    #[test]
+    fn outcomes_corridor() {
+        // UP, DOWN, and STAY all collapse to STAY.
+        let effective = [4, 1, 4, 3, 4];
+        let (outcomes, n, a2i) = compute_outcomes(effective);
+        assert_eq!(n, 3);
+        assert_eq!(&outcomes[..3], &[1, 3, 4]);
+        // Actions 0, 2, 4 all map to same index (for outcome 4).
+        assert_eq!(a2i[0], a2i[2]);
+        assert_eq!(a2i[0], a2i[4]);
     }
 
     // ---- NodeArena ----
