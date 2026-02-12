@@ -127,8 +127,8 @@ fn alloc_root(arena: &mut NodeArena, game: &GameState) -> NodeIndex {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use pyrat::{Coordinates, GameState};
-    use std::collections::HashMap;
+    use crate::test_util;
+    use pyrat::Coordinates;
 
     // ---- find_child ----
 
@@ -211,36 +211,6 @@ mod tests {
         assert!((prior[4] - 1.0).abs() < 1e-6);
     }
 
-    // ---- Helper: create simple games for tree tests ----
-
-    fn open_5x5_game(cheese: &[Coordinates]) -> GameState {
-        GameState::new_with_config(
-            5,
-            5,
-            HashMap::new(), // no walls
-            Default::default(),
-            cheese,
-            Coordinates::new(2, 2), // center — open in all directions
-            Coordinates::new(4, 4),
-            100,
-        )
-    }
-
-    fn corner_game(cheese: &[Coordinates]) -> GameState {
-        // P1 at (0,0) — blocked UP on 1-tall and LEFT on 1-wide? No — (0,0) is bottom-left.
-        // On a 5×5 board, (0,0) has walls on DOWN and LEFT (board edges).
-        GameState::new_with_config(
-            5,
-            5,
-            HashMap::new(),
-            Default::default(),
-            cheese,
-            Coordinates::new(0, 0), // bottom-left corner
-            Coordinates::new(4, 4),
-            100,
-        )
-    }
-
     // ---- MCTSTree: root init ----
 
     #[test]
@@ -252,7 +222,7 @@ mod tests {
             Coordinates::new(4, 4),
             Coordinates::new(2, 0),
         ];
-        let game = open_5x5_game(&cheese);
+        let game = test_util::open_5x5_game(Coordinates::new(2, 2), Coordinates::new(4, 4), &cheese);
         let tree = MCTSTree::new(&game);
         let root = &tree.arena()[tree.root()];
 
@@ -279,7 +249,7 @@ mod tests {
     #[test]
     fn root_init_corner() {
         let cheese = [Coordinates::new(2, 2)];
-        let game = corner_game(&cheese);
+        let game = test_util::open_5x5_game(Coordinates::new(0, 0), Coordinates::new(4, 4), &cheese);
         let tree = MCTSTree::new(&game);
         let root = &tree.arena()[tree.root()];
 
@@ -300,53 +270,19 @@ mod tests {
     fn root_init_value_scale() {
         // 5 cheese → value_scale = 5
         let cheese: Vec<_> = (0..5).map(|i| Coordinates::new(i, 0)).collect();
-        let game = open_5x5_game(&cheese);
+        let game = test_util::open_5x5_game(Coordinates::new(2, 2), Coordinates::new(4, 4), &cheese);
         let tree = MCTSTree::new(&game);
         assert!((tree.arena()[tree.root()].value_scale() - 5.0).abs() < 1e-6);
 
         // 0 cheese → value_scale = 1 (clamped)
-        let game_no_cheese = open_5x5_game(&[]);
+        let game_no_cheese = test_util::open_5x5_game(Coordinates::new(2, 2), Coordinates::new(4, 4), &[]);
         let tree_no_cheese = MCTSTree::new(&game_no_cheese);
         assert!((tree_no_cheese.arena()[tree_no_cheese.root()].value_scale() - 1.0).abs() < 1e-6);
     }
 
     #[test]
     fn root_init_mud() {
-        // Create game, then put P1 in mud manually via make_move into mud.
-        // Simpler: use new_with_config with mud and position P1 so they're in mud.
-        //
-        // Actually, mud_timer is set when a player *moves into* a mud passage.
-        // We can't just place P1 on mud at init — they need to walk into it.
-        // Instead, test effective_actions_p1 directly with a game where P1 is stuck.
-        use pyrat::game::types::MudMap;
-
-        let mut mud = MudMap::new();
-        // Mud between (2,2) and (2,3) with value 3
-        mud.insert(Coordinates::new(2, 2), Coordinates::new(2, 3), 3);
-
-        let game = GameState::new_with_config(
-            5,
-            5,
-            HashMap::new(),
-            mud,
-            &[Coordinates::new(0, 0)],
-            Coordinates::new(2, 2), // P1 at mud start
-            Coordinates::new(4, 4),
-            100,
-        );
-
-        // P1 isn't *in* mud yet (mud_timer=0), just at a position with mud.
-        // To actually get stuck, P1 must move UP into the mud passage.
-        // Let's do that.
-        let mut game = game;
-        let _undo = game.make_move(
-            pyrat::Direction::Up, // P1 moves into mud (2,2)→(2,3)
-            pyrat::Direction::Stay,
-        );
-
-        // Now P1 should be stuck in mud.
-        assert!(game.player1.mud_timer > 0);
-
+        let game = test_util::mud_game_p1_stuck();
         let tree = MCTSTree::new(&game);
         let root = &tree.arena()[tree.root()];
 
@@ -364,7 +300,7 @@ mod tests {
     #[test]
     fn arena_clear_reinit() {
         let cheese = [Coordinates::new(1, 1), Coordinates::new(3, 3)];
-        let game1 = open_5x5_game(&cheese);
+        let game1 = test_util::open_5x5_game(Coordinates::new(2, 2), Coordinates::new(4, 4), &cheese);
         let mut tree = MCTSTree::new(&game1);
 
         // Verify initial state
@@ -378,7 +314,7 @@ mod tests {
 
         // Reinit with different game state (1 cheese → value_scale = 1)
         let cheese2 = [Coordinates::new(0, 0)];
-        let game2 = open_5x5_game(&cheese2);
+        let game2 = test_util::open_5x5_game(Coordinates::new(2, 2), Coordinates::new(4, 4), &cheese2);
         tree.reinit(&game2);
 
         // Old nodes gone, single fresh root
@@ -391,7 +327,7 @@ mod tests {
     #[test]
     fn advance_root_found() {
         let cheese = [Coordinates::new(1, 1)];
-        let game = open_5x5_game(&cheese);
+        let game = test_util::open_5x5_game(Coordinates::new(2, 2), Coordinates::new(4, 4), &cheese);
         let mut tree = MCTSTree::new(&game);
         let root = tree.root();
 
@@ -414,7 +350,7 @@ mod tests {
         // Wire a child at the STAY outcome, then advance with DOWN.
         // Should resolve to the same child through action_to_outcome_idx.
         let cheese = [Coordinates::new(2, 2)];
-        let game = corner_game(&cheese);
+        let game = test_util::open_5x5_game(Coordinates::new(0, 0), Coordinates::new(4, 4), &cheese);
         let mut tree = MCTSTree::new(&game);
         let root = tree.root();
 
@@ -435,7 +371,7 @@ mod tests {
     #[test]
     fn advance_root_not_found() {
         let cheese = [Coordinates::new(1, 1)];
-        let game = open_5x5_game(&cheese);
+        let game = test_util::open_5x5_game(Coordinates::new(2, 2), Coordinates::new(4, 4), &cheese);
         let mut tree = MCTSTree::new(&game);
         let root = tree.root();
 
