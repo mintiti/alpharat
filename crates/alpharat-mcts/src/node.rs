@@ -63,21 +63,35 @@ impl HalfNode {
     /// The prior is reduced by summing probabilities of actions that share
     /// the same outcome.
     pub fn new(prior_5: [f32; 5], effective: [u8; 5]) -> Self {
+        let mut half = Self::new_shell(effective);
+        half.set_prior(prior_5);
+        half
+    }
+
+    /// Shell constructor: outcomes computed, priors zeroed.
+    ///
+    /// Used in the three-phase lifecycle: shell exists so other descents
+    /// detect the child, priors arrive later from batch NN eval.
+    pub fn new_shell(effective: [u8; 5]) -> Self {
         let (outcomes, n_outcomes, action_to_idx) = compute_outcomes(effective);
-
-        // Reduce prior: sum probabilities of equivalent actions.
-        let mut prior = [0.0f32; 5];
-        for action in 0..5u8 {
-            let idx = action_to_idx[action as usize];
-            prior[idx as usize] += prior_5[action as usize];
-        }
-
         Self {
-            prior,
+            prior: [0.0f32; 5],
             edges: [HalfEdge::default(); 5],
             outcomes,
             action_to_idx,
             n_outcomes,
+        }
+    }
+
+    /// Set priors from a 5-action policy, reducing into outcome-indexed space.
+    ///
+    /// Clears existing priors, then scatter-adds: for each action,
+    /// `prior[action_to_idx[a]] += prior_5[a]`.
+    pub fn set_prior(&mut self, prior_5: [f32; 5]) {
+        self.prior = [0.0f32; 5];
+        for action in 0..5u8 {
+            let idx = self.action_to_idx[action as usize];
+            self.prior[idx as usize] += prior_5[action as usize];
         }
     }
 
@@ -691,6 +705,71 @@ mod tests {
         // Actions 0, 2, 4 all map to same index (for outcome 4).
         assert_eq!(a2i[0], a2i[2]);
         assert_eq!(a2i[0], a2i[4]);
+    }
+
+    // ---- HalfNode shell lifecycle ----
+
+    #[test]
+    fn shell_then_set_prior_open() {
+        let effective = [0, 1, 2, 3, 4];
+        let shell = HalfNode::new_shell(effective);
+
+        // Shell: 5 outcomes, all priors zero
+        assert_eq!(shell.n_outcomes(), 5);
+        for i in 0..5 {
+            assert_eq!(shell.prior(i), 0.0);
+        }
+
+        // Set uniform prior
+        let mut half = shell;
+        half.set_prior([0.2; 5]);
+        for i in 0..5 {
+            assert!((half.prior(i) - 0.2).abs() < 1e-6);
+        }
+    }
+
+    #[test]
+    fn shell_then_set_prior_one_wall() {
+        // UP blocked → maps to STAY
+        let effective = [4, 1, 2, 3, 4];
+        let mut shell = HalfNode::new_shell(effective);
+        assert_eq!(shell.n_outcomes(), 4);
+
+        shell.set_prior([0.2; 5]);
+        // STAY gets 0.2 (action 0) + 0.2 (action 4) = 0.4
+        let stay_idx = shell.action_to_outcome_idx(4) as usize;
+        assert!((shell.prior(stay_idx) - 0.4).abs() < 1e-6);
+
+        let total: f32 = (0..shell.n_outcomes()).map(|i| shell.prior(i)).sum();
+        assert!((total - 1.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn shell_set_prior_matches_new() {
+        // new_shell + set_prior ≡ new() for non-uniform prior with wall
+        let prior_5 = [0.1, 0.3, 0.2, 0.15, 0.25];
+        let effective = [4, 1, 2, 3, 4];
+
+        let from_new = HalfNode::new(prior_5, effective);
+        let mut from_shell = HalfNode::new_shell(effective);
+        from_shell.set_prior(prior_5);
+
+        assert_eq!(from_new.n_outcomes(), from_shell.n_outcomes());
+        for i in 0..from_new.n_outcomes() {
+            assert!(
+                (from_new.prior(i) - from_shell.prior(i)).abs() < 1e-6,
+                "outcome {i}: new={} shell={}",
+                from_new.prior(i),
+                from_shell.prior(i)
+            );
+            assert_eq!(from_new.outcome_action(i), from_shell.outcome_action(i));
+        }
+        for a in 0..5u8 {
+            assert_eq!(
+                from_new.action_to_outcome_idx(a),
+                from_shell.action_to_outcome_idx(a)
+            );
+        }
     }
 
     // ---- NodeArena ----
