@@ -1,4 +1,4 @@
-use crate::{HalfNode, Node, NodeArena, NodeIndex};
+use crate::{EvalResult, HalfNode, Node, NodeArena, NodeIndex};
 use pyrat::GameState;
 
 // ---------------------------------------------------------------------------
@@ -37,6 +37,60 @@ pub fn smart_uniform_prior(effective: &[u8; 5]) -> [f32; 5] {
         prior[e as usize] = p;
     }
     prior
+}
+
+// ---------------------------------------------------------------------------
+// Three-phase lifecycle: extend_node + populate_node
+// ---------------------------------------------------------------------------
+
+/// Create a shell child node under `parent` at the given outcome indices.
+///
+/// The child gets outcome mappings from `game` (which must already be advanced
+/// to the child position), but priors are zeroed — they arrive later via
+/// `populate_node`. Does NOT set priors, values, or terminal status.
+///
+/// Wires the child into the parent's linked list (prepend).
+pub fn extend_node(
+    arena: &mut NodeArena,
+    parent: NodeIndex,
+    outcome_p1: u8,
+    outcome_p2: u8,
+    game: &GameState,
+) -> NodeIndex {
+    let p1_shell = HalfNode::new_shell(game.effective_actions_p1());
+    let p2_shell = HalfNode::new_shell(game.effective_actions_p2());
+
+    let mut node = Node::new(p1_shell, p2_shell);
+    node.set_value_scale(game.cheese.remaining_cheese().max(1) as f32);
+    node.set_parent(Some(parent), (outcome_p1, outcome_p2));
+
+    let child_idx = arena.alloc(node);
+
+    // Prepend to parent's linked list.
+    let old_first = arena[parent].first_child();
+    arena[child_idx].set_next_sibling(old_first);
+    arena[parent].set_first_child(Some(child_idx));
+
+    child_idx
+}
+
+/// Set priors on a shell node after batch NN evaluation.
+///
+/// - `Some(result)`: reduces NN policies into outcome-indexed priors.
+/// - `None`: marks the node as terminal (no priors needed).
+///
+/// Does NOT call `update_value` — value flows through backup (chunk 4).
+pub fn populate_node(arena: &mut NodeArena, node_idx: NodeIndex, eval_result: Option<&EvalResult>) {
+    let node = &mut arena[node_idx];
+    match eval_result {
+        Some(result) => {
+            node.p1.set_prior(result.policy_p1);
+            node.p2.set_prior(result.policy_p2);
+        }
+        None => {
+            node.set_terminal();
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -378,5 +432,362 @@ mod tests {
         // No children → advance should fail
         assert!(!tree.advance_root(0, 0));
         assert_eq!(tree.root(), root); // Root unchanged
+    }
+
+    // ---- extend_node ----
+
+    #[test]
+    fn extend_node_shell_properties() {
+        // P1 center (2,2): 5 outcomes. P2 corner (4,4): 3 outcomes.
+        // Extend with P1=UP, P2=DOWN → child at new positions.
+        let cheese = [Coordinates::new(0, 0), Coordinates::new(1, 1)];
+        let mut game =
+            test_util::open_5x5_game(Coordinates::new(2, 2), Coordinates::new(4, 4), &cheese);
+        let mut arena = NodeArena::new();
+
+        let root_h = HalfNode::new([0.2; 5], game.effective_actions_p1());
+        let root_h2 = HalfNode::new([0.2; 5], game.effective_actions_p2());
+        let parent = arena.alloc(Node::new(root_h, root_h2));
+
+        let i = arena[parent].p1.action_to_outcome_idx(0); // UP
+        let j = arena[parent].p2.action_to_outcome_idx(2); // DOWN
+
+        // Advance game to child position
+        let _undo = game.make_move(pyrat::Direction::Up, pyrat::Direction::Down);
+
+        let child_idx = extend_node(&mut arena, parent, i, j, &game);
+        let child = &arena[child_idx];
+
+        // Shell properties
+        assert_eq!(child.total_visits(), 0);
+        assert_eq!(child.v1(), 0.0);
+        assert_eq!(child.v2(), 0.0);
+        assert!(!child.is_terminal());
+        assert_eq!(child.edge_r1(), 0.0);
+        assert_eq!(child.edge_r2(), 0.0);
+
+        // Effective actions from game at child position
+        // P1 now at (2,3): open interior → 5 outcomes
+        assert_eq!(child.p1.n_outcomes(), 5);
+
+        // Priors are zero (shell)
+        for idx in 0..child.p1.n_outcomes() {
+            assert_eq!(child.p1.prior(idx), 0.0);
+        }
+        for idx in 0..child.p2.n_outcomes() {
+            assert_eq!(child.p2.prior(idx), 0.0);
+        }
+
+        // Value scale = remaining cheese
+        assert!((child.value_scale() - 2.0).abs() < 1e-6);
+
+        // Parent link
+        assert_eq!(child.parent(), Some(parent));
+        assert_eq!(child.parent_outcome(), (i, j));
+
+        // Parent's first_child updated
+        assert_eq!(arena[parent].first_child(), Some(child_idx));
+    }
+
+    #[test]
+    fn extend_node_linked_list_two_children() {
+        let cheese = [Coordinates::new(0, 0)];
+        let mut game =
+            test_util::open_5x5_game(Coordinates::new(2, 2), Coordinates::new(2, 2), &cheese);
+        let mut arena = NodeArena::new();
+
+        let root_h = HalfNode::new([0.2; 5], game.effective_actions_p1());
+        let parent = arena.alloc(Node::new(root_h, root_h));
+
+        // Child 1: P1=UP, P2=RIGHT
+        let i1 = arena[parent].p1.action_to_outcome_idx(0);
+        let j1 = arena[parent].p2.action_to_outcome_idx(1);
+        let undo1 = game.make_move(pyrat::Direction::Up, pyrat::Direction::Right);
+        let c1 = extend_node(&mut arena, parent, i1, j1, &game);
+        game.unmake_move(undo1);
+
+        // Child 2: P1=DOWN, P2=LEFT
+        let i2 = arena[parent].p1.action_to_outcome_idx(2);
+        let j2 = arena[parent].p2.action_to_outcome_idx(3);
+        let undo2 = game.make_move(pyrat::Direction::Down, pyrat::Direction::Left);
+        let c2 = extend_node(&mut arena, parent, i2, j2, &game);
+        game.unmake_move(undo2);
+
+        // Prepend order: c2 is first_child (added last)
+        assert_eq!(arena[parent].first_child(), Some(c2));
+        assert_eq!(arena[c2].next_sibling(), Some(c1));
+        assert!(arena[c1].next_sibling().is_none());
+
+        // find_child locates both
+        assert_eq!(find_child(&arena, parent, i1, j1), Some(c1));
+        assert_eq!(find_child(&arena, parent, i2, j2), Some(c2));
+
+        // Parent outcomes correct
+        assert_eq!(arena[c1].parent_outcome(), (i1, j1));
+        assert_eq!(arena[c2].parent_outcome(), (i2, j2));
+    }
+
+    #[test]
+    fn extend_node_multiple_children() {
+        let cheese = [Coordinates::new(0, 0)];
+        let mut game =
+            test_util::open_5x5_game(Coordinates::new(2, 2), Coordinates::new(2, 2), &cheese);
+        let mut arena = NodeArena::new();
+
+        let root_h = HalfNode::new([0.2; 5], game.effective_actions_p1());
+        let parent = arena.alloc(Node::new(root_h, root_h));
+
+        // Create 5 children: P1=each direction, P2=STAY
+        let j = arena[parent].p2.action_to_outcome_idx(4); // STAY
+        let dirs = [
+            pyrat::Direction::Up,
+            pyrat::Direction::Right,
+            pyrat::Direction::Down,
+            pyrat::Direction::Left,
+            pyrat::Direction::Stay,
+        ];
+        let mut child_indices = Vec::new();
+        for &dir in &dirs {
+            let action = dir as u8;
+            let i = arena[parent].p1.action_to_outcome_idx(action);
+            let undo = game.make_move(dir, pyrat::Direction::Stay);
+            let c = extend_node(&mut arena, parent, i, j, &game);
+            child_indices.push((c, i));
+            game.unmake_move(undo);
+        }
+
+        // All findable
+        for &(c, i) in &child_indices {
+            assert_eq!(find_child(&arena, parent, i, j), Some(c));
+        }
+
+        // Linked list walk counts 5 children
+        let mut count = 0;
+        let mut cur = arena[parent].first_child();
+        while let Some(idx) = cur {
+            count += 1;
+            cur = arena[idx].next_sibling();
+        }
+        assert_eq!(count, 5);
+    }
+
+    // ---- populate_node ----
+
+    #[test]
+    fn populate_node_sets_priors() {
+        let cheese = [Coordinates::new(0, 0)];
+        let game =
+            test_util::open_5x5_game(Coordinates::new(2, 2), Coordinates::new(2, 2), &cheese);
+        let mut arena = NodeArena::new();
+
+        let shell_p1 = HalfNode::new_shell(game.effective_actions_p1());
+        let shell_p2 = HalfNode::new_shell(game.effective_actions_p2());
+        let node_idx = arena.alloc(Node::new(shell_p1, shell_p2));
+
+        let eval = EvalResult {
+            policy_p1: [0.1, 0.2, 0.3, 0.25, 0.15],
+            policy_p2: [0.2; 5],
+            value_p1: 0.5,
+            value_p2: 0.3,
+        };
+
+        populate_node(&mut arena, node_idx, Some(&eval));
+        let node = &arena[node_idx];
+
+        // Open position: 5 outcomes, no merging — reduced priors = input priors
+        let expected_p1 = [0.1, 0.2, 0.3, 0.25, 0.15];
+        for i in 0..node.p1.n_outcomes() {
+            assert!(
+                (node.p1.prior(i) - expected_p1[i]).abs() < 1e-6,
+                "P1 outcome {i}: expected {} got {}",
+                expected_p1[i],
+                node.p1.prior(i)
+            );
+        }
+
+        // Priors sum to 1
+        let sum_p1: f32 = (0..node.p1.n_outcomes()).map(|i| node.p1.prior(i)).sum();
+        let sum_p2: f32 = (0..node.p2.n_outcomes()).map(|i| node.p2.prior(i)).sum();
+        assert!((sum_p1 - 1.0).abs() < 1e-6);
+        assert!((sum_p2 - 1.0).abs() < 1e-6);
+
+        // Still unvisited — value not set by populate
+        assert_eq!(node.total_visits(), 0);
+        assert!(!node.is_terminal());
+    }
+
+    #[test]
+    fn populate_node_terminal() {
+        let cheese = [Coordinates::new(0, 0)];
+        let game =
+            test_util::open_5x5_game(Coordinates::new(2, 2), Coordinates::new(2, 2), &cheese);
+        let mut arena = NodeArena::new();
+
+        let shell_p1 = HalfNode::new_shell(game.effective_actions_p1());
+        let shell_p2 = HalfNode::new_shell(game.effective_actions_p2());
+        let node_idx = arena.alloc(Node::new(shell_p1, shell_p2));
+
+        populate_node(&mut arena, node_idx, None);
+        let node = &arena[node_idx];
+
+        assert!(node.is_terminal());
+        assert_eq!(node.total_visits(), 0);
+
+        // Priors stay zero
+        for i in 0..node.p1.n_outcomes() {
+            assert_eq!(node.p1.prior(i), 0.0);
+        }
+    }
+
+    #[test]
+    fn populate_node_wall_topology() {
+        // P1 at corner (0,0): DOWN and LEFT blocked → 3 outcomes
+        let cheese = [Coordinates::new(2, 2)];
+        let game =
+            test_util::open_5x5_game(Coordinates::new(0, 0), Coordinates::new(2, 2), &cheese);
+        let mut arena = NodeArena::new();
+
+        let shell_p1 = HalfNode::new_shell(game.effective_actions_p1());
+        let shell_p2 = HalfNode::new_shell(game.effective_actions_p2());
+        let node_idx = arena.alloc(Node::new(shell_p1, shell_p2));
+
+        assert_eq!(arena[node_idx].p1.n_outcomes(), 3);
+
+        // Non-uniform prior where blocked actions have mass
+        let eval = EvalResult {
+            policy_p1: [0.1, 0.3, 0.2, 0.15, 0.25],
+            policy_p2: [0.2; 5],
+            value_p1: 1.0,
+            value_p2: 2.0,
+        };
+
+        populate_node(&mut arena, node_idx, Some(&eval));
+        let node = &arena[node_idx];
+
+        // P1: actions 2,3 blocked → merge into STAY
+        // STAY outcome gets: 0.2 (DOWN) + 0.15 (LEFT) + 0.25 (STAY) = 0.6
+        let stay_idx = node.p1.action_to_outcome_idx(4) as usize;
+        assert!((node.p1.prior(stay_idx) - 0.6).abs() < 1e-6);
+
+        // Expand and verify blocked actions get 0
+        let expanded = node.p1.expand_prior();
+        assert_eq!(expanded[2], 0.0); // DOWN blocked
+        assert_eq!(expanded[3], 0.0); // LEFT blocked
+
+        let sum: f32 = (0..node.p1.n_outcomes()).map(|i| node.p1.prior(i)).sum();
+        assert!((sum - 1.0).abs() < 1e-6);
+    }
+
+    // ---- integration: extend → populate roundtrip ----
+
+    #[test]
+    fn extend_then_populate_roundtrip() {
+        use crate::backend::{Backend, SmartUniformBackend};
+
+        let cheese = [Coordinates::new(0, 0), Coordinates::new(4, 4)];
+        let mut game =
+            test_util::open_5x5_game(Coordinates::new(2, 2), Coordinates::new(2, 2), &cheese);
+        let mut arena = NodeArena::new();
+
+        // Root with priors
+        let root_h1 = HalfNode::new([0.2; 5], game.effective_actions_p1());
+        let root_h2 = HalfNode::new([0.2; 5], game.effective_actions_p2());
+        let parent = arena.alloc(Node::new(root_h1, root_h2));
+
+        // Extend: P1=UP, P2=RIGHT
+        let i = arena[parent].p1.action_to_outcome_idx(0);
+        let j = arena[parent].p2.action_to_outcome_idx(1);
+        let _undo = game.make_move(pyrat::Direction::Up, pyrat::Direction::Right);
+
+        let child_idx = extend_node(&mut arena, parent, i, j, &game);
+
+        // Shell: priors zero, visits 0
+        assert_eq!(arena[child_idx].total_visits(), 0);
+        for idx in 0..arena[child_idx].p1.n_outcomes() {
+            assert_eq!(arena[child_idx].p1.prior(idx), 0.0);
+        }
+
+        // Populate with SmartUniformBackend
+        let backend = SmartUniformBackend;
+        let eval = backend.evaluate(&game);
+        populate_node(&mut arena, child_idx, Some(&eval));
+
+        // Verify: expand_prior matches backend output
+        let child = &arena[child_idx];
+        let expanded_p1 = child.p1.expand_prior();
+        let expanded_p2 = child.p2.expand_prior();
+
+        // Smart uniform: each unique outcome gets equal weight
+        let expected_p1 = smart_uniform_prior(&game.effective_actions_p1());
+        let expected_p2 = smart_uniform_prior(&game.effective_actions_p2());
+
+        for a in 0..5 {
+            assert!(
+                (expanded_p1[a] - expected_p1[a]).abs() < 1e-6,
+                "P1 action {a}: expanded={} expected={}",
+                expanded_p1[a],
+                expected_p1[a]
+            );
+            assert!(
+                (expanded_p2[a] - expected_p2[a]).abs() < 1e-6,
+                "P2 action {a}: expanded={} expected={}",
+                expanded_p2[a],
+                expected_p2[a]
+            );
+        }
+
+        // Still unvisited
+        assert_eq!(child.total_visits(), 0);
+    }
+
+    #[test]
+    fn extend_then_populate_wall_topology() {
+        // Parent P1 at (1,0), P2 at (2,2). Extend with P1=LEFT → child P1 at (0,0).
+        // Corner (0,0): DOWN and LEFT blocked → 3 outcomes (UP, RIGHT, STAY).
+        // Populate with non-uniform priors to exercise merging.
+        let cheese = [Coordinates::new(3, 3), Coordinates::new(4, 4)];
+        let mut game =
+            test_util::open_5x5_game(Coordinates::new(1, 0), Coordinates::new(2, 2), &cheese);
+        let mut arena = NodeArena::new();
+
+        let root_h1 = HalfNode::new([0.2; 5], game.effective_actions_p1());
+        let root_h2 = HalfNode::new([0.2; 5], game.effective_actions_p2());
+        let parent = arena.alloc(Node::new(root_h1, root_h2));
+
+        // P1=LEFT(3), P2=STAY(4)
+        let i = arena[parent].p1.action_to_outcome_idx(3);
+        let j = arena[parent].p2.action_to_outcome_idx(4);
+        let _undo = game.make_move(pyrat::Direction::Left, pyrat::Direction::Stay);
+
+        let child_idx = extend_node(&mut arena, parent, i, j, &game);
+
+        // Shell: P1 at corner (0,0) → 3 outcomes
+        assert_eq!(arena[child_idx].p1.n_outcomes(), 3);
+
+        // Populate with non-uniform priors — blocked actions carry mass
+        let eval = EvalResult {
+            policy_p1: [0.1, 0.3, 0.2, 0.15, 0.25],
+            policy_p2: [0.2; 5],
+            value_p1: 0.5,
+            value_p2: 0.3,
+        };
+        populate_node(&mut arena, child_idx, Some(&eval));
+        let child = &arena[child_idx];
+
+        // DOWN(2) and LEFT(3) blocked → merge into STAY
+        // STAY outcome gets: 0.2 (DOWN) + 0.15 (LEFT) + 0.25 (STAY) = 0.6
+        let stay_idx = child.p1.action_to_outcome_idx(4) as usize;
+        assert!((child.p1.prior(stay_idx) - 0.6).abs() < 1e-6);
+
+        // expand_prior: blocked actions get 0
+        let expanded = child.p1.expand_prior();
+        assert_eq!(expanded[2], 0.0); // DOWN blocked
+        assert_eq!(expanded[3], 0.0); // LEFT blocked
+
+        // STAY in expanded space carries the merged mass
+        assert!((expanded[4] - 0.6).abs() < 1e-6);
+
+        // Still unvisited
+        assert_eq!(child.total_visits(), 0);
     }
 }
