@@ -39,6 +39,16 @@ pub fn smart_uniform_prior(effective: &[u8; 5]) -> [f32; 5] {
     prior
 }
 
+/// Score diffs after advancing game state.
+///
+/// Call AFTER make_move — compares current scores against `scores_before`.
+pub fn compute_rewards(game: &GameState, scores_before: (f32, f32)) -> (f32, f32) {
+    (
+        game.player1_score() - scores_before.0,
+        game.player2_score() - scores_before.1,
+    )
+}
+
 // ---------------------------------------------------------------------------
 // Three-phase lifecycle: extend_node + populate_node
 // ---------------------------------------------------------------------------
@@ -57,6 +67,21 @@ pub fn extend_node(
     outcome_p2: u8,
     game: &GameState,
 ) -> NodeIndex {
+    debug_assert!(
+        (outcome_p1 as usize) < arena[parent].p1.n_outcomes(),
+        "extend_node: outcome_p1={outcome_p1} out of bounds (n_outcomes={})",
+        arena[parent].p1.n_outcomes()
+    );
+    debug_assert!(
+        (outcome_p2 as usize) < arena[parent].p2.n_outcomes(),
+        "extend_node: outcome_p2={outcome_p2} out of bounds (n_outcomes={})",
+        arena[parent].p2.n_outcomes()
+    );
+    debug_assert!(
+        find_child(arena, parent, outcome_p1, outcome_p2).is_none(),
+        "extend_node: child already exists at outcome ({outcome_p1}, {outcome_p2})"
+    );
+
     let p1_shell = HalfNode::new_shell(game.effective_actions_p1());
     let p2_shell = HalfNode::new_shell(game.effective_actions_p2());
 
@@ -81,6 +106,12 @@ pub fn extend_node(
 ///
 /// Does NOT call `update_value` — value flows through backup (chunk 4).
 pub fn populate_node(arena: &mut NodeArena, node_idx: NodeIndex, eval_result: Option<&EvalResult>) {
+    debug_assert!(
+        arena[node_idx].total_visits() == 0,
+        "populate_node: node already has {} visits",
+        arena[node_idx].total_visits()
+    );
+
     let node = &mut arena[node_idx];
     match eval_result {
         Some(result) => {
@@ -91,6 +122,35 @@ pub fn populate_node(arena: &mut NodeArena, node_idx: NodeIndex, eval_result: Op
             node.set_terminal();
         }
     }
+}
+
+/// Find existing child or create a shell at the given outcome pair.
+///
+/// For new children: creates shell (extend_node), sets edge rewards.
+/// For existing children, `r1`/`r2` are ignored — edge rewards are set
+/// once at creation.
+///
+/// New nodes are shells — caller must handle terminal detection and
+/// populate_node before backup. (Terminal detection is search-layer
+/// logic, matching lc0's pattern where SearchWorker owns ExtendNode.)
+///
+/// Returns (child_index, is_new).
+pub fn find_or_extend_child(
+    arena: &mut NodeArena,
+    parent: NodeIndex,
+    outcome_p1: u8,
+    outcome_p2: u8,
+    game: &GameState,
+    r1: f32,
+    r2: f32,
+) -> (NodeIndex, bool) {
+    if let Some(child) = find_child(arena, parent, outcome_p1, outcome_p2) {
+        return (child, false);
+    }
+
+    let child = extend_node(arena, parent, outcome_p1, outcome_p2, game);
+    arena[child].set_edge_rewards(r1, r2);
+    (child, true)
 }
 
 // ---------------------------------------------------------------------------
@@ -789,5 +849,427 @@ mod tests {
 
         // Still unvisited
         assert_eq!(child.total_visits(), 0);
+    }
+
+    // ---- find_or_extend_child: basic ----
+
+    #[test]
+    fn find_or_extend_new_child() {
+        let cheese = [Coordinates::new(0, 0), Coordinates::new(1, 1)];
+        let mut game =
+            test_util::open_5x5_game(Coordinates::new(2, 2), Coordinates::new(4, 4), &cheese);
+        let mut arena = NodeArena::new();
+
+        let root_h1 = HalfNode::new([0.2; 5], game.effective_actions_p1());
+        let root_h2 = HalfNode::new([0.2; 5], game.effective_actions_p2());
+        let parent = arena.alloc(Node::new(root_h1, root_h2));
+
+        let i = arena[parent].p1.action_to_outcome_idx(0); // UP
+        let j = arena[parent].p2.action_to_outcome_idx(2); // DOWN
+
+        let _undo = game.make_move(pyrat::Direction::Up, pyrat::Direction::Down);
+
+        let (child_idx, is_new) =
+            find_or_extend_child(&mut arena, parent, i, j, &game, 0.0, 0.0);
+        assert!(is_new);
+
+        // Shell properties: priors zero, visits 0
+        let child = &arena[child_idx];
+        assert_eq!(child.total_visits(), 0);
+        for idx in 0..child.p1.n_outcomes() {
+            assert_eq!(child.p1.prior(idx), 0.0);
+        }
+
+        // Effective actions derived from child position
+        // P1 at (2,3): open interior → 5 outcomes
+        assert_eq!(child.p1.n_outcomes(), 5);
+    }
+
+    #[test]
+    fn find_or_extend_existing_child() {
+        let cheese = [Coordinates::new(0, 0)];
+        let mut game =
+            test_util::open_5x5_game(Coordinates::new(2, 2), Coordinates::new(4, 4), &cheese);
+        let mut arena = NodeArena::new();
+
+        let root_h1 = HalfNode::new([0.2; 5], game.effective_actions_p1());
+        let root_h2 = HalfNode::new([0.2; 5], game.effective_actions_p2());
+        let parent = arena.alloc(Node::new(root_h1, root_h2));
+
+        let i = arena[parent].p1.action_to_outcome_idx(0);
+        let j = arena[parent].p2.action_to_outcome_idx(2);
+
+        let _undo = game.make_move(pyrat::Direction::Up, pyrat::Direction::Down);
+
+        let (first_idx, is_new1) =
+            find_or_extend_child(&mut arena, parent, i, j, &game, 0.0, 0.0);
+        assert!(is_new1);
+        let arena_len_after_first = arena.len();
+
+        // Second call: same (i, j) → existing child
+        let (second_idx, is_new2) =
+            find_or_extend_child(&mut arena, parent, i, j, &game, 0.0, 0.0);
+        assert!(!is_new2);
+        assert_eq!(first_idx, second_idx);
+        assert_eq!(arena.len(), arena_len_after_first); // No new allocation
+    }
+
+    #[test]
+    fn find_or_extend_multiple_children() {
+        let cheese = [Coordinates::new(0, 0)];
+        let mut game =
+            test_util::open_5x5_game(Coordinates::new(2, 2), Coordinates::new(2, 2), &cheese);
+        let mut arena = NodeArena::new();
+
+        let root_h = HalfNode::new([0.2; 5], game.effective_actions_p1());
+        let parent = arena.alloc(Node::new(root_h, root_h));
+
+        let j = arena[parent].p2.action_to_outcome_idx(4); // P2=STAY
+        let moves = [
+            (0, pyrat::Direction::Up),
+            (1, pyrat::Direction::Right),
+            (2, pyrat::Direction::Down),
+        ];
+
+        let mut children = Vec::new();
+        for &(action, dir) in &moves {
+            let i = arena[parent].p1.action_to_outcome_idx(action);
+            let undo = game.make_move(dir, pyrat::Direction::Stay);
+            let (child, is_new) =
+                find_or_extend_child(&mut arena, parent, i, j, &game, 0.0, 0.0);
+            assert!(is_new);
+            children.push((child, i));
+            game.unmake_move(undo);
+        }
+
+        // All distinct
+        assert_ne!(children[0].0, children[1].0);
+        assert_ne!(children[1].0, children[2].0);
+
+        // All findable
+        for &(child, i) in &children {
+            assert_eq!(find_child(&arena, parent, i, j), Some(child));
+        }
+    }
+
+    // ---- compute_rewards ----
+
+    #[test]
+    fn compute_rewards_cheese_collected() {
+        let mut game = test_util::one_cheese_adjacent_game();
+        let scores_before = (game.player1_score(), game.player2_score());
+
+        // P1 at (0,0) moves RIGHT to (1,0) where cheese is
+        let _undo = game.make_move(pyrat::Direction::Right, pyrat::Direction::Stay);
+
+        let (r1, r2) = compute_rewards(&game, scores_before);
+        assert!((r1 - 1.0).abs() < 1e-6, "P1 should collect 1 cheese, got {r1}");
+        assert!((r2 - 0.0).abs() < 1e-6, "P2 should collect nothing, got {r2}");
+    }
+
+    #[test]
+    fn compute_rewards_no_cheese() {
+        let mut game = test_util::one_cheese_adjacent_game();
+        let scores_before = (game.player1_score(), game.player2_score());
+
+        // P1 moves UP (no cheese at (0,1))
+        let _undo = game.make_move(pyrat::Direction::Up, pyrat::Direction::Stay);
+
+        let (r1, r2) = compute_rewards(&game, scores_before);
+        assert!((r1 - 0.0).abs() < 1e-6);
+        assert!((r2 - 0.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn compute_rewards_contested_cheese() {
+        // Both players reach the same cheese simultaneously → 0.5 each
+        let mut game = test_util::contested_cheese_game();
+        let scores_before = (game.player1_score(), game.player2_score());
+
+        // P1 RIGHT (0,0)→(1,0), P2 LEFT (2,0)→(1,0) — both land on cheese
+        let _undo = game.make_move(pyrat::Direction::Right, pyrat::Direction::Left);
+
+        let (r1, r2) = compute_rewards(&game, scores_before);
+        assert!((r1 - 0.5).abs() < 1e-6, "P1 should get 0.5, got {r1}");
+        assert!((r2 - 0.5).abs() < 1e-6, "P2 should get 0.5, got {r2}");
+    }
+
+    #[test]
+    fn compute_rewards_both_collect_different() {
+        // Each player collects a different cheese → (1.0, 1.0)
+        let game = GameState::new_with_config(
+            5,
+            5,
+            std::collections::HashMap::new(),
+            Default::default(),
+            &[Coordinates::new(1, 0), Coordinates::new(3, 0)],
+            Coordinates::new(0, 0), // P1 adjacent to cheese at (1,0)
+            Coordinates::new(4, 0), // P2 adjacent to cheese at (3,0)
+            100,
+        );
+        let mut game = game;
+        let scores_before = (game.player1_score(), game.player2_score());
+
+        // P1 RIGHT → (1,0), P2 LEFT → (3,0)
+        let _undo = game.make_move(pyrat::Direction::Right, pyrat::Direction::Left);
+
+        let (r1, r2) = compute_rewards(&game, scores_before);
+        assert!((r1 - 1.0).abs() < 1e-6, "P1 should collect 1, got {r1}");
+        assert!((r2 - 1.0).abs() < 1e-6, "P2 should collect 1, got {r2}");
+    }
+
+    #[test]
+    fn compute_rewards_p2_collects() {
+        // Only P2 collects — symmetry check
+        let mut game = test_util::contested_cheese_game();
+        let scores_before = (game.player1_score(), game.player2_score());
+
+        // P1 stays, P2 LEFT (2,0)→(1,0) collects cheese
+        let _undo = game.make_move(pyrat::Direction::Stay, pyrat::Direction::Left);
+
+        let (r1, r2) = compute_rewards(&game, scores_before);
+        assert!((r1 - 0.0).abs() < 1e-6, "P1 should get 0, got {r1}");
+        assert!((r2 - 1.0).abs() < 1e-6, "P2 should get 1, got {r2}");
+    }
+
+    #[test]
+    fn find_or_extend_rewards_on_child() {
+        let cheese = [Coordinates::new(0, 0)];
+        let mut game =
+            test_util::open_5x5_game(Coordinates::new(2, 2), Coordinates::new(4, 4), &cheese);
+        let mut arena = NodeArena::new();
+
+        let root_h1 = HalfNode::new([0.2; 5], game.effective_actions_p1());
+        let root_h2 = HalfNode::new([0.2; 5], game.effective_actions_p2());
+        let parent = arena.alloc(Node::new(root_h1, root_h2));
+
+        let i = arena[parent].p1.action_to_outcome_idx(0);
+        let j = arena[parent].p2.action_to_outcome_idx(2);
+
+        let _undo = game.make_move(pyrat::Direction::Up, pyrat::Direction::Down);
+
+        let (child_idx, _) =
+            find_or_extend_child(&mut arena, parent, i, j, &game, 1.5, 0.5);
+
+        assert!((arena[child_idx].edge_r1() - 1.5).abs() < 1e-6);
+        assert!((arena[child_idx].edge_r2() - 0.5).abs() < 1e-6);
+    }
+
+    #[test]
+    fn find_or_extend_existing_child_ignores_rewards() {
+        let cheese = [Coordinates::new(0, 0)];
+        let mut game =
+            test_util::open_5x5_game(Coordinates::new(2, 2), Coordinates::new(4, 4), &cheese);
+        let mut arena = NodeArena::new();
+
+        let root_h1 = HalfNode::new([0.2; 5], game.effective_actions_p1());
+        let root_h2 = HalfNode::new([0.2; 5], game.effective_actions_p2());
+        let parent = arena.alloc(Node::new(root_h1, root_h2));
+
+        let i = arena[parent].p1.action_to_outcome_idx(0);
+        let j = arena[parent].p2.action_to_outcome_idx(2);
+
+        let _undo = game.make_move(pyrat::Direction::Up, pyrat::Direction::Down);
+
+        // First call: creates child with rewards (1.5, 0.5)
+        let (child_idx, is_new) =
+            find_or_extend_child(&mut arena, parent, i, j, &game, 1.5, 0.5);
+        assert!(is_new);
+
+        // Second call: same outcome pair, different rewards — should be ignored
+        let (same_idx, is_new2) =
+            find_or_extend_child(&mut arena, parent, i, j, &game, 99.0, 99.0);
+        assert!(!is_new2);
+        assert_eq!(child_idx, same_idx);
+
+        // Edge rewards unchanged from first creation
+        assert!((arena[child_idx].edge_r1() - 1.5).abs() < 1e-6);
+        assert!((arena[child_idx].edge_r2() - 0.5).abs() < 1e-6);
+    }
+
+    // ---- debug_assert guards ----
+
+    #[cfg(debug_assertions)]
+    #[test]
+    #[should_panic(expected = "extend_node: child already exists")]
+    fn extend_node_duplicate_panics() {
+        let cheese = [Coordinates::new(0, 0)];
+        let mut game =
+            test_util::open_5x5_game(Coordinates::new(2, 2), Coordinates::new(2, 2), &cheese);
+        let mut arena = NodeArena::new();
+
+        let root_h = HalfNode::new([0.2; 5], game.effective_actions_p1());
+        let parent = arena.alloc(Node::new(root_h, root_h));
+
+        let i = arena[parent].p1.action_to_outcome_idx(0);
+        let j = arena[parent].p2.action_to_outcome_idx(1);
+        let _undo = game.make_move(pyrat::Direction::Up, pyrat::Direction::Right);
+
+        // First extend: fine
+        let _ = extend_node(&mut arena, parent, i, j, &game);
+        // Second extend at same (i, j): should panic
+        let _ = extend_node(&mut arena, parent, i, j, &game);
+    }
+
+    #[cfg(debug_assertions)]
+    #[test]
+    #[should_panic(expected = "populate_node: node already has")]
+    fn populate_node_visited_panics() {
+        let cheese = [Coordinates::new(0, 0)];
+        let game =
+            test_util::open_5x5_game(Coordinates::new(2, 2), Coordinates::new(2, 2), &cheese);
+        let mut arena = NodeArena::new();
+
+        let shell_p1 = HalfNode::new_shell(game.effective_actions_p1());
+        let shell_p2 = HalfNode::new_shell(game.effective_actions_p2());
+        let node_idx = arena.alloc(Node::new(shell_p1, shell_p2));
+
+        // Simulate a visit before populate
+        arena[node_idx].update_value(1.0, 1.0);
+        assert_eq!(arena[node_idx].total_visits(), 1);
+
+        let eval = EvalResult {
+            policy_p1: [0.2; 5],
+            policy_p2: [0.2; 5],
+            value_p1: 0.0,
+            value_p2: 0.0,
+        };
+        // Should panic: node already has visits
+        populate_node(&mut arena, node_idx, Some(&eval));
+    }
+
+    #[cfg(debug_assertions)]
+    #[test]
+    #[should_panic(expected = "extend_node: outcome_p1")]
+    fn extend_node_outcome_p1_out_of_bounds_panics() {
+        let cheese = [Coordinates::new(0, 0)];
+        let game =
+            test_util::open_5x5_game(Coordinates::new(0, 0), Coordinates::new(4, 4), &cheese);
+        let mut arena = NodeArena::new();
+
+        let root_h1 = HalfNode::new([0.2; 5], game.effective_actions_p1());
+        let root_h2 = HalfNode::new([0.2; 5], game.effective_actions_p2());
+        let parent = arena.alloc(Node::new(root_h1, root_h2));
+
+        // P1 at (0,0): 3 outcomes. Outcome index 3 is out of bounds.
+        let _ = extend_node(&mut arena, parent, 3, 0, &game);
+    }
+
+    #[cfg(debug_assertions)]
+    #[test]
+    #[should_panic(expected = "extend_node: outcome_p2")]
+    fn extend_node_outcome_p2_out_of_bounds_panics() {
+        let cheese = [Coordinates::new(0, 0)];
+        let game =
+            test_util::open_5x5_game(Coordinates::new(0, 0), Coordinates::new(4, 4), &cheese);
+        let mut arena = NodeArena::new();
+
+        let root_h1 = HalfNode::new([0.2; 5], game.effective_actions_p1());
+        let root_h2 = HalfNode::new([0.2; 5], game.effective_actions_p2());
+        let parent = arena.alloc(Node::new(root_h1, root_h2));
+
+        // P2 at (4,4): 3 outcomes. Outcome index 3 is out of bounds.
+        let _ = extend_node(&mut arena, parent, 0, 3, &game);
+    }
+
+    // ---- integration / topology ----
+
+    #[test]
+    fn find_or_extend_corner_topology() {
+        // P1 at (1,0) moves LEFT → child P1 at (0,0), corner with 3 outcomes
+        let cheese = [Coordinates::new(3, 3)];
+        let mut game =
+            test_util::open_5x5_game(Coordinates::new(1, 0), Coordinates::new(2, 2), &cheese);
+        let mut arena = NodeArena::new();
+
+        let root_h1 = HalfNode::new([0.2; 5], game.effective_actions_p1());
+        let root_h2 = HalfNode::new([0.2; 5], game.effective_actions_p2());
+        let parent = arena.alloc(Node::new(root_h1, root_h2));
+
+        let i = arena[parent].p1.action_to_outcome_idx(3); // LEFT
+        let j = arena[parent].p2.action_to_outcome_idx(4); // STAY
+
+        let _undo = game.make_move(pyrat::Direction::Left, pyrat::Direction::Stay);
+
+        let (child_idx, is_new) =
+            find_or_extend_child(&mut arena, parent, i, j, &game, 0.0, 0.0);
+        assert!(is_new);
+
+        // (0,0) corner: DOWN and LEFT blocked → 3 outcomes
+        assert_eq!(arena[child_idx].p1.n_outcomes(), 3);
+    }
+
+    #[test]
+    fn find_or_extend_then_populate_corner_merges_priors() {
+        // Extend to a corner, then populate with non-uniform priors that
+        // exercise prior merging — distinct from extend_then_populate_roundtrip
+        // which uses an open interior with SmartUniformBackend.
+        let cheese = [Coordinates::new(3, 3), Coordinates::new(4, 4)];
+        let mut game =
+            test_util::open_5x5_game(Coordinates::new(1, 0), Coordinates::new(2, 2), &cheese);
+        let mut arena = NodeArena::new();
+
+        let root_h1 = HalfNode::new([0.2; 5], game.effective_actions_p1());
+        let root_h2 = HalfNode::new([0.2; 5], game.effective_actions_p2());
+        let parent = arena.alloc(Node::new(root_h1, root_h2));
+
+        // P1=LEFT(3) → child P1 at (0,0), corner: DOWN and LEFT blocked → 3 outcomes
+        let i = arena[parent].p1.action_to_outcome_idx(3);
+        let j = arena[parent].p2.action_to_outcome_idx(4); // STAY
+
+        let _undo = game.make_move(pyrat::Direction::Left, pyrat::Direction::Stay);
+
+        let (child_idx, is_new) =
+            find_or_extend_child(&mut arena, parent, i, j, &game, 0.0, 0.0);
+        assert!(is_new);
+        assert_eq!(arena[child_idx].p1.n_outcomes(), 3);
+
+        // Populate with non-uniform priors — blocked actions carry mass
+        let eval = EvalResult {
+            policy_p1: [0.1, 0.3, 0.2, 0.15, 0.25],
+            policy_p2: [0.2; 5],
+            value_p1: 0.5,
+            value_p2: 0.3,
+        };
+        populate_node(&mut arena, child_idx, Some(&eval));
+        let child = &arena[child_idx];
+
+        // STAY outcome merges: DOWN(0.2) + LEFT(0.15) + STAY(0.25) = 0.6
+        let stay_idx = child.p1.action_to_outcome_idx(4) as usize;
+        assert!((child.p1.prior(stay_idx) - 0.6).abs() < 1e-6);
+
+        // Blocked actions expand to 0
+        let expanded = child.p1.expand_prior();
+        assert_eq!(expanded[2], 0.0); // DOWN blocked
+        assert_eq!(expanded[3], 0.0); // LEFT blocked
+        assert!((expanded[4] - 0.6).abs() < 1e-6);
+
+        assert_eq!(child.total_visits(), 0);
+    }
+
+    // ---- find_or_extend + advance_root interaction ----
+
+    #[test]
+    fn find_or_extend_then_advance_root() {
+        let cheese = [Coordinates::new(0, 0), Coordinates::new(4, 4)];
+        let mut game =
+            test_util::open_5x5_game(Coordinates::new(2, 2), Coordinates::new(2, 2), &cheese);
+
+        let mut tree = MCTSTree::new(&game);
+        let root = tree.root();
+
+        // Create child via find_or_extend_child on the arena
+        let i = tree.arena()[root].p1.action_to_outcome_idx(0); // UP
+        let j = tree.arena()[root].p2.action_to_outcome_idx(1); // RIGHT
+
+        let _undo = game.make_move(pyrat::Direction::Up, pyrat::Direction::Right);
+
+        let (child_idx, is_new) =
+            find_or_extend_child(tree.arena_mut(), root, i, j, &game, 0.0, 0.0);
+        assert!(is_new);
+
+        // advance_root with the same actions should land on that child
+        assert!(tree.advance_root(0, 1));
+        assert_eq!(tree.root(), child_idx);
     }
 }
