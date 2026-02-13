@@ -36,6 +36,36 @@ pub fn mud_game_p1_stuck() -> GameState {
     game
 }
 
+/// 5×5 game with 1 cheese at (1,0), P1 at (0,0), P2 at (4,4).
+/// P1 moving RIGHT collects the cheese.
+pub fn one_cheese_adjacent_game() -> GameState {
+    GameState::new_with_config(
+        5,
+        5,
+        HashMap::new(),
+        Default::default(),
+        &[Coordinates::new(1, 0)],
+        Coordinates::new(0, 0),
+        Coordinates::new(4, 4),
+        100,
+    )
+}
+
+/// 5×5 game with 1 cheese at (1,0), P1 at (0,0), P2 at (2,0).
+/// Both can reach the cheese in one move (P1 RIGHT, P2 LEFT).
+pub fn contested_cheese_game() -> GameState {
+    GameState::new_with_config(
+        5,
+        5,
+        HashMap::new(),
+        Default::default(),
+        &[Coordinates::new(1, 0)],
+        Coordinates::new(0, 0),
+        Coordinates::new(2, 0),
+        100,
+    )
+}
+
 pub fn mud_game_both_stuck() -> GameState {
     let mut mud = MudMap::new();
     mud.insert(Coordinates::new(2, 2), Coordinates::new(2, 3), 3);

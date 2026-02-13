@@ -7,4 +7,7 @@ pub(crate) mod test_util;
 
 pub use backend::{Backend, EvalResult, SmartUniformBackend};
 pub use node::{HalfEdge, HalfNode, Node, NodeArena, NodeIndex};
-pub use tree::{extend_node, find_child, populate_node, smart_uniform_prior, MCTSTree};
+pub use tree::{
+    compute_rewards, extend_node, find_child, find_or_extend_child, populate_node,
+    smart_uniform_prior, MCTSTree,
+};
