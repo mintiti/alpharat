@@ -61,6 +61,32 @@ impl Backend for SmartUniformBackend {
 }
 
 // ---------------------------------------------------------------------------
+// ConstantValueBackend — test-only, configurable constant values
+// ---------------------------------------------------------------------------
+
+/// Smart uniform priors + constant value outputs. Test-only.
+///
+/// Use this to test backup propagation with non-zero leaf values,
+/// which SmartUniformBackend can't exercise (it always returns 0).
+#[cfg(test)]
+pub(crate) struct ConstantValueBackend {
+    pub value_p1: f32,
+    pub value_p2: f32,
+}
+
+#[cfg(test)]
+impl Backend for ConstantValueBackend {
+    fn evaluate(&self, game: &GameState) -> EvalResult {
+        EvalResult {
+            policy_p1: smart_uniform_prior(&game.effective_actions_p1()),
+            policy_p2: smart_uniform_prior(&game.effective_actions_p2()),
+            value_p1: self.value_p1,
+            value_p2: self.value_p2,
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 

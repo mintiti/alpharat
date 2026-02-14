@@ -63,24 +63,25 @@ pub fn backup(
         "backup: leaf's parent should match last path entry"
     );
 
+    // Carry raw values upward — NOT running averages from child nodes.
+    // This matches lc0's DoBackupUpdateSingleNode: each ancestor sees
+    // q = edge_reward + propagated_value, where propagated_value chains
+    // from the leaf evaluation, not from stale Welford averages.
+    let mut v1 = g1;
+    let mut v2 = g2;
     let mut child_idx = leaf_idx;
 
     for &(node_idx, a1, a2) in path.iter().rev() {
-        // Read child fields into locals before mutating parent.
-        let child = &arena[child_idx];
-        let child_r1 = child.edge_r1();
-        let child_r2 = child.edge_r2();
-        let child_v1 = child.v1();
-        let child_v2 = child.v2();
-
-        let q1 = child_r1 + child_v1;
-        let q2 = child_r2 + child_v2;
+        let q1 = arena[child_idx].edge_r1() + v1;
+        let q2 = arena[child_idx].edge_r2() + v2;
 
         let node = &mut arena[node_idx];
         node.update_value(q1, q2);
         node.p1.edge_mut(a1 as usize).update(q1);
         node.p2.edge_mut(a2 as usize).update(q2);
 
+        v1 = q1;
+        v2 = q2;
         child_idx = node_idx;
     }
 }
@@ -735,14 +736,15 @@ mod tests {
         assert!((arena[child].v1() - 4.0).abs() < 1e-5);
         assert!((arena[child].v2() - 3.0).abs() < 1e-5);
 
-        // Root edge: q = 0 + child_v at each backup time
-        // After backup 1: child_v=(2,1) → edge q=2.0
-        // After backup 2: child_v=(3,2) → edge q=(2+3)/2=2.5
-        // After backup 3: child_v=(4,3) → edge q=(2+3+4)/3=3.0
+        // Root edge: q = edge_r(0) + raw_v propagated from leaf.
+        // Each backup propagates the raw leaf value (not the running average).
+        // Backup 1: v1=2.0 → q1=2.0
+        // Backup 2: v1=4.0 → q1=4.0
+        // Backup 3: v1=6.0 → q1=6.0
+        // Edge Q = mean(2.0, 4.0, 6.0) = 4.0
         assert_eq!(arena[root].p1.edge(0).visits, 3);
-        // Edge Q is Welford average of [2.0, 3.0, 4.0] = 3.0
-        assert!((arena[root].p1.edge(0).q - 3.0).abs() < 1e-5);
-        assert!((arena[root].p2.edge(0).q - 2.0).abs() < 1e-5);
+        assert!((arena[root].p1.edge(0).q - 4.0).abs() < 1e-5);
+        assert!((arena[root].p2.edge(0).q - 3.0).abs() < 1e-5);
     }
 
     #[test]
@@ -843,7 +845,8 @@ mod tests {
 
     #[test]
     fn backup_value_mixing() {
-        // Node value after N backups: v1 * N ≈ sum of all q1 values that passed through.
+        // Raw leaf values propagated upward: q = edge_r + raw_v (not running avg).
+        // g=[2,4,6], edge_r=1.0 → Q values = [3, 5, 7] → root.v1 = mean(3,5,7) = 5.0
         let mut arena = NodeArena::new();
         let root = alloc_open_node(&mut arena, [0.2; 5], [0.2; 5]);
         let child = alloc_open_node(&mut arena, [0.2; 5], [0.2; 5]);
@@ -856,21 +859,16 @@ mod tests {
             arena[idx].set_value_scale(5.0);
         }
 
-        let leaf_values = [(2.0, 0.0), (4.0, 0.0), (6.0, 0.0)];
-        let mut sum_q1 = 0.0f32;
-        for (g1, g2) in &leaf_values {
-            backup(&mut arena, &[(root, 0, 0)], child, *g1, *g2);
-            // At backup time, child_v1 is the running average so far.
-            // The q1 passed to root is edge_r1 + child_v1_at_this_point.
-            sum_q1 += 1.0 + arena[child].v1();
-        }
+        backup(&mut arena, &[(root, 0, 0)], child, 2.0, 0.0);
+        backup(&mut arena, &[(root, 0, 0)], child, 4.0, 0.0);
+        backup(&mut arena, &[(root, 0, 0)], child, 6.0, 0.0);
 
-        let expected_mean = sum_q1 / 3.0;
+        // Root Q: edge_r(1.0) + raw_v for each backup = [3.0, 5.0, 7.0]
+        // mean = 5.0
         assert!(
-            (arena[root].v1() - expected_mean).abs() < 1e-5,
-            "root v1={} expected={}",
+            (arena[root].v1() - 5.0).abs() < 1e-5,
+            "root v1={} expected=5.0",
             arena[root].v1(),
-            expected_mean
         );
     }
 
@@ -1354,6 +1352,195 @@ mod tests {
         // total_visits = 1 (NN eval) + 5 (backups) = 6, edge_sum = 5.
         assert_eq!(arena[root].total_visits(), 6);
         assert_eq!(edge_sum, arena[root].total_visits() - 1);
+    }
+
+    // ---- backup: value propagation correctness ----
+
+    #[test]
+    fn backup_multi_level_multi_backup() {
+        // The killer regression test: root→mid→leaf with edge rewards.
+        // Two backups through the same path. The bug reads child.v1() (running
+        // average) instead of propagating the raw leaf value upward, causing
+        // stale averages to bleed into parent values.
+        //
+        // edge_r_mid=1.0, edge_r_leaf=0.5
+        // Backup 1: g=10 → leaf=10, mid=10.5, root=11.5
+        // Backup 2: g=6  → leaf=8, mid=8.5 (bug: 9.5), root=9.5 (bug: 11.0)
+        let mut arena = NodeArena::new();
+        let root = alloc_open_node(&mut arena, [0.2; 5], [0.2; 5]);
+        let mid = alloc_open_node(&mut arena, [0.2; 5], [0.2; 5]);
+        let leaf = alloc_open_node(&mut arena, [0.2; 5], [0.2; 5]);
+
+        arena[root].set_first_child(Some(mid));
+        arena[mid].set_parent(Some(root), (0, 0));
+        arena[mid].set_edge_rewards(1.0, 1.0);
+
+        arena[mid].set_first_child(Some(leaf));
+        arena[leaf].set_parent(Some(mid), (0, 0));
+        arena[leaf].set_edge_rewards(0.5, 0.5);
+
+        for idx in [root, mid, leaf] {
+            arena[idx].set_value_scale(15.0);
+        }
+
+        let path = vec![(root, 0, 0), (mid, 0, 0)];
+
+        // Backup 1: g=10
+        backup(&mut arena, &path, leaf, 10.0, 10.0);
+        assert!((arena[leaf].v1() - 10.0).abs() < 1e-5);
+        // mid: q1 = edge_r_leaf(0.5) + raw_v(10.0) = 10.5
+        assert!((arena[mid].v1() - 10.5).abs() < 1e-5);
+        // root: q1 = edge_r_mid(1.0) + propagated_v(10.5) = 11.5
+        assert!((arena[root].v1() - 11.5).abs() < 1e-5);
+
+        // Backup 2: g=6
+        backup(&mut arena, &path, leaf, 6.0, 6.0);
+        // leaf: mean(10, 6) = 8.0
+        assert!((arena[leaf].v1() - 8.0).abs() < 1e-5);
+        // mid: q1 = 0.5 + 6.0 = 6.5. mean(10.5, 6.5) = 8.5
+        assert!(
+            (arena[mid].v1() - 8.5).abs() < 1e-5,
+            "mid.v1={} expected=8.5 (bug would give 9.5)",
+            arena[mid].v1()
+        );
+        // root: q1 = 1.0 + 6.5 = 7.5. mean(11.5, 7.5) = 9.5
+        assert!(
+            (arena[root].v1() - 9.5).abs() < 1e-5,
+            "root.v1={} expected=9.5 (bug would give 11.0)",
+            arena[root].v1()
+        );
+    }
+
+    #[test]
+    fn backup_same_edge_raw_propagation() {
+        // Edge Q = mean of raw Q values, not stale running averages.
+        // 3 backups g=[10,4,7], edge_r=2.0 → edge Q = mean(12, 6, 9) = 9.0
+        let mut arena = NodeArena::new();
+        let root = alloc_open_node(&mut arena, [0.2; 5], [0.2; 5]);
+        let child = alloc_open_node(&mut arena, [0.2; 5], [0.2; 5]);
+
+        arena[root].set_first_child(Some(child));
+        arena[child].set_parent(Some(root), (0, 0));
+        arena[child].set_edge_rewards(2.0, 2.0);
+
+        for idx in [root, child] {
+            arena[idx].set_value_scale(15.0);
+        }
+
+        let path = vec![(root, 0, 0)];
+        backup(&mut arena, &path, child, 10.0, 10.0);
+        backup(&mut arena, &path, child, 4.0, 4.0);
+        backup(&mut arena, &path, child, 7.0, 7.0);
+
+        // Edge Q = mean(2+10, 2+4, 2+7) = mean(12, 6, 9) = 9.0
+        assert!(
+            (arena[root].p1.edge(0).q - 9.0).abs() < 1e-5,
+            "edge Q={} expected=9.0",
+            arena[root].p1.edge(0).q
+        );
+    }
+
+    #[test]
+    fn backup_three_level_reward_chain() {
+        // Rewards stack across depth: root→A→B→leaf
+        // edge_r = [1.0, 0.5, 0.25]
+        //
+        // Backup 1: g=4.0
+        //   leaf=4.0, B=4.25, A=4.75, root=5.75
+        // Backup 2: g=2.0
+        //   leaf=3.0, B=mean(4.25, 2.25)=3.25, A=mean(4.75, 2.75)=3.75, root=mean(5.75, 3.75)=4.75
+        let mut arena = NodeArena::new();
+        let root = alloc_open_node(&mut arena, [0.2; 5], [0.2; 5]);
+        let a = alloc_open_node(&mut arena, [0.2; 5], [0.2; 5]);
+        let b = alloc_open_node(&mut arena, [0.2; 5], [0.2; 5]);
+        let leaf = alloc_open_node(&mut arena, [0.2; 5], [0.2; 5]);
+
+        arena[root].set_first_child(Some(a));
+        arena[a].set_parent(Some(root), (0, 0));
+        arena[a].set_edge_rewards(1.0, 1.0);
+
+        arena[a].set_first_child(Some(b));
+        arena[b].set_parent(Some(a), (0, 0));
+        arena[b].set_edge_rewards(0.5, 0.5);
+
+        arena[b].set_first_child(Some(leaf));
+        arena[leaf].set_parent(Some(b), (0, 0));
+        arena[leaf].set_edge_rewards(0.25, 0.25);
+
+        for idx in [root, a, b, leaf] {
+            arena[idx].set_value_scale(10.0);
+        }
+
+        let path = vec![(root, 0, 0), (a, 0, 0), (b, 0, 0)];
+
+        // Backup 1: g=4.0
+        backup(&mut arena, &path, leaf, 4.0, 4.0);
+        assert!((arena[leaf].v1() - 4.0).abs() < 1e-5);
+        assert!((arena[b].v1() - 4.25).abs() < 1e-5);
+        assert!((arena[a].v1() - 4.75).abs() < 1e-5);
+        assert!((arena[root].v1() - 5.75).abs() < 1e-5);
+
+        // Backup 2: g=2.0
+        backup(&mut arena, &path, leaf, 2.0, 2.0);
+        assert!((arena[leaf].v1() - 3.0).abs() < 1e-5);
+        // B: mean(4.25, 0.25+2.0) = mean(4.25, 2.25) = 3.25
+        assert!(
+            (arena[b].v1() - 3.25).abs() < 1e-5,
+            "B.v1={} expected=3.25",
+            arena[b].v1()
+        );
+        // A: mean(4.75, 0.5+2.25) = mean(4.75, 2.75) = 3.75
+        assert!(
+            (arena[a].v1() - 3.75).abs() < 1e-5,
+            "A.v1={} expected=3.75",
+            arena[a].v1()
+        );
+        // root: mean(5.75, 1.0+2.75) = mean(5.75, 3.75) = 4.75
+        assert!(
+            (arena[root].v1() - 4.75).abs() < 1e-5,
+            "root.v1={} expected=4.75",
+            arena[root].v1()
+        );
+    }
+
+    #[test]
+    fn backup_p2_independent_propagation() {
+        // Asymmetric P1/P2 edge rewards, 2 backups, verifies independent propagation.
+        // P1 edge_r=2.0, P2 edge_r=0.5
+        let mut arena = NodeArena::new();
+        let root = alloc_open_node(&mut arena, [0.2; 5], [0.2; 5]);
+        let child = alloc_open_node(&mut arena, [0.2; 5], [0.2; 5]);
+
+        arena[root].set_first_child(Some(child));
+        arena[child].set_parent(Some(root), (0, 0));
+        arena[child].set_edge_rewards(2.0, 0.5);
+
+        for idx in [root, child] {
+            arena[idx].set_value_scale(10.0);
+        }
+
+        let path = vec![(root, 0, 0)];
+
+        // Backup 1: g1=3, g2=7
+        backup(&mut arena, &path, child, 3.0, 7.0);
+        // root: q1 = 2.0 + 3.0 = 5.0, q2 = 0.5 + 7.0 = 7.5
+        assert!((arena[root].v1() - 5.0).abs() < 1e-5);
+        assert!((arena[root].v2() - 7.5).abs() < 1e-5);
+
+        // Backup 2: g1=1, g2=5
+        backup(&mut arena, &path, child, 1.0, 5.0);
+        // root: q1 = 2.0 + 1.0 = 3.0. mean(5.0, 3.0) = 4.0
+        // root: q2 = 0.5 + 5.0 = 5.5. mean(7.5, 5.5) = 6.5
+        assert!(
+            (arena[root].v1() - 4.0).abs() < 1e-5,
+            "root.v1={} expected=4.0",
+            arena[root].v1()
+        );
+        assert!(
+            (arena[root].v2() - 6.5).abs() < 1e-5,
+            "root.v2={} expected=6.5",
+            arena[root].v2()
+        );
     }
 
     // ---- PUCT selection: edge cases ----
@@ -2042,5 +2229,143 @@ mod tests {
             "Should run at most 3 sims, got {}",
             result.total_visits
         );
+    }
+
+    // ====================================================================
+    // Integration tests: ConstantValueBackend (non-zero leaf values)
+    // ====================================================================
+
+    use crate::backend::ConstantValueBackend;
+
+    // 15. root values positive with constant v=(3,2)
+    #[test]
+    fn search_nonzero_backend_root_value() {
+        let cheese = [Coordinates::new(2, 2), Coordinates::new(3, 3)];
+        let game = test_util::open_5x5_game(
+            Coordinates::new(1, 1),
+            Coordinates::new(3, 3),
+            &cheese,
+        );
+        let backend = ConstantValueBackend {
+            value_p1: 3.0,
+            value_p2: 2.0,
+        };
+        let mut tree = MCTSTree::new(&game);
+        let config = default_config();
+        let mut r = search_rng();
+
+        let result = run_search(&mut tree, &game, &backend, &config, 50, 1, &mut r);
+
+        assert_eq!(result.total_visits, 50);
+        assert!(
+            result.value_p1 > 0.0,
+            "v1 should be positive with constant backend, got {}",
+            result.value_p1
+        );
+        assert!(
+            result.value_p2 > 0.0,
+            "v2 should be positive with constant backend, got {}",
+            result.value_p2
+        );
+    }
+
+    // 16. visited edges have Q > 0 with constant v=(5,5)
+    #[test]
+    fn search_nonzero_backend_edge_q_positive() {
+        let cheese = [Coordinates::new(2, 2)];
+        let game = test_util::open_5x5_game(
+            Coordinates::new(1, 1),
+            Coordinates::new(3, 3),
+            &cheese,
+        );
+        let backend = ConstantValueBackend {
+            value_p1: 5.0,
+            value_p2: 5.0,
+        };
+        let mut tree = MCTSTree::new(&game);
+        let config = default_config();
+        let mut r = search_rng();
+
+        let _ = run_search(&mut tree, &game, &backend, &config, 30, 1, &mut r);
+
+        let root = &tree.arena()[tree.root()];
+        for i in 0..root.p1.n_outcomes() {
+            let edge = root.p1.edge(i);
+            if edge.visits > 0 {
+                assert!(
+                    edge.q > 0.0,
+                    "P1 edge {i}: visited edge should have Q > 0, got {}",
+                    edge.q
+                );
+            }
+        }
+        for i in 0..root.p2.n_outcomes() {
+            let edge = root.p2.edge(i);
+            if edge.visits > 0 {
+                assert!(
+                    edge.q > 0.0,
+                    "P2 edge {i}: visited edge should have Q > 0, got {}",
+                    edge.q
+                );
+            }
+        }
+    }
+
+    // 17. structural invariants hold with non-zero values
+    #[test]
+    fn search_nonzero_backend_invariants() {
+        let cheese: Vec<_> = (0..5).map(|i| Coordinates::new(i, 0)).collect();
+        let game = test_util::open_5x5_game(
+            Coordinates::new(2, 2),
+            Coordinates::new(2, 2),
+            &cheese,
+        );
+        let backend = ConstantValueBackend {
+            value_p1: 3.0,
+            value_p2: 2.0,
+        };
+        let mut tree = MCTSTree::new(&game);
+        let config = default_config();
+        let mut r = search_rng();
+
+        let result = run_search(&mut tree, &game, &backend, &config, 50, 1, &mut r);
+        assert_eq!(result.total_visits, 50);
+
+        let arena = tree.arena();
+        for i in 0..arena.len() {
+            let idx = NodeIndex::from_raw(i as u32);
+            let node = &arena[idx];
+            if node.total_visits() == 0 {
+                continue;
+            }
+
+            // Edge visit sum invariant.
+            let p1_edge_sum: u32 = (0..node.p1.n_outcomes())
+                .map(|j| node.p1.edge(j).visits)
+                .sum();
+
+            if node.first_child().is_some() {
+                assert_eq!(
+                    p1_edge_sum,
+                    node.total_visits() - 1,
+                    "Node {i}: p1 edge visit sum mismatch"
+                );
+            }
+
+            // n_in_flight should be 0 after search.
+            assert_eq!(
+                node.n_in_flight(),
+                0,
+                "Node {i}: n_in_flight should be 0"
+            );
+
+            // All Q values should be finite.
+            for j in 0..node.p1.n_outcomes() {
+                assert!(node.p1.edge(j).q.is_finite(), "Node {i}: P1 edge {j} Q not finite");
+            }
+            for j in 0..node.p2.n_outcomes() {
+                assert!(node.p2.edge(j).q.is_finite(), "Node {i}: P2 edge {j} Q not finite");
+            }
+        }
     }
 }
