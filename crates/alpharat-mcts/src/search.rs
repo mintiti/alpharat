@@ -138,7 +138,8 @@ fn select_half(
         let q = if edge.visits > 0 { edge.q } else { fpu };
         let q_norm = q / value_scale;
 
-        let exploration = config.c_puct * prior * sqrt_total / (1.0 + edge.visits as f32);
+        let exploration =
+            config.c_puct * prior * sqrt_total / (1.0 + edge.visits as f32 + edge.n_in_flight() as f32);
         let mut score = q_norm + exploration;
 
         // Forced playouts: at root, boost undervisited outcomes.
@@ -1007,5 +1008,213 @@ mod tests {
         let (a1, a2) = select_actions(&arena[idx], &config, false, &mut r);
         assert_eq!(a1, 0);
         assert_eq!(a2, 0);
+    }
+
+    // ---- Virtual loss: PUCT ----
+
+    #[test]
+    fn puct_virtual_loss_diversifies() {
+        // Heavy virtual loss on best edge shifts selection to a different outcome.
+        let mut arena = NodeArena::new();
+        let node_idx = alloc_open_node(&mut arena, [0.2; 5], [0.2; 5]);
+        arena[node_idx].set_value_scale(5.0);
+        arena[node_idx].update_value(2.0, 2.0);
+
+        let config = default_config();
+        let mut r = rng();
+
+        // First selection with no virtual loss — pick baseline.
+        let (baseline, _) = select_actions(&arena[node_idx], &config, false, &mut r);
+
+        // Add heavy virtual loss on the baseline outcome.
+        for _ in 0..100 {
+            arena[node_idx].p1.edge_mut(baseline as usize).add_virtual_loss();
+        }
+
+        let mut r2 = rng();
+        let (a1, _) = select_actions(&arena[node_idx], &config, false, &mut r2);
+        assert_ne!(a1, baseline, "Virtual loss should shift selection away");
+    }
+
+    #[test]
+    fn puct_no_virtual_loss_unchanged() {
+        // When all n_in_flight == 0, behavior is identical to before.
+        let mut arena = NodeArena::new();
+        let p1_prior = [0.05, 0.05, 0.7, 0.1, 0.1];
+        let node_idx = alloc_open_node(&mut arena, p1_prior, [0.2; 5]);
+        arena[node_idx].set_value_scale(5.0);
+        arena[node_idx].update_value(2.0, 2.0);
+
+        // Verify no edge has in-flight.
+        for i in 0..5 {
+            assert_eq!(arena[node_idx].p1.edge(i).n_in_flight(), 0);
+        }
+
+        let config = default_config();
+        let mut r = rng();
+        let (a1, _) = select_actions(&arena[node_idx], &config, false, &mut r);
+        // Same as puct_monotonic_prior: highest prior wins.
+        assert_eq!(a1, 2);
+    }
+
+    #[test]
+    fn puct_virtual_loss_unvisited_still_fpu() {
+        // Unvisited edge with virtual loss gets FPU, not edge.q=0.
+        // FPU uses edge.visits (real visits), not n_in_flight.
+        let mut arena = NodeArena::new();
+        let node_idx = alloc_open_node(&mut arena, [0.2; 5], [0.2; 5]);
+        arena[node_idx].set_value_scale(5.0);
+        arena[node_idx].update_value(5.0, 5.0);
+
+        // Visit some edges with low Q so unvisited FPU-based edges dominate.
+        for i in 0..3 {
+            arena[node_idx].p1.edge_mut(i).update(1.0);
+        }
+
+        // Add virtual loss on unvisited edge 3. It should still get FPU (visits==0).
+        arena[node_idx].p1.edge_mut(3).add_virtual_loss();
+
+        let config = default_config();
+        let mut r = rng();
+        let (a1, _) = select_actions(&arena[node_idx], &config, false, &mut r);
+
+        // Edges 3 and 4 are both unvisited. Edge 3 has virtual loss reducing
+        // its exploration bonus, so edge 4 should be preferred.
+        assert_eq!(a1, 4, "Unvisited edge without virtual loss should beat one with");
+    }
+
+    #[test]
+    fn virtual_loss_sum_invariant() {
+        // R1: sum(edge.n_in_flight) == node.n_in_flight after N descents.
+        let h = HalfNode::new([0.2; 5], [0, 1, 2, 3, 4]);
+        let mut node = Node::new(h, h);
+        node.set_value_scale(5.0);
+        node.update_value(2.0, 2.0);
+
+        let config = default_config();
+
+        // Simulate 3 descents: claim node, pick an action, add virtual loss.
+        let mut r = rng();
+        for _ in 0..3 {
+            assert!(node.try_start_score_update());
+            let a1 = select_half(
+                &node.p1, node.v1(), node.value_scale(), node.total_visits(),
+                &config, false, &mut r,
+            );
+            node.p1.edge_mut(a1 as usize).add_virtual_loss();
+        }
+
+        let edge_sum: u32 = (0..5).map(|i| node.p1.edge(i).n_in_flight()).sum();
+        assert_eq!(edge_sum, node.n_in_flight());
+    }
+
+    #[test]
+    fn virtual_loss_cleanup_invariant() {
+        // R2: after full revert, all n_in_flight == 0.
+        let h = HalfNode::new([0.2; 5], [0, 1, 2, 3, 4]);
+        let mut node = Node::new(h, h);
+        node.set_value_scale(5.0);
+        node.update_value(2.0, 2.0);
+
+        let config = default_config();
+        let mut r = rng();
+
+        // Track which edges got virtual loss.
+        let mut vl_edges = Vec::new();
+        for _ in 0..3 {
+            assert!(node.try_start_score_update());
+            let a1 = select_half(
+                &node.p1, node.v1(), node.value_scale(), node.total_visits(),
+                &config, false, &mut r,
+            );
+            node.p1.edge_mut(a1 as usize).add_virtual_loss();
+            vl_edges.push(a1);
+        }
+
+        // Revert everything.
+        for a in &vl_edges {
+            node.p1.edge_mut(*a as usize).revert_virtual_loss();
+            node.cancel_score_update();
+        }
+
+        assert_eq!(node.n_in_flight(), 0);
+        for i in 0..5 {
+            assert_eq!(node.p1.edge(i).n_in_flight(), 0);
+        }
+    }
+
+    #[test]
+    fn puct_multi_descent_diversification() {
+        // 3 descents with virtual loss → 3 different outcomes.
+        let h = HalfNode::new([0.2; 5], [0, 1, 2, 3, 4]);
+        let mut node = Node::new(h, h);
+        node.set_value_scale(5.0);
+        node.update_value(2.0, 2.0);
+
+        let config = default_config();
+        let mut r = rng();
+        let mut selected = Vec::new();
+
+        for _ in 0..3 {
+            let a1 = select_half(
+                &node.p1, node.v1(), node.value_scale(), node.total_visits(),
+                &config, false, &mut r,
+            );
+            node.p1.edge_mut(a1 as usize).add_virtual_loss();
+            selected.push(a1);
+        }
+
+        // All 3 should be different outcomes.
+        selected.sort();
+        selected.dedup();
+        assert_eq!(
+            selected.len(), 3,
+            "3 descents with virtual loss should diversify to 3 outcomes, got {:?}",
+            selected
+        );
+    }
+
+    #[test]
+    fn puct_forced_playout_ignores_virtual_loss() {
+        // Forced playout threshold uses real visits only (edge.visits), not n_in_flight.
+        let mut arena = NodeArena::new();
+        let p1_prior = [0.4, 0.4, 0.1, 0.05, 0.05];
+        let node_idx = alloc_open_node(&mut arena, p1_prior, [0.2; 5]);
+        arena[node_idx].set_value_scale(5.0);
+
+        // Many visits, heavily on 0 and 1.
+        for _ in 0..100 {
+            arena[node_idx].update_value(2.0, 2.0);
+        }
+        for _ in 0..45 {
+            arena[node_idx].p1.edge_mut(0).update(2.0);
+        }
+        for _ in 0..45 {
+            arena[node_idx].p1.edge_mut(1).update(2.0);
+        }
+        arena[node_idx].p1.edge_mut(2).update(2.0);
+        arena[node_idx].p1.edge_mut(3).update(2.0);
+        arena[node_idx].p1.edge_mut(4).update(2.0);
+
+        // Add large virtual loss on the undervisited outcomes.
+        // Threshold for outcome 2: sqrt(2.0 * 0.1 * 100) ≈ 4.47. Visits=1 < 4.47 → forced.
+        // Even with virtual loss, forced playouts should still fire (they check real visits).
+        for _ in 0..50 {
+            arena[node_idx].p1.edge_mut(2).add_virtual_loss();
+            arena[node_idx].p1.edge_mut(3).add_virtual_loss();
+            arena[node_idx].p1.edge_mut(4).add_virtual_loss();
+        }
+
+        let config = default_config();
+        let mut r = rng();
+        let (a1, _) = select_actions(&arena[node_idx], &config, true, &mut r);
+
+        // Forced playouts should still fire on undervisited outcomes.
+        assert!(
+            arena[node_idx].p1.edge(a1 as usize).visits < 5,
+            "Forced playout should still select undervisited outcome despite virtual loss, got outcome {} with {} visits",
+            a1,
+            arena[node_idx].p1.edge(a1 as usize).visits
+        );
     }
 }
