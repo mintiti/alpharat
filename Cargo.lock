@@ -185,7 +185,7 @@ dependencies = [
 [[package]]
 name = "pyrat-rust"
 version = "0.1.0"
-source = "git+https://github.com/mintiti/pyrat-rust#1a57ef20189610ea2bec34556accc7f82e1f4866"
+source = "git+https://github.com/mintiti/pyrat-rust#14c87447a148f7f8008a48bb7a0c971ce5d01ca7"
 dependencies = [
  "rand 0.10.0",
  "serde",
