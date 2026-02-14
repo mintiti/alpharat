@@ -8,6 +8,11 @@ use std::ops::{Index, IndexMut};
 pub struct NodeIndex(u32);
 
 impl NodeIndex {
+    #[cfg(test)]
+    pub(crate) fn from_raw(v: u32) -> Self {
+        Self(v)
+    }
+
     fn as_usize(self) -> usize {
         self.0 as usize
     }

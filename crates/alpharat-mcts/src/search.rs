@@ -1,6 +1,9 @@
 use rand::Rng;
 
+use crate::backend::Backend;
 use crate::node::{HalfNode, Node, NodeArena, NodeIndex};
+use crate::tree::{compute_rewards, find_or_extend_child, populate_node, MCTSTree};
+use pyrat::{Direction, GameState};
 
 /// Score assigned to forced-playout outcomes to guarantee selection.
 const FORCED_PLAYOUT_SCORE: f32 = 1e20;
@@ -56,7 +59,7 @@ pub fn backup(
     arena[leaf_idx].update_value(g1, g2);
 
     debug_assert!(
-        path.last().map_or(true, |&(parent_idx, _, _)| arena[leaf_idx].parent() == Some(parent_idx)),
+        path.last().is_none_or(|&(parent_idx, _, _)| arena[leaf_idx].parent() == Some(parent_idx)),
         "backup: leaf's parent should match last path entry"
     );
 
@@ -235,6 +238,371 @@ pub fn compute_pruned_visits(
     }
 
     result
+}
+
+// ---------------------------------------------------------------------------
+// SearchResult — public return type
+// ---------------------------------------------------------------------------
+
+/// Result of an MCTS search: policies and values for both players.
+#[derive(Clone, Debug)]
+pub struct SearchResult {
+    /// Policy in 5-action space, sums to 1, blocked actions = 0.
+    pub policy_p1: [f32; 5],
+    pub policy_p2: [f32; 5],
+    /// Expected remaining cheese for each player.
+    pub value_p1: f32,
+    pub value_p2: f32,
+    /// Root visit count after search.
+    pub total_visits: u32,
+}
+
+// ---------------------------------------------------------------------------
+// DescentOutcome — internal, what happened at the leaf
+// ---------------------------------------------------------------------------
+
+enum DescentOutcome {
+    /// Leaf needs NN evaluation.
+    NeedsEval {
+        path: SearchPath,
+        leaf_idx: NodeIndex,
+        game_state: GameState,
+    },
+    /// Leaf is terminal (game over).
+    Terminal {
+        path: SearchPath,
+        leaf_idx: NodeIndex,
+        /// Whether try_start_score_update was called on the leaf.
+        leaf_claimed: bool,
+    },
+    /// Collision: another descent already claimed this unvisited leaf.
+    Collision {
+        path: SearchPath,
+    },
+}
+
+// ---------------------------------------------------------------------------
+// is_game_over — local terminal detection
+// ---------------------------------------------------------------------------
+
+/// Check if the game has ended.
+///
+/// Replicates the three conditions from pyrat-rust's private `check_game_over`:
+/// 1. A player collected more than half the total cheese
+/// 2. All cheese collected
+/// 3. Maximum turns reached
+///
+/// TODO: Replace with `game.check_game_over()` once pyrat-rust#123 is merged.
+fn is_game_over(game: &GameState) -> bool {
+    let total_cheese = game.cheese.total_cheese() as f32;
+    let half_cheese = total_cheese / 2.0;
+    if game.player1_score() > half_cheese || game.player2_score() > half_cheese {
+        return true;
+    }
+    if game.cheese.remaining_cheese() == 0 && total_cheese > 0.0 {
+        return true;
+    }
+    game.turn >= game.max_turns
+}
+
+// ---------------------------------------------------------------------------
+// run_search — public API
+// ---------------------------------------------------------------------------
+
+/// Run MCTS search: N simulations with within-tree batching.
+///
+/// Returns policies (visit-proportional with forced playout pruning) and
+/// values for both players.
+pub fn run_search(
+    tree: &mut MCTSTree,
+    game: &GameState,
+    backend: &dyn Backend,
+    config: &SearchConfig,
+    n_sims: u32,
+    batch_size: u32,
+    rng: &mut impl Rng,
+) -> SearchResult {
+    let mut remaining = n_sims;
+    while remaining > 0 {
+        let actual = remaining.min(batch_size);
+        simulate_batch(tree, game, backend, config, actual, rng);
+        remaining -= actual;
+    }
+
+    let root = tree.root();
+    extract_result(tree.arena(), root, config, rng)
+}
+
+// ---------------------------------------------------------------------------
+// simulate_batch — gather/eval/backup cycle
+// ---------------------------------------------------------------------------
+
+fn simulate_batch(
+    tree: &mut MCTSTree,
+    game: &GameState,
+    backend: &dyn Backend,
+    config: &SearchConfig,
+    batch_size: u32,
+    rng: &mut impl Rng,
+) {
+    let root = tree.root();
+
+    // Gather phase: descend batch_size times.
+    let mut outcomes = Vec::with_capacity(batch_size as usize);
+    for _ in 0..batch_size {
+        outcomes.push(descend(tree.arena_mut(), root, game, config, rng));
+    }
+
+    // Eval phase: collect game states from NeedsEval, batch evaluate.
+    let needs_eval_refs: Vec<&GameState> = outcomes
+        .iter()
+        .filter_map(|o| match o {
+            DescentOutcome::NeedsEval { game_state, .. } => Some(game_state),
+            _ => None,
+        })
+        .collect();
+
+    let eval_results = if needs_eval_refs.is_empty() {
+        Vec::new()
+    } else {
+        backend.evaluate_batch(&needs_eval_refs)
+    };
+
+    // Populate + backup + cleanup phase.
+    let mut eval_idx = 0;
+    for outcome in outcomes {
+        match outcome {
+            DescentOutcome::NeedsEval {
+                path,
+                leaf_idx,
+                ..
+            } => {
+                let eval = &eval_results[eval_idx];
+                eval_idx += 1;
+
+                populate_node(tree.arena_mut(), leaf_idx, Some(eval));
+                backup(tree.arena_mut(), &path, leaf_idx, eval.value_p1, eval.value_p2);
+                cleanup_descent(tree.arena_mut(), &path, Some(leaf_idx));
+            }
+            DescentOutcome::Terminal {
+                path,
+                leaf_idx,
+                leaf_claimed,
+            } => {
+                // Mark as terminal if first visit.
+                if tree.arena()[leaf_idx].total_visits() == 0 {
+                    populate_node(tree.arena_mut(), leaf_idx, None);
+                }
+                backup(tree.arena_mut(), &path, leaf_idx, 0.0, 0.0);
+                let claimed = if leaf_claimed { Some(leaf_idx) } else { None };
+                cleanup_descent(tree.arena_mut(), &path, claimed);
+            }
+            DescentOutcome::Collision { path } => {
+                cleanup_descent(tree.arena_mut(), &path, None);
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// descend — single PUCT descent with virtual loss
+// ---------------------------------------------------------------------------
+
+fn descend(
+    arena: &mut NodeArena,
+    root: NodeIndex,
+    game: &GameState,
+    config: &SearchConfig,
+    rng: &mut impl Rng,
+) -> DescentOutcome {
+    let mut current = root;
+    let mut path: SearchPath = Vec::new();
+    let mut game = game.clone();
+
+    loop {
+        let node = &arena[current];
+
+        // Unvisited leaf — try to claim it.
+        if node.total_visits() == 0 && !node.is_terminal() {
+            if !arena[current].try_start_score_update() {
+                return DescentOutcome::Collision { path };
+            }
+            // Leaf claimed. Game is at leaf position.
+            if is_game_over(&game) {
+                return DescentOutcome::Terminal {
+                    path,
+                    leaf_idx: current,
+                    leaf_claimed: true,
+                };
+            }
+            return DescentOutcome::NeedsEval {
+                path,
+                leaf_idx: current,
+                game_state: game,
+            };
+        }
+
+        // Revisited terminal — no claim needed.
+        if node.is_terminal() {
+            return DescentOutcome::Terminal {
+                path,
+                leaf_idx: current,
+                leaf_claimed: false,
+            };
+        }
+
+        // Interior node: select actions via PUCT.
+        let is_root = current == root;
+        let (idx1, idx2) = select_actions(&arena[current], config, is_root, rng);
+
+        // Add virtual loss on selected edges.
+        arena[current].p1.edge_mut(idx1 as usize).add_virtual_loss();
+        arena[current].p2.edge_mut(idx2 as usize).add_virtual_loss();
+
+        // Record path step.
+        path.push((current, idx1, idx2));
+
+        // Convert outcome indices to actions.
+        let a1 = arena[current].p1.outcome_action(idx1 as usize);
+        let a2 = arena[current].p2.outcome_action(idx2 as usize);
+
+        // Advance game state.
+        let scores_before = (game.player1_score(), game.player2_score());
+        let d1 = Direction::try_from(a1).expect("valid direction");
+        let d2 = Direction::try_from(a2).expect("valid direction");
+        let _undo = game.make_move(d1, d2);
+        let (r1, r2) = compute_rewards(&game, scores_before);
+
+        // Find or create child.
+        let (child_idx, _is_new) =
+            find_or_extend_child(arena, current, idx1, idx2, &game, r1, r2);
+
+        current = child_idx;
+    }
+}
+
+// ---------------------------------------------------------------------------
+// cleanup_descent — revert virtual losses
+// ---------------------------------------------------------------------------
+
+fn cleanup_descent(
+    arena: &mut NodeArena,
+    path: &[(NodeIndex, u8, u8)],
+    leaf_claimed: Option<NodeIndex>,
+) {
+    // Revert edge virtual losses along the path.
+    for &(node_idx, a1, a2) in path {
+        arena[node_idx]
+            .p1
+            .edge_mut(a1 as usize)
+            .revert_virtual_loss();
+        arena[node_idx]
+            .p2
+            .edge_mut(a2 as usize)
+            .revert_virtual_loss();
+    }
+
+    // Cancel leaf claim if applicable.
+    if let Some(leaf_idx) = leaf_claimed {
+        arena[leaf_idx].cancel_score_update();
+    }
+}
+
+// ---------------------------------------------------------------------------
+// extract_result — policies and values from root
+// ---------------------------------------------------------------------------
+
+fn extract_result(
+    arena: &NodeArena,
+    root: NodeIndex,
+    config: &SearchConfig,
+    _rng: &mut impl Rng,
+) -> SearchResult {
+    let node = &arena[root];
+    let total_visits = node.total_visits();
+
+    let (policy_p1, value_p1) =
+        extract_half(&node.p1, node.v1(), node.value_scale(), total_visits, config);
+    let (policy_p2, value_p2) =
+        extract_half(&node.p2, node.v2(), node.value_scale(), total_visits, config);
+
+    SearchResult {
+        policy_p1,
+        policy_p2,
+        value_p1,
+        value_p2,
+        total_visits,
+    }
+}
+
+/// Extract policy and value for one player from root.
+fn extract_half(
+    half: &HalfNode,
+    node_value: f32,
+    value_scale: f32,
+    total_visits: u32,
+    config: &SearchConfig,
+) -> ([f32; 5], f32) {
+    let n = half.n_outcomes();
+
+    if n == 0 {
+        return ([0.0; 5], node_value);
+    }
+
+    // Compute FPU for unvisited outcomes.
+    let mut visited_prior_mass = 0.0f32;
+    for i in 0..n {
+        if half.edge(i).visits > 0 {
+            visited_prior_mass += half.prior(i);
+        }
+    }
+    let fpu = node_value - config.fpu_reduction * value_scale * visited_prior_mass.sqrt();
+
+    // Read Q and visits per outcome.
+    let mut q = [0.0f32; 5];
+    let mut raw_visits = [0.0f32; 5];
+    let mut prior = [0.0f32; 5];
+    let mut q_norm = [0.0f32; 5];
+
+    for i in 0..n {
+        let edge = half.edge(i);
+        q[i] = if edge.visits > 0 { edge.q } else { fpu };
+        raw_visits[i] = edge.visits as f32;
+        prior[i] = half.prior(i);
+        q_norm[i] = q[i] / value_scale;
+    }
+
+    // Compute pruned visits for policy.
+    let pruned = compute_pruned_visits(&q_norm, &prior, &raw_visits, n, total_visits, config.c_puct);
+
+    // Expand pruned visits to 5-action space.
+    let mut policy = [0.0f32; 5];
+    for (i, &pv) in pruned.iter().enumerate().take(n) {
+        let action = half.outcome_action(i) as usize;
+        policy[action] = pv;
+    }
+
+    // Normalize policy to sum=1.
+    let policy_sum: f32 = policy.iter().sum();
+    if policy_sum > 0.0 {
+        for p in &mut policy {
+            *p /= policy_sum;
+        }
+    } else {
+        // Fallback to expanded prior.
+        policy = half.expand_prior();
+    }
+
+    // Value = dot(q, raw_visits) / sum(raw_visits).
+    let visit_sum: f32 = raw_visits[..n].iter().sum();
+    let value = if visit_sum > 0.0 {
+        let dot: f32 = (0..n).map(|i| q[i] * raw_visits[i]).sum();
+        dot / visit_sum
+    } else {
+        node_value
+    };
+
+    (policy, value)
 }
 
 // ---------------------------------------------------------------------------
@@ -1215,6 +1583,464 @@ mod tests {
             "Forced playout should still select undervisited outcome despite virtual loss, got outcome {} with {} visits",
             a1,
             arena[node_idx].p1.edge(a1 as usize).visits
+        );
+    }
+
+    // ====================================================================
+    // Integration tests: run_search with real GameState + SmartUniformBackend
+    // ====================================================================
+
+    use crate::backend::SmartUniformBackend;
+    use crate::test_util;
+    use crate::tree::MCTSTree;
+    use pyrat::Coordinates;
+
+    const BACKEND: SmartUniformBackend = SmartUniformBackend;
+
+    fn search_rng() -> SmallRng {
+        SmallRng::seed_from_u64(123)
+    }
+
+    // 1. root_evaluation: 1 sim populates and visits root
+    #[test]
+    fn search_root_evaluation() {
+        let cheese = [Coordinates::new(2, 2), Coordinates::new(3, 3)];
+        let game = test_util::open_5x5_game(
+            Coordinates::new(1, 1),
+            Coordinates::new(3, 3),
+            &cheese,
+        );
+        let mut tree = MCTSTree::new(&game);
+        let config = default_config();
+        let mut r = search_rng();
+
+        let result = run_search(&mut tree, &game, &BACKEND, &config, 1, 1, &mut r);
+
+        assert_eq!(result.total_visits, 1);
+        // SmartUniform values are 0 → root value should be 0.
+        assert!((result.value_p1).abs() < 1e-6);
+        assert!((result.value_p2).abs() < 1e-6);
+        // Root priors should be set.
+        let root = &tree.arena()[tree.root()];
+        assert!(root.total_visits() >= 1);
+    }
+
+    // 2. first_expansion: 2 sims → root visits=2, one child with visits=1
+    #[test]
+    fn search_first_expansion() {
+        let cheese = [Coordinates::new(2, 2)];
+        let game = test_util::open_5x5_game(
+            Coordinates::new(1, 1),
+            Coordinates::new(3, 3),
+            &cheese,
+        );
+        let mut tree = MCTSTree::new(&game);
+        let config = default_config();
+        let mut r = search_rng();
+
+        let result = run_search(&mut tree, &game, &BACKEND, &config, 2, 1, &mut r);
+
+        assert_eq!(result.total_visits, 2);
+
+        // Root should have at least one child.
+        let root = &tree.arena()[tree.root()];
+        assert!(root.first_child().is_some());
+
+        // Walk children: at least one with visits=1.
+        let mut found_child_with_visit = false;
+        let mut cur = root.first_child();
+        while let Some(idx) = cur {
+            if tree.arena()[idx].total_visits() == 1 {
+                found_child_with_visit = true;
+            }
+            cur = tree.arena()[idx].next_sibling();
+        }
+        assert!(found_child_with_visit, "Should have a child with 1 visit");
+    }
+
+    // 3. invariants_after_50_sims: walk all nodes, check edge visit sum
+    #[test]
+    fn search_invariants_after_50_sims() {
+        let cheese: Vec<_> = (0..5).map(|i| Coordinates::new(i, 0)).collect();
+        let game = test_util::open_5x5_game(
+            Coordinates::new(2, 2),
+            Coordinates::new(2, 2),
+            &cheese,
+        );
+        let mut tree = MCTSTree::new(&game);
+        let config = default_config();
+        let mut r = search_rng();
+
+        // batch_size=1 to avoid collisions → exact visit count.
+        let result = run_search(&mut tree, &game, &BACKEND, &config, 50, 1, &mut r);
+        assert_eq!(result.total_visits, 50);
+
+        // Walk all nodes: for visited interior nodes,
+        // sum(p1.edge.visits) == total_visits - 1 (the -1 is the NN eval).
+        let arena = tree.arena();
+        for i in 0..arena.len() {
+            let idx = NodeIndex::from_raw(i as u32);
+            let node = &arena[idx];
+            if node.total_visits() == 0 {
+                continue;
+            }
+
+            let p1_edge_sum: u32 = (0..node.p1.n_outcomes())
+                .map(|j| node.p1.edge(j).visits)
+                .sum();
+
+            if node.first_child().is_some() {
+                // Interior node with children: edge_sum == total_visits - 1
+                assert_eq!(
+                    p1_edge_sum,
+                    node.total_visits() - 1,
+                    "Node {i}: p1 edge visit sum mismatch"
+                );
+            }
+
+            // No negative edge visits (can't happen with u32 but check Q is finite).
+            for j in 0..node.p1.n_outcomes() {
+                assert!(node.p1.edge(j).q.is_finite(), "Node {i}: P1 edge {j} Q is not finite");
+            }
+            for j in 0..node.p2.n_outcomes() {
+                assert!(node.p2.edge(j).q.is_finite(), "Node {i}: P2 edge {j} Q is not finite");
+            }
+        }
+    }
+
+    // 4. corridor: linear maze, policy weights the real moves
+    #[test]
+    fn search_corridor() {
+        let game = test_util::corridor_game();
+        let mut tree = MCTSTree::new(&game);
+        let config = default_config();
+        let mut r = search_rng();
+
+        let result = run_search(&mut tree, &game, &BACKEND, &config, 50, 4, &mut r);
+
+        // P1 at (0,0) in corridor: UP blocked by wall, DOWN blocked by edge.
+        // Only RIGHT, LEFT, STAY are effective — but LEFT is blocked by edge too.
+        // So real moves are RIGHT and STAY. Policy should put 0 on UP and DOWN.
+        assert_eq!(result.policy_p1[0], 0.0, "UP should be 0 (wall)");
+        assert_eq!(result.policy_p1[2], 0.0, "DOWN should be 0 (edge)");
+
+        // RIGHT should have substantial weight (leads toward cheese).
+        assert!(
+            result.policy_p1[1] > 0.0,
+            "RIGHT should have positive weight, got {}",
+            result.policy_p1[1]
+        );
+    }
+
+    // 5. adjacent_cheese: cheese 1 step away, policy prefers that direction
+    #[test]
+    fn search_adjacent_cheese() {
+        let game = test_util::one_cheese_adjacent_game();
+        let mut tree = MCTSTree::new(&game);
+        let config = default_config();
+        let mut r = search_rng();
+
+        let result = run_search(&mut tree, &game, &BACKEND, &config, 100, 4, &mut r);
+
+        // P1 at (0,0), cheese at (1,0). RIGHT collects it.
+        // With enough sims, RIGHT should dominate.
+        let right = result.policy_p1[1]; // Direction::Right = 1
+        assert!(
+            right > 0.3,
+            "RIGHT should have significant weight toward adjacent cheese, got {}",
+            right
+        );
+    }
+
+    // 6. terminal_mid_tree: short game, terminal nodes get (0,0) backup
+    #[test]
+    fn search_terminal_mid_tree() {
+        let game = test_util::short_game();
+        let mut tree = MCTSTree::new(&game);
+        let config = default_config();
+        let mut r = search_rng();
+
+        // batch_size=1 to avoid collisions.
+        let result = run_search(&mut tree, &game, &BACKEND, &config, 50, 1, &mut r);
+
+        // Should complete without panics. 3-turn game means terminals appear.
+        assert_eq!(result.total_visits, 50);
+
+        // Walk nodes: any terminal node should have is_terminal set.
+        let arena = tree.arena();
+        for i in 0..arena.len() {
+            let idx = NodeIndex::from_raw(i as u32);
+            let node = &arena[idx];
+            if node.is_terminal() {
+                // Terminal nodes should have 0 for edge visits (no children).
+                assert!(node.first_child().is_none(), "Terminal node shouldn't have children");
+            }
+        }
+    }
+
+    // 7. terminal_root: already game-over
+    #[test]
+    fn search_terminal_root() {
+        let game = test_util::terminal_game();
+        let mut tree = MCTSTree::new(&game);
+        let config = default_config();
+        let mut r = search_rng();
+
+        let result = run_search(&mut tree, &game, &BACKEND, &config, 10, 4, &mut r);
+
+        // Root is terminal → values should be 0.
+        assert!((result.value_p1).abs() < 1e-6, "Terminal root v1 should be 0, got {}", result.value_p1);
+        assert!((result.value_p2).abs() < 1e-6, "Terminal root v2 should be 0, got {}", result.value_p2);
+    }
+
+    // 8. mud_position: P1 stuck, policy 100% STAY
+    #[test]
+    fn search_mud_position() {
+        let game = test_util::mud_game_p1_stuck();
+        let mut tree = MCTSTree::new(&game);
+        let config = default_config();
+        let mut r = search_rng();
+
+        let result = run_search(&mut tree, &game, &BACKEND, &config, 20, 4, &mut r);
+
+        // P1 stuck in mud: only STAY is valid.
+        assert!(
+            (result.policy_p1[4] - 1.0).abs() < 1e-6,
+            "Stuck P1 should have 100% STAY, got {:?}",
+            result.policy_p1
+        );
+        for a in 0..4 {
+            assert_eq!(result.policy_p1[a], 0.0, "Action {a} should be 0 for stuck P1");
+        }
+    }
+
+    // 9. policy_sums_to_one
+    #[test]
+    fn search_policy_sums_to_one() {
+        let games = [
+            test_util::open_5x5_game(
+                Coordinates::new(2, 2),
+                Coordinates::new(2, 2),
+                &[Coordinates::new(0, 0)],
+            ),
+            test_util::one_cheese_adjacent_game(),
+            test_util::mud_game_p1_stuck(),
+            test_util::corridor_game(),
+        ];
+
+        let config = default_config();
+        for (gi, game) in games.iter().enumerate() {
+            let mut tree = MCTSTree::new(game);
+            let mut r = search_rng();
+            let result = run_search(&mut tree, game, &BACKEND, &config, 30, 4, &mut r);
+
+            let sum_p1: f32 = result.policy_p1.iter().sum();
+            let sum_p2: f32 = result.policy_p2.iter().sum();
+            assert!(
+                (sum_p1 - 1.0).abs() < 1e-5,
+                "Game {gi}: P1 policy sum = {sum_p1}"
+            );
+            assert!(
+                (sum_p2 - 1.0).abs() < 1e-5,
+                "Game {gi}: P2 policy sum = {sum_p2}"
+            );
+        }
+    }
+
+    // 10. blocked_actions_zero
+    #[test]
+    fn search_blocked_actions_zero() {
+        // P1 at (0,0): DOWN and LEFT blocked by board edges.
+        let game = test_util::open_5x5_game(
+            Coordinates::new(0, 0),
+            Coordinates::new(4, 4),
+            &[Coordinates::new(2, 2)],
+        );
+        let mut tree = MCTSTree::new(&game);
+        let config = default_config();
+        let mut r = search_rng();
+
+        let result = run_search(&mut tree, &game, &BACKEND, &config, 30, 4, &mut r);
+
+        assert_eq!(result.policy_p1[2], 0.0, "DOWN should be 0 (board edge)");
+        assert_eq!(result.policy_p1[3], 0.0, "LEFT should be 0 (board edge)");
+    }
+
+    // 11. value_bounded: 0 <= value <= remaining_cheese (approximately)
+    #[test]
+    fn search_value_bounded() {
+        let cheese: Vec<_> = (0..5).map(|i| Coordinates::new(i, 0)).collect();
+        let game = test_util::open_5x5_game(
+            Coordinates::new(2, 2),
+            Coordinates::new(2, 2),
+            &cheese,
+        );
+        let remaining = game.cheese.remaining_cheese() as f32;
+        let mut tree = MCTSTree::new(&game);
+        let config = default_config();
+        let mut r = search_rng();
+
+        let result = run_search(&mut tree, &game, &BACKEND, &config, 100, 4, &mut r);
+
+        // Values should be non-negative and bounded by remaining cheese.
+        // SmartUniform starts at 0, so values stay near 0. Allow some slack.
+        assert!(
+            result.value_p1 >= -0.1,
+            "v1 should be roughly non-negative, got {}",
+            result.value_p1
+        );
+        assert!(
+            result.value_p1 <= remaining + 0.1,
+            "v1 should be <= remaining cheese ({}), got {}",
+            remaining,
+            result.value_p1
+        );
+        assert!(
+            result.value_p2 >= -0.1,
+            "v2 should be roughly non-negative, got {}",
+            result.value_p2
+        );
+        assert!(
+            result.value_p2 <= remaining + 0.1,
+            "v2 should be <= remaining cheese ({}), got {}",
+            remaining,
+            result.value_p2
+        );
+    }
+
+    // 12. replay_correctness: children's effective actions match game after move
+    #[test]
+    fn search_replay_correctness() {
+        let cheese = [Coordinates::new(2, 2)];
+        let game = test_util::open_5x5_game(
+            Coordinates::new(1, 1),
+            Coordinates::new(3, 3),
+            &cheese,
+        );
+        let mut tree = MCTSTree::new(&game);
+        let config = default_config();
+        let mut r = search_rng();
+
+        let _ = run_search(&mut tree, &game, &BACKEND, &config, 20, 4, &mut r);
+
+        // For each child of root, replay the move and verify effective actions match.
+        let root = tree.root();
+        let arena = tree.arena();
+        let root_node = &arena[root];
+
+        let mut cur = root_node.first_child();
+        while let Some(child_idx) = cur {
+            let child = &arena[child_idx];
+            let (oi, oj) = child.parent_outcome();
+
+            // Convert outcome indices to actions.
+            let a1 = root_node.p1.outcome_action(oi as usize);
+            let a2 = root_node.p2.outcome_action(oj as usize);
+
+            // Replay the move.
+            let mut game_copy = game.clone();
+            let d1 = Direction::try_from(a1).expect("valid");
+            let d2 = Direction::try_from(a2).expect("valid");
+            let _undo = game_copy.make_move(d1, d2);
+
+            // Child's outcome count should match game at child position.
+            let eff_p1 = game_copy.effective_actions_p1();
+            let eff_p2 = game_copy.effective_actions_p2();
+
+            // Count unique outcomes from effective actions.
+            let count_unique = |eff: &[u8; 5]| -> usize {
+                let mut seen = [false; 5];
+                let mut n = 0;
+                for &e in eff {
+                    if !seen[e as usize] {
+                        seen[e as usize] = true;
+                        n += 1;
+                    }
+                }
+                n
+            };
+
+            assert_eq!(
+                child.p1.n_outcomes(),
+                count_unique(&eff_p1),
+                "P1 outcome count mismatch for child at ({oi}, {oj})"
+            );
+            assert_eq!(
+                child.p2.n_outcomes(),
+                count_unique(&eff_p2),
+                "P2 outcome count mismatch for child at ({oi}, {oj})"
+            );
+
+            cur = child.next_sibling();
+        }
+    }
+
+    // 13. n_in_flight_zero_after_search: all nodes and edges clean
+    #[test]
+    fn search_n_in_flight_zero_after_search() {
+        let cheese = [Coordinates::new(2, 2), Coordinates::new(3, 3)];
+        let game = test_util::open_5x5_game(
+            Coordinates::new(1, 1),
+            Coordinates::new(3, 3),
+            &cheese,
+        );
+        let mut tree = MCTSTree::new(&game);
+        let config = default_config();
+        let mut r = search_rng();
+
+        let _ = run_search(&mut tree, &game, &BACKEND, &config, 30, 4, &mut r);
+
+        let arena = tree.arena();
+        for i in 0..arena.len() {
+            let idx = NodeIndex::from_raw(i as u32);
+            let node = &arena[idx];
+
+            assert_eq!(
+                node.n_in_flight(),
+                0,
+                "Node {i}: n_in_flight should be 0, got {}",
+                node.n_in_flight()
+            );
+
+            for j in 0..node.p1.n_outcomes() {
+                assert_eq!(
+                    node.p1.edge(j).n_in_flight(),
+                    0,
+                    "Node {i} P1 edge {j}: n_in_flight should be 0"
+                );
+            }
+            for j in 0..node.p2.n_outcomes() {
+                assert_eq!(
+                    node.p2.edge(j).n_in_flight(),
+                    0,
+                    "Node {i} P2 edge {j}: n_in_flight should be 0"
+                );
+            }
+        }
+    }
+
+    // 14. batch_size_larger_than_n_sims: only n_sims run
+    #[test]
+    fn search_batch_size_larger_than_n_sims() {
+        let cheese = [Coordinates::new(2, 2)];
+        let game = test_util::open_5x5_game(
+            Coordinates::new(1, 1),
+            Coordinates::new(3, 3),
+            &cheese,
+        );
+        let mut tree = MCTSTree::new(&game);
+        let config = default_config();
+        let mut r = search_rng();
+
+        // batch_size=10 but only n_sims=3. With batch_size > n_sims, we run one
+        // batch of 3 descents. Some may collide (root is unvisited), so
+        // total_visits <= 3. At least 1 should succeed (the first descent).
+        let result = run_search(&mut tree, &game, &BACKEND, &config, 3, 10, &mut r);
+
+        assert!(
+            result.total_visits >= 1 && result.total_visits <= 3,
+            "Should run at most 3 sims, got {}",
+            result.total_visits
         );
     }
 }
