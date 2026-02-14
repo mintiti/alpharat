@@ -32,6 +32,11 @@ pub struct EvalResult {
 /// (lc0 pattern: single shared backend, per-thread computation).
 pub trait Backend: Send + Sync {
     fn evaluate(&self, game: &GameState) -> EvalResult;
+
+    /// Batch evaluation — sequential fallback, real backends override for GPU batching.
+    fn evaluate_batch(&self, games: &[&GameState]) -> Vec<EvalResult> {
+        games.iter().map(|g| self.evaluate(g)).collect()
+    }
 }
 
 // ---------------------------------------------------------------------------
