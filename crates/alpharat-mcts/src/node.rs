@@ -21,11 +21,16 @@ impl NodeIndex {
 pub struct HalfEdge {
     pub q: f32,
     pub visits: u32,
+    n_in_flight: u32,
 }
 
 impl Default for HalfEdge {
     fn default() -> Self {
-        Self { q: 0.0, visits: 0 }
+        Self {
+            q: 0.0,
+            visits: 0,
+            n_in_flight: 0,
+        }
     }
 }
 
@@ -34,6 +39,22 @@ impl HalfEdge {
     pub fn update(&mut self, value: f32) {
         self.visits += 1;
         self.q += (value - self.q) / self.visits as f32;
+    }
+
+    pub fn n_in_flight(&self) -> u32 {
+        self.n_in_flight
+    }
+
+    pub fn add_virtual_loss(&mut self) {
+        self.n_in_flight += 1;
+    }
+
+    pub fn revert_virtual_loss(&mut self) {
+        debug_assert!(
+            self.n_in_flight > 0,
+            "revert_virtual_loss: n_in_flight is already 0"
+        );
+        self.n_in_flight -= 1;
     }
 }
 
@@ -206,6 +227,7 @@ pub struct Node {
     v1: f32,
     v2: f32,
     total_visits: u32,
+    n_in_flight: u32,
 
     // PUCT normalization
     value_scale: f32,
@@ -233,6 +255,7 @@ impl Node {
             v1: 0.0,
             v2: 0.0,
             total_visits: 0,
+            n_in_flight: 0,
             value_scale: 0.0,
             edge_r1: 0.0,
             edge_r2: 0.0,
@@ -278,6 +301,28 @@ impl Node {
     }
     pub fn parent_outcome(&self) -> (u8, u8) {
         self.parent_outcome
+    }
+    pub fn n_in_flight(&self) -> u32 {
+        self.n_in_flight
+    }
+
+    /// lc0 pattern. For unvisited nodes (total_visits == 0): fails if already
+    /// claimed (n_in_flight > 0). For visited nodes: always succeeds.
+    pub fn try_start_score_update(&mut self) -> bool {
+        if self.total_visits == 0 && self.n_in_flight > 0 {
+            return false;
+        }
+        self.n_in_flight += 1;
+        true
+    }
+
+    /// Revert a score update claim (collision or post-backup).
+    pub fn cancel_score_update(&mut self) {
+        debug_assert!(
+            self.n_in_flight > 0,
+            "cancel_score_update: n_in_flight is already 0"
+        );
+        self.n_in_flight -= 1;
     }
 
     // --- Setters ---
@@ -842,5 +887,106 @@ mod tests {
         assert_eq!(arena[second].parent_outcome(), (2, 3));
 
         assert!(arena[second].next_sibling().is_none());
+    }
+
+    // ---- Virtual loss: Node ----
+
+    #[test]
+    fn try_start_score_update_fresh_node() {
+        let h = HalfNode::new([0.2; 5], [0, 1, 2, 3, 4]);
+        let mut node = Node::new(h, h);
+
+        assert!(node.try_start_score_update());
+        assert_eq!(node.n_in_flight(), 1);
+    }
+
+    #[test]
+    fn try_start_score_update_collision_unvisited() {
+        let h = HalfNode::new([0.2; 5], [0, 1, 2, 3, 4]);
+        let mut node = Node::new(h, h);
+
+        assert!(node.try_start_score_update());
+        // Second claim on unvisited node should fail.
+        assert!(!node.try_start_score_update());
+        assert_eq!(node.n_in_flight(), 1);
+    }
+
+    #[test]
+    fn try_start_score_update_visited_always_succeeds() {
+        let h = HalfNode::new([0.2; 5], [0, 1, 2, 3, 4]);
+        let mut node = Node::new(h, h);
+
+        node.update_value(1.0, 1.0);
+        assert!(node.try_start_score_update());
+        assert!(node.try_start_score_update());
+        assert!(node.try_start_score_update());
+        assert_eq!(node.n_in_flight(), 3);
+    }
+
+    #[test]
+    fn try_start_score_update_visited_with_existing_in_flight() {
+        let h = HalfNode::new([0.2; 5], [0, 1, 2, 3, 4]);
+        let mut node = Node::new(h, h);
+
+        // Claim then visit — simulates: descend, then backup arrives.
+        assert!(node.try_start_score_update());
+        node.update_value(1.0, 1.0);
+
+        // Now visited with 1 in-flight. New claim should still work.
+        assert!(node.try_start_score_update());
+        assert_eq!(node.n_in_flight(), 2);
+    }
+
+    #[test]
+    fn cancel_score_update_decrements() {
+        let h = HalfNode::new([0.2; 5], [0, 1, 2, 3, 4]);
+        let mut node = Node::new(h, h);
+
+        node.update_value(1.0, 2.0);
+        assert!(node.try_start_score_update());
+        assert_eq!(node.n_in_flight(), 1);
+
+        node.cancel_score_update();
+        assert_eq!(node.n_in_flight(), 0);
+        // Values untouched.
+        assert!((node.v1() - 1.0).abs() < 1e-6);
+        assert!((node.v2() - 2.0).abs() < 1e-6);
+    }
+
+    #[test]
+    #[should_panic(expected = "cancel_score_update: n_in_flight is already 0")]
+    fn cancel_score_update_at_zero_panics() {
+        let h = HalfNode::new([0.2; 5], [0, 1, 2, 3, 4]);
+        let mut node = Node::new(h, h);
+        node.cancel_score_update();
+    }
+
+    // ---- Virtual loss: HalfEdge ----
+
+    #[test]
+    fn half_edge_virtual_loss_round_trip() {
+        let mut edge = HalfEdge::default();
+        edge.update(5.0);
+        assert_eq!(edge.visits, 1);
+
+        edge.add_virtual_loss();
+        edge.add_virtual_loss();
+        assert_eq!(edge.n_in_flight(), 2);
+        // q and visits untouched.
+        assert!((edge.q - 5.0).abs() < 1e-6);
+        assert_eq!(edge.visits, 1);
+
+        edge.revert_virtual_loss();
+        edge.revert_virtual_loss();
+        assert_eq!(edge.n_in_flight(), 0);
+        assert!((edge.q - 5.0).abs() < 1e-6);
+        assert_eq!(edge.visits, 1);
+    }
+
+    #[test]
+    #[should_panic(expected = "revert_virtual_loss: n_in_flight is already 0")]
+    fn half_edge_revert_at_zero_panics() {
+        let mut edge = HalfEdge::default();
+        edge.revert_virtual_loss();
     }
 }
