@@ -262,6 +262,7 @@ pub struct SearchResult {
 // DescentOutcome — internal, what happened at the leaf
 // ---------------------------------------------------------------------------
 
+/// What happened at the leaf of a single PUCT descent.
 enum DescentOutcome {
     /// Leaf needs NN evaluation.
     NeedsEval {
@@ -282,29 +283,6 @@ enum DescentOutcome {
     },
 }
 
-// ---------------------------------------------------------------------------
-// is_game_over — local terminal detection
-// ---------------------------------------------------------------------------
-
-/// Check if the game has ended.
-///
-/// Replicates the three conditions from pyrat-rust's private `check_game_over`:
-/// 1. A player collected more than half the total cheese
-/// 2. All cheese collected
-/// 3. Maximum turns reached
-///
-/// TODO: Replace with `game.check_game_over()` once pyrat-rust#123 is merged.
-fn is_game_over(game: &GameState) -> bool {
-    let total_cheese = game.cheese.total_cheese() as f32;
-    let half_cheese = total_cheese / 2.0;
-    if game.player1_score() > half_cheese || game.player2_score() > half_cheese {
-        return true;
-    }
-    if game.cheese.remaining_cheese() == 0 && total_cheese > 0.0 {
-        return true;
-    }
-    game.turn >= game.max_turns
-}
 
 // ---------------------------------------------------------------------------
 // run_search — public API
@@ -429,7 +407,7 @@ fn descend(
                 return DescentOutcome::Collision { path };
             }
             // Leaf claimed. Game is at leaf position.
-            if is_game_over(&game) {
+            if game.check_game_over() {
                 return DescentOutcome::Terminal {
                     path,
                     leaf_idx: current,
@@ -613,7 +591,11 @@ fn extract_half(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::backend::{ConstantValueBackend, SmartUniformBackend};
     use crate::node::{Node, NodeArena};
+    use crate::test_util;
+    use crate::tree::MCTSTree;
+    use pyrat::Coordinates;
     use rand::rngs::SmallRng;
     use rand::SeedableRng;
 
@@ -1773,14 +1755,7 @@ mod tests {
         );
     }
 
-    // ====================================================================
-    // Integration tests: run_search with real GameState + SmartUniformBackend
-    // ====================================================================
-
-    use crate::backend::SmartUniformBackend;
-    use crate::test_util;
-    use crate::tree::MCTSTree;
-    use pyrat::Coordinates;
+    // ---- integration: run_search with real GameState + SmartUniformBackend ----
 
     const BACKEND: SmartUniformBackend = SmartUniformBackend;
 
@@ -1913,8 +1888,8 @@ mod tests {
 
         // RIGHT should have substantial weight (leads toward cheese).
         assert!(
-            result.policy_p1[1] > 0.0,
-            "RIGHT should have positive weight, got {}",
+            result.policy_p1[1] > 0.3,
+            "RIGHT should have significant weight, got {}",
             result.policy_p1[1]
         );
     }
@@ -1933,8 +1908,8 @@ mod tests {
         // With enough sims, RIGHT should dominate.
         let right = result.policy_p1[1]; // Direction::Right = 1
         assert!(
-            right > 0.3,
-            "RIGHT should have significant weight toward adjacent cheese, got {}",
+            right > 0.5,
+            "RIGHT should dominate toward adjacent cheese, got {}",
             right
         );
     }
@@ -2224,18 +2199,14 @@ mod tests {
         // total_visits <= 3. At least 1 should succeed (the first descent).
         let result = run_search(&mut tree, &game, &BACKEND, &config, 3, 10, &mut r);
 
-        assert!(
-            result.total_visits >= 1 && result.total_visits <= 3,
-            "Should run at most 3 sims, got {}",
+        assert_eq!(
+            result.total_visits, 1,
+            "3 descents on unvisited root: first claims it, other 2 collide. Got {}",
             result.total_visits
         );
     }
 
-    // ====================================================================
-    // Integration tests: ConstantValueBackend (non-zero leaf values)
-    // ====================================================================
-
-    use crate::backend::ConstantValueBackend;
+    // ---- integration: ConstantValueBackend (non-zero leaf values) ----
 
     // 15. root values positive with constant v=(3,2)
     #[test]
@@ -2258,13 +2229,13 @@ mod tests {
 
         assert_eq!(result.total_visits, 50);
         assert!(
-            result.value_p1 > 0.0,
-            "v1 should be positive with constant backend, got {}",
+            result.value_p1 > 2.0,
+            "v1 should be >= leaf value 3.0 (edge rewards non-negative), got {}",
             result.value_p1
         );
         assert!(
-            result.value_p2 > 0.0,
-            "v2 should be positive with constant backend, got {}",
+            result.value_p2 > 1.0,
+            "v2 should be >= leaf value 2.0 (edge rewards non-negative), got {}",
             result.value_p2
         );
     }
@@ -2293,8 +2264,8 @@ mod tests {
             let edge = root.p1.edge(i);
             if edge.visits > 0 {
                 assert!(
-                    edge.q > 0.0,
-                    "P1 edge {i}: visited edge should have Q > 0, got {}",
+                    edge.q > 2.0,
+                    "P1 edge {i}: Q should be well above 0 with v=(5,5), got {}",
                     edge.q
                 );
             }
@@ -2303,8 +2274,8 @@ mod tests {
             let edge = root.p2.edge(i);
             if edge.visits > 0 {
                 assert!(
-                    edge.q > 0.0,
-                    "P2 edge {i}: visited edge should have Q > 0, got {}",
+                    edge.q > 2.0,
+                    "P2 edge {i}: Q should be well above 0 with v=(5,5), got {}",
                     edge.q
                 );
             }
