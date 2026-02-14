@@ -1,0 +1,8 @@
+[package]
+name = "alpharat-mcts"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+pyrat = { package = "pyrat-rust", git = "https://github.com/mintiti/pyrat-rust", default-features = false }
+rand = { version = "0.8", features = ["small_rng"] }
