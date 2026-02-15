@@ -5,7 +5,11 @@ from __future__ import annotations
 import numpy as np
 
 
-def select_action_from_strategy(strategy: np.ndarray, temperature: float = 1.0) -> int:
+def select_action_from_strategy(
+    strategy: np.ndarray,
+    temperature: float = 1.0,
+    rng: np.random.Generator | None = None,
+) -> int:
     """Sample an action from a probability distribution.
 
     Args:
@@ -14,6 +18,7 @@ def select_action_from_strategy(strategy: np.ndarray, temperature: float = 1.0) 
             - 0.0 = deterministic argmax
             - 1.0 = sample from distribution
             - >1.0 = more random
+        rng: Optional numpy Generator for reproducible sampling.
 
     Returns:
         Selected action index.
@@ -21,8 +26,10 @@ def select_action_from_strategy(strategy: np.ndarray, temperature: float = 1.0) 
     if temperature == 0.0:
         return int(np.argmax(strategy))
 
+    choose = rng.choice if rng is not None else np.random.choice
+
     if temperature == 1.0:
-        return int(np.random.choice(len(strategy), p=strategy))
+        return int(choose(len(strategy), p=strategy))
 
     # Apply temperature
     log_probs = np.log(strategy + 1e-10)
@@ -30,4 +37,4 @@ def select_action_from_strategy(strategy: np.ndarray, temperature: float = 1.0) 
     tempered_probs = np.exp(tempered_logits)
     tempered_probs /= tempered_probs.sum()
 
-    return int(np.random.choice(len(tempered_probs), p=tempered_probs))
+    return int(choose(len(tempered_probs), p=tempered_probs))

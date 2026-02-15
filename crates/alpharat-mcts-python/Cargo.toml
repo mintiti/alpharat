@@ -1,0 +1,15 @@
+[package]
+name = "alpharat-mcts-python"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[lib]
+name = "alpharat_mcts_python"
+crate-type = ["cdylib"]
+
+[dependencies]
+alpharat-mcts = { path = "../alpharat-mcts", features = ["python"] }
+pyrat = { package = "pyrat-rust", git = "https://github.com/mintiti/pyrat-rust", branch = "refactor/split-cdylib-from-rlib", features = ["python"] }
+pyo3 = { version = "0.25", features = ["extension-module"] }
+numpy = "0.25"

@@ -13,6 +13,7 @@ from alpharat.ai.greedy_agent import GreedyAgent
 from alpharat.ai.mcts_agent import MCTSAgent
 from alpharat.ai.nn_agent import NNAgent
 from alpharat.ai.random_agent import RandomAgent
+from alpharat.ai.rust_mcts_agent import RustMCTSAgent
 
 __all__ = [
     "Agent",
@@ -26,4 +27,5 @@ __all__ = [
     "NNAgentConfig",
     "RandomAgent",
     "RandomAgentConfig",
+    "RustMCTSAgent",
 ]

@@ -1,4 +1,6 @@
 pub mod backend;
+#[cfg(feature = "python")]
+pub mod bindings;
 pub mod node;
 pub mod search;
 pub mod tree;
