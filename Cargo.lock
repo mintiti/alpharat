@@ -372,7 +372,7 @@ dependencies = [
 [[package]]
 name = "pyrat-rust"
 version = "0.1.0"
-source = "git+https://github.com/mintiti/pyrat-rust?branch=refactor%2Fsplit-cdylib-from-rlib#1e80877d055e25e69e60d68bedc7517dda686aa0"
+source = "git+https://github.com/mintiti/pyrat-rust?branch=main#19e0131d277ed6a00f88342839a56c2026543108"
 dependencies = [
  "ndarray",
  "numpy",
