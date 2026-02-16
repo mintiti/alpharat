@@ -460,7 +460,7 @@ class MCTSTree:
             Valid moves map to themselves, blocked moves map to STAY.
         """
         stay_action = 4
-        valid_moves = set(self.game.get_valid_moves(position))  # type: ignore[attr-defined]
+        valid_moves = set(self.game.get_valid_moves(position))
 
         effective = []
         for action in range(5):

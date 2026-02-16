@@ -66,7 +66,7 @@ class TestGameConfigIntegration:
         assert game.height == config.height
 
         # Verify game is playable (can make moves)
-        valid_moves = game.get_valid_moves(game.player1_position)  # type: ignore[attr-defined]
+        valid_moves = game.get_valid_moves(game.player1_position)
         assert len(valid_moves) > 0
 
         # Can actually make a move without error
