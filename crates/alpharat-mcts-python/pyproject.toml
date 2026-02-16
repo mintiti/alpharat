@@ -8,5 +8,9 @@ version = "0.1.0"
 requires-python = ">=3.11"
 
 [tool.maturin]
+# We replace pyrat-engine's native module with a superset that includes MCTS bindings,
+# because the Rust MCTS crate depends on pyrat-rust types that must be compiled into
+# the same .so (PyO3 types can't be passed across separate extension modules).
 module-name = "pyrat_engine._core"
 python-source = "python"
+python-packages = ["pyrat_engine", "alpharat_mcts"]
