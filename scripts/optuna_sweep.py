@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""PUCT parameter sweep using Optuna.
+"""PUCT parameter sweep using Optuna with Rust MCTS.
 
 Usage:
     uv run python scripts/optuna_sweep.py
@@ -16,18 +16,17 @@ from pathlib import Path
 import optuna
 import pandas as pd
 
-from alpharat.ai import GreedyAgent, MCTSAgent
+from alpharat.ai import GreedyAgent
+from alpharat.ai.rust_mcts_agent import RustMCTSAgent
 from alpharat.eval.game import play_game
-from alpharat.mcts.decoupled_puct import DecoupledPUCTConfig
 
 # Game parameters - 7x7 open maze
 WIDTH, HEIGHT = 7, 7
 CHEESE_COUNT, MAX_TURNS = 10, 50
 WALL_DENSITY, MUD_DENSITY = 0.0, 0.0
-GAMES_PER_CONFIG = 100
+GAMES_PER_CONFIG = 1000
 
-# Seed configs for normalized Q-values (Q in [0, 1])
-# Pareto front from per_node_puct_7x7 sweep (847 trials, no FPU reduction).
+# Seed configs: Pareto front from per_node_puct_7x7 sweep (847 trials, no FPU reduction).
 # Each config seeded at both KataGo (0.2) and LC0 (0.33) FPU values.
 _PARETO_FRONT = [
     {"n_sims": 200, "c_puct": 0.548, "force_k": 1.184},
@@ -46,29 +45,41 @@ _PARETO_FRONT = [
     {"n_sims": 855, "c_puct": 0.576, "force_k": 0.099},
     {"n_sims": 1007, "c_puct": 0.505, "force_k": 0.265},
 ]
-SEED_CONFIGS = [{**cfg, "fpu_reduction": fpu} for cfg in _PARETO_FRONT for fpu in (0.2, 0.33)]
+
+# Tuned configs from fpu_7x7 sweep (configs/mcts/)
+_TUNED_CONFIGS = [
+    {"n_sims": 290, "c_puct": 0.561, "force_k": 0.050, "fpu_reduction": 0.295},  # fast
+    {"n_sims": 475, "c_puct": 0.529, "force_k": 0.017, "fpu_reduction": 0.264},  # tuned
+    {"n_sims": 901, "c_puct": 0.588, "force_k": 0.017, "fpu_reduction": 0.196},  # strong
+]
+
+SEED_CONFIGS = [
+    {**cfg, "fpu_reduction": fpu} for cfg in _PARETO_FRONT for fpu in (0.2, 0.33)
+] + _TUNED_CONFIGS
 
 
 def objective(trial: optuna.Trial) -> tuple[float, int]:
     """Run games vs Greedy, return win rate."""
-    n_sims = trial.suggest_int("n_sims", 200, 1200, log=True)
+    n_sims = trial.suggest_int("n_sims", 200, 3000, log=True)
     c_puct = trial.suggest_float("c_puct", 0.5, 2.0, log=True)
     force_k = trial.suggest_float("force_k", 0.01, 5.0, log=True)
     fpu_reduction = trial.suggest_float("fpu_reduction", 0.1, 0.5)
 
     wins = 0.0
     for game_idx in range(GAMES_PER_CONFIG):
-        seed = game_idx  # Same mazes for all configs
-        mcts_config = DecoupledPUCTConfig(
-            simulations=n_sims, c_puct=c_puct, force_k=force_k, fpu_reduction=fpu_reduction
+        agent = RustMCTSAgent(
+            simulations=n_sims,
+            c_puct=c_puct,
+            force_k=force_k,
+            fpu_reduction=fpu_reduction,
+            batch_size=16,
         )
-        agent = MCTSAgent(mcts_config=mcts_config)
         opponent = GreedyAgent()
 
         result = play_game(
             agent,
             opponent,
-            seed=seed,
+            seed=game_idx,
             width=WIDTH,
             height=HEIGHT,
             cheese_count=CHEESE_COUNT,
@@ -106,9 +117,9 @@ def enqueue_seed_trials(study: optuna.Study, csv_path: str, top_n: int) -> None:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="PUCT parameter sweep with Optuna")
+    parser = argparse.ArgumentParser(description="PUCT parameter sweep with Optuna (Rust MCTS)")
     parser.add_argument("--n-jobs", type=int, default=1, help="Parallel workers")
-    parser.add_argument("--study-name", default="per_node_puct_7x7", help="Study name")
+    parser.add_argument("--study-name", default="rust_fpu_7x7", help="Study name")
     parser.add_argument("--seed-from", type=str, help="CSV file to seed trials from")
     parser.add_argument("--seed-top", type=int, default=20, help="Number of top configs to seed")
     args = parser.parse_args()
