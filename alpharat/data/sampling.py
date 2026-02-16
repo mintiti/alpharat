@@ -76,6 +76,8 @@ class GameStats:
     score_p2: float
     turns: int
     cheese_available: int
+    nn_calls: int = 0
+    nn_time_s: float = 0.0
 
 
 @dataclass
@@ -103,6 +105,10 @@ class SamplingMetrics:
     min_turns: int
     max_turns: int
 
+    # NN timing
+    total_nn_calls: int = 0
+    total_nn_time_s: float = 0.0
+
     @property
     def games_per_second(self) -> float:
         return self.total_games / self.elapsed_seconds if self.elapsed_seconds > 0 else 0.0
@@ -127,17 +133,29 @@ class SamplingMetrics:
         return self.total_cheese_collected / self.total_cheese_available
 
     @property
+    def avg_nn_latency_ms(self) -> float:
+        if self.total_nn_calls == 0:
+            return 0.0
+        return self.total_nn_time_s / self.total_nn_calls * 1000
+
+    @property
     def draw_rate(self) -> float:
         return self.draws / self.total_games if self.total_games > 0 else 0.0
 
     def __str__(self) -> str:
+        nn_line = ""
+        if self.total_nn_calls > 0:
+            nn_line = (
+                f"    nn_latency={self.avg_nn_latency_ms:.1f}ms avg ({self.total_nn_calls} calls)\n"
+            )
         return (
             f"SamplingMetrics(\n"
             f"  Throughput:\n"
             f"    workers={self.workers}, elapsed={self.elapsed_seconds:.2f}s\n"
-            f"    games={self.total_games} ({self.games_per_second:.2f}/s)\n"
-            f"    positions={self.total_positions} ({self.positions_per_second:.2f}/s)\n"
-            f"    simulations={self.total_simulations} ({self.simulations_per_second:.2f}/s)\n"
+            f"    simulations={self.total_simulations} ({self.simulations_per_second:.0f}/s)\n"
+            f"    positions={self.total_positions} ({self.positions_per_second:.0f}/s)\n"
+            f"    games={self.total_games} ({self.games_per_second:.1f}/s)\n"
+            f"{nn_line}"
             f"  Outcomes (P1 perspective):\n"
             f"    W/D/L = {self.p1_wins}/{self.draws}/{self.p2_wins}\n"
             f"    draw_rate = {self.draw_rate:.1%}\n"
@@ -268,23 +286,17 @@ def play_and_record_game(
     cheese_available = config.game.cheese_count
     positions = 0
     total_simulations = 0
+    nn_calls = 0
+    nn_total_time = 0.0
 
     with GameRecorder(
         game, games_dir, config.game.width, config.game.height, auto_save=auto_save
     ) as recorder:
         while not is_terminal(game):
-            # Create predict_fn if NN context available
-            # Note: build_tree deep-copies the game, so we need to create predict_fn
-            # for the copy, not the original. We pass None here and let build_tree
-            # handle it, or we restructure to pass nn_ctx.
-            # Actually, we need to create predict_fn AFTER build_tree gets the simulator.
-            # Let's restructure build_tree to handle this.
             predict_fn = None
             if nn_ctx is not None:
-                # We need the simulator from inside build_tree, so we'll inline
-                # the tree creation here to capture the simulator reference
                 simulator = copy.deepcopy(game)
-                predict_fn = make_predict_fn(
+                raw_predict_fn = make_predict_fn(
                     nn_ctx.model,
                     nn_ctx.builder,
                     simulator,
@@ -292,6 +304,18 @@ def play_and_record_game(
                     nn_ctx.height,
                     nn_ctx.device,
                 )
+
+                def timed_predict_fn(
+                    obs: Any, *, _raw: Any = raw_predict_fn
+                ) -> tuple[np.ndarray, np.ndarray, float, float]:
+                    nonlocal nn_calls, nn_total_time
+                    start = time.perf_counter()
+                    result: tuple[np.ndarray, np.ndarray, float, float] = _raw(obs)
+                    nn_total_time += time.perf_counter() - start
+                    nn_calls += 1
+                    return result
+
+                predict_fn = timed_predict_fn
                 dummy = np.ones(5) / 5
                 root = MCTSNode(
                     game_state=None,
@@ -351,6 +375,8 @@ def play_and_record_game(
         score_p2=score_p2,
         turns=game.turn,
         cheese_available=cheese_available,
+        nn_calls=nn_calls,
+        nn_time_s=nn_total_time,
     )
 
     # Return game data if not auto-saving (for bundling)
@@ -459,6 +485,8 @@ def run_sampling(config: SamplingConfig, *, verbose: bool = True) -> tuple[Path,
     # Aggregation accumulators
     total_positions = 0
     total_simulations = 0
+    total_nn_calls = 0
+    total_nn_time_s = 0.0
     p1_wins = 0
     p2_wins = 0
     draws = 0
@@ -508,6 +536,8 @@ def run_sampling(config: SamplingConfig, *, verbose: bool = True) -> tuple[Path,
         # Throughput stats
         total_positions += game_stats.positions
         total_simulations += game_stats.simulations
+        total_nn_calls += game_stats.nn_calls
+        total_nn_time_s += game_stats.nn_time_s
 
         # Outcome stats
         if game_stats.winner == 1:
@@ -528,20 +558,27 @@ def run_sampling(config: SamplingConfig, *, verbose: bool = True) -> tuple[Path,
 
         if verbose and completed % 100 == 0:
             elapsed = time.perf_counter() - start_time
-            rate = completed / elapsed
+            games_rate = completed / elapsed
+            sims_rate = total_simulations / elapsed
+            pos_rate = total_positions / elapsed
             cheese_util = (
                 total_cheese_collected / total_cheese_available
                 if total_cheese_available > 0
                 else 0.0
             )
             draw_rate = draws / completed
-            avg_turns = total_turns / completed
+
+            sims_str = f"{sims_rate / 1000:.1f}k" if sims_rate >= 1000 else f"{sims_rate:.0f}"
+            nn_str = ""
+            if total_nn_calls > 0:
+                nn_latency = total_nn_time_s / total_nn_calls * 1000
+                nn_str = f" | nn {nn_latency:.1f}ms"
             print(
                 f"[{completed}/{num_games}] "
-                f"{rate:.1f} games/s | "
+                f"{sims_str} sims/s | {pos_rate:.0f} pos/s{nn_str} | "
+                f"{games_rate:.1f} games/s | "
                 f"W/D/L {p1_wins}/{draws}/{p2_wins} ({draw_rate:.0%} draws) | "
-                f"cheese {cheese_util:.0%} | "
-                f"avg turns {avg_turns:.1f}"
+                f"cheese {cheese_util:.0%}"
             )
 
     # Send sentinel values to stop workers
@@ -568,6 +605,8 @@ def run_sampling(config: SamplingConfig, *, verbose: bool = True) -> tuple[Path,
         total_turns=total_turns,
         min_turns=int(min_turns) if min_turns != float("inf") else 0,
         max_turns=max_turns,
+        total_nn_calls=total_nn_calls,
+        total_nn_time_s=total_nn_time_s,
     )
 
     if verbose:
