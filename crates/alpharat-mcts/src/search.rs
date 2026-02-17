@@ -28,6 +28,9 @@ pub struct SearchConfig {
     /// Per-move alpha = concentration / n_outcomes.
     /// Default: 10.83 (KataGo's value, = 361 * 0.03).
     pub noise_concentration: f32,
+    /// Maximum collision retries per batch before stopping the gather phase.
+    /// 0 = use batch_size as the limit (default).
+    pub max_collisions: u32,
 }
 
 impl Default for SearchConfig {
@@ -38,6 +41,7 @@ impl Default for SearchConfig {
             force_k: 2.0,
             noise_epsilon: 0.0,
             noise_concentration: 10.83,
+            max_collisions: 0,
         }
     }
 }
@@ -379,15 +383,56 @@ fn simulate_batch(
     rng: &mut impl Rng,
 ) {
     let root = tree.root();
+    let max_collisions = if config.max_collisions > 0 {
+        config.max_collisions
+    } else {
+        batch_size
+    };
 
-    // Gather phase: descend batch_size times.
-    let mut outcomes = Vec::with_capacity(batch_size as usize);
-    for _ in 0..batch_size {
-        outcomes.push(descend(tree.arena_mut(), root, game, config, rng));
+    // ---- OOO Gather Phase (matches Lc0's GatherMinibatch) ----
+    // Target batch_size NN evaluations. Terminals are "free" — backed up
+    // immediately and their slot recycled for another descent.
+    // Three stopping conditions:
+    //   1. NN batch full (nn_outcomes.len() >= batch_size)
+    //   2. Collision budget exhausted
+    //   3. OOO budget exhausted (too many terminals, prevents runaway)
+    let max_ooo = 2 * batch_size; // Lc0 uses 2.4x; 2x is conservative enough
+    let mut nn_outcomes: Vec<DescentOutcome> = Vec::with_capacity(batch_size as usize);
+    let mut collisions = 0u32;
+    let mut n_ooo = 0u32;
+
+    while (nn_outcomes.len() as u32) < batch_size
+        && collisions < max_collisions
+        && n_ooo < max_ooo
+    {
+        let outcome = descend(tree.arena_mut(), root, game, config, rng);
+
+        match outcome {
+            DescentOutcome::NeedsEval { .. } => {
+                nn_outcomes.push(outcome);
+            }
+            DescentOutcome::Terminal {
+                ref path,
+                leaf_idx,
+                leaf_claimed,
+            } => {
+                if tree.arena()[leaf_idx].total_visits() == 0 {
+                    populate_node(tree.arena_mut(), leaf_idx, None);
+                }
+                backup(tree.arena_mut(), path, leaf_idx, 0.0, 0.0);
+                let claimed = if leaf_claimed { Some(leaf_idx) } else { None };
+                cleanup_descent(tree.arena_mut(), path, claimed);
+                n_ooo += 1;
+            }
+            DescentOutcome::Collision { ref path } => {
+                cleanup_descent(tree.arena_mut(), path, None);
+                collisions += 1;
+            }
+        }
     }
 
-    // Eval phase: collect game states from NeedsEval, batch evaluate.
-    let needs_eval_refs: Vec<&GameState> = outcomes
+    // ---- Eval Phase ----
+    let needs_eval_refs: Vec<&GameState> = nn_outcomes
         .iter()
         .filter_map(|o| match o {
             DescentOutcome::NeedsEval { game_state, .. } => Some(game_state),
@@ -401,46 +446,36 @@ fn simulate_batch(
         backend.evaluate_batch(&needs_eval_refs)
     };
 
-    // Populate + backup + cleanup phase.
+    // ---- Backup Phase (NeedsEval only) ----
     let mut eval_idx = 0;
-    for outcome in outcomes {
-        match outcome {
-            DescentOutcome::NeedsEval {
-                path,
-                leaf_idx,
-                ..
-            } => {
-                let eval = &eval_results[eval_idx];
-                eval_idx += 1;
+    for outcome in nn_outcomes {
+        if let DescentOutcome::NeedsEval {
+            path, leaf_idx, ..
+        } = outcome
+        {
+            let eval = &eval_results[eval_idx];
+            eval_idx += 1;
 
-                populate_node(tree.arena_mut(), leaf_idx, Some(eval));
+            populate_node(tree.arena_mut(), leaf_idx, Some(eval));
 
-                // Inject Dirichlet noise at root after NN evaluation.
-                if leaf_idx == root && config.noise_epsilon > 0.0 {
-                    let node = &mut tree.arena_mut()[leaf_idx];
-                    apply_dirichlet_noise(&mut node.p1, config.noise_epsilon, config.noise_concentration, rng);
-                    apply_dirichlet_noise(&mut node.p2, config.noise_epsilon, config.noise_concentration, rng);
-                }
+            if leaf_idx == root && config.noise_epsilon > 0.0 {
+                let node = &mut tree.arena_mut()[leaf_idx];
+                apply_dirichlet_noise(
+                    &mut node.p1,
+                    config.noise_epsilon,
+                    config.noise_concentration,
+                    rng,
+                );
+                apply_dirichlet_noise(
+                    &mut node.p2,
+                    config.noise_epsilon,
+                    config.noise_concentration,
+                    rng,
+                );
+            }
 
-                backup(tree.arena_mut(), &path, leaf_idx, eval.value_p1, eval.value_p2);
-                cleanup_descent(tree.arena_mut(), &path, Some(leaf_idx));
-            }
-            DescentOutcome::Terminal {
-                path,
-                leaf_idx,
-                leaf_claimed,
-            } => {
-                // Mark as terminal if first visit.
-                if tree.arena()[leaf_idx].total_visits() == 0 {
-                    populate_node(tree.arena_mut(), leaf_idx, None);
-                }
-                backup(tree.arena_mut(), &path, leaf_idx, 0.0, 0.0);
-                let claimed = if leaf_claimed { Some(leaf_idx) } else { None };
-                cleanup_descent(tree.arena_mut(), &path, claimed);
-            }
-            DescentOutcome::Collision { path } => {
-                cleanup_descent(tree.arena_mut(), &path, None);
-            }
+            backup(tree.arena_mut(), &path, leaf_idx, eval.value_p1, eval.value_p2);
+            cleanup_descent(tree.arena_mut(), &path, Some(leaf_idx));
         }
     }
 }
@@ -1998,7 +2033,8 @@ mod tests {
         let result = run_search(&mut tree, &game, &BACKEND, &config, 50, 1, &mut r);
 
         // Should complete without panics. 3-turn game means terminals appear.
-        assert_eq!(result.total_visits, 50);
+        // OOO may add free terminal visits beyond n_sims.
+        assert!(result.total_visits >= 50, "expected >= 50, got {}", result.total_visits);
 
         // Walk nodes: any terminal node should have is_terminal set.
         let arena = tree.arena();
@@ -2299,7 +2335,8 @@ mod tests {
 
         let result = run_search(&mut tree, &game, &backend, &config, 50, 1, &mut r);
 
-        assert_eq!(result.total_visits, 50);
+        // OOO may add free terminal visits beyond n_sims.
+        assert!(result.total_visits >= 50, "expected >= 50, got {}", result.total_visits);
         assert!(
             result.value_p1 > 2.0,
             "v1 should be >= leaf value 3.0 (edge rewards non-negative), got {}",
@@ -2540,5 +2577,82 @@ mod tests {
         // Policies should still sum to 1.
         let sum: f32 = result_noise.policy_p1.iter().sum();
         assert!((sum - 1.0).abs() < 1e-5, "Noisy policy should sum to ~1.0, got {}", sum);
+    }
+
+    // ---- OOO gather tests ----
+
+    // OOO: short game has terminals within shallow search. Terminals are
+    // backed up OOO (free), so the tree gets more total visits than n_sims
+    // since terminal visits don't consume NN slots.
+    #[test]
+    fn ooo_terminal_fills_batch() {
+        // short_game: 3 turns, 1 cheese. Terminals appear at depth 3.
+        let game = test_util::short_game();
+        let mut tree = MCTSTree::new(&game);
+        let config = default_config();
+        let mut r = search_rng();
+
+        // Run with batch_size=8, 50 sims. OOO terminals are free, so the
+        // tree accumulates more visits than the 50 NN eval budget.
+        let result = run_search(&mut tree, &game, &BACKEND, &config, 50, 8, &mut r);
+
+        assert!(
+            result.total_visits > 50,
+            "OOO terminals should give more visits than n_sims={}, got {}",
+            50,
+            result.total_visits
+        );
+    }
+
+    // OOO: collision budget prevents infinite gather on empty tree.
+    // batch_size=10 on unvisited root: first descent claims root, retries collide.
+    #[test]
+    fn ooo_collision_budget_stops_gather() {
+        let cheese = [Coordinates::new(2, 2)];
+        let game = test_util::open_5x5_game(
+            Coordinates::new(1, 1),
+            Coordinates::new(3, 3),
+            &cheese,
+        );
+        let mut tree = MCTSTree::new(&game);
+        let config = SearchConfig {
+            max_collisions: 5,
+            ..default_config()
+        };
+        let mut r = search_rng();
+
+        // n_sims=1, batch_size=10, max_collisions=5.
+        // First descent claims root (NeedsEval). Retries collide.
+        // After 5 collisions the gather stops with 1 NN eval.
+        let result = run_search(&mut tree, &game, &BACKEND, &config, 1, 10, &mut r);
+
+        assert_eq!(
+            result.total_visits, 1,
+            "Should have exactly 1 visit (1 NN eval, rest collided). Got {}",
+            result.total_visits
+        );
+    }
+
+    // OOO: with batch_size=1, each batch is exactly 1 descent — no retries
+    // possible. Behavior is identical to the old fixed gather loop.
+    #[test]
+    fn ooo_no_change_batch_size_1() {
+        let cheese = [Coordinates::new(2, 2)];
+        let game = test_util::open_5x5_game(
+            Coordinates::new(0, 0),
+            Coordinates::new(4, 4),
+            &cheese,
+        );
+        let mut tree = MCTSTree::new(&game);
+        let config = default_config();
+        let mut r = search_rng();
+
+        let result = run_search(&mut tree, &game, &BACKEND, &config, 20, 1, &mut r);
+
+        assert_eq!(
+            result.total_visits, 20,
+            "batch_size=1: each batch is 1 descent, 20 sims = 20 visits. Got {}",
+            result.total_visits
+        );
     }
 }

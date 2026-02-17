@@ -140,6 +140,7 @@ class RustMCTSConfig(MCTSConfigBase):
     batch_size: int = 8
     noise_epsilon: float = 0.0
     noise_concentration: float = 10.83
+    max_collisions: int = 0
 
     def for_evaluation(self) -> Self:
         """Return a copy with Dirichlet noise disabled."""
@@ -168,6 +169,7 @@ class RustMCTSConfig(MCTSConfigBase):
             batch_size=self.batch_size,
             noise_epsilon=self.noise_epsilon,
             noise_concentration=self.noise_concentration,
+            max_collisions=self.max_collisions,
             predict_fn=predict_fn,
         )
 

@@ -37,5 +37,6 @@ def rust_mcts_search(
     force_k: float = 2.0,
     noise_epsilon: float = 0.0,
     noise_concentration: float = 10.83,
+    max_collisions: int = 0,
     seed: int | None = None,
 ) -> SearchResult: ...

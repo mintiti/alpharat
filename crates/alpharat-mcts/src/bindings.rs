@@ -201,7 +201,7 @@ fn parse_eval_results(result: &Bound<'_, PyAny>, n: usize) -> Vec<EvalResult> {
 /// With `predict_fn`, the GIL is held during search (Python callbacks need it).
 /// Without `predict_fn`, the GIL is released for pure Rust computation.
 #[pyfunction]
-#[pyo3(signature = (game, *, predict_fn=None, simulations=100, batch_size=8, c_puct=1.5, fpu_reduction=0.2, force_k=2.0, noise_epsilon=0.0, noise_concentration=10.83, seed=None))]
+#[pyo3(signature = (game, *, predict_fn=None, simulations=100, batch_size=8, c_puct=1.5, fpu_reduction=0.2, force_k=2.0, noise_epsilon=0.0, noise_concentration=10.83, max_collisions=0, seed=None))]
 fn rust_mcts_search(
     py: Python<'_>,
     game: PyRef<'_, PyRat>,
@@ -213,6 +213,7 @@ fn rust_mcts_search(
     force_k: f32,
     noise_epsilon: f32,
     noise_concentration: f32,
+    max_collisions: u32,
     seed: Option<u64>,
 ) -> PyResult<PySearchResult> {
     let game_state = game.game_state().clone();
@@ -223,6 +224,7 @@ fn rust_mcts_search(
         force_k,
         noise_epsilon,
         noise_concentration,
+        max_collisions,
     };
     let mut rng = match seed {
         Some(s) => SmallRng::seed_from_u64(s),
