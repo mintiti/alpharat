@@ -512,6 +512,214 @@ class TestBenchmarkOperations:
                 exp.create_benchmark(name="duplicate", config={}, checkpoints=[])
 
 
+class TestDeferredRegistration:
+    """Tests for prepare/register split and recovery."""
+
+    def test_prepare_batch_no_manifest_write(self) -> None:
+        """prepare_batch creates directory but does not write to manifest."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            exp = ExperimentManager(tmpdir)
+            batch_dir, batch_uuid = exp.prepare_batch(
+                group="test_group",
+                mcts_config=DecoupledPUCTConfig(simulations=100),
+                game=GameConfig(width=5, height=5, max_turns=30, cheese_count=5),
+            )
+
+            assert batch_dir.exists()
+            assert (batch_dir / GAMES_DIR).exists()
+
+            manifest = exp.load_manifest()
+            assert len(manifest.batches) == 0
+
+    def test_register_batch_writes_manifest(self) -> None:
+        """register_batch adds entry to manifest."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            exp = ExperimentManager(tmpdir)
+            mcts = DecoupledPUCTConfig(simulations=100)
+            game = GameConfig(width=5, height=5, max_turns=30, cheese_count=5)
+
+            batch_dir, batch_uuid = exp.prepare_batch(
+                group="test_group", mcts_config=mcts, game=game
+            )
+            exp.register_batch(
+                group="test_group", batch_uuid=batch_uuid, mcts_config=mcts, game=game
+            )
+
+            manifest = exp.load_manifest()
+            batch_id = f"test_group/{batch_uuid}"
+            assert batch_id in manifest.batches
+
+    def test_prepare_batch_recovers_incomplete(self) -> None:
+        """prepare_batch cleans up leftover directory without manifest entry."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            exp = ExperimentManager(tmpdir)
+            mcts = DecoupledPUCTConfig(simulations=100)
+            game = GameConfig(width=5, height=5, max_turns=30, cheese_count=5)
+
+            # Simulate a crash: prepare but don't register
+            batch_dir1, _ = exp.prepare_batch(group="g", mcts_config=mcts, game=game)
+            assert batch_dir1.exists()
+
+            # Second prepare gets a new UUID, doesn't collide
+            batch_dir2, _ = exp.prepare_batch(group="g", mcts_config=mcts, game=game)
+            assert batch_dir2.exists()
+            # Both dirs exist (different UUIDs), no crash
+            assert batch_dir1 != batch_dir2
+
+    def test_prepare_run_no_manifest_write(self) -> None:
+        """prepare_run creates directory but does not write to manifest."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            exp = ExperimentManager(tmpdir)
+            run_dir, actual_name = exp.prepare_run(
+                name="test_run", config={"lr": 0.001}, source_shards="s1"
+            )
+
+            assert run_dir.exists()
+            assert (run_dir / CHECKPOINTS_DIR).exists()
+            assert (run_dir / CONFIG_FILE).exists()
+
+            manifest = exp.load_manifest()
+            assert len(manifest.runs) == 0
+
+    def test_register_run_writes_manifest(self) -> None:
+        """register_run adds entry to manifest."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            exp = ExperimentManager(tmpdir)
+            config = {"lr": 0.001}
+
+            run_dir, actual_name = exp.prepare_run(
+                name="test_run", config=config, source_shards="s1"
+            )
+            exp.register_run(name=actual_name, config=config, source_shards="s1")
+
+            manifest = exp.load_manifest()
+            assert actual_name in manifest.runs
+
+    def test_prepare_run_recovers_incomplete(self) -> None:
+        """prepare_run cleans up leftover directory without manifest entry."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            exp = ExperimentManager(tmpdir)
+            config = {"lr": 0.001}
+
+            # Simulate crash: prepare but don't register
+            run_dir1, name1 = exp.prepare_run(name="my_run", config=config, source_shards="s1")
+            assert run_dir1.exists()
+
+            # Second prepare with same name: dir exists but no manifest entry → cleanup
+            run_dir2, name2 = exp.prepare_run(name="my_run", config=config, source_shards="s1")
+            assert run_dir2.exists()
+            assert name2 == "my_run"  # Same name reused since not registered
+
+    def test_prepare_run_raises_if_registered(self) -> None:
+        """prepare_run raises FileExistsError if directory AND manifest entry exist."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            exp = ExperimentManager(tmpdir)
+            config = {"lr": 0.001}
+
+            # Full create (prepare + register)
+            exp.create_run(name="my_run", config=config, source_shards="s1")
+
+            # prepare_run with different config should raise ValueError (config mismatch)
+            with pytest.raises(ValueError, match="different config"):
+                exp.prepare_run(name="my_run", config={"lr": 0.01}, source_shards="s1")
+
+    def test_prepare_run_auto_increments(self) -> None:
+        """prepare_run auto-increments name when same config is registered."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            exp = ExperimentManager(tmpdir)
+            config = {"model": {"hidden_dim": 256}}
+
+            # First run: registered
+            exp.create_run(name="my_exp", config=config, source_shards="s1")
+
+            # Second prepare: same config → auto-increment
+            _, name2 = exp.prepare_run(name="my_exp", config=config, source_shards="s1")
+            assert name2 == "my_exp_run2"
+
+    def test_create_benchmark_transactional(self) -> None:
+        """create_benchmark writes directory, results, and manifest in one shot."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            exp = ExperimentManager(tmpdir)
+            results = {"elo": {"agent_a": 1500}}
+
+            bench_dir = exp.create_benchmark(
+                name="bench_1",
+                config={"games": 50},
+                checkpoints=["run_a"],
+                results=results,
+            )
+
+            assert bench_dir.exists()
+            assert (bench_dir / CONFIG_FILE).exists()
+            assert (bench_dir / RESULTS_FILE).exists()
+
+            import json
+
+            loaded = json.loads((bench_dir / RESULTS_FILE).read_text())
+            assert loaded == results
+
+            manifest = exp.load_manifest()
+            assert "bench_1" in manifest.benchmarks
+
+    def test_create_benchmark_recovers_incomplete(self) -> None:
+        """create_benchmark cleans up leftover directory without manifest entry."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            exp = ExperimentManager(tmpdir)
+            exp.init()
+
+            # Simulate leftover: create dir manually without manifest entry
+            bench_dir = Path(tmpdir) / BENCHMARKS_DIR / "stale_bench"
+            bench_dir.mkdir(parents=True)
+            (bench_dir / "some_file.txt").write_text("leftover")
+
+            # create_benchmark should clean up and proceed
+            result_dir = exp.create_benchmark(
+                name="stale_bench",
+                config={"games": 50},
+                checkpoints=["run_a"],
+                results={"elo": {}},
+            )
+
+            assert result_dir.exists()
+            assert (result_dir / CONFIG_FILE).exists()
+            assert not (result_dir / "some_file.txt").exists()
+
+    def test_create_benchmark_raises_if_registered(self) -> None:
+        """create_benchmark raises FileExistsError if already registered."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            exp = ExperimentManager(tmpdir)
+            exp.create_benchmark(name="done_bench", config={}, checkpoints=[], results={"elo": {}})
+
+            with pytest.raises(FileExistsError):
+                exp.create_benchmark(
+                    name="done_bench", config={}, checkpoints=[], results={"elo": {}}
+                )
+
+    def test_create_batch_still_works(self) -> None:
+        """create_batch wrapper does prepare + register in one call."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            exp = ExperimentManager(tmpdir)
+            batch_dir = exp.create_batch(
+                group="wrapper_test",
+                mcts_config=DecoupledPUCTConfig(simulations=100),
+                game=GameConfig(width=5, height=5, max_turns=30, cheese_count=5),
+            )
+
+            assert batch_dir.exists()
+            manifest = exp.load_manifest()
+            assert len(manifest.batches) == 1
+
+    def test_create_run_still_works(self) -> None:
+        """create_run wrapper does prepare + register in one call."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            exp = ExperimentManager(tmpdir)
+            run_dir = exp.create_run(name="wrapper_test", config={"lr": 0.001}, source_shards="s1")
+
+            assert run_dir.exists()
+            manifest = exp.load_manifest()
+            assert "wrapper_test" in manifest.runs
+
+
 class TestManifestPersistence:
     """Tests for manifest persistence and roundtrip."""
 

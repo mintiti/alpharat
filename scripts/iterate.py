@@ -247,14 +247,13 @@ def run_training_phase(
         resume_from=str(resume_from) if resume_from else None,
     )
 
-    # Create run via ExperimentManager
-    run_dir = exp.create_run(
+    # Prepare run directory (no manifest entry yet)
+    run_dir, actual_run_name = exp.prepare_run(
         name=run_name,
         config=train_config.model_dump(),
         source_shards=shard_id,
         parent_checkpoint=str(resume_from) if resume_from else None,
     )
-    actual_run_name = run_dir.name
 
     logger.info(f"Training run: {actual_run_name}")
 
@@ -266,6 +265,14 @@ def run_training_phase(
         output_dir=run_dir.parent,
         run_name=actual_run_name,
         checkpoints_subdir="checkpoints",
+    )
+
+    # Register run in manifest now that training succeeded
+    exp.register_run(
+        name=actual_run_name,
+        config=train_config.model_dump(),
+        source_shards=shard_id,
+        parent_checkpoint=str(resume_from) if resume_from else None,
     )
 
     return checkpoint_path
@@ -315,18 +322,16 @@ def run_benchmark_phase(
         baseline_checkpoint=previous_checkpoint,
     )
 
-    # Create benchmark via ExperimentManager
+    # Run tournament first, then create benchmark with results
+    result = run_tournament(tournament_config)
+
     exp.create_benchmark(
         name=benchmark_name,
         config=tournament_config.model_dump(),
         checkpoints=[str(checkpoint_path)],
+        results=result.to_dict(),
     )
     logger.info(f"Created benchmark: {benchmark_name}")
-
-    result = run_tournament(tournament_config)
-
-    # Save and print results
-    exp.save_benchmark_results(benchmark_name, result.to_dict())
     print_benchmark_results(result, anchor="greedy")
 
 
