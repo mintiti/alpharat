@@ -18,7 +18,7 @@ def add_child(
     """Helper to add a child node for testing Q computation.
 
     Sets child._edge_visits = 1 to mark it as visited (otherwise get_q_values uses FPU).
-    Also sets edge rewards for Q = edge_r + gamma * V computation.
+    Also sets edge rewards for Q = edge_r + V computation.
     """
     child = MCTSNode(
         game_state=None,
@@ -127,7 +127,7 @@ class TestNodeBackup:
     """Tests for the backup method with incremental mean updates.
 
     Backup updates self.V and marginal visit counts:
-    - self.V updated with q_value (discounted return Q = r + gamma * child.V)
+    - self.V updated with q_value (return Q = r + child.V)
     - Child V values are updated by tree.backup(), not node.backup()
     """
 
@@ -146,7 +146,7 @@ class TestNodeBackup:
         assert q1[1] == 0.0
         assert q2[2] == 0.0
 
-        # Backup with q_value (the discounted return Q = r + gamma * V)
+        # Backup with q_value (the return Q = r + V)
         simple_node.backup(action_p1=1, action_p2=2, q_value=(5.0, 3.0))
 
         q1, q2 = simple_node.get_q_values()
@@ -277,7 +277,7 @@ class TestNodeBackup:
         add_child(simple_node, idx1=1, idx2=1, v1=10.0, v2=4.0)
         add_child(simple_node, idx1=2, idx2=2, v1=15.0, v2=6.0)
 
-        # Back up through each child (q_value = child.v for gamma=1, no reward)
+        # Back up through each child (q_value = child.v, no reward)
         simple_node.backup(action_p1=0, action_p2=0, q_value=(5.0, 2.0))
         simple_node.backup(action_p1=1, action_p2=1, q_value=(10.0, 4.0))
         simple_node.backup(action_p1=2, action_p2=2, q_value=(15.0, 6.0))
@@ -373,7 +373,7 @@ class TestQValueComputation:
         backed_up_q2.append(q2_sim2)
 
         # get_q_values should return the average of backed-up returns
-        q1, q2 = node.get_q_values(gamma=1.0)
+        q1, q2 = node.get_q_values()
         expected_q1 = sum(backed_up_q1) / len(backed_up_q1)  # (11 + 7) / 2 = 9
         expected_q2 = sum(backed_up_q2) / len(backed_up_q2)  # (5.5 + 3.5) / 2 = 4.5
 
@@ -424,7 +424,7 @@ class TestQValueComputation:
         child_01._total_visits = 3
         node.children[(0, 1)] = child_01
 
-        q1, q2 = node.get_q_values(gamma=1.0)
+        q1, q2 = node.get_q_values()
 
         # Q1(0) = (2*11 + 3*22) / 5 = (22 + 66) / 5 = 88/5 = 17.6
         expected_q1_0 = (2 * 11.0 + 3 * 22.0) / 5
@@ -475,7 +475,7 @@ class TestQValueComputation:
         child_11._total_visits = 99
         node.children[(1, 1)] = child_11
 
-        q1, q2 = node.get_q_values(gamma=1.0)
+        q1, q2 = node.get_q_values()
 
         # Q1(1) = (1*100 + 99*0) / 100 = 1.0 (not 50!)
         # If this were uniform average, it would be 50

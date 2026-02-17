@@ -74,7 +74,6 @@ class PythonMCTSConfig(MCTSConfigBase):
 
     backend: Literal["python"] = "python"
     simulations: int = 100
-    gamma: float = 1.0
     c_puct: float = 1.5
     force_k: float = 2.0
     fpu_reduction: float = 0.2
@@ -93,7 +92,6 @@ class PythonMCTSConfig(MCTSConfigBase):
 
         return PythonSearcher(
             simulations=self.simulations,
-            gamma=self.gamma,
             c_puct=self.c_puct,
             force_k=self.force_k,
             fpu_reduction=self.fpu_reduction,
@@ -122,7 +120,6 @@ class PythonMCTSConfig(MCTSConfigBase):
 
         return DecoupledPUCTConfig(
             simulations=self.simulations,
-            gamma=self.gamma,
             c_puct=self.c_puct,
             force_k=self.force_k,
             fpu_reduction=self.fpu_reduction,

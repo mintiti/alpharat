@@ -37,7 +37,6 @@ class PythonSearcher:
 
     Args:
         simulations: Number of MCTS simulations.
-        gamma: Discount factor for value backup.
         c_puct: Exploration constant.
         force_k: Forced playout coefficient.
         fpu_reduction: First-play urgency penalty.
@@ -47,7 +46,6 @@ class PythonSearcher:
     def __init__(
         self,
         simulations: int,
-        gamma: float,
         c_puct: float,
         force_k: float,
         fpu_reduction: float,
@@ -57,7 +55,6 @@ class PythonSearcher:
 
         self._config = DecoupledPUCTConfig(
             simulations=simulations,
-            gamma=gamma,
             c_puct=c_puct,
             force_k=force_k,
             fpu_reduction=fpu_reduction,
@@ -98,7 +95,6 @@ class PythonSearcher:
         tree = MCTSTree(
             game=simulator,
             root=root,
-            gamma=self._config.gamma,
             predict_fn=predict_fn,
         )
 

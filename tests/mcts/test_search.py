@@ -115,7 +115,7 @@ def uniform_root() -> MCTSNode:
 @pytest.fixture
 def fake_tree(fake_game: FakeGame, uniform_root: MCTSNode) -> MCTSTree:
     """Tree with FakeGame and uniform priors."""
-    return MCTSTree(game=fake_game, root=uniform_root, gamma=1.0)  # type: ignore[arg-type]
+    return MCTSTree(game=fake_game, root=uniform_root)  # type: ignore[arg-type]
 
 
 def make_config(simulations: int) -> DecoupledPUCTConfig:
@@ -185,7 +185,7 @@ class TestTerminalHandling:
 
         # Create game and tree
         game = FakeGame()
-        tree = MCTSTree(game=game, root=root, gamma=1.0)  # type: ignore[arg-type]
+        tree = MCTSTree(game=game, root=root)  # type: ignore[arg-type]
 
         # Run search
         search = DecoupledPUCTSearch(tree, make_config(100))
@@ -252,7 +252,7 @@ class TestLeafValue:
             # Return scalar values (v1=10.0, v2=-10.0)
             return prior, prior, 10.0, -10.0
 
-        tree = MCTSTree(game=game, root=root, gamma=1.0, predict_fn=predict_fn)  # type: ignore[arg-type]
+        tree = MCTSTree(game=game, root=root, predict_fn=predict_fn)  # type: ignore[arg-type]
 
         # Run one simulation
         search = DecoupledPUCTSearch(tree, make_config(1))
@@ -285,7 +285,7 @@ class TestWithRealGame:
             nn_value_p1=0.0,
             nn_value_p2=0.0,
         )
-        return MCTSTree(game=real_game, root=root, gamma=0.99)
+        return MCTSTree(game=real_game, root=root)
 
     def test_search_with_real_game(self, real_tree: MCTSTree) -> None:
         """Search should work with real PyRat game."""
@@ -326,7 +326,7 @@ class TestMakeResultIntegration:
             nn_value_p1=0.0,
             nn_value_p2=0.0,
         )
-        tree = MCTSTree(game=game, root=root, gamma=0.99)
+        tree = MCTSTree(game=game, root=root)
         search = DecoupledPUCTSearch(tree, DecoupledPUCTConfig(simulations=50))
         result = search.search()
 
@@ -346,7 +346,7 @@ class TestMakeResultIntegration:
             nn_value_p1=0.0,
             nn_value_p2=0.0,
         )
-        tree = MCTSTree(game=game, root=root, gamma=0.99)
+        tree = MCTSTree(game=game, root=root)
         search = DecoupledPUCTSearch(tree, DecoupledPUCTConfig(simulations=50))
         result = search.search()
 
@@ -364,7 +364,7 @@ class TestMakeResultIntegration:
             nn_value_p1=0.0,
             nn_value_p2=0.0,
         )
-        tree = MCTSTree(game=game, root=root, gamma=0.99)
+        tree = MCTSTree(game=game, root=root)
         search = DecoupledPUCTSearch(tree, DecoupledPUCTConfig(simulations=50))
         result = search.search()
 
@@ -385,7 +385,7 @@ class TestMakeResultIntegration:
             nn_value_p1=0.0,
             nn_value_p2=0.0,
         )
-        tree = MCTSTree(game=game, root=root, gamma=0.99)
+        tree = MCTSTree(game=game, root=root)
         search = DecoupledPUCTSearch(tree, DecoupledPUCTConfig(simulations=50))
         result = search.search()
 
@@ -409,40 +409,11 @@ class TestBackupWithLeafValue:
         path = [(fake_tree.root, 0, 0)]
         fake_tree.backup(path, g=(5.0, -5.0))
 
-        # Value = edge_r + gamma * g = (1.0, -1.0) + 1.0 * (5.0, -5.0) = (6.0, -6.0)
+        # Value = edge_r + g = (1.0, -1.0) + (5.0, -5.0) = (6.0, -6.0)
         # With decoupled UCT, check Q-values instead of payout matrix
         q1, q2 = fake_tree.root.get_q_values()
         assert q1[0] == pytest.approx(6.0)
         assert q2[0] == pytest.approx(-6.0)
-
-    def test_backup_with_discount(self) -> None:
-        """Backup should apply gamma to leaf value."""
-        game = FakeGame()
-        prior = np.ones(5) / 5
-        root = MCTSNode(
-            game_state=None,
-            prior_policy_p1=prior,
-            prior_policy_p2=prior,
-            nn_value_p1=0.0,
-            nn_value_p2=0.0,
-        )
-        tree = MCTSTree(game=game, root=root, gamma=0.5)  # type: ignore[arg-type]
-
-        # Create child
-        child, _ = tree.make_move_from(root, 1, 1)
-
-        # Set edge reward on child (simulates reward from make_move_from)
-        child._edge_r1 = 2.0
-        child._edge_r2 = -2.0
-
-        # Backup with leaf value - tuple (p1_value, p2_value)
-        path = [(root, 1, 1)]
-        tree.backup(path, g=(10.0, -10.0))
-
-        # Value = edge_r + gamma * g = (2.0, -2.0) + 0.5 * (10.0, -10.0) = (7.0, -7.0)
-        q1, q2 = root.get_q_values(gamma=0.5)
-        assert q1[1] == pytest.approx(7.0)
-        assert q2[1] == pytest.approx(-7.0)
 
 
 class TestPureNNMode:
@@ -515,7 +486,7 @@ class TestTerminalMidSearch:
             nn_value_p1=0.0,
             nn_value_p2=0.0,
         )
-        tree = MCTSTree(game=game, root=root, gamma=1.0)  # type: ignore[arg-type]
+        tree = MCTSTree(game=game, root=root)  # type: ignore[arg-type]
 
         # Run enough simulations to visit all action pairs
         search = DecoupledPUCTSearch(tree, make_config(50))
@@ -552,7 +523,7 @@ class TestMakeResultControlled:
             nn_value_p1=0.0,
             nn_value_p2=0.0,
         )
-        tree = MCTSTree(game=game, root=root, gamma=1.0)  # type: ignore[arg-type]
+        tree = MCTSTree(game=game, root=root)  # type: ignore[arg-type]
 
         # Create children with controlled visit counts and values
         # Action 1 is clearly best (high Q, many visits)
@@ -629,7 +600,7 @@ class TestRawVsPrunedVisits:
             nn_value_p1=0.0,
             nn_value_p2=0.0,
         )
-        tree = MCTSTree(game=game, root=root, gamma=1.0)  # type: ignore[arg-type]
+        tree = MCTSTree(game=game, root=root)  # type: ignore[arg-type]
 
         # Set up controlled state with clear best action (0) and weak action (3)
         # Values are raw cheese scale (no normalization in storage).
@@ -697,7 +668,7 @@ class TestNormalization:
             nn_value_p1=0.0,
             nn_value_p2=0.0,
         )
-        tree = MCTSTree(game=game, root=root, gamma=1.0)  # type: ignore[arg-type]
+        tree = MCTSTree(game=game, root=root)  # type: ignore[arg-type]
         assert tree.root.value_scale == 3.0
 
     def test_value_scale_minimum_one(self) -> None:
@@ -712,7 +683,7 @@ class TestNormalization:
             nn_value_p1=0.0,
             nn_value_p2=0.0,
         )
-        tree = MCTSTree(game=game, root=root, gamma=1.0)  # type: ignore[arg-type]
+        tree = MCTSTree(game=game, root=root)  # type: ignore[arg-type]
         assert tree.root.value_scale == 1.0
 
     def test_value_scale_set_on_children(self) -> None:
@@ -726,7 +697,7 @@ class TestNormalization:
             nn_value_p1=0.0,
             nn_value_p2=0.0,
         )
-        tree = MCTSTree(game=game, root=root, gamma=1.0)  # type: ignore[arg-type]
+        tree = MCTSTree(game=game, root=root)  # type: ignore[arg-type]
 
         # Create a child — FakeGame doesn't collect cheese, so same count
         child, _ = tree.make_move_from(root, 0, 0)
@@ -743,7 +714,7 @@ class TestNormalization:
             nn_value_p1=0.0,
             nn_value_p2=0.0,
         )
-        tree = MCTSTree(game=game, root=root, gamma=0.99)
+        tree = MCTSTree(game=game, root=root)
         initial_cheese = tree.root.value_scale
 
         # Run search — children at depth may collect cheese
@@ -773,12 +744,12 @@ class TestNormalization:
             nn_value_p1=0.0,
             nn_value_p2=0.0,
         )
-        tree = MCTSTree(game=game, root=root, gamma=0.99, predict_fn=predict_fn)
+        tree = MCTSTree(game=game, root=root, predict_fn=predict_fn)
         search = DecoupledPUCTSearch(tree, DecoupledPUCTConfig(simulations=100))
         search.search()
 
         # Raw Q-values can be in [0, value_scale], not necessarily [0, 1]
-        q1, q2 = tree.root.get_q_values(gamma=0.99)
+        q1, q2 = tree.root.get_q_values()
         rc = tree.root.value_scale
         for q in [q1, q2]:
             visited = q[q != 0]
@@ -812,7 +783,7 @@ class TestNormalization:
             nn_value_p1=0.0,
             nn_value_p2=0.0,
         )
-        tree = MCTSTree(game=game, root=root, gamma=0.99, predict_fn=predict_fn)
+        tree = MCTSTree(game=game, root=root, predict_fn=predict_fn)
 
         search = DecoupledPUCTSearch(tree, DecoupledPUCTConfig(simulations=100))
         result = search.search()
@@ -842,7 +813,7 @@ class TestNormalization:
             nn_value_p1=0.0,
             nn_value_p2=0.0,
         )
-        tree = MCTSTree(game=game, root=root, gamma=0.99)
+        tree = MCTSTree(game=game, root=root)
         search = DecoupledPUCTSearch(tree, DecoupledPUCTConfig(simulations=200))
         search.search()
 
@@ -851,7 +822,7 @@ class TestNormalization:
             if node.total_visits == 0:
                 return
 
-            q1, q2 = node.get_q_values(gamma=0.99)
+            q1, q2 = node.get_q_values()
             rc = node.value_scale
             assert rc >= 1.0, f"value_scale too small: {rc}"
 
@@ -890,7 +861,7 @@ class TestNormalization:
             nn_value_p1=0.0,
             nn_value_p2=0.0,
         )
-        tree = MCTSTree(game=game, root=root, gamma=1.0)  # type: ignore[arg-type]
+        tree = MCTSTree(game=game, root=root)  # type: ignore[arg-type]
         assert tree.root.value_scale == 10.0
 
         # Create child and simulate cheese being collected
@@ -929,7 +900,7 @@ class TestNormalization:
             nn_value_p1=0.0,
             nn_value_p2=0.0,
         )
-        tree = MCTSTree(game=game, root=root, gamma=0.99, predict_fn=predict_fn)
+        tree = MCTSTree(game=game, root=root, predict_fn=predict_fn)
         search = DecoupledPUCTSearch(tree, DecoupledPUCTConfig(simulations=200))
         search.search()
 
@@ -938,7 +909,7 @@ class TestNormalization:
             if node.total_visits == 0:
                 return
 
-            q1, q2 = node.get_q_values(gamma=0.99)
+            q1, q2 = node.get_q_values()
             rc = node.value_scale
             assert rc >= 1.0
 
@@ -978,7 +949,7 @@ class TestFPUReductionSearch:
             nn_value_p1=0.0,
             nn_value_p2=0.0,
         )
-        tree = MCTSTree(game=game, root=root, gamma=0.99)
+        tree = MCTSTree(game=game, root=root)
 
         config = DecoupledPUCTConfig(simulations=50, fpu_reduction=0.0)
         search = DecoupledPUCTSearch(tree, config)
@@ -1000,7 +971,7 @@ class TestFPUReductionSearch:
             nn_value_p1=0.0,
             nn_value_p2=0.0,
         )
-        tree = MCTSTree(game=game, root=root, gamma=0.99)
+        tree = MCTSTree(game=game, root=root)
 
         config = DecoupledPUCTConfig(simulations=50, fpu_reduction=0.3)
         search = DecoupledPUCTSearch(tree, config)

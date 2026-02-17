@@ -25,7 +25,6 @@ class DecoupledPUCTConfig(StrictBaseModel):
     """Configuration for decoupled PUCT search."""
 
     simulations: int = 100
-    gamma: float = 1.0
     c_puct: float = 1.5
     force_k: float = 2.0
     fpu_reduction: float = 0.2
@@ -87,7 +86,7 @@ class DecoupledPUCTSearch:
         root = self.tree.root
 
         # Get raw Q-values and visit counts (reduced space)
-        q1, q2 = root.get_q_values(gamma=self.tree.gamma, fpu_reduction=self._fpu_reduction)
+        q1, q2 = root.get_q_values(fpu_reduction=self._fpu_reduction)
         n1, n2 = root.get_visit_counts()
 
         # Normalize Q for pruning (PUCT sees [0, 1] values)
@@ -198,7 +197,7 @@ class DecoupledPUCTSearch:
         """
         # Work in reduced space: [n1], [n2] arrays
         # Decoupled UCT: each player has independent Q and N
-        q1, q2 = node.get_q_values(gamma=self.tree.gamma, fpu_reduction=self._fpu_reduction)
+        q1, q2 = node.get_q_values(fpu_reduction=self._fpu_reduction)
         n1, n2 = node.get_visit_counts()
         n_total = node.total_visits
         is_root = node == self.tree.root

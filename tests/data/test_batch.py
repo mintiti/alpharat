@@ -30,20 +30,17 @@ class TestMCTSConfig:
         """PythonMCTSConfig parses from dict."""
         data = {
             "simulations": 400,
-            "gamma": 0.98,
             "c_puct": 2.0,
         }
         config = PythonMCTSConfig.model_validate(data)
 
         assert config.simulations == 400
-        assert config.gamma == 0.98
         assert config.c_puct == 2.0
 
     def test_decoupled_puct_defaults(self) -> None:
-        """PythonMCTSConfig uses default gamma and c_puct."""
+        """PythonMCTSConfig uses default c_puct."""
         config = PythonMCTSConfig(simulations=100)
 
-        assert config.gamma == 1.0
         assert config.c_puct == 1.5
 
     def test_batch_metadata_parses_config(self) -> None:
@@ -175,7 +172,7 @@ class TestSaveLoadRoundtrip:
                 batch_id="test-batch",
                 created_at=datetime(2024, 6, 15, 12, 30, 0, tzinfo=UTC),
                 checkpoint_path="/models/best.pt",
-                mcts_config=PythonMCTSConfig(simulations=400, gamma=0.98, c_puct=2.5),
+                mcts_config=PythonMCTSConfig(simulations=400, c_puct=2.5),
                 game=GameConfig(width=10, height=10, max_turns=200, cheese_count=21),
             )
 
@@ -185,7 +182,6 @@ class TestSaveLoadRoundtrip:
             assert loaded.checkpoint_path == "/models/best.pt"
             assert isinstance(loaded.mcts_config, PythonMCTSConfig)
             assert loaded.mcts_config.simulations == 400
-            assert loaded.mcts_config.gamma == 0.98
             assert loaded.mcts_config.c_puct == 2.5
             assert loaded.game.width == 10
 

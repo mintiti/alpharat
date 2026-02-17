@@ -235,7 +235,7 @@ class TestPipelineIntegrity:
 
         # === Config: Real game, fast MCTS ===
         config = SamplingConfig(
-            mcts=PythonMCTSConfig(simulations=30, gamma=1.0, c_puct=1.5),
+            mcts=PythonMCTSConfig(simulations=30, c_puct=1.5),
             game=GameConfig(
                 width=width,
                 height=height,
@@ -301,7 +301,7 @@ class TestPipelineIntegrity:
         width, height = 5, 5
 
         config = SamplingConfig(
-            mcts=PythonMCTSConfig(simulations=20, gamma=1.0, c_puct=1.5),
+            mcts=PythonMCTSConfig(simulations=20, c_puct=1.5),
             game=GameConfig(
                 width=width,
                 height=height,
@@ -346,7 +346,7 @@ class TestPipelineIntegrity:
         width, height = 5, 5
 
         config = SamplingConfig(
-            mcts=PythonMCTSConfig(simulations=25, gamma=1.0, c_puct=1.5),
+            mcts=PythonMCTSConfig(simulations=25, c_puct=1.5),
             game=GameConfig(
                 width=width,
                 height=height,

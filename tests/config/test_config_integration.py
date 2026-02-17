@@ -113,7 +113,7 @@ def _create_mcts_tree(game: PyRat, mcts_config: PythonMCTSConfig) -> MCTSTree:
         p1_mud_turns_remaining=game.player1_mud_turns,
         p2_mud_turns_remaining=game.player2_mud_turns,
     )
-    return MCTSTree(game=game, root=root, gamma=mcts_config.gamma)
+    return MCTSTree(game=game, root=root)
 
 
 class TestSamplingConfigIntegration:

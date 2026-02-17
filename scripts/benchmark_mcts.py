@@ -22,7 +22,7 @@ from alpharat.mcts.node import MCTSNode
 from alpharat.mcts.tree import MCTSTree
 
 
-def _build_tree(game, gamma: float = 1.0) -> MCTSTree:  # type: ignore[no-untyped-def]
+def _build_tree(game) -> MCTSTree:  # type: ignore[no-untyped-def]
     """Build an MCTSTree from a game (no NN, uniform priors)."""
     dummy = np.ones(5) / 5
     root = MCTSNode(
@@ -35,7 +35,7 @@ def _build_tree(game, gamma: float = 1.0) -> MCTSTree:  # type: ignore[no-untype
         p1_mud_turns_remaining=game.player1_mud_turns,
         p2_mud_turns_remaining=game.player2_mud_turns,
     )
-    return MCTSTree(game, root, gamma=gamma)
+    return MCTSTree(game, root)
 
 
 def benchmark_sims_per_second(
@@ -52,7 +52,7 @@ def benchmark_sims_per_second(
         max_turns=100,
     )
     game = create_game(params, seed=42)
-    tree = _build_tree(game, gamma=1.0)
+    tree = _build_tree(game)
     config = DecoupledPUCTConfig(simulations=n_sims)
     search = DecoupledPUCTSearch(tree, config)
 
@@ -68,7 +68,7 @@ def run_for_profile(n_sims: int = 5000) -> None:
     """Run search in a way that's easy to profile."""
     params = GameConfig(width=5, height=5, cheese_count=5, max_turns=100)
     game = create_game(params, seed=42)
-    tree = _build_tree(game, gamma=1.0)
+    tree = _build_tree(game)
     config = DecoupledPUCTConfig(simulations=n_sims)
     search = DecoupledPUCTSearch(tree, config)
     search.search()

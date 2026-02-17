@@ -156,7 +156,7 @@ class MCTSNode:
         self._v2 = float(nn_value_p2)
 
         # Edge rewards: reward collected when transitioning to this node from parent
-        # Set by make_move_from(), used to compute Q = reward + gamma * V
+        # Set by make_move_from(), used to compute Q = reward + V
         self._edge_r1: float = 0.0
         self._edge_r2: float = 0.0
 
@@ -353,7 +353,7 @@ class MCTSNode:
         Args:
             action_p1: Player 1's action that led to child (0-4)
             action_p2: Player 2's action that led to child (0-4)
-            q_value: Discounted return Q = r + gamma * child_value (updates self.V)
+            q_value: Return Q = r + child_value (updates self.V)
         """
         idx1 = int(self._p1_action_to_idx[action_p1])
         idx2 = int(self._p2_action_to_idx[action_p2])
@@ -369,21 +369,18 @@ class MCTSNode:
 
         self.finalize_value(q_value[0], q_value[1])
 
-    def get_q_values(
-        self, gamma: float = 1.0, fpu_reduction: float = 0.0
-    ) -> tuple[np.ndarray, np.ndarray]:
+    def get_q_values(self, fpu_reduction: float = 0.0) -> tuple[np.ndarray, np.ndarray]:
         """Compute marginal Q-values from children (LC0-style).
 
-        Q = reward + gamma * V, where V is the child's value.
-        Q1(i) = weighted average of (r1 + gamma * child.v1) for children (i, *).
-        Q2(j) = weighted average of (r2 + gamma * child.v2) for children (*, j).
+        Q = reward + V, where V is the child's value.
+        Q1(i) = weighted average of (r1 + child.v1) for children (i, *).
+        Q2(j) = weighted average of (r2 + child.v2) for children (*, j).
         Weight = child's edge visits.
         FPU (first play urgency) = node value minus pessimistic reduction for
         unvisited outcomes. Following LC0/KataGo:
             FPU_Q = V - fpu_reduction * value_scale * sqrt(visited_policy_mass)
 
         Args:
-            gamma: Discount factor for computing Q = r + gamma * V.
             fpu_reduction: Pessimistic reduction for unvisited outcomes (0 = no reduction).
 
         Returns:
@@ -406,7 +403,7 @@ class MCTSNode:
         if not self.children:
             return q1, q2
 
-        # Accumulate weighted Q values: Q = r + gamma * V
+        # Accumulate weighted Q values: Q = r + V
         w1 = np.zeros(self._n1, dtype=np.float64)
         w2 = np.zeros(self._n2, dtype=np.float64)
         n1_sum = np.zeros(self._n1, dtype=np.float64)
@@ -414,8 +411,8 @@ class MCTSNode:
 
         for (i, j), child in self.children.items():
             if child._edge_visits > 0:
-                q1_child = child._edge_r1 + gamma * child._v1
-                q2_child = child._edge_r2 + gamma * child._v2
+                q1_child = child._edge_r1 + child._v1
+                q2_child = child._edge_r2 + child._v2
                 w1[i] += child._edge_visits * q1_child
                 w2[j] += child._edge_visits * q2_child
                 n1_sum[i] += child._edge_visits
