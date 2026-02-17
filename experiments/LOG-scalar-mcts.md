@@ -147,6 +147,60 @@ alpharat-iterate configs/iterate.yaml \
 
 ---
 
+### 2026-02-17: Rust MCTS Backend — Iter0 (7×7)
+
+**Goal:** First full iteration with the Rust MCTS backend on 7×7. Test that the Rust backend works end-to-end through the self-play pipeline.
+
+**Setup:**
+
+| Component | Config |
+|-----------|--------|
+| Game | 7×7 open, 10 cheese, 50 turns |
+| MCTS | Rust backend, 1897 sims, c_puct=0.512, force_k=0.103, fpu_reduction=0.459, batch_size=16 |
+| Model | SymmetricMLP (hidden=256, dropout=0.1) |
+| Training | 300 epochs, policy_weight=1.0, value_weight=1.0, lr=1e-3 |
+| Data | 50k games → 658k positions |
+
+**Benchmark (50 games/matchup, Rust MCTS for mcts and mcts+nn agents):**
+
+| Rank | Agent | W | D | L | Elo |
+|------|-------|---|---|---|-----|
+| 1 | mcts+nn | 83 | 116 | 1 | 1050 |
+| 2 | greedy | 70 | 116 | 14 | 1000 (anchor) |
+| 3 | mcts | 61 | 113 | 26 | 968 |
+| 4 | nn | 57 | 112 | 31 | 953 |
+| 5 | random | 0 | 1 | 199 | 165 |
+
+**Head-to-head (W/D/L):**
+
+```
+                random      greedy        mcts          nn     mcts+nn
+greedy          50/0/0           -     11/37/2      8/38/4      1/41/8
+mcts            50/0/0     2/37/11           -      9/37/4     0/39/11
+nn              49/1/0      4/38/8      4/37/9           -     0/36/14
+mcts+nn         50/0/0      8/41/1     11/39/0     14/36/0           -
+```
+
+**Comparison to Python MCTS iter0 (300 epochs, from previous entry):**
+
+| Agent | Python (593 sims) | Rust (1897 sims) | Δ |
+|-------|-------------------|-------------------|---|
+| mcts+nn Elo | 1014 | 1050 | +36 |
+| nn Elo | 910 | 953 | +43 |
+| mcts+nn vs greedy | 8/38/4 | 8/41/1 | Fewer losses |
+
+Rust backend stronger — more sims from tuned Optuna sweep, only 1 loss total for mcts+nn.
+
+**Bugs fixed during this run:**
+- Manifest validation: old batches missing `backend` discriminator field
+- f32→f64 policy renormalization: Rust normalizes in f32, numpy.random.choice rejects f64 sums ≠ 1.0
+- squeeze(−1) on batch_size=1: collapsed 1D array to 0-dim scalar, Rust binding expected 1D
+- ModelOutput/BatchKey StrEnum collision: both had `"value_p1"` — metrics compared targets vs targets (always 1.0)
+
+**Next:** Iter1 — sample with this checkpoint as MCTS prior, continue self-play loop.
+
+---
+
 ## Open Questions
 
 1. Does scalar value MCTS match payout matrix MCTS at the same sim budget?

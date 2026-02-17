@@ -32,7 +32,7 @@ from alpharat.eval.benchmark import (
 )
 from alpharat.eval.tournament import run_tournament
 from alpharat.experiments import ExperimentManager
-from alpharat.mcts.decoupled_puct import DecoupledPUCTConfig
+from alpharat.mcts.config import PythonMCTSConfig
 from alpharat.nn.config import TrainConfig
 from alpharat.nn.training import run_training
 
@@ -213,7 +213,7 @@ def main() -> None:
     logger.info("")
 
     # Load MCTS and game configs from Hydra sub-configs
-    mcts_config = load_config(DecoupledPUCTConfig, "configs/mcts", args.mcts)
+    mcts_config = load_config(PythonMCTSConfig, "configs/mcts", args.mcts)
     game_config = load_config(GameConfig, "configs/game", args.game)
 
     benchmark_config = BenchmarkConfig(

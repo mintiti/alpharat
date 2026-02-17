@@ -24,7 +24,7 @@ from alpharat.config.game import GameConfig
 from alpharat.config.loader import load_config
 from alpharat.data.sampling import SamplingConfig
 from alpharat.eval.tournament import TournamentConfig
-from alpharat.mcts import DecoupledPUCTConfig
+from alpharat.mcts import PythonMCTSConfig
 from alpharat.mcts.node import MCTSNode
 from alpharat.mcts.tree import MCTSTree
 from alpharat.nn.config import TrainConfig
@@ -66,7 +66,7 @@ class TestGameConfigIntegration:
         assert game.height == config.height
 
         # Verify game is playable (can make moves)
-        valid_moves = game.get_valid_moves(game.player1_position)  # type: ignore[attr-defined]
+        valid_moves = game.get_valid_moves(game.player1_position)
         assert len(valid_moves) > 0
 
         # Can actually make a move without error
@@ -99,7 +99,7 @@ class TestTournamentConfigIntegration:
 # --- Sampling Config Integration ---
 
 
-def _create_mcts_tree(game: PyRat, mcts_config: DecoupledPUCTConfig) -> MCTSTree:
+def _create_mcts_tree(game: PyRat, mcts_config: PythonMCTSConfig) -> MCTSTree:
     """Helper to create MCTS tree from game and config."""
     # Create root with dummy priors (tree will reinitialize with smart uniform)
     dummy = np.ones(5) / 5
@@ -113,7 +113,7 @@ def _create_mcts_tree(game: PyRat, mcts_config: DecoupledPUCTConfig) -> MCTSTree
         p1_mud_turns_remaining=game.player1_mud_turns,
         p2_mud_turns_remaining=game.player2_mud_turns,
     )
-    return MCTSTree(game=game, root=root, gamma=mcts_config.gamma)
+    return MCTSTree(game=game, root=root)
 
 
 class TestSamplingConfigIntegration:
@@ -123,10 +123,12 @@ class TestSamplingConfigIntegration:
         """Sampling config can initialize MCTS and run simulations."""
         config = load_config(SamplingConfig, CONFIGS, "sample")
         game = config.game.build(seed=42)
+        assert isinstance(config.mcts, PythonMCTSConfig)
 
         # Build MCTS tree and run search
         tree = _create_mcts_tree(game, config.mcts)
-        search = config.mcts.build(tree)
+        puct_config = config.mcts.to_decoupled_puct_config()
+        search = puct_config.build(tree)
 
         # Run search (returns SearchResult with policies)
         result = search.search()
@@ -144,10 +146,12 @@ class TestSamplingConfigIntegration:
         # Load from configs root with sample/ prefix (Hydra resolves defaults)
         config = load_config(SamplingConfig, CONFIGS, f"sample/{sample_config_name}")
         game = config.game.build(seed=42)
+        assert isinstance(config.mcts, PythonMCTSConfig)
 
         # Build MCTS tree and search
         tree = _create_mcts_tree(game, config.mcts)
-        search = config.mcts.build(tree)
+        puct_config = config.mcts.to_decoupled_puct_config()
+        search = puct_config.build(tree)
 
         # Run search (returns SearchResult with policies)
         result = search.search()
@@ -183,15 +187,15 @@ class TestTrainConfigIntegration:
         # Verify output structure
         assert "policy_p1" in output
         assert "policy_p2" in output
-        assert "value_p1" in output
-        assert "value_p2" in output
+        assert "pred_value_p1" in output
+        assert "pred_value_p2" in output
 
         # Verify output shapes
         assert output["policy_p1"].shape == (1, 5)
         assert output["policy_p2"].shape == (1, 5)
         # Value shapes are scalar per sample
-        assert output["value_p1"].shape == (1,)
-        assert output["value_p2"].shape == (1,)
+        assert output["pred_value_p1"].shape == (1,)
+        assert output["pred_value_p2"].shape == (1,)
 
 
 # --- Composition Semantics ---
@@ -210,7 +214,7 @@ class TestCompositionSemantics:
     def test_sample_yaml_uses_default_mcts(self) -> None:
         """Main sample.yaml uses 7x7_scalar_tuned MCTS by default."""
         config = load_config(SamplingConfig, CONFIGS, "sample")
-        mcts_config = load_config(DecoupledPUCTConfig, CONFIGS / "mcts", "7x7_scalar_tuned")
+        mcts_config = load_config(PythonMCTSConfig, CONFIGS / "mcts", "7x7_scalar_tuned")
         assert config.mcts.simulations == mcts_config.simulations
         assert config.mcts.c_puct == mcts_config.c_puct
 

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import tempfile
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
 import pytest
@@ -173,16 +173,21 @@ class TestDirectionHelpers:
 # =============================================================================
 
 
-def make_mock_search_result() -> SearchResult:
+def make_mock_search_result(**overrides: Any) -> SearchResult:
     """Create a mock SearchResult for testing."""
-    return SearchResult(
-        policy_p1=np.ones(5, dtype=np.float64) / 5,
-        policy_p2=np.ones(5, dtype=np.float64) / 5,
-        value_p1=0.0,
-        value_p2=0.0,
-        visit_counts_p1=np.ones(5, dtype=np.float64),
-        visit_counts_p2=np.ones(5, dtype=np.float64),
-    )
+    defaults: dict[str, Any] = {
+        "policy_p1": np.ones(5, dtype=np.float64) / 5,
+        "policy_p2": np.ones(5, dtype=np.float64) / 5,
+        "value_p1": 0.0,
+        "value_p2": 0.0,
+        "visit_counts_p1": np.ones(5, dtype=np.float64),
+        "visit_counts_p2": np.ones(5, dtype=np.float64),
+        "prior_p1": np.ones(5, dtype=np.float64) / 5,
+        "prior_p2": np.ones(5, dtype=np.float64) / 5,
+        "total_visits": 5,
+    }
+    defaults.update(overrides)
+    return SearchResult(**defaults)
 
 
 class TestGameRecorder:
@@ -244,16 +249,7 @@ class TestGameRecorder:
             result = make_mock_search_result()
 
             with pytest.raises(RuntimeError, match="context manager"):
-                recorder.record_position(
-                    game=game,
-                    search_result=result,
-                    prior_p1=np.ones(5) / 5,
-                    prior_p2=np.ones(5) / 5,
-                    visit_counts_p1=np.zeros(5, dtype=np.int32),
-                    visit_counts_p2=np.zeros(5, dtype=np.int32),
-                    action_p1=0,
-                    action_p2=0,
-                )
+                recorder.record_position(game, result, 0, 0)
 
     def test_record_position_accumulates(self) -> None:
         """record_position should accumulate position data."""
@@ -264,32 +260,14 @@ class TestGameRecorder:
             GameRecorder(game, tmpdir, width=5, height=5) as recorder,
         ):
             result = make_mock_search_result()
-            recorder.record_position(
-                game=game,
-                search_result=result,
-                prior_p1=np.ones(5) / 5,
-                prior_p2=np.ones(5) / 5,
-                visit_counts_p1=np.zeros(5, dtype=np.int32),
-                visit_counts_p2=np.zeros(5, dtype=np.int32),
-                action_p1=0,
-                action_p2=0,
-            )
+            recorder.record_position(game, result, 0, 0)
 
             assert recorder.data is not None
             assert len(recorder.data.positions) == 1
 
             # Record another
             game.turn = 1
-            recorder.record_position(
-                game=game,
-                search_result=result,
-                prior_p1=np.ones(5) / 5,
-                prior_p2=np.ones(5) / 5,
-                visit_counts_p1=np.zeros(5, dtype=np.int32),
-                visit_counts_p2=np.zeros(5, dtype=np.int32),
-                action_p1=0,
-                action_p2=0,
-            )
+            recorder.record_position(game, result, 0, 0)
 
             assert len(recorder.data.positions) == 2
 
@@ -300,16 +278,7 @@ class TestGameRecorder:
         with tempfile.TemporaryDirectory() as tmpdir:
             with GameRecorder(game, tmpdir, width=5, height=5) as recorder:
                 result = make_mock_search_result()
-                recorder.record_position(
-                    game=game,
-                    search_result=result,
-                    prior_p1=np.ones(5) / 5,
-                    prior_p2=np.ones(5) / 5,
-                    visit_counts_p1=np.zeros(5, dtype=np.int32),
-                    visit_counts_p2=np.zeros(5, dtype=np.int32),
-                    action_p1=0,
-                    action_p2=0,
-                )
+                recorder.record_position(game, result, 0, 0)
 
             assert recorder.saved_path is not None
             assert recorder.saved_path.exists()
@@ -322,16 +291,7 @@ class TestGameRecorder:
         with tempfile.TemporaryDirectory() as tmpdir:
             with GameRecorder(game, tmpdir, width=5, height=5) as recorder:
                 result = make_mock_search_result()
-                recorder.record_position(
-                    game=game,
-                    search_result=result,
-                    prior_p1=np.ones(5) / 5,
-                    prior_p2=np.ones(5) / 5,
-                    visit_counts_p1=np.zeros(5, dtype=np.int32),
-                    visit_counts_p2=np.zeros(5, dtype=np.int32),
-                    action_p1=0,
-                    action_p2=0,
-                )
+                recorder.record_position(game, result, 0, 0)
                 game.player1_score = 10.0
                 game.player2_score = 5.0
 
@@ -347,16 +307,7 @@ class TestGameRecorder:
         with tempfile.TemporaryDirectory() as tmpdir:
             with GameRecorder(game, tmpdir, width=5, height=5) as recorder:
                 result = make_mock_search_result()
-                recorder.record_position(
-                    game=game,
-                    search_result=result,
-                    prior_p1=np.ones(5) / 5,
-                    prior_p2=np.ones(5) / 5,
-                    visit_counts_p1=np.zeros(5, dtype=np.int32),
-                    visit_counts_p2=np.zeros(5, dtype=np.int32),
-                    action_p1=0,
-                    action_p2=0,
-                )
+                recorder.record_position(game, result, 0, 0)
                 game.player1_score = 5.0
                 game.player2_score = 5.0
 
@@ -381,16 +332,7 @@ class TestGameRecorder:
             try:
                 with GameRecorder(game, tmpdir, width=5, height=5) as recorder:
                     result = make_mock_search_result()
-                    recorder.record_position(
-                        game=game,
-                        search_result=result,
-                        prior_p1=np.ones(5) / 5,
-                        prior_p2=np.ones(5) / 5,
-                        visit_counts_p1=np.zeros(5, dtype=np.int32),
-                        visit_counts_p2=np.zeros(5, dtype=np.int32),
-                        action_p1=0,
-                        action_p2=0,
-                    )
+                    recorder.record_position(game, result, 0, 0)
                     raise ValueError("Simulated error")
             except ValueError:
                 pass
@@ -408,16 +350,7 @@ class TestSavedArrays:
         with tempfile.TemporaryDirectory() as tmpdir:
             with GameRecorder(game, tmpdir, width=5, height=5) as recorder:
                 result = make_mock_search_result()
-                recorder.record_position(
-                    game=game,
-                    search_result=result,
-                    prior_p1=np.ones(5) / 5,
-                    prior_p2=np.ones(5) / 5,
-                    visit_counts_p1=np.zeros(5, dtype=np.int32),
-                    visit_counts_p2=np.zeros(5, dtype=np.int32),
-                    action_p1=0,
-                    action_p2=0,
-                )
+                recorder.record_position(game, result, 0, 0)
 
             assert recorder.saved_path is not None
             data = np.load(recorder.saved_path)
@@ -464,16 +397,7 @@ class TestSavedArrays:
                 # Record 3 positions
                 for i in range(3):
                     game.turn = i
-                    recorder.record_position(
-                        game=game,
-                        search_result=result,
-                        prior_p1=np.ones(5) / 5,
-                        prior_p2=np.ones(5) / 5,
-                        visit_counts_p1=np.zeros(5, dtype=np.int32),
-                        visit_counts_p2=np.zeros(5, dtype=np.int32),
-                        action_p1=0,
-                        action_p2=0,
-                    )
+                    recorder.record_position(game, result, 0, 0)
 
             assert recorder.saved_path is not None
             data = np.load(recorder.saved_path)
@@ -508,16 +432,7 @@ class TestSavedArrays:
         with tempfile.TemporaryDirectory() as tmpdir:
             with GameRecorder(game, tmpdir, width=5, height=5) as recorder:
                 result = make_mock_search_result()
-                recorder.record_position(
-                    game=game,
-                    search_result=result,
-                    prior_p1=np.ones(5) / 5,
-                    prior_p2=np.ones(5) / 5,
-                    visit_counts_p1=np.zeros(5, dtype=np.int32),
-                    visit_counts_p2=np.zeros(5, dtype=np.int32),
-                    action_p1=0,
-                    action_p2=0,
-                )
+                recorder.record_position(game, result, 0, 0)
 
             assert recorder.saved_path is not None
             data = np.load(recorder.saved_path)
@@ -568,16 +483,7 @@ class TestRoundtrip:
         with tempfile.TemporaryDirectory() as tmpdir:
             with GameRecorder(game, tmpdir, width=5, height=4) as recorder:
                 result = make_mock_search_result()
-                recorder.record_position(
-                    game=game,
-                    search_result=result,
-                    prior_p1=np.ones(5) / 5,
-                    prior_p2=np.ones(5) / 5,
-                    visit_counts_p1=np.zeros(5, dtype=np.int32),
-                    visit_counts_p2=np.zeros(5, dtype=np.int32),
-                    action_p1=0,
-                    action_p2=0,
-                )
+                recorder.record_position(game, result, 0, 0)
 
             assert recorder.saved_path is not None
             loaded = load_game_data(recorder.saved_path)
@@ -603,16 +509,7 @@ class TestRoundtrip:
         with tempfile.TemporaryDirectory() as tmpdir:
             with GameRecorder(game, tmpdir, width=5, height=5) as recorder:
                 result = make_mock_search_result()
-                recorder.record_position(
-                    game=game,
-                    search_result=result,
-                    prior_p1=np.ones(5) / 5,
-                    prior_p2=np.ones(5) / 5,
-                    visit_counts_p1=np.zeros(5, dtype=np.int32),
-                    visit_counts_p2=np.zeros(5, dtype=np.int32),
-                    action_p1=0,
-                    action_p2=0,
-                )
+                recorder.record_position(game, result, 0, 0)
 
             assert recorder.saved_path is not None
             loaded = load_game_data(recorder.saved_path)
@@ -640,16 +537,7 @@ class TestRoundtrip:
         with tempfile.TemporaryDirectory() as tmpdir:
             with GameRecorder(game, tmpdir, width=5, height=5) as recorder:
                 result = make_mock_search_result()
-                recorder.record_position(
-                    game=game,
-                    search_result=result,
-                    prior_p1=np.ones(5) / 5,
-                    prior_p2=np.ones(5) / 5,
-                    visit_counts_p1=np.zeros(5, dtype=np.int32),
-                    visit_counts_p2=np.zeros(5, dtype=np.int32),
-                    action_p1=0,
-                    action_p2=0,
-                )
+                recorder.record_position(game, result, 0, 0)
 
             assert recorder.saved_path is not None
             loaded = load_game_data(recorder.saved_path)
@@ -686,20 +574,14 @@ class TestRoundtrip:
             value_p2=value_p2,
             visit_counts_p1=visits_p1.astype(np.float64),
             visit_counts_p2=visits_p2.astype(np.float64),
+            prior_p1=prior_p1,
+            prior_p2=prior_p2,
+            total_visits=30,
         )
 
         with tempfile.TemporaryDirectory() as tmpdir:
             with GameRecorder(game, tmpdir, width=5, height=5) as recorder:
-                recorder.record_position(
-                    game=game,
-                    search_result=search_result,
-                    prior_p1=prior_p1,
-                    prior_p2=prior_p2,
-                    visit_counts_p1=search_result.visit_counts_p1,
-                    visit_counts_p2=search_result.visit_counts_p2,
-                    action_p1=0,
-                    action_p2=0,
-                )
+                recorder.record_position(game, search_result, 0, 0)
 
             assert recorder.saved_path is not None
             loaded = load_game_data(recorder.saved_path)
@@ -725,46 +607,30 @@ class TestRoundtrip:
                 # Position 0
                 game.turn = 0
                 game.player1_position = Coordinates(0, 0)
-                result = make_mock_search_result()
-                recorder.record_position(
-                    game=game,
-                    search_result=result,
-                    prior_p1=np.ones(5) / 5,
-                    prior_p2=np.ones(5) / 5,
-                    visit_counts_p1=np.ones(5, dtype=np.int32),
-                    visit_counts_p2=np.ones(5, dtype=np.int32),
-                    action_p1=0,
-                    action_p2=0,
+                result0 = make_mock_search_result(
+                    visit_counts_p1=np.ones(5, dtype=np.float64),
+                    visit_counts_p2=np.ones(5, dtype=np.float64),
                 )
+                recorder.record_position(game, result0, 0, 0)
 
                 # Position 1
                 game.turn = 1
                 game.player1_position = Coordinates(1, 0)
                 game._cheese = []  # Cheese collected
-                recorder.record_position(
-                    game=game,
-                    search_result=result,
-                    prior_p1=np.ones(5) / 5,
-                    prior_p2=np.ones(5) / 5,
-                    visit_counts_p1=np.ones(5, dtype=np.int32) * 2,
-                    visit_counts_p2=np.ones(5, dtype=np.int32) * 2,
-                    action_p1=0,
-                    action_p2=0,
+                result1 = make_mock_search_result(
+                    visit_counts_p1=np.ones(5, dtype=np.float64) * 2,
+                    visit_counts_p2=np.ones(5, dtype=np.float64) * 2,
                 )
+                recorder.record_position(game, result1, 0, 0)
 
                 # Position 2
                 game.turn = 2
                 game.player1_position = Coordinates(2, 0)
-                recorder.record_position(
-                    game=game,
-                    search_result=result,
-                    prior_p1=np.ones(5) / 5,
-                    prior_p2=np.ones(5) / 5,
-                    visit_counts_p1=np.ones(5, dtype=np.int32) * 3,
-                    visit_counts_p2=np.ones(5, dtype=np.int32) * 3,
-                    action_p1=0,
-                    action_p2=0,
+                result2 = make_mock_search_result(
+                    visit_counts_p1=np.ones(5, dtype=np.float64) * 3,
+                    visit_counts_p2=np.ones(5, dtype=np.float64) * 3,
                 )
+                recorder.record_position(game, result2, 0, 0)
 
             assert recorder.saved_path is not None
             loaded = load_game_data(recorder.saved_path)
@@ -795,16 +661,7 @@ class TestRoundtrip:
         with tempfile.TemporaryDirectory() as tmpdir:
             with GameRecorder(game, tmpdir, width=5, height=5) as recorder:
                 result = make_mock_search_result()
-                recorder.record_position(
-                    game=game,
-                    search_result=result,
-                    prior_p1=np.ones(5) / 5,
-                    prior_p2=np.ones(5) / 5,
-                    visit_counts_p1=np.zeros(5, dtype=np.int32),
-                    visit_counts_p2=np.zeros(5, dtype=np.int32),
-                    action_p1=0,
-                    action_p2=0,
-                )
+                recorder.record_position(game, result, 0, 0)
 
             assert recorder.saved_path is not None
             loaded = load_game_data(recorder.saved_path)
@@ -837,17 +694,11 @@ class TestGameBundler:
         with GameRecorder(game, tmpdir, width=5, height=5, auto_save=False) as recorder:
             for i in range(n_positions):
                 game.turn = i
-                result = make_mock_search_result()
-                recorder.record_position(
-                    game=game,
-                    search_result=result,
-                    prior_p1=np.ones(5) / 5,
-                    prior_p2=np.ones(5) / 5,
-                    visit_counts_p1=np.ones(5, dtype=np.int32) * (i + 1),
-                    visit_counts_p2=np.ones(5, dtype=np.int32) * (i + 1),
-                    action_p1=i % 5,
-                    action_p2=(i + 1) % 5,
+                result = make_mock_search_result(
+                    visit_counts_p1=np.ones(5, dtype=np.float64) * (i + 1),
+                    visit_counts_p2=np.ones(5, dtype=np.float64) * (i + 1),
                 )
+                recorder.record_position(game, result, i % 5, (i + 1) % 5)
 
         assert recorder.data is not None
         return recorder.data
@@ -967,16 +818,7 @@ class TestGameBundler:
 
             with GameRecorder(game, tmpdir, width=10, height=10, auto_save=False) as recorder:
                 result = make_mock_search_result()
-                recorder.record_position(
-                    game=game,
-                    search_result=result,
-                    prior_p1=np.ones(5) / 5,
-                    prior_p2=np.ones(5) / 5,
-                    visit_counts_p1=np.ones(5, dtype=np.int32),
-                    visit_counts_p2=np.ones(5, dtype=np.int32),
-                    action_p1=0,
-                    action_p2=0,
-                )
+                recorder.record_position(game, result, 0, 0)
 
             assert recorder.data is not None
 
@@ -1085,17 +927,11 @@ class TestBundleLoading:
                 for j in range(i + 1):  # i+1 positions per game
                     game.turn = j
                     game.player1_position = Coordinates(j % 5, j % 5)
-                    result = make_mock_search_result()
-                    recorder.record_position(
-                        game=game,
-                        search_result=result,
-                        prior_p1=np.ones(5) / 5,
-                        prior_p2=np.ones(5) / 5,
-                        visit_counts_p1=np.ones(5, dtype=np.int32) * (j + 1),
-                        visit_counts_p2=np.ones(5, dtype=np.int32) * (j + 1),
-                        action_p1=j % 5,
-                        action_p2=0,
+                    result = make_mock_search_result(
+                        visit_counts_p1=np.ones(5, dtype=np.float64) * (j + 1),
+                        visit_counts_p2=np.ones(5, dtype=np.float64) * (j + 1),
                     )
+                    recorder.record_position(game, result, j % 5, 0)
 
             assert recorder.data is not None
             bundler.add_game(recorder.data)
@@ -1120,16 +956,7 @@ class TestBundleLoading:
 
             with GameRecorder(game, tmpdir, width=5, height=5) as recorder:
                 result = make_mock_search_result()
-                recorder.record_position(
-                    game=game,
-                    search_result=result,
-                    prior_p1=np.ones(5) / 5,
-                    prior_p2=np.ones(5) / 5,
-                    visit_counts_p1=np.ones(5, dtype=np.int32),
-                    visit_counts_p2=np.ones(5, dtype=np.int32),
-                    action_p1=0,
-                    action_p2=0,
-                )
+                recorder.record_position(game, result, 0, 0)
 
             assert recorder.saved_path is not None
             assert is_bundle_file(recorder.saved_path) is False
@@ -1192,17 +1019,11 @@ class TestBundleLoading:
                     value_p2=value_p2,
                     visit_counts_p1=visits_p1,
                     visit_counts_p2=visits_p2,
+                    prior_p1=np.ones(5, dtype=np.float64) / 5,
+                    prior_p2=np.ones(5, dtype=np.float64) / 5,
+                    total_visits=30,
                 )
-                recorder.record_position(
-                    game=game,
-                    search_result=result,
-                    prior_p1=np.ones(5) / 5,
-                    prior_p2=np.ones(5) / 5,
-                    visit_counts_p1=result.visit_counts_p1,
-                    visit_counts_p2=result.visit_counts_p2,
-                    action_p1=2,
-                    action_p2=3,
-                )
+                recorder.record_position(game, result, 2, 3)
 
             assert recorder.data is not None
             bundler.add_game(recorder.data)
@@ -1243,16 +1064,7 @@ class TestBundleLoading:
 
             with GameRecorder(game, tmpdir, width=5, height=5) as recorder:
                 result = make_mock_search_result()
-                recorder.record_position(
-                    game=game,
-                    search_result=result,
-                    prior_p1=np.ones(5) / 5,
-                    prior_p2=np.ones(5) / 5,
-                    visit_counts_p1=np.ones(5, dtype=np.int32),
-                    visit_counts_p2=np.ones(5, dtype=np.int32),
-                    action_p1=0,
-                    action_p2=0,
-                )
+                recorder.record_position(game, result, 0, 0)
 
             assert recorder.saved_path is not None
 

@@ -26,7 +26,7 @@ from alpharat.experiments.paths import (
     TRAIN_DIR,
     VAL_DIR,
 )
-from alpharat.mcts import DecoupledPUCTConfig
+from alpharat.mcts import PythonMCTSConfig
 
 
 class TestExperimentManagerInit:
@@ -97,7 +97,7 @@ class TestBatchOperations:
             exp = ExperimentManager(tmpdir)
             batch_dir = exp.create_batch(
                 group="test_group",
-                mcts_config=DecoupledPUCTConfig(simulations=100),
+                mcts_config=PythonMCTSConfig(simulations=100),
                 game=GameConfig(width=5, height=5, max_turns=30, cheese_count=5),
             )
 
@@ -111,7 +111,7 @@ class TestBatchOperations:
             exp = ExperimentManager(tmpdir)
             batch_dir = exp.create_batch(
                 group="test_group",
-                mcts_config=DecoupledPUCTConfig(simulations=100),
+                mcts_config=PythonMCTSConfig(simulations=100),
                 game=GameConfig(width=5, height=5, max_turns=30, cheese_count=5),
             )
 
@@ -129,7 +129,7 @@ class TestBatchOperations:
             exp = ExperimentManager(tmpdir)
             exp.create_batch(
                 group="nn_guided",
-                mcts_config=DecoupledPUCTConfig(simulations=200, c_puct=2.0),
+                mcts_config=PythonMCTSConfig(simulations=200, c_puct=2.0),
                 game=GameConfig(width=5, height=5, max_turns=30, cheese_count=5),
                 checkpoint_path="/path/to/model.pt",
             )
@@ -143,7 +143,7 @@ class TestBatchOperations:
         with tempfile.TemporaryDirectory() as tmpdir:
             exp = ExperimentManager(tmpdir)
             game = GameConfig(width=5, height=5, max_turns=30, cheese_count=5)
-            mcts_config = DecoupledPUCTConfig(simulations=100)
+            mcts_config = PythonMCTSConfig(simulations=100)
 
             exp.create_batch(group="group_a", mcts_config=mcts_config, game=game)
             exp.create_batch(group="group_b", mcts_config=mcts_config, game=game)
@@ -159,7 +159,7 @@ class TestBatchOperations:
             exp = ExperimentManager(tmpdir)
             batch_dir = exp.create_batch(
                 group="test_group",
-                mcts_config=DecoupledPUCTConfig(simulations=100),
+                mcts_config=PythonMCTSConfig(simulations=100),
                 game=GameConfig(width=5, height=5, max_turns=30, cheese_count=5),
             )
 
@@ -521,7 +521,7 @@ class TestDeferredRegistration:
             exp = ExperimentManager(tmpdir)
             batch_dir, batch_uuid = exp.prepare_batch(
                 group="test_group",
-                mcts_config=DecoupledPUCTConfig(simulations=100),
+                mcts_config=PythonMCTSConfig(simulations=100),
                 game=GameConfig(width=5, height=5, max_turns=30, cheese_count=5),
             )
 
@@ -535,7 +535,7 @@ class TestDeferredRegistration:
         """register_batch adds entry to manifest."""
         with tempfile.TemporaryDirectory() as tmpdir:
             exp = ExperimentManager(tmpdir)
-            mcts = DecoupledPUCTConfig(simulations=100)
+            mcts = PythonMCTSConfig(simulations=100)
             game = GameConfig(width=5, height=5, max_turns=30, cheese_count=5)
 
             batch_dir, batch_uuid = exp.prepare_batch(
@@ -553,7 +553,7 @@ class TestDeferredRegistration:
         """Concurrent prepare_batch calls get different UUIDs and don't interfere."""
         with tempfile.TemporaryDirectory() as tmpdir:
             exp = ExperimentManager(tmpdir)
-            mcts = DecoupledPUCTConfig(simulations=100)
+            mcts = PythonMCTSConfig(simulations=100)
             game = GameConfig(width=5, height=5, max_turns=30, cheese_count=5)
 
             # Simulate a crash: prepare but don't register
@@ -701,7 +701,7 @@ class TestDeferredRegistration:
             exp = ExperimentManager(tmpdir)
             batch_dir = exp.create_batch(
                 group="wrapper_test",
-                mcts_config=DecoupledPUCTConfig(simulations=100),
+                mcts_config=PythonMCTSConfig(simulations=100),
                 game=GameConfig(width=5, height=5, max_turns=30, cheese_count=5),
             )
 
@@ -730,7 +730,7 @@ class TestManifestPersistence:
             exp1 = ExperimentManager(tmpdir)
             exp1.create_batch(
                 group="group1",
-                mcts_config=DecoupledPUCTConfig(simulations=100),
+                mcts_config=PythonMCTSConfig(simulations=100),
                 game=GameConfig(width=5, height=5, max_turns=30, cheese_count=5),
             )
             exp1.create_run(name="run1", config={"lr": 0.001}, source_shards="s1")

@@ -1,0 +1,3 @@
+[workspace]
+members = ["crates/alpharat-mcts", "crates/alpharat-mcts-python"]
+resolver = "2"

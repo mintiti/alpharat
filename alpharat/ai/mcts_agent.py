@@ -150,7 +150,6 @@ class MCTSAgent(Agent):
         tree = MCTSTree(
             game=simulator,
             root=root,
-            gamma=self.mcts_config.gamma,
             predict_fn=predict_fn,
         )
 

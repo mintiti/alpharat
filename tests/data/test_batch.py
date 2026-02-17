@@ -20,30 +20,27 @@ from alpharat.data.batch import (
     load_batch_metadata,
     save_batch_metadata,
 )
-from alpharat.mcts import DecoupledPUCTConfig
+from alpharat.mcts import PythonMCTSConfig
 
 
 class TestMCTSConfig:
     """Tests for MCTS config."""
 
     def test_decoupled_puct_from_dict(self) -> None:
-        """DecoupledPUCTConfig parses from dict."""
+        """PythonMCTSConfig parses from dict."""
         data = {
             "simulations": 400,
-            "gamma": 0.98,
             "c_puct": 2.0,
         }
-        config = DecoupledPUCTConfig.model_validate(data)
+        config = PythonMCTSConfig.model_validate(data)
 
         assert config.simulations == 400
-        assert config.gamma == 0.98
         assert config.c_puct == 2.0
 
     def test_decoupled_puct_defaults(self) -> None:
-        """DecoupledPUCTConfig uses default gamma and c_puct."""
-        config = DecoupledPUCTConfig(simulations=100)
+        """PythonMCTSConfig uses default c_puct."""
+        config = PythonMCTSConfig(simulations=100)
 
-        assert config.gamma == 1.0
         assert config.c_puct == 1.5
 
     def test_batch_metadata_parses_config(self) -> None:
@@ -52,12 +49,12 @@ class TestMCTSConfig:
             "batch_id": "test-id",
             "created_at": "2024-01-01T00:00:00Z",
             "checkpoint_path": "/path/to/model.pt",
-            "mcts_config": {"simulations": 400, "c_puct": 2.5},
+            "mcts_config": {"backend": "python", "simulations": 400, "c_puct": 2.5},
             "game": {"width": 10, "height": 10, "max_turns": 200, "cheese_count": 21},
         }
         metadata = BatchMetadata.model_validate(data)
 
-        assert isinstance(metadata.mcts_config, DecoupledPUCTConfig)
+        assert isinstance(metadata.mcts_config, PythonMCTSConfig)
         assert metadata.mcts_config.c_puct == 2.5
 
 
@@ -70,7 +67,7 @@ class TestBatchMetadata:
             batch_id="test",
             created_at=datetime.now(UTC),
             checkpoint_path=None,
-            mcts_config=DecoupledPUCTConfig(simulations=100),
+            mcts_config=PythonMCTSConfig(simulations=100),
             game=GameConfig(width=10, height=10, max_turns=200, cheese_count=21),
         )
 
@@ -82,7 +79,7 @@ class TestBatchMetadata:
             batch_id="test",
             created_at=datetime.now(UTC),
             checkpoint_path="/models/checkpoint_100.pt",
-            mcts_config=DecoupledPUCTConfig(simulations=100),
+            mcts_config=PythonMCTSConfig(simulations=100),
             game=GameConfig(width=10, height=10, max_turns=200, cheese_count=21),
         )
 
@@ -98,7 +95,7 @@ class TestCreateBatch:
             batch_dir = create_batch(
                 parent_dir=tmpdir,
                 checkpoint_path=None,
-                mcts_config=DecoupledPUCTConfig(simulations=100),
+                mcts_config=PythonMCTSConfig(simulations=100),
                 game=GameConfig(width=10, height=10, max_turns=200, cheese_count=21),
             )
 
@@ -112,14 +109,14 @@ class TestCreateBatch:
             batch_dir = create_batch(
                 parent_dir=tmpdir,
                 checkpoint_path="/test/checkpoint.pt",
-                mcts_config=DecoupledPUCTConfig(simulations=400, c_puct=2.0),
+                mcts_config=PythonMCTSConfig(simulations=400, c_puct=2.0),
                 game=GameConfig(width=15, height=12, max_turns=300, cheese_count=21),
             )
 
             metadata = load_batch_metadata(batch_dir)
 
             assert metadata.checkpoint_path == "/test/checkpoint.pt"
-            assert isinstance(metadata.mcts_config, DecoupledPUCTConfig)
+            assert isinstance(metadata.mcts_config, PythonMCTSConfig)
             assert metadata.mcts_config.simulations == 400
             assert metadata.mcts_config.c_puct == 2.0
             assert metadata.game.width == 15
@@ -132,7 +129,7 @@ class TestCreateBatch:
             batch_dir = create_batch(
                 parent_dir=tmpdir,
                 checkpoint_path=None,
-                mcts_config=DecoupledPUCTConfig(simulations=100),
+                mcts_config=PythonMCTSConfig(simulations=100),
                 game=GameConfig(width=10, height=10, max_turns=200, cheese_count=21),
             )
 
@@ -153,7 +150,7 @@ class TestCreateBatch:
             batch_dir = create_batch(
                 parent_dir=tmpdir,
                 checkpoint_path=None,
-                mcts_config=DecoupledPUCTConfig(simulations=100),
+                mcts_config=PythonMCTSConfig(simulations=100),
                 game=GameConfig(width=10, height=10, max_turns=200, cheese_count=21),
             )
 
@@ -166,7 +163,7 @@ class TestSaveLoadRoundtrip:
     """Tests for save/load metadata roundtrip."""
 
     def test_roundtrip_decoupled_puct(self) -> None:
-        """Metadata with DecoupledPUCTConfig survives roundtrip."""
+        """Metadata with PythonMCTSConfig survives roundtrip."""
         with tempfile.TemporaryDirectory() as tmpdir:
             batch_dir = Path(tmpdir) / "test-batch"
             batch_dir.mkdir()
@@ -175,7 +172,7 @@ class TestSaveLoadRoundtrip:
                 batch_id="test-batch",
                 created_at=datetime(2024, 6, 15, 12, 30, 0, tzinfo=UTC),
                 checkpoint_path="/models/best.pt",
-                mcts_config=DecoupledPUCTConfig(simulations=400, gamma=0.98, c_puct=2.5),
+                mcts_config=PythonMCTSConfig(simulations=400, c_puct=2.5),
                 game=GameConfig(width=10, height=10, max_turns=200, cheese_count=21),
             )
 
@@ -183,9 +180,8 @@ class TestSaveLoadRoundtrip:
             loaded = load_batch_metadata(batch_dir)
 
             assert loaded.checkpoint_path == "/models/best.pt"
-            assert isinstance(loaded.mcts_config, DecoupledPUCTConfig)
+            assert isinstance(loaded.mcts_config, PythonMCTSConfig)
             assert loaded.mcts_config.simulations == 400
-            assert loaded.mcts_config.gamma == 0.98
             assert loaded.mcts_config.c_puct == 2.5
             assert loaded.game.width == 10
 
@@ -245,8 +241,8 @@ class TestBatchMetadataError:
 
     # All fields for each config, so _field_diff reports "OK" when section is clean.
     _VALID_MCTS = {
+        "backend": "python",
         "simulations": 100,
-        "gamma": 1.0,
         "c_puct": 1.5,
         "force_k": 2.0,
         "fpu_reduction": 0.2,

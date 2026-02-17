@@ -28,7 +28,6 @@ class MCTSTree:
     Attributes:
         game: PyRat game instance (simulator)
         root: Root node of the tree
-        gamma: Discount factor for value backup
         _sim_path: Path from root to current simulator position
     """
 
@@ -36,7 +35,6 @@ class MCTSTree:
         self,
         game: PyRat,
         root: MCTSNode,
-        gamma: float = 1.0,
         predict_fn: Callable[[Any], tuple[np.ndarray, np.ndarray, float, float]] | None = None,
     ):
         """Initialize MCTS tree.
@@ -44,13 +42,11 @@ class MCTSTree:
         Args:
             game: PyRat game instance
             root: Root node of the tree
-            gamma: Discount factor (1.0 = no discounting)
             predict_fn: Callable taking an observation and returning
                         (prior_p1, prior_p2, v1, v2) as numpy arrays and floats.
         """
         self.game = game
         self.root = root
-        self.gamma = gamma
         self._predict_fn = predict_fn
 
         # Set value scale on root from game state (remaining cheese)
@@ -149,7 +145,7 @@ class MCTSTree:
         path: list[tuple[MCTSNode, int, int]],
         g: tuple[float, float] = (0.0, 0.0),
     ) -> None:
-        """Backup discounted returns through the tree (LC0-style).
+        """Backup returns through the tree (LC0-style).
 
         Finalize the leaf first, then propagate returns up the path.
         Uses edge_r stored on child nodes as the source of truth for rewards.
@@ -175,8 +171,8 @@ class MCTSTree:
             child = node.children[(idx1, idx2)]
 
             q_value = (
-                child._edge_r1 + self.gamma * child_value[0],
-                child._edge_r2 + self.gamma * child_value[1],
+                child._edge_r1 + child_value[0],
+                child._edge_r2 + child_value[1],
             )
 
             node.backup(action_p1, action_p2, q_value)
@@ -460,7 +456,7 @@ class MCTSTree:
             Valid moves map to themselves, blocked moves map to STAY.
         """
         stay_action = 4
-        valid_moves = set(self.game.get_valid_moves(position))  # type: ignore[attr-defined]
+        valid_moves = set(self.game.get_valid_moves(position))
 
         effective = []
         for action in range(5):

@@ -1,0 +1,18 @@
+[package]
+name = "alpharat-mcts"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+name = "alpharat_mcts"
+# rlib only (default) — the cdylib lives in alpharat-mcts-python
+
+[dependencies]
+pyrat = { package = "pyrat-rust", git = "https://github.com/mintiti/pyrat-rust", branch = "main", default-features = false }
+rand = { version = "0.8", features = ["small_rng"] }
+rand_distr = "0.4"
+pyo3 = { version = "0.25", optional = true }
+numpy = { version = "0.25", optional = true }
+
+[features]
+python = ["dep:pyo3", "dep:numpy", "pyrat/python"]

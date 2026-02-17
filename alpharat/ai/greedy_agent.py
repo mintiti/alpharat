@@ -66,7 +66,7 @@ class GreedyAgent(Agent):
                 return first_move
 
             # Explore only valid moves (skips walls and out-of-bounds)
-            for direction in game.get_valid_moves(pos):  # type: ignore[attr-defined]
+            for direction in game.get_valid_moves(pos):
                 neighbor = pos.get_neighbor(direction)
 
                 # Cost: 1 for normal move, or mud value for mud

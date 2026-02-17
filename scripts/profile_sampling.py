@@ -14,27 +14,29 @@ import cProfile
 import pstats
 import tempfile
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from alpharat.config.game import GameConfig
 from alpharat.data.sampling import (
-    NNContext,
     SamplingConfig,
     SamplingParams,
-    load_nn_context,
     play_and_record_game,
 )
-from alpharat.mcts import DecoupledPUCTConfig
+from alpharat.mcts import PythonMCTSConfig
+
+if TYPE_CHECKING:
+    from alpharat.mcts.searcher import Searcher
 
 
 def run_games(
     config: SamplingConfig,
     games_dir: Path,
     num_games: int,
-    nn_ctx: NNContext | None,
+    searcher: Searcher,
 ) -> None:
     """Run N games sequentially (the part we're profiling)."""
     for seed in range(num_games):
-        play_and_record_game(config, games_dir, seed, nn_ctx=nn_ctx)
+        play_and_record_game(config, games_dir, seed, searcher)
         print(f"  Game {seed + 1}/{num_games} done")
 
 
@@ -42,12 +44,14 @@ def main() -> None:
     # Config matching 7x7_open + 5x5_tuned MCTS
     checkpoint = "experiments/runs/cnn_7x7_visits/checkpoints/checkpoint_epoch_100.pt"
 
+    mcts_config = PythonMCTSConfig(
+        simulations=554,
+        c_puct=1.5,
+        force_k=2.0,
+    )
+
     config = SamplingConfig(
-        mcts=DecoupledPUCTConfig(
-            simulations=554,
-            c_puct=1.5,
-            force_k=2.0,
-        ),
+        mcts=mcts_config,
         game=GameConfig(
             width=7,
             height=7,
@@ -62,9 +66,9 @@ def main() -> None:
         checkpoint=checkpoint,
     )
 
-    # Load NN once (like worker does at startup)
+    # Build searcher with NN (like worker does at startup)
     print(f"Loading NN from {checkpoint}...")
-    nn_ctx = load_nn_context(checkpoint, device="cpu")
+    searcher = mcts_config.build_searcher(checkpoint=checkpoint, device="cpu")
     print("NN loaded.\n")
 
     # Temp dir for game files (we don't care about saving them)
@@ -76,7 +80,7 @@ def main() -> None:
     profiler = cProfile.Profile()
     profiler.enable()
 
-    run_games(config, games_dir, num_games, nn_ctx)
+    run_games(config, games_dir, num_games, searcher)
 
     profiler.disable()
 

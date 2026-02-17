@@ -14,7 +14,7 @@ from pydantic import ValidationError
 from alpharat.config.base import StrictBaseModel
 from alpharat.config.game import GameConfig  # noqa: TC001
 from alpharat.data.types import GameFileKey
-from alpharat.mcts import DecoupledPUCTConfig  # noqa: TC001
+from alpharat.mcts.config import MCTSConfig, PythonMCTSConfig  # noqa: TC001
 
 
 class BatchMetadataError(Exception):
@@ -34,7 +34,7 @@ class BatchMetadata(StrictBaseModel):
     batch_id: str
     created_at: datetime
     checkpoint_path: str | None
-    mcts_config: DecoupledPUCTConfig
+    mcts_config: MCTSConfig
     game: GameConfig
 
 
@@ -51,7 +51,7 @@ class BatchStats(StrictBaseModel):
 def create_batch(
     parent_dir: Path | str,
     checkpoint_path: str | None,
-    mcts_config: DecoupledPUCTConfig,
+    mcts_config: MCTSConfig,
     game: GameConfig,
 ) -> Path:
     """Create a new batch directory with metadata.
@@ -137,7 +137,7 @@ def _raise_batch_metadata_error(
         f"Cannot load batch metadata from {metadata_path}",
         "",
         "Config schema mismatch — this batch was created with a different version:",
-        _field_diff("mcts_config", DecoupledPUCTConfig, data.get("mcts_config")),
+        _field_diff("mcts_config", PythonMCTSConfig, data.get("mcts_config")),
         _field_diff("game", GameConfig, data.get("game")),
         "",
         "Update the config classes to include these fields, or re-sample with the current config.",

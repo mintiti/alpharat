@@ -1,0 +1,11 @@
+# Fast Rust MCTS params from rust_fpu_7x7 Pareto front (3956 trials)
+# 40.5% win rate vs Greedy — for cheap self-play
+# See scripts/optuna_sweep.py, study rust_fpu_7x7
+backend: rust
+simulations: 834
+c_puct: 0.508
+force_k: 0.137
+fpu_reduction: 0.479
+batch_size: 16
+noise_epsilon: 0.25
+noise_concentration: 10.83

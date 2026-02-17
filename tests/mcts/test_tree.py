@@ -130,7 +130,7 @@ def fake_tree(fake_game: FakeGame) -> MCTSTree:
         nn_value_p2=0.0,
         parent=None,
     )
-    return MCTSTree(game=fake_game, root=root, gamma=1.0)  # type: ignore[arg-type]
+    return MCTSTree(game=fake_game, root=root)  # type: ignore[arg-type]
 
 
 @pytest.fixture
@@ -159,7 +159,7 @@ def root_node() -> MCTSNode:
 @pytest.fixture
 def tree(game: PyRat, root_node: MCTSNode) -> MCTSTree:
     """Create an MCTS tree for testing."""
-    return MCTSTree(game=game, root=root_node, gamma=1.0)
+    return MCTSTree(game=game, root=root_node)
 
 
 class TestTreeInitialization:
@@ -400,18 +400,15 @@ class TestBackup:
         q1, q2 = tree.root.get_q_values()
         assert n1[idx1] == 1  # Outcome visited once
         assert n2[idx2] == 1  # Outcome visited once
-        # value = edge_r + gamma * 0 = (1.0, -0.5) + 1.0 * (0, 0) = (1.0, -0.5)
+        # value = edge_r + 0 = (1.0, -0.5) + (0, 0) = (1.0, -0.5)
         assert q1[idx1] == pytest.approx(1.0)  # P1's Q-value
         assert q2[idx2] == pytest.approx(-0.5)  # P2's Q-value
 
-    def test_backup_with_discount_factor(self, tree: MCTSTree) -> None:
-        """Backup should apply gamma discounting."""
-        # Create tree with gamma < 1
-        tree_discounted = MCTSTree(tree.game, tree.root, gamma=0.9)
-
+    def test_backup_multi_step(self, tree: MCTSTree) -> None:
+        """Backup should propagate values through two-step path."""
         # Create path: root → child → grandchild
-        child, _ = tree_discounted.make_move_from(tree.root, 0, 0)
-        grandchild, _ = tree_discounted.make_move_from(child, 1, 1)
+        child, _ = tree.make_move_from(tree.root, 0, 0)
+        grandchild, _ = tree.make_move_from(child, 1, 1)
 
         # Get outcome indices
         root_idx1 = tree.root.action_to_outcome(1, 0)
@@ -430,15 +427,15 @@ class TestBackup:
             (tree.root, 0, 0),  # root → child
             (child, 1, 1),  # child → grandchild
         ]
-        tree_discounted.backup(path)
+        tree.backup(path)
 
-        # Grandchild: value = (0.5, 0.0) + 0.9 * (0, 0) = (0.5, 0.0)
-        child_q1, child_q2 = child.get_q_values(gamma=0.9)
+        # Grandchild: value = (0.5, 0.0) + (0, 0) = (0.5, 0.0)
+        child_q1, child_q2 = child.get_q_values()
         assert child_q1[child_idx1] == pytest.approx(0.5)  # P1's Q-value
 
-        # Root: value = (1.0, 0.0) + 0.9 * (0.5, 0.0) = (1.45, 0.0)
-        root_q1, root_q2 = tree.root.get_q_values(gamma=0.9)
-        assert root_q1[root_idx1] == pytest.approx(1.45)  # P1's Q-value
+        # Root: value = (1.0, 0.0) + (0.5, 0.0) = (1.5, 0.0)
+        root_q1, root_q2 = tree.root.get_q_values()
+        assert root_q1[root_idx1] == pytest.approx(1.5)  # P1's Q-value
 
     def test_backup_multiple_visits(self, tree: MCTSTree) -> None:
         """Multiple backups should use incremental mean for node values."""
@@ -469,7 +466,7 @@ class TestBackup:
         assert child.v1 == pytest.approx(8.0)  # P1
         assert child.v2 == pytest.approx(-8.0)  # P2
 
-        # get_q_values() returns Q = edge_r + gamma * child.V = 1.0 + 1.0 * 8.0 = 9.0
+        # get_q_values() returns Q = edge_r + child.V = 1.0 + 8.0 = 9.0
         q1, q2 = tree.root.get_q_values()
         assert q1[idx1] == pytest.approx(9.0)  # P1
         assert q2[idx2] == pytest.approx(-9.0)  # P2
@@ -536,7 +533,7 @@ class TestBackup:
         # Simulation 1: g = (10, -10) → Q = 2 + 1*10 = 12
         path = [(tree.root, 0, 0)]
         tree.backup(path, g=(10.0, -10.0))
-        backed_up_q1.append(2.0 + 1.0 * 10.0)  # edge_r + gamma * g
+        backed_up_q1.append(2.0 + 10.0)  # edge_r + g
 
         # Simulation 2: g = (4, -4) → Q = 2 + 1*4 = 6
         tree.backup(path, g=(4.0, -4.0))
@@ -547,7 +544,7 @@ class TestBackup:
         backed_up_q1.append(2.0 + 1.0 * 7.0)
 
         # get_q_values should return average: (12 + 6 + 9) / 3 = 9
-        q1, q2 = tree.root.get_q_values(gamma=tree.gamma)
+        q1, q2 = tree.root.get_q_values()
 
         idx = tree.root.action_to_outcome(1, 0)
         expected_q1 = sum(backed_up_q1) / len(backed_up_q1)
@@ -591,7 +588,7 @@ class TestBackup:
         tree.backup([(tree.root, p1_action, p2_action_b)], g=(20.0, 0.0))
 
         # Q1(p1_outcome) = (2*11 + 1*23) / 3 = 45/3 = 15
-        q1, _ = tree.root.get_q_values(gamma=tree.gamma)
+        q1, _ = tree.root.get_q_values()
         idx = tree.root.action_to_outcome(1, p1_action)
 
         expected = (2 * 11.0 + 1 * 23.0) / 3
@@ -755,7 +752,7 @@ class TestPredictionCache:
             nn_value_p1=0.0,
             nn_value_p2=0.0,
         )
-        tree = MCTSTree(game=game, root=root, gamma=1.0, predict_fn=predict_fn)  # type: ignore[arg-type]
+        tree = MCTSTree(game=game, root=root, predict_fn=predict_fn)  # type: ignore[arg-type]
 
         # Root init calls predict_fn once (state: P1=(5,5), P2=(5,5), turn=0)
         assert call_count[0] == 1
@@ -788,7 +785,7 @@ class TestPredictionCache:
             nn_value_p1=0.0,
             nn_value_p2=0.0,
         )
-        tree = MCTSTree(game=game, root=root, gamma=1.0, predict_fn=predict_fn)  # type: ignore[arg-type]
+        tree = MCTSTree(game=game, root=root, predict_fn=predict_fn)  # type: ignore[arg-type]
         assert call_count[0] == 1  # Root init
 
         # Each child has a unique position → all misses
@@ -809,7 +806,7 @@ class TestPredictionCache:
             nn_value_p1=0.0,
             nn_value_p2=0.0,
         )
-        tree = MCTSTree(game=game, root=root, gamma=1.0)  # type: ignore[arg-type]
+        tree = MCTSTree(game=game, root=root)  # type: ignore[arg-type]
 
         # Expand some children
         tree.make_move_from(tree.root, 0, 0)
@@ -830,7 +827,7 @@ class TestPredictionCache:
             nn_value_p1=0.0,
             nn_value_p2=0.0,
         )
-        tree = MCTSTree(game=game, root=root, gamma=1.0, predict_fn=predict_fn)  # type: ignore[arg-type]
+        tree = MCTSTree(game=game, root=root, predict_fn=predict_fn)  # type: ignore[arg-type]
 
         # Build a transposition: two paths to P1=(6,6), P2=(6,6), turn=2
         a, _ = tree.make_move_from(tree.root, 1, 0)
@@ -863,7 +860,7 @@ class TestTerminalNodes:
             nn_value_p1=0.0,
             nn_value_p2=0.0,
         )
-        tree = MCTSTree(game=game, root=root, gamma=1.0)  # type: ignore[arg-type]
+        tree = MCTSTree(game=game, root=root)  # type: ignore[arg-type]
 
         # Create a child — game.turn will be max_turns after make_move
         child, _ = tree.make_move_from(tree.root, 4, 4)  # STAY/STAY

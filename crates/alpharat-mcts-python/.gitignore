@@ -1,0 +1,5 @@
+# Compiled extension placed here by maturin develop
+python/pyrat_engine/*.so
+# Python bytecode
+__pycache__/
+*.pyc

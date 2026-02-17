@@ -9,7 +9,7 @@ from typing import TYPE_CHECKING, Any
 if TYPE_CHECKING:
     from types import TracebackType
 
-    from alpharat.mcts.decoupled_puct import SearchResult
+    from alpharat.mcts.result import SearchResult
 
 import numpy as np
 
@@ -43,17 +43,10 @@ class GameRecorder:
     Usage as context manager:
         with GameRecorder(game, output_dir, width=15, height=11) as recorder:
             while not is_terminal(game):
-                result = mcts.search()
-                recorder.record_position(
-                    game=game,
-                    search_result=result,
-                    prior_p1=tree.root.prior_policy_p1,
-                    prior_p2=tree.root.prior_policy_p2,
-                    visit_counts_p1=result.visit_counts_p1,
-                    visit_counts_p2=result.visit_counts_p2,
-                    action_p1=a1,
-                    action_p2=a2,
-                )
+                result = searcher.search(game)
+                a1 = select_action(result.policy_p1)
+                a2 = select_action(result.policy_p2)
+                recorder.record_position(game, result, a1, a2)
                 game.make_move(a1, a2)
         # auto-finalize and save on exit
 
@@ -139,11 +132,7 @@ class GameRecorder:
     def record_position(
         self,
         game: Any,
-        search_result: SearchResult,
-        prior_p1: np.ndarray,
-        prior_p2: np.ndarray,
-        visit_counts_p1: np.ndarray,
-        visit_counts_p2: np.ndarray,
+        result: SearchResult,
         action_p1: int,
         action_p2: int,
     ) -> None:
@@ -154,11 +143,7 @@ class GameRecorder:
 
         Args:
             game: Current game state.
-            search_result: MCTS search output (policy_p1, policy_p2, value_p1, value_p2).
-            prior_p1: Neural network's policy prior for player 1.
-            prior_p2: Neural network's policy prior for player 2.
-            visit_counts_p1: Marginal MCTS visit counts for P1 actions.
-            visit_counts_p2: Marginal MCTS visit counts for P2 actions.
+            result: MCTS search result (has policies, values, priors, visit counts).
             action_p1: Action taken by player 1 (0-4).
             action_p2: Action taken by player 2 (0-4).
 
@@ -177,15 +162,14 @@ class GameRecorder:
             p2_mud=int(game.player2_mud_turns),
             cheese_positions=[(c.x, c.y) for c in game.cheese_positions()],
             turn=int(game.turn),
-            value_p1=search_result.value_p1,
-            value_p2=search_result.value_p2,
-            visit_counts_p1=visit_counts_p1.copy(),
-            visit_counts_p2=visit_counts_p2.copy(),
-            prior_p1=prior_p1.copy(),
-            prior_p2=prior_p2.copy(),
-            # Save visit-proportional policies (for NN training)
-            policy_p1=search_result.policy_p1.copy(),
-            policy_p2=search_result.policy_p2.copy(),
+            value_p1=result.value_p1,
+            value_p2=result.value_p2,
+            visit_counts_p1=result.visit_counts_p1.copy(),
+            visit_counts_p2=result.visit_counts_p2.copy(),
+            prior_p1=result.prior_p1.copy(),
+            prior_p2=result.prior_p2.copy(),
+            policy_p1=result.policy_p1.copy(),
+            policy_p2=result.policy_p2.copy(),
             action_p1=action_p1,
             action_p2=action_p2,
         )

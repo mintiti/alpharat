@@ -29,7 +29,7 @@ from alpharat.experiments.schema import (
 
 if TYPE_CHECKING:
     from alpharat.config.game import GameConfig
-    from alpharat.mcts import DecoupledPUCTConfig
+    from alpharat.mcts.config import MCTSConfigBase
 
 logger = logging.getLogger(__name__)
 
@@ -161,7 +161,7 @@ class ExperimentManager:
     def prepare_batch(
         self,
         group: str,
-        mcts_config: DecoupledPUCTConfig,
+        mcts_config: MCTSConfigBase,
         game: GameConfig,
         checkpoint_path: str | None = None,
     ) -> tuple[Path, str]:
@@ -203,7 +203,7 @@ class ExperimentManager:
             batch_id=batch_uuid,
             created_at=datetime.now(UTC),
             checkpoint_path=checkpoint_path,
-            mcts_config=mcts_config,
+            mcts_config=mcts_config,  # type: ignore[arg-type]
             game=game,
         )
         save_batch_metadata(batch_dir, metadata)
@@ -214,7 +214,7 @@ class ExperimentManager:
         self,
         group: str,
         batch_uuid: str,
-        mcts_config: DecoupledPUCTConfig,
+        mcts_config: MCTSConfigBase,
         game: GameConfig,
         checkpoint_path: str | None = None,
         seed_start: int = 0,
@@ -250,7 +250,7 @@ class ExperimentManager:
     def create_batch(
         self,
         group: str,
-        mcts_config: DecoupledPUCTConfig,
+        mcts_config: MCTSConfigBase,
         game: GameConfig,
         checkpoint_path: str | None = None,
         seed_start: int = 0,
