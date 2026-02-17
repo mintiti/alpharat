@@ -115,6 +115,8 @@ class RustSearcher:
         force_k: Forced playout coefficient.
         fpu_reduction: First-play urgency penalty.
         batch_size: Within-tree batching size.
+        noise_epsilon: Dirichlet noise mixing weight (0 = disabled).
+        noise_concentration: Total Dirichlet concentration (KataGo-style).
         predict_fn: Optional batched predict_fn for NN priors.
         seed: Optional RNG seed for deterministic search.
     """
@@ -126,6 +128,8 @@ class RustSearcher:
         force_k: float,
         fpu_reduction: float,
         batch_size: int = 8,
+        noise_epsilon: float = 0.0,
+        noise_concentration: float = 10.83,
         predict_fn: Callable[..., Any] | None = None,
         seed: int | None = None,
     ) -> None:
@@ -134,6 +138,8 @@ class RustSearcher:
         self._force_k = force_k
         self._fpu_reduction = fpu_reduction
         self._batch_size = batch_size
+        self._noise_epsilon = noise_epsilon
+        self._noise_concentration = noise_concentration
         self._predict_fn = predict_fn
         self._seed = seed
 
@@ -149,6 +155,8 @@ class RustSearcher:
             c_puct=self._c_puct,
             fpu_reduction=self._fpu_reduction,
             force_k=self._force_k,
+            noise_epsilon=self._noise_epsilon,
+            noise_concentration=self._noise_concentration,
             seed=self._seed,
         )
 

@@ -8,7 +8,7 @@ never need to know which backend they're using.
 from __future__ import annotations
 
 from abc import abstractmethod
-from typing import TYPE_CHECKING, Annotated, Any, Literal
+from typing import TYPE_CHECKING, Annotated, Any, Literal, Self
 
 from pydantic import Field
 
@@ -21,6 +21,16 @@ if TYPE_CHECKING:
 
 class MCTSConfigBase(StrictBaseModel):
     """Base class for MCTS backend configurations."""
+
+    def for_evaluation(self) -> Self:
+        """Return a copy suitable for evaluation (no exploration noise).
+
+        Sampling uses Dirichlet noise at the root to encourage exploration.
+        Evaluation should measure true playing strength, so noise is disabled.
+
+        Default: returns self (no noise to strip).
+        """
+        return self
 
     @abstractmethod
     def build_searcher(
@@ -128,6 +138,14 @@ class RustMCTSConfig(MCTSConfigBase):
     force_k: float = 2.0
     fpu_reduction: float = 0.2
     batch_size: int = 8
+    noise_epsilon: float = 0.0
+    noise_concentration: float = 10.83
+
+    def for_evaluation(self) -> Self:
+        """Return a copy with Dirichlet noise disabled."""
+        if self.noise_epsilon == 0.0:
+            return self
+        return self.model_copy(update={"noise_epsilon": 0.0})
 
     def build_searcher(
         self,
@@ -148,6 +166,8 @@ class RustMCTSConfig(MCTSConfigBase):
             force_k=self.force_k,
             fpu_reduction=self.fpu_reduction,
             batch_size=self.batch_size,
+            noise_epsilon=self.noise_epsilon,
+            noise_concentration=self.noise_concentration,
             predict_fn=predict_fn,
         )
 

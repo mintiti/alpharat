@@ -7,3 +7,5 @@ c_puct: 0.508
 force_k: 0.137
 fpu_reduction: 0.479
 batch_size: 16
+noise_epsilon: 0.25
+noise_concentration: 10.83

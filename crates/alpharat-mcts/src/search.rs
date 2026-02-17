@@ -1,4 +1,5 @@
 use rand::Rng;
+use rand_distr::Gamma;
 
 use crate::backend::Backend;
 use crate::node::{HalfNode, Node, NodeArena, NodeIndex};
@@ -21,6 +22,12 @@ pub struct SearchConfig {
     pub fpu_reduction: f32,
     /// Forced playout coefficient. 0 disables forced playouts.
     pub force_k: f32,
+    /// Dirichlet noise mixing weight. 0.0 = disabled, typical: 0.25.
+    pub noise_epsilon: f32,
+    /// Total Dirichlet concentration (KataGo-style).
+    /// Per-move alpha = concentration / n_outcomes.
+    /// Default: 10.83 (KataGo's value, = 361 * 0.03).
+    pub noise_concentration: f32,
 }
 
 impl Default for SearchConfig {
@@ -29,6 +36,8 @@ impl Default for SearchConfig {
             c_puct: 1.5,
             fpu_reduction: 0.2,
             force_k: 2.0,
+            noise_epsilon: 0.0,
+            noise_concentration: 10.83,
         }
     }
 }
@@ -319,6 +328,45 @@ pub fn run_search(
 }
 
 // ---------------------------------------------------------------------------
+// apply_dirichlet_noise — root exploration noise
+// ---------------------------------------------------------------------------
+
+/// Mix Dirichlet noise into a HalfNode's outcome-indexed priors.
+///
+/// Uses KataGo's total-concentration approach: per-move alpha = concentration / n_outcomes.
+/// No-op if n_outcomes <= 1 (only one possible outcome, noise is meaningless).
+fn apply_dirichlet_noise(half: &mut HalfNode, epsilon: f32, concentration: f32, rng: &mut impl Rng) {
+    let n = half.n_outcomes();
+    if n <= 1 {
+        return;
+    }
+
+    // Per-move alpha = total concentration / n_outcomes (KataGo-style)
+    let alpha = (concentration / n as f32) as f64;
+
+    // Sample Gamma(alpha, 1.0) per outcome, normalize → Dirichlet sample
+    let gamma_dist = match Gamma::new(alpha, 1.0) {
+        Ok(d) => d,
+        Err(_) => return, // alpha <= 0 or invalid
+    };
+
+    let mut noise = [0.0f32; 5];
+    let mut total = 0.0f32;
+    for item in noise.iter_mut().take(n) {
+        *item = rng.sample(gamma_dist) as f32;
+        total += *item;
+    }
+    if total < f32::MIN_POSITIVE {
+        return;
+    }
+
+    // Blend: prior = (1 - eps) * prior + eps * normalized_noise
+    for i in 0..n {
+        half.set_prior_at(i, half.prior(i) * (1.0 - epsilon) + epsilon * noise[i] / total);
+    }
+}
+
+// ---------------------------------------------------------------------------
 // simulate_batch — gather/eval/backup cycle
 // ---------------------------------------------------------------------------
 
@@ -366,6 +414,14 @@ fn simulate_batch(
                 eval_idx += 1;
 
                 populate_node(tree.arena_mut(), leaf_idx, Some(eval));
+
+                // Inject Dirichlet noise at root after NN evaluation.
+                if leaf_idx == root && config.noise_epsilon > 0.0 {
+                    let node = &mut tree.arena_mut()[leaf_idx];
+                    apply_dirichlet_noise(&mut node.p1, config.noise_epsilon, config.noise_concentration, rng);
+                    apply_dirichlet_noise(&mut node.p2, config.noise_epsilon, config.noise_concentration, rng);
+                }
+
                 backup(tree.arena_mut(), &path, leaf_idx, eval.value_p1, eval.value_p2);
                 cleanup_descent(tree.arena_mut(), &path, Some(leaf_idx));
             }
@@ -2354,5 +2410,135 @@ mod tests {
                 assert!(node.p2.edge(j).q.is_finite(), "Node {i}: P2 edge {j} Q not finite");
             }
         }
+    }
+
+    // ---- Dirichlet noise ----
+
+    #[test]
+    fn noise_disabled_priors_unchanged() {
+        // epsilon=0 → priors should be untouched.
+        let prior_5 = [0.1, 0.3, 0.2, 0.15, 0.25];
+        let effective = [0, 1, 2, 3, 4];
+        let mut half = HalfNode::new(prior_5, effective);
+
+        let original: Vec<f32> = (0..5).map(|i| half.prior(i)).collect();
+        apply_dirichlet_noise(&mut half, 0.0, 10.83, &mut rng());
+
+        for i in 0..5 {
+            assert!(
+                (half.prior(i) - original[i]).abs() < 1e-6,
+                "Prior {i} changed with epsilon=0"
+            );
+        }
+    }
+
+    #[test]
+    fn noise_enabled_priors_modified() {
+        // epsilon>0 → priors should differ from original.
+        let prior_5 = [0.2; 5];
+        let effective = [0, 1, 2, 3, 4];
+        let mut half = HalfNode::new(prior_5, effective);
+
+        let original: Vec<f32> = (0..5).map(|i| half.prior(i)).collect();
+        apply_dirichlet_noise(&mut half, 0.25, 10.83, &mut rng());
+
+        let mut any_changed = false;
+        for i in 0..5 {
+            if (half.prior(i) - original[i]).abs() > 1e-6 {
+                any_changed = true;
+            }
+        }
+        assert!(any_changed, "At least one prior should change with noise");
+
+        // Sum should still be close to 1.0.
+        let total: f32 = (0..half.n_outcomes()).map(|i| half.prior(i)).sum();
+        assert!(
+            (total - 1.0).abs() < 1e-5,
+            "Noisy priors should sum to ~1.0, got {}",
+            total
+        );
+    }
+
+    #[test]
+    fn noise_deterministic_with_seed() {
+        // Same seed → same noise.
+        let prior_5 = [0.2; 5];
+        let effective = [0, 1, 2, 3, 4];
+
+        let mut half1 = HalfNode::new(prior_5, effective);
+        let mut half2 = HalfNode::new(prior_5, effective);
+
+        apply_dirichlet_noise(&mut half1, 0.25, 10.83, &mut SmallRng::seed_from_u64(99));
+        apply_dirichlet_noise(&mut half2, 0.25, 10.83, &mut SmallRng::seed_from_u64(99));
+
+        for i in 0..5 {
+            assert!(
+                (half1.prior(i) - half2.prior(i)).abs() < 1e-6,
+                "Same seed should give same noise at outcome {}",
+                i
+            );
+        }
+    }
+
+    #[test]
+    fn noise_single_outcome_noop() {
+        // n_outcomes=1 → noise is a no-op.
+        let prior_5 = [0.2; 5];
+        let effective = [4, 4, 4, 4, 4]; // all → STAY
+        let mut half = HalfNode::new(prior_5, effective);
+        assert_eq!(half.n_outcomes(), 1);
+
+        let original = half.prior(0);
+        apply_dirichlet_noise(&mut half, 0.25, 10.83, &mut rng());
+
+        assert!(
+            (half.prior(0) - original).abs() < 1e-6,
+            "Single-outcome node priors should be unchanged"
+        );
+    }
+
+    #[test]
+    fn noise_search_integration() {
+        // Run search with noise enabled, verify root priors differ from
+        // SmartUniform baseline.
+        let cheese = [Coordinates::new(2, 2)];
+        let game = test_util::open_5x5_game(
+            Coordinates::new(1, 1),
+            Coordinates::new(3, 3),
+            &cheese,
+        );
+
+        // Without noise.
+        let mut tree_no_noise = MCTSTree::new(&game);
+        let config_no_noise = default_config();
+        let mut r1 = SmallRng::seed_from_u64(42);
+        let result_no_noise = run_search(
+            &mut tree_no_noise, &game, &BACKEND, &config_no_noise, 50, 1, &mut r1,
+        );
+
+        // With noise.
+        let mut tree_noise = MCTSTree::new(&game);
+        let config_noise = SearchConfig {
+            noise_epsilon: 0.25,
+            noise_concentration: 10.83,
+            ..default_config()
+        };
+        let mut r2 = SmallRng::seed_from_u64(42);
+        let result_noise = run_search(
+            &mut tree_noise, &game, &BACKEND, &config_noise, 50, 1, &mut r2,
+        );
+
+        // Priors should differ because noise was injected.
+        let mut any_prior_diff = false;
+        for i in 0..5 {
+            if (result_noise.prior_p1[i] - result_no_noise.prior_p1[i]).abs() > 1e-6 {
+                any_prior_diff = true;
+            }
+        }
+        assert!(any_prior_diff, "Root priors should differ with noise enabled");
+
+        // Policies should still sum to 1.
+        let sum: f32 = result_noise.policy_p1.iter().sum();
+        assert!((sum - 1.0).abs() < 1e-5, "Noisy policy should sum to ~1.0, got {}", sum);
     }
 }

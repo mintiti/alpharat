@@ -165,6 +165,12 @@ impl HalfNode {
         out
     }
 
+    /// Set a single outcome-indexed prior directly.
+    pub fn set_prior_at(&mut self, idx: usize, value: f32) {
+        debug_assert!(idx < self.n_outcomes());
+        self.prior[idx] = value;
+    }
+
     /// Expand outcome-indexed priors back to 5-action space.
     ///
     /// Canonical actions get their outcome's prior; blocked actions get 0.

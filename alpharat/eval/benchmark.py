@@ -93,6 +93,9 @@ def build_standard_agents(
     - nn-prev: Previous iteration's NN
     - mcts+nn-prev: Previous iteration's MCTS+NN
 
+    Dirichlet noise is stripped from the MCTS config — benchmarks measure
+    true playing strength, not noisy exploration.
+
     Args:
         checkpoint_path: Path to the model checkpoint to evaluate.
         mcts_config: MCTS configuration for search-based agents.
@@ -103,18 +106,21 @@ def build_standard_agents(
     """
     checkpoint_str = str(checkpoint_path)
 
+    # Strip exploration noise — benchmarks should measure true strength.
+    eval_mcts = mcts_config.for_evaluation()
+
     agents: dict[str, AgentConfig] = {
         "random": RandomAgentConfig(),
         "greedy": GreedyAgentConfig(),
-        "mcts": MCTSAgentConfig(mcts=mcts_config),
+        "mcts": MCTSAgentConfig(mcts=eval_mcts),
         "nn": NNAgentConfig(checkpoint=checkpoint_str, temperature=1.0),
-        "mcts+nn": MCTSAgentConfig(mcts=mcts_config, checkpoint=checkpoint_str),
+        "mcts+nn": MCTSAgentConfig(mcts=eval_mcts, checkpoint=checkpoint_str),
     }
 
     if baseline_checkpoint is not None:
         baseline_str = str(baseline_checkpoint)
         agents["nn-prev"] = NNAgentConfig(checkpoint=baseline_str, temperature=1.0)
-        agents["mcts+nn-prev"] = MCTSAgentConfig(mcts=mcts_config, checkpoint=baseline_str)
+        agents["mcts+nn-prev"] = MCTSAgentConfig(mcts=eval_mcts, checkpoint=baseline_str)
 
     return agents
 
