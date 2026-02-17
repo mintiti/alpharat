@@ -466,17 +466,17 @@ def run_sampling(config: SamplingConfig, *, verbose: bool = True) -> tuple[Path,
     games_dir = batch_dir / "games"
 
     if verbose:
-        print(f"Sampling {config.sampling.num_games} games")
-        print(f"  Group: {config.group}")
-        print(f"  MCTS: {config.mcts.simulations} sims")
-        print(
-            f"  Game: {config.game.width}x{config.game.height}, {config.game.cheese_count} cheese"
+        from alpharat.config.display import format_config_summary
+
+        summary = format_config_summary(
+            ("Game", config.game),
+            ("MCTS", config.mcts),
+            ("Sampling", config.sampling),
         )
-        print(f"  Workers: {config.sampling.workers}")
+        print(summary)
         if config.checkpoint:
-            print(f"  Checkpoint: {config.checkpoint}")
-            print(f"  Device: {config.sampling.device}")
-        print(f"  Output: {batch_dir}")
+            print(f"Checkpoint: {config.checkpoint}")
+        print(f"Output: {batch_dir}")
         print()
 
     num_workers = config.sampling.workers

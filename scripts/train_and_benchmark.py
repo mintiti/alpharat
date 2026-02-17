@@ -22,6 +22,7 @@ import logging
 import sys
 from pathlib import Path
 
+from alpharat.config.display import format_config_summary
 from alpharat.config.game import GameConfig
 from alpharat.config.loader import load_config, split_config_path
 from alpharat.eval.benchmark import (
@@ -165,6 +166,14 @@ def main() -> None:
         logger.info("=" * 60)
         logger.info(f"Created run: {actual_run_name}")
         logger.info(f"  Run directory: {run_dir}")
+        logger.info(
+            "\n%s",
+            format_config_summary(
+                ("Model", config.model),
+                ("Optimizer", config.optim),
+                ("Data", config.data),
+            ),
+        )
 
         checkpoint_path = run_training(
             config,
@@ -216,11 +225,12 @@ def main() -> None:
         baseline_checkpoint=baseline,
     )
     logger.info(
-        "Game settings: %dx%d, %d cheese, %d max turns",
-        game_config.width,
-        game_config.height,
-        game_config.cheese_count,
-        game_config.max_turns,
+        "\n%s",
+        format_config_summary(
+            ("Game", game_config),
+            ("MCTS", mcts_config),
+            ("Benchmark", benchmark_config),
+        ),
     )
     logger.info("")
 

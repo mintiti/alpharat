@@ -37,6 +37,7 @@ from pathlib import Path
 from pydantic import Field
 
 from alpharat.config.base import StrictBaseModel
+from alpharat.config.display import format_config_summary
 from alpharat.config.game import GameConfig  # noqa: TC001
 from alpharat.config.loader import load_config, split_config_path
 from alpharat.mcts import DecoupledPUCTConfig  # noqa: TC001
@@ -416,13 +417,18 @@ def main() -> None:
     logger.info("AlphaZero Iteration Loop")
     logger.info("=" * 60)
     logger.info(f"Prefix: {prefix}")
-    logger.info(f"Game: {config.game.width}x{config.game.height}")
-    logger.info(f"MCTS: {config.mcts.simulations} sims, c_puct={config.mcts.c_puct}")
-    logger.info(f"Model: {config.model.architecture}")
-    logger.info(f"Games per iteration: {config.iteration.games}")
-    logger.info(f"Epochs per iteration: {config.iteration.epochs}")
-    logger.info(f"Benchmark every: {benchmark_every if benchmark_every > 0 else 'never'}")
-    logger.info(f"Device: {device}")
+    summary = format_config_summary(
+        ("Game", config.game),
+        ("MCTS", config.mcts),
+        ("Model", config.model),
+        ("Optimizer", config.optim),
+        ("Iteration", config.iteration),
+        ("Sampling", config.sampling),
+        ("Sharding", config.sharding),
+        ("Benchmark", config.benchmark),
+    )
+    logger.info("\n%s", summary)
+    logger.info("Device: %s", device)
     logger.info("")
 
     # Initialize state
