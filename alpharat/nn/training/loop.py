@@ -39,6 +39,7 @@ from alpharat.nn.training_utils import (
 )
 
 if TYPE_CHECKING:
+    from pydantic import BaseModel
     from torch import nn
 
     from alpharat.nn.config import TrainConfig
@@ -134,6 +135,20 @@ def run_training(
     # Device and AMP setup
     torch_device = select_device(device)
     logger.info(f"Using device: {torch_device}")
+
+    from alpharat.config.display import format_config_summary
+
+    config_sections: list[tuple[str, BaseModel]] = []
+    if game_config:
+        config_sections.append(("Game", game_config))
+    config_sections.extend(
+        [
+            ("Model", model_config),
+            ("Optimizer", optim_config),
+            ("Data", data_config),
+        ]
+    )
+    logger.info("Resolved config:\n%s", format_config_summary(*config_sections))
 
     amp = setup_amp(torch_device, use_amp)
     amp_enabled = amp.enabled
