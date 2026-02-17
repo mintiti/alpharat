@@ -2,15 +2,18 @@
 
 from __future__ import annotations
 
+import json
 import tempfile
 from datetime import UTC, datetime
 from pathlib import Path
 
 import numpy as np
+import pytest
 
 from alpharat.config.game import GameConfig
 from alpharat.data.batch import (
     BatchMetadata,
+    BatchMetadataError,
     create_batch,
     get_batch_stats,
     load_batch_metadata,
@@ -231,3 +234,55 @@ class TestGetBatchStats:
 
             assert stats.game_count == 1
             assert stats.total_positions == 20
+
+
+class TestBatchMetadataError:
+    """Tests for actionable errors from load_batch_metadata."""
+
+    def _write_metadata(self, batch_dir: Path, data: dict[str, object]) -> None:
+        (batch_dir / "metadata.json").write_text(json.dumps(data))
+
+    def test_extra_mcts_config_field(self) -> None:
+        """Extra field in mcts_config produces BatchMetadataError naming the field."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            batch_dir = Path(tmpdir)
+            self._write_metadata(
+                batch_dir,
+                {
+                    "batch_id": "test",
+                    "created_at": "2024-01-01T00:00:00Z",
+                    "checkpoint_path": None,
+                    "mcts_config": {
+                        "simulations": 100,
+                        "dirichlet_alpha": 0.3,  # extra
+                    },
+                    "game": {"width": 5, "height": 5, "max_turns": 30, "cheese_count": 5},
+                },
+            )
+
+            with pytest.raises(BatchMetadataError, match="dirichlet_alpha"):
+                load_batch_metadata(batch_dir)
+
+    def test_extra_game_field(self) -> None:
+        """Extra field in game produces BatchMetadataError naming the field."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            batch_dir = Path(tmpdir)
+            self._write_metadata(
+                batch_dir,
+                {
+                    "batch_id": "test",
+                    "created_at": "2024-01-01T00:00:00Z",
+                    "checkpoint_path": None,
+                    "mcts_config": {"simulations": 100},
+                    "game": {
+                        "width": 5,
+                        "height": 5,
+                        "max_turns": 30,
+                        "cheese_count": 5,
+                        "fog_of_war": True,  # extra
+                    },
+                },
+            )
+
+            with pytest.raises(BatchMetadataError, match="fog_of_war"):
+                load_batch_metadata(batch_dir)

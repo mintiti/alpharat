@@ -3,6 +3,7 @@
 from alpharat.config.game import GameConfig
 from alpharat.data.batch import (
     BatchMetadata,
+    BatchMetadataError,
     BatchStats,
     create_batch,
     get_batch_stats,
@@ -30,6 +31,7 @@ GameParams = GameConfig
 
 __all__ = [
     "BatchMetadata",
+    "BatchMetadataError",
     "BatchStats",
     "GameConfig",
     "GameParams",  # Deprecated alias for GameConfig

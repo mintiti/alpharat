@@ -240,7 +240,7 @@ class ExperimentManager:
             created_at=created_at or datetime.now(UTC),
             parent_checkpoint=checkpoint_path,
             mcts_config=mcts_config.model_dump(),
-            game=game,
+            game=game.model_dump(),
             seed_start=seed_start,
         )
         manifest = self._load_manifest()
@@ -796,7 +796,7 @@ class ExperimentManager:
                 "id": batch_id,
                 "created": entry.created_at.strftime("%Y-%m-%d %H:%M"),
                 "parent": entry.parent_checkpoint or "-",
-                "size": f"{entry.game.width}x{entry.game.height}",
+                "size": f"{entry.game.get('width')}x{entry.game.get('height')}",
                 "simulations": entry.mcts_config.get("simulations"),
             }
             for batch_id, entry in manifest.batches.items()
