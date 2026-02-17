@@ -521,7 +521,7 @@ class TestDeferredRegistration:
             exp = ExperimentManager(tmpdir)
             batch_dir, batch_uuid = exp.prepare_batch(
                 group="test_group",
-                mcts_config=DecoupledPUCTConfig(simulations=100),
+                mcts_config=PythonMCTSConfig(simulations=100),
                 game=GameConfig(width=5, height=5, max_turns=30, cheese_count=5),
             )
 
@@ -535,7 +535,7 @@ class TestDeferredRegistration:
         """register_batch adds entry to manifest."""
         with tempfile.TemporaryDirectory() as tmpdir:
             exp = ExperimentManager(tmpdir)
-            mcts = DecoupledPUCTConfig(simulations=100)
+            mcts = PythonMCTSConfig(simulations=100)
             game = GameConfig(width=5, height=5, max_turns=30, cheese_count=5)
 
             batch_dir, batch_uuid = exp.prepare_batch(
@@ -553,7 +553,7 @@ class TestDeferredRegistration:
         """Concurrent prepare_batch calls get different UUIDs and don't interfere."""
         with tempfile.TemporaryDirectory() as tmpdir:
             exp = ExperimentManager(tmpdir)
-            mcts = DecoupledPUCTConfig(simulations=100)
+            mcts = PythonMCTSConfig(simulations=100)
             game = GameConfig(width=5, height=5, max_turns=30, cheese_count=5)
 
             # Simulate a crash: prepare but don't register
@@ -701,7 +701,7 @@ class TestDeferredRegistration:
             exp = ExperimentManager(tmpdir)
             batch_dir = exp.create_batch(
                 group="wrapper_test",
-                mcts_config=DecoupledPUCTConfig(simulations=100),
+                mcts_config=PythonMCTSConfig(simulations=100),
                 game=GameConfig(width=5, height=5, max_turns=30, cheese_count=5),
             )
 

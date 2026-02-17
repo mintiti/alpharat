@@ -214,7 +214,7 @@ class ExperimentManager:
         self,
         group: str,
         batch_uuid: str,
-        mcts_config: DecoupledPUCTConfig,
+        mcts_config: MCTSConfigBase,
         game: GameConfig,
         checkpoint_path: str | None = None,
         seed_start: int = 0,
@@ -250,7 +250,7 @@ class ExperimentManager:
     def create_batch(
         self,
         group: str,
-        mcts_config: DecoupledPUCTConfig,
+        mcts_config: MCTSConfigBase,
         game: GameConfig,
         checkpoint_path: str | None = None,
         seed_start: int = 0,
