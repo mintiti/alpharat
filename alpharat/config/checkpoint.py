@@ -152,8 +152,8 @@ def make_predict_fn(
             # Dict interface - all models now return dicts
             policy_p1 = result["policy_p1"].squeeze(0).cpu().numpy()
             policy_p2 = result["policy_p2"].squeeze(0).cpu().numpy()
-            v1 = result["value_p1"].item()
-            v2 = result["value_p2"].item()
+            v1 = result["pred_value_p1"].item()
+            v2 = result["pred_value_p2"].item()
 
         return policy_p1, policy_p2, v1, v2
 

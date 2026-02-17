@@ -187,15 +187,15 @@ class TestTrainConfigIntegration:
         # Verify output structure
         assert "policy_p1" in output
         assert "policy_p2" in output
-        assert "value_p1" in output
-        assert "value_p2" in output
+        assert "pred_value_p1" in output
+        assert "pred_value_p2" in output
 
         # Verify output shapes
         assert output["policy_p1"].shape == (1, 5)
         assert output["policy_p2"].shape == (1, 5)
         # Value shapes are scalar per sample
-        assert output["value_p1"].shape == (1,)
-        assert output["value_p2"].shape == (1,)
+        assert output["pred_value_p1"].shape == (1,)
+        assert output["pred_value_p2"].shape == (1,)
 
 
 # --- Composition Semantics ---

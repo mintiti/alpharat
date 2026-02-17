@@ -152,9 +152,19 @@ class RustSearcher:
             seed=self._seed,
         )
 
+        # Renormalize policies: Rust normalizes in f32, promoting to f64
+        # can drift the sum away from 1.0 which numpy.random.choice rejects.
+        policy_p1 = np.asarray(rust_result.policy_p1, dtype=np.float64)
+        policy_p2 = np.asarray(rust_result.policy_p2, dtype=np.float64)
+        s1, s2 = policy_p1.sum(), policy_p2.sum()
+        if s1 > 0:
+            policy_p1 /= s1
+        if s2 > 0:
+            policy_p2 /= s2
+
         return SearchResult(
-            policy_p1=np.asarray(rust_result.policy_p1, dtype=np.float64),
-            policy_p2=np.asarray(rust_result.policy_p2, dtype=np.float64),
+            policy_p1=policy_p1,
+            policy_p2=policy_p2,
             value_p1=float(rust_result.value_p1),
             value_p2=float(rust_result.value_p2),
             visit_counts_p1=np.asarray(rust_result.visit_counts_p1, dtype=np.float64),

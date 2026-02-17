@@ -21,8 +21,8 @@ class ModelOutput(StrEnum):
     POLICY_P2 = "policy_p2"
 
     # Scalar value outputs
-    VALUE_P1 = "value_p1"
-    VALUE_P2 = "value_p2"
+    VALUE_P1 = "pred_value_p1"
+    VALUE_P2 = "pred_value_p2"
 
     # LocalValueMLP-specific
     OWNERSHIP_LOGITS = "ownership_logits"

@@ -67,8 +67,8 @@ def make_batched_predict_fn(
             result = model.predict(batch_tensor)  # type: ignore[operator]
             policy_p1 = result["policy_p1"].cpu().numpy().astype(np.float32)
             policy_p2 = result["policy_p2"].cpu().numpy().astype(np.float32)
-            value_p1 = result["value_p1"].squeeze(-1).cpu().numpy().astype(np.float32)
-            value_p2 = result["value_p2"].squeeze(-1).cpu().numpy().astype(np.float32)
+            value_p1 = result["pred_value_p1"].reshape(-1).cpu().numpy().astype(np.float32)
+            value_p2 = result["pred_value_p2"].reshape(-1).cpu().numpy().astype(np.float32)
 
         return policy_p1, policy_p2, value_p1, value_p2
 

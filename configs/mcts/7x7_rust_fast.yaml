@@ -6,3 +6,4 @@ simulations: 834
 c_puct: 0.508
 force_k: 0.137
 fpu_reduction: 0.479
+batch_size: 16
