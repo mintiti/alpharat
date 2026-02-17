@@ -114,6 +114,10 @@ class ExperimentManager:
         If the directory doesn't exist, does nothing.
         If the directory exists AND is registered in manifest, raises FileExistsError.
         If the directory exists but is NOT in manifest (crash leftover), cleans it up.
+
+        Warning: not safe for concurrent access. If two processes call prepare_run()
+        with the same name, the second will delete the first's in-progress directory.
+        Batches are safe (UUID-based paths prevent collisions).
         """
         if not artifact_dir.exists():
             return
@@ -136,9 +140,12 @@ class ExperimentManager:
     def _save_manifest(self, manifest: Manifest) -> None:
         """Save the manifest to disk."""
         manifest_path = paths.get_manifest_path(self.root)
-        # Use model_dump with mode="json" for datetime serialization
         data = manifest.model_dump(mode="json")
-        manifest_path.write_text(self._dump_yaml(data))
+        content = self._dump_yaml(data)
+        # Atomic write: temp file + rename prevents corruption on crash
+        tmp_path = manifest_path.with_suffix(".yaml.tmp")
+        tmp_path.write_text(content)
+        tmp_path.rename(manifest_path)
 
     def load_manifest(self) -> Manifest:
         """Load the manifest.

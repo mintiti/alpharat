@@ -549,8 +549,8 @@ class TestDeferredRegistration:
             batch_id = f"test_group/{batch_uuid}"
             assert batch_id in manifest.batches
 
-    def test_prepare_batch_recovers_incomplete(self) -> None:
-        """prepare_batch cleans up leftover directory without manifest entry."""
+    def test_prepare_batch_concurrent_uuids_dont_collide(self) -> None:
+        """Concurrent prepare_batch calls get different UUIDs and don't interfere."""
         with tempfile.TemporaryDirectory() as tmpdir:
             exp = ExperimentManager(tmpdir)
             mcts = DecoupledPUCTConfig(simulations=100)
@@ -610,8 +610,8 @@ class TestDeferredRegistration:
             assert run_dir2.exists()
             assert name2 == "my_run"  # Same name reused since not registered
 
-    def test_prepare_run_raises_if_registered(self) -> None:
-        """prepare_run raises FileExistsError if directory AND manifest entry exist."""
+    def test_prepare_run_raises_on_config_mismatch(self) -> None:
+        """prepare_run raises ValueError when name exists with different config."""
         with tempfile.TemporaryDirectory() as tmpdir:
             exp = ExperimentManager(tmpdir)
             config = {"lr": 0.001}
