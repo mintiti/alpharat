@@ -796,7 +796,7 @@ class ExperimentManager:
                 "id": batch_id,
                 "created": entry.created_at.strftime("%Y-%m-%d %H:%M"),
                 "parent": entry.parent_checkpoint or "-",
-                "size": f"{entry.game.get('width')}x{entry.game.get('height')}",
+                "size": f"{entry.game.get('width', '?')}x{entry.game.get('height', '?')}",
                 "simulations": entry.mcts_config.get("simulations"),
             }
             for batch_id, entry in manifest.batches.items()

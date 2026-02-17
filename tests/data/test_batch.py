@@ -9,6 +9,7 @@ from pathlib import Path
 
 import numpy as np
 import pytest
+from pydantic import ValidationError
 
 from alpharat.config.game import GameConfig
 from alpharat.data.batch import (
@@ -242,47 +243,130 @@ class TestBatchMetadataError:
     def _write_metadata(self, batch_dir: Path, data: dict[str, object]) -> None:
         (batch_dir / "metadata.json").write_text(json.dumps(data))
 
+    # All fields for each config, so _field_diff reports "OK" when section is clean.
+    _VALID_MCTS = {
+        "simulations": 100,
+        "gamma": 1.0,
+        "c_puct": 1.5,
+        "force_k": 2.0,
+        "fpu_reduction": 0.2,
+    }
+    _VALID_GAME = {
+        "width": 5,
+        "height": 5,
+        "max_turns": 30,
+        "cheese_count": 5,
+        "wall_density": None,
+        "mud_density": None,
+        "symmetric": True,
+    }
+
     def test_extra_mcts_config_field(self) -> None:
-        """Extra field in mcts_config produces BatchMetadataError naming the field."""
+        """Extra field in mcts_config reports drift and marks game OK."""
         with tempfile.TemporaryDirectory() as tmpdir:
             batch_dir = Path(tmpdir)
+            mcts = {**self._VALID_MCTS, "dirichlet_alpha": 0.3}
             self._write_metadata(
                 batch_dir,
                 {
                     "batch_id": "test",
                     "created_at": "2024-01-01T00:00:00Z",
                     "checkpoint_path": None,
-                    "mcts_config": {
-                        "simulations": 100,
-                        "dirichlet_alpha": 0.3,  # extra
-                    },
-                    "game": {"width": 5, "height": 5, "max_turns": 30, "cheese_count": 5},
+                    "mcts_config": mcts,
+                    "game": self._VALID_GAME,
                 },
             )
 
-            with pytest.raises(BatchMetadataError, match="dirichlet_alpha"):
+            with pytest.raises(BatchMetadataError, match="dirichlet_alpha") as exc_info:
                 load_batch_metadata(batch_dir)
+            assert "game: OK" in str(exc_info.value)
 
     def test_extra_game_field(self) -> None:
-        """Extra field in game produces BatchMetadataError naming the field."""
+        """Extra field in game reports drift and marks mcts_config OK."""
         with tempfile.TemporaryDirectory() as tmpdir:
             batch_dir = Path(tmpdir)
+            game = {**self._VALID_GAME, "fog_of_war": True}
             self._write_metadata(
                 batch_dir,
                 {
                     "batch_id": "test",
                     "created_at": "2024-01-01T00:00:00Z",
                     "checkpoint_path": None,
-                    "mcts_config": {"simulations": 100},
-                    "game": {
-                        "width": 5,
-                        "height": 5,
-                        "max_turns": 30,
-                        "cheese_count": 5,
-                        "fog_of_war": True,  # extra
-                    },
+                    "mcts_config": self._VALID_MCTS,
+                    "game": game,
                 },
             )
 
-            with pytest.raises(BatchMetadataError, match="fog_of_war"):
+            with pytest.raises(BatchMetadataError, match="fog_of_war") as exc_info:
                 load_batch_metadata(batch_dir)
+            assert "mcts_config: OK" in str(exc_info.value)
+
+    def test_missing_and_extra_in_one_section(self) -> None:
+        """Swapped field (removed + added) reports both missing and extra, game OK."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            batch_dir = Path(tmpdir)
+            # Remove simulations, add unknown — the extra triggers ValidationError,
+            # and _field_diff reports both missing and extra.
+            mcts = {k: v for k, v in self._VALID_MCTS.items() if k != "simulations"}
+            mcts["exploration_weight"] = 0.5
+            self._write_metadata(
+                batch_dir,
+                {
+                    "batch_id": "test",
+                    "created_at": "2024-01-01T00:00:00Z",
+                    "checkpoint_path": None,
+                    "mcts_config": mcts,
+                    "game": self._VALID_GAME,
+                },
+            )
+
+            with pytest.raises(BatchMetadataError) as exc_info:
+                load_batch_metadata(batch_dir)
+            msg = str(exc_info.value)
+            assert "missing fields: simulations" in msg
+            assert "extra fields: exploration_weight" in msg
+            assert "game: OK" in msg
+
+    def test_extra_and_missing_both_sections(self) -> None:
+        """Drift in both sections reports both."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            batch_dir = Path(tmpdir)
+            mcts = {**self._VALID_MCTS, "dirichlet_alpha": 0.3}
+            game = {**self._VALID_GAME, "fog_of_war": True}
+            self._write_metadata(
+                batch_dir,
+                {
+                    "batch_id": "test",
+                    "created_at": "2024-01-01T00:00:00Z",
+                    "checkpoint_path": None,
+                    "mcts_config": mcts,
+                    "game": game,
+                },
+            )
+
+            with pytest.raises(BatchMetadataError) as exc_info:
+                load_batch_metadata(batch_dir)
+            msg = str(exc_info.value)
+            assert "dirichlet_alpha" in msg
+            assert "fog_of_war" in msg
+
+    def test_value_validation_chains_original_error(self) -> None:
+        """Value errors (valid keys, invalid values) chain the original ValidationError."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            batch_dir = Path(tmpdir)
+            game = {**self._VALID_GAME, "cheese_count": 9999}  # fails check_cheese_fits
+            self._write_metadata(
+                batch_dir,
+                {
+                    "batch_id": "test",
+                    "created_at": "2024-01-01T00:00:00Z",
+                    "checkpoint_path": None,
+                    "mcts_config": self._VALID_MCTS,
+                    "game": game,
+                },
+            )
+
+            with pytest.raises(BatchMetadataError) as exc_info:
+                load_batch_metadata(batch_dir)
+            assert exc_info.value.__cause__ is not None
+            assert isinstance(exc_info.value.__cause__, ValidationError)

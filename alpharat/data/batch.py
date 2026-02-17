@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import NoReturn
 
 import numpy as np
+from pydantic import ValidationError
 
 from alpharat.config.base import StrictBaseModel
 from alpharat.config.game import GameConfig  # noqa: TC001
@@ -108,54 +109,41 @@ def load_batch_metadata(batch_dir: Path | str) -> BatchMetadata:
 
     try:
         return BatchMetadata.model_validate(data)
-    except Exception:
-        _raise_batch_metadata_error(metadata_path, data)
+    except ValidationError as exc:
+        _raise_batch_metadata_error(metadata_path, data, cause=exc)
 
 
-def _raise_batch_metadata_error(metadata_path: Path, data: dict[str, object]) -> NoReturn:
+def _field_diff(label: str, model_cls: type[StrictBaseModel], saved: object) -> str:
+    """Compare saved dict keys against a model's fields. Returns summary line."""
+    if not isinstance(saved, dict):
+        return f"  {label}: OK"
+    expected = set(model_cls.model_fields)
+    actual = set(saved)
+    extra = sorted(actual - expected)
+    missing = sorted(expected - actual)
+    parts: list[str] = []
+    if extra:
+        parts.append(f"extra fields: {', '.join(extra)}")
+    if missing:
+        parts.append(f"missing fields: {', '.join(missing)}")
+    return f"  {label}: {'; '.join(parts)}" if parts else f"  {label}: OK"
+
+
+def _raise_batch_metadata_error(
+    metadata_path: Path, data: dict[str, object], *, cause: Exception
+) -> NoReturn:
     """Build and raise an actionable BatchMetadataError."""
     lines: list[str] = [
         f"Cannot load batch metadata from {metadata_path}",
         "",
         "Config schema mismatch — this batch was created with a different version:",
+        _field_diff("mcts_config", DecoupledPUCTConfig, data.get("mcts_config")),
+        _field_diff("game", GameConfig, data.get("game")),
+        "",
+        "Update the config classes to include these fields, or re-sample with the current config.",
     ]
 
-    saved_mcts = data.get("mcts_config")
-    if isinstance(saved_mcts, dict):
-        expected = set(DecoupledPUCTConfig.model_fields)
-        actual = set(saved_mcts)
-        extra = sorted(actual - expected)
-        missing = sorted(expected - actual)
-        parts: list[str] = []
-        if extra:
-            parts.append(f"extra fields: {', '.join(extra)}")
-        if missing:
-            parts.append(f"missing fields: {', '.join(missing)}")
-        lines.append(f"  mcts_config: {'; '.join(parts)}" if parts else "  mcts_config: OK")
-    else:
-        lines.append("  mcts_config: OK")
-
-    saved_game = data.get("game")
-    if isinstance(saved_game, dict):
-        expected = set(GameConfig.model_fields)
-        actual = set(saved_game)
-        extra = sorted(actual - expected)
-        missing = sorted(expected - actual)
-        parts = []
-        if extra:
-            parts.append(f"extra fields: {', '.join(extra)}")
-        if missing:
-            parts.append(f"missing fields: {', '.join(missing)}")
-        lines.append(f"  game: {'; '.join(parts)}" if parts else "  game: OK")
-    else:
-        lines.append("  game: OK")
-
-    lines.append("")
-    lines.append(
-        "Update the config classes to include these fields, or re-sample with the current config."
-    )
-
-    raise BatchMetadataError("\n".join(lines))
+    raise BatchMetadataError("\n".join(lines)) from cause
 
 
 def get_batch_stats(batch_dir: Path | str) -> BatchStats:
