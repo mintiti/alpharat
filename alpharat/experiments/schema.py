@@ -11,7 +11,6 @@ from typing import Any
 
 from alpharat.config.base import StrictBaseModel
 from alpharat.config.game import GameConfig  # noqa: TC001
-from alpharat.mcts import DecoupledPUCTConfig  # noqa: TC001
 
 
 class BatchEntry(StrictBaseModel):
@@ -19,13 +18,16 @@ class BatchEntry(StrictBaseModel):
 
     Tracks the provenance of sampled game data, including the MCTS configuration
     and optional parent checkpoint used for NN-guided sampling.
+
+    mcts_config is stored as a dict because the manifest is a historical record —
+    old entries may contain fields that no longer exist in DecoupledPUCTConfig.
     """
 
     group: str
     uuid: str
     created_at: datetime
     parent_checkpoint: str | None
-    mcts_config: DecoupledPUCTConfig
+    mcts_config: dict[str, Any]
     game: GameConfig
     seed_start: int = 0  # First game uses this seed, increments from there
 

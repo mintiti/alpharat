@@ -9,6 +9,8 @@ Usage:
 
 from __future__ import annotations
 
+import logging
+import shutil
 import uuid
 from datetime import UTC, datetime  # noqa: TC003
 from pathlib import Path  # noqa: TC003
@@ -28,6 +30,8 @@ from alpharat.experiments.schema import (
 if TYPE_CHECKING:
     from alpharat.config.game import GameConfig
     from alpharat.mcts import DecoupledPUCTConfig
+
+logger = logging.getLogger(__name__)
 
 
 class ExperimentManager:
@@ -102,6 +106,27 @@ class ExperimentManager:
         notes_path = artifact_dir / paths.NOTES_FILE
         notes_path.write_text(templates.NOTES_TEMPLATE)
 
+    def _recover_or_raise(
+        self, artifact_dir: Path, artifact_key: str, manifest_section: dict[str, Any]
+    ) -> None:
+        """Handle pre-existing artifact directories.
+
+        If the directory doesn't exist, does nothing.
+        If the directory exists AND is registered in manifest, raises FileExistsError.
+        If the directory exists but is NOT in manifest (crash leftover), cleans it up.
+
+        Warning: not safe for concurrent access. If two processes call prepare_run()
+        with the same name, the second will delete the first's in-progress directory.
+        Batches are safe (UUID-based paths prevent collisions).
+        """
+        if not artifact_dir.exists():
+            return
+        if artifact_key in manifest_section:
+            raise FileExistsError(f"Artifact already registered: {artifact_dir}")
+        # Directory exists but no manifest entry = crash leftover
+        logger.warning("Cleaning up incomplete artifact: %s", artifact_dir)
+        shutil.rmtree(artifact_dir)
+
     # --- Manifest Operations ---
 
     def _load_manifest(self) -> Manifest:
@@ -115,9 +140,12 @@ class ExperimentManager:
     def _save_manifest(self, manifest: Manifest) -> None:
         """Save the manifest to disk."""
         manifest_path = paths.get_manifest_path(self.root)
-        # Use model_dump with mode="json" for datetime serialization
         data = manifest.model_dump(mode="json")
-        manifest_path.write_text(self._dump_yaml(data))
+        content = self._dump_yaml(data)
+        # Atomic write: temp file + rename prevents corruption on crash
+        tmp_path = manifest_path.with_suffix(".yaml.tmp")
+        tmp_path.write_text(content)
+        tmp_path.rename(manifest_path)
 
     def load_manifest(self) -> Manifest:
         """Load the manifest.
@@ -130,30 +158,39 @@ class ExperimentManager:
 
     # --- Batch Operations ---
 
-    def create_batch(
+    def prepare_batch(
         self,
         group: str,
         mcts_config: DecoupledPUCTConfig,
         game: GameConfig,
         checkpoint_path: str | None = None,
-        seed_start: int = 0,
-    ) -> Path:
-        """Create a new batch directory for sampling.
+    ) -> tuple[Path, str]:
+        """Create a batch directory without registering in manifest.
+
+        Use this when the operation (sampling) needs a directory during work.
+        Call register_batch() after the operation succeeds.
+
+        If a previous attempt left a directory without a manifest entry,
+        it is cleaned up automatically.
 
         Args:
             group: Human-readable grouping name (e.g., "uniform_5x5").
             mcts_config: MCTS algorithm configuration.
             game: Game configuration (GameConfig).
             checkpoint_path: Optional path to parent checkpoint for NN-guided sampling.
-            seed_start: Starting seed for game generation (game N uses seed_start + N).
 
         Returns:
-            Path to the created batch directory.
+            Tuple of (batch_dir, batch_uuid).
         """
         self._ensure_initialized()
 
         batch_uuid = str(uuid.uuid4())
         batch_dir = paths.get_batch_path(self.root, group, batch_uuid)
+
+        # New UUID won't collide with manifest, but guard anyway
+        batch_id = f"{group}/{batch_uuid}"
+        manifest = self._load_manifest()
+        self._recover_or_raise(batch_dir, batch_id, manifest.batches)
 
         # Create directory structure
         batch_dir.mkdir(parents=True, exist_ok=False)
@@ -171,14 +208,38 @@ class ExperimentManager:
         )
         save_batch_metadata(batch_dir, metadata)
 
-        # Update manifest
+        return batch_dir, batch_uuid
+
+    def register_batch(
+        self,
+        group: str,
+        batch_uuid: str,
+        mcts_config: DecoupledPUCTConfig,
+        game: GameConfig,
+        checkpoint_path: str | None = None,
+        seed_start: int = 0,
+        created_at: datetime | None = None,
+    ) -> None:
+        """Register a completed batch in the manifest.
+
+        Called after sampling succeeds. The batch directory must already exist.
+
+        Args:
+            group: Batch group name.
+            batch_uuid: UUID of the batch (from prepare_batch).
+            mcts_config: MCTS algorithm configuration.
+            game: Game configuration.
+            checkpoint_path: Optional parent checkpoint path.
+            seed_start: Starting seed for game generation.
+            created_at: Timestamp override (defaults to now).
+        """
         batch_id = f"{group}/{batch_uuid}"
         entry = BatchEntry(
             group=group,
             uuid=batch_uuid,
-            created_at=metadata.created_at,
+            created_at=created_at or datetime.now(UTC),
             parent_checkpoint=checkpoint_path,
-            mcts_config=mcts_config,
+            mcts_config=mcts_config.model_dump(),
             game=game,
             seed_start=seed_start,
         )
@@ -186,6 +247,42 @@ class ExperimentManager:
         manifest.batches[batch_id] = entry
         self._save_manifest(manifest)
 
+    def create_batch(
+        self,
+        group: str,
+        mcts_config: DecoupledPUCTConfig,
+        game: GameConfig,
+        checkpoint_path: str | None = None,
+        seed_start: int = 0,
+    ) -> Path:
+        """Create a new batch directory and register it in manifest.
+
+        Convenience wrapper around prepare_batch + register_batch.
+
+        Args:
+            group: Human-readable grouping name (e.g., "uniform_5x5").
+            mcts_config: MCTS algorithm configuration.
+            game: Game configuration (GameConfig).
+            checkpoint_path: Optional path to parent checkpoint for NN-guided sampling.
+            seed_start: Starting seed for game generation (game N uses seed_start + N).
+
+        Returns:
+            Path to the created batch directory.
+        """
+        batch_dir, batch_uuid = self.prepare_batch(
+            group=group,
+            mcts_config=mcts_config,
+            game=game,
+            checkpoint_path=checkpoint_path,
+        )
+        self.register_batch(
+            group=group,
+            batch_uuid=batch_uuid,
+            mcts_config=mcts_config,
+            game=game,
+            checkpoint_path=checkpoint_path,
+            seed_start=seed_start,
+        )
         return batch_dir
 
     def get_batch_path(self, batch_id: str) -> Path:
@@ -395,6 +492,103 @@ class ExperimentManager:
 
         return f"{base_name}_run{run_num}"
 
+    def _resolve_run_name(self, name: str, config: dict[str, Any]) -> str:
+        """Resolve the actual run name, handling auto-increment and conflicts.
+
+        Checks manifest (not filesystem) for name collisions:
+        - Name not in manifest → use as-is
+        - Name in manifest with same config → auto-increment
+        - Name in manifest with different config → raise ValueError
+
+        Args:
+            name: Requested run name.
+            config: Training configuration dict.
+
+        Returns:
+            The resolved run name.
+        """
+        manifest = self._load_manifest()
+        if name in manifest.runs:
+            if self._configs_equal(config, manifest.runs[name].config):
+                return self._find_next_run_name(name)
+            raise ValueError(
+                f"Run '{name}' exists with different config. Pick a new name for this experiment."
+            )
+        return name
+
+    def prepare_run(
+        self,
+        name: str,
+        config: dict[str, Any],
+        source_shards: str,
+        parent_checkpoint: str | None = None,
+    ) -> tuple[Path, str]:
+        """Create a run directory without registering in manifest.
+
+        Handles name auto-increment. Call register_run() after training succeeds.
+
+        If a previous attempt left a directory without a manifest entry,
+        it is cleaned up automatically.
+
+        Args:
+            name: Human-readable run name (e.g., "mlp_v1").
+            config: Training configuration dict (will be saved as config.yaml).
+            source_shards: Shard ID used for training.
+            parent_checkpoint: Optional path to checkpoint being resumed from.
+
+        Returns:
+            Tuple of (run_dir, actual_name) where actual_name may be auto-incremented.
+
+        Raises:
+            ValueError: If a run with this name exists but has a different config.
+        """
+        self._ensure_initialized()
+
+        actual_name = self._resolve_run_name(name, config)
+        run_dir = paths.get_run_path(self.root, actual_name)
+
+        manifest = self._load_manifest()
+        self._recover_or_raise(run_dir, actual_name, manifest.runs)
+
+        # Create directory structure
+        run_dir.mkdir(parents=True, exist_ok=False)
+        (run_dir / paths.CHECKPOINTS_DIR).mkdir()
+
+        # Save config.yaml and notes.txt
+        self._setup_config_and_notes(run_dir, config)
+
+        return run_dir, actual_name
+
+    def register_run(
+        self,
+        name: str,
+        config: dict[str, Any],
+        source_shards: str,
+        parent_checkpoint: str | None = None,
+        created_at: datetime | None = None,
+    ) -> None:
+        """Register a completed training run in the manifest.
+
+        Called after training succeeds. The run directory must already exist.
+
+        Args:
+            name: Run name (the actual_name from prepare_run).
+            config: Training configuration dict.
+            source_shards: Shard ID used for training.
+            parent_checkpoint: Optional parent checkpoint path.
+            created_at: Timestamp override (defaults to now).
+        """
+        entry = RunEntry(
+            name=name,
+            created_at=created_at or datetime.now(UTC),
+            source_shards=source_shards,
+            parent_checkpoint=parent_checkpoint,
+            config=config,
+        )
+        manifest = self._load_manifest()
+        manifest.runs[name] = entry
+        self._save_manifest(manifest)
+
     def create_run(
         self,
         name: str,
@@ -402,7 +596,9 @@ class ExperimentManager:
         source_shards: str,
         parent_checkpoint: str | None = None,
     ) -> Path:
-        """Create a new training run directory.
+        """Create a new training run directory and register it in manifest.
+
+        Convenience wrapper around prepare_run + register_run.
 
         If a run with this name exists and has the same config, auto-increments
         the name (e.g., mlp_v1 → mlp_v1_run2). If configs differ, raises an error.
@@ -419,43 +615,18 @@ class ExperimentManager:
         Raises:
             ValueError: If a run with this name exists but has a different config.
         """
-        self._ensure_initialized()
-
-        run_dir = paths.get_run_path(self.root, name)
-        if run_dir.exists():
-            # Check if configs match
-            manifest = self._load_manifest()
-            existing_config = manifest.runs[name].config
-
-            if self._configs_equal(config, existing_config):
-                # Same experiment, auto-increment run number
-                name = self._find_next_run_name(name)
-                run_dir = paths.get_run_path(self.root, name)
-            else:
-                raise ValueError(
-                    f"Run '{name}' exists with different config. "
-                    f"Pick a new name for this experiment."
-                )
-
-        # Create directory structure
-        run_dir.mkdir(parents=True, exist_ok=False)
-        (run_dir / paths.CHECKPOINTS_DIR).mkdir()
-
-        # Save config.yaml and notes.txt
-        self._setup_config_and_notes(run_dir, config)
-
-        # Update manifest
-        entry = RunEntry(
+        run_dir, actual_name = self.prepare_run(
             name=name,
-            created_at=datetime.now(UTC),
+            config=config,
             source_shards=source_shards,
             parent_checkpoint=parent_checkpoint,
-            config=config,
         )
-        manifest = self._load_manifest()
-        manifest.runs[name] = entry
-        self._save_manifest(manifest)
-
+        self.register_run(
+            name=actual_name,
+            config=config,
+            source_shards=source_shards,
+            parent_checkpoint=parent_checkpoint,
+        )
         return run_dir
 
     def update_run_results(
@@ -521,31 +692,46 @@ class ExperimentManager:
         name: str,
         config: dict[str, Any],
         checkpoints: list[str],
+        results: dict[str, Any] | None = None,
     ) -> Path:
-        """Create a new benchmark directory.
+        """Create a benchmark directory, save results, and register in manifest.
+
+        Fully transactional: nothing goes to disk until this method is called.
+        The tournament should already have completed successfully.
+
+        If a previous attempt left a directory without a manifest entry,
+        it is cleaned up automatically.
 
         Args:
             name: Human-readable benchmark name (e.g., "tournament_20260107").
             config: Benchmark configuration dict (will be saved as config.yaml).
             checkpoints: List of checkpoint/run names being evaluated.
+            results: Tournament results dict (saved as results.json if provided).
 
         Returns:
             Path to the benchmark directory.
 
         Raises:
-            FileExistsError: If a benchmark with this name already exists.
+            FileExistsError: If a benchmark with this name is already registered.
         """
+        import json
+
         self._ensure_initialized()
 
         bench_dir = paths.get_benchmark_path(self.root, name)
-        if bench_dir.exists():
-            raise FileExistsError(f"Benchmark '{name}' already exists at {bench_dir}")
+        manifest = self._load_manifest()
+        self._recover_or_raise(bench_dir, name, manifest.benchmarks)
 
         # Create directory
         bench_dir.mkdir(parents=True, exist_ok=False)
 
         # Save config.yaml and notes.txt
         self._setup_config_and_notes(bench_dir, config)
+
+        # Save results if provided
+        if results is not None:
+            results_path = bench_dir / paths.RESULTS_FILE
+            results_path.write_text(json.dumps(results, indent=2, default=str))
 
         # Update manifest
         entry = BenchmarkEntry(
@@ -611,7 +797,7 @@ class ExperimentManager:
                 "created": entry.created_at.strftime("%Y-%m-%d %H:%M"),
                 "parent": entry.parent_checkpoint or "-",
                 "size": f"{entry.game.width}x{entry.game.height}",
-                "simulations": entry.mcts_config.simulations,
+                "simulations": entry.mcts_config.get("simulations"),
             }
             for batch_id, entry in manifest.batches.items()
         ]

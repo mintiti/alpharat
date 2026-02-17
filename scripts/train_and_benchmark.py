@@ -149,15 +149,13 @@ def main() -> None:
         actual_run_name = config.name  # Use merged name when skipping
         logger.info(f"Skipping training, using checkpoint: {checkpoint_path}")
     else:
-        # Create run via ExperimentManager
-        run_dir = exp.create_run(
+        # Prepare run directory (no manifest entry yet)
+        run_dir, actual_run_name = exp.prepare_run(
             name=config.name,
             config=config.model_dump(),
             source_shards=source_shards,
             parent_checkpoint=None,
         )
-        # Name might have been auto-incremented if same config exists
-        actual_run_name = run_dir.name
         if actual_run_name != config.name:
             logger.info(f"Run '{config.name}' exists with same config, using '{actual_run_name}'")
 
@@ -184,6 +182,14 @@ def main() -> None:
             run_name=actual_run_name,
             use_amp=use_amp,
             checkpoints_subdir="checkpoints",
+        )
+
+        # Register run in manifest now that training succeeded
+        exp.register_run(
+            name=actual_run_name,
+            config=config.model_dump(),
+            source_shards=source_shards,
+            parent_checkpoint=None,
         )
 
         logger.info(f"Training complete. Best checkpoint: {checkpoint_path}")
@@ -234,20 +240,17 @@ def main() -> None:
     )
     logger.info("")
 
-    # Create benchmark via ExperimentManager
+    # Run tournament first, then create benchmark with results
+    result = run_tournament(tournament_config)
+
     bench_dir = exp.create_benchmark(
         name=benchmark_name,
         config=tournament_config.model_dump(),
         checkpoints=[str(checkpoint_path)],
+        results=result.to_dict(),
     )
     logger.info(f"Created benchmark: {benchmark_name}")
-    logger.info(f"  Benchmark directory: {bench_dir}")
-
-    result = run_tournament(tournament_config)
-
-    # Save and print results
-    exp.save_benchmark_results(benchmark_name, result.to_dict())
-    logger.info(f"Results saved to {bench_dir / 'results.json'}")
+    logger.info(f"  Results saved to {bench_dir / 'results.json'}")
 
     print_benchmark_results(result, anchor="greedy")
 

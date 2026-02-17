@@ -106,14 +106,12 @@ def main() -> None:
     # Create run via ExperimentManager (unless resuming)
     # Note: config.name has the merged value (from --name if provided, else from YAML)
     if args.resume is None:
-        run_dir = exp.create_run(
+        run_dir, actual_name = exp.prepare_run(
             name=config.name,
             config=config.model_dump(),
             source_shards=source_shards,
             parent_checkpoint=None,
         )
-        # Name might have been auto-incremented if same config exists
-        actual_name = run_dir.name
         if actual_name != config.name:
             logger.info(f"Run '{config.name}' exists with same config, using '{actual_name}'")
         logger.info(f"Created run: {actual_name}")
@@ -143,6 +141,15 @@ def main() -> None:
         use_amp=use_amp,
         checkpoints_subdir="checkpoints",
     )
+
+    # Register run in manifest now that training succeeded
+    if args.resume is None:
+        exp.register_run(
+            name=actual_name,
+            config=config.model_dump(),
+            source_shards=source_shards,
+            parent_checkpoint=None,
+        )
 
     logger.info(f"Training complete. Best model: {best_model}")
 

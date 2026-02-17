@@ -92,22 +92,18 @@ def main() -> None:
         else:
             checkpoints.append(agent_name)  # Use agent name if no checkpoint
 
-    # Create benchmark via ExperimentManager
-    bench_dir = exp.create_benchmark(
-        name=benchmark_name,
-        config=config.model_dump(),  # Save merged config
-        checkpoints=checkpoints,
-    )
-    logger.info(f"Created benchmark: {benchmark_name}")
-    logger.info(f"  Benchmark directory: {bench_dir}")
-
-    # Run tournament
+    # Run tournament first, then create benchmark with results
     logger.info("Running tournament...")
     result = run_tournament(config)
 
-    # Save and print results
-    exp.save_benchmark_results(benchmark_name, result.to_dict())
-    logger.info(f"Results saved to {bench_dir / 'results.json'}")
+    bench_dir = exp.create_benchmark(
+        name=benchmark_name,
+        config=config.model_dump(),
+        checkpoints=checkpoints,
+        results=result.to_dict(),
+    )
+    logger.info(f"Created benchmark: {benchmark_name}")
+    logger.info(f"  Results saved to {bench_dir / 'results.json'}")
 
     anchor = "greedy" if "greedy" in config.agents else list(config.agents.keys())[0]
     print_benchmark_results(result, anchor=anchor)

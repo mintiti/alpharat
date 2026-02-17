@@ -456,12 +456,11 @@ def run_sampling(config: SamplingConfig, *, verbose: bool = True) -> tuple[Path,
     from alpharat.experiments import ExperimentManager
 
     exp = ExperimentManager(config.experiments_dir)
-    batch_dir = exp.create_batch(
+    batch_dir, batch_uuid = exp.prepare_batch(
         group=config.group,
         mcts_config=config.mcts,
         game=config.game,
         checkpoint_path=config.checkpoint,
-        seed_start=0,  # Games use seeds 0, 1, 2, ... N
     )
     games_dir = batch_dir / "games"
 
@@ -590,6 +589,16 @@ def run_sampling(config: SamplingConfig, *, verbose: bool = True) -> tuple[Path,
         worker.join()
 
     elapsed_seconds = time.perf_counter() - start_time
+
+    # Register batch in manifest now that sampling succeeded
+    exp.register_batch(
+        group=config.group,
+        batch_uuid=batch_uuid,
+        mcts_config=config.mcts,
+        game=config.game,
+        checkpoint_path=config.checkpoint,
+        seed_start=0,
+    )
 
     metrics = SamplingMetrics(
         total_games=num_games,
