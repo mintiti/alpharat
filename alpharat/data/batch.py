@@ -6,13 +6,24 @@ import json
 import uuid
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import NoReturn
 
 import numpy as np
+from pydantic import ValidationError
 
 from alpharat.config.base import StrictBaseModel
 from alpharat.config.game import GameConfig  # noqa: TC001
 from alpharat.data.types import GameFileKey
 from alpharat.mcts import DecoupledPUCTConfig  # noqa: TC001
+
+
+class BatchMetadataError(Exception):
+    """Raised when batch metadata.json fails validation.
+
+    Provides an actionable message identifying which config fields drifted
+    from the current schema, instead of a raw Pydantic dump.
+    """
+
 
 # --- Batch Metadata ---
 
@@ -86,11 +97,53 @@ def save_batch_metadata(batch_dir: Path | str, metadata: BatchMetadata) -> None:
 
 
 def load_batch_metadata(batch_dir: Path | str) -> BatchMetadata:
-    """Load batch metadata from metadata.json."""
+    """Load batch metadata from metadata.json.
+
+    Raises:
+        BatchMetadataError: If the saved metadata doesn't match the current config
+            schemas, with an actionable message identifying which fields drifted.
+    """
     batch_dir = Path(batch_dir)
     metadata_path = batch_dir / "metadata.json"
     data = json.loads(metadata_path.read_text())
-    return BatchMetadata.model_validate(data)
+
+    try:
+        return BatchMetadata.model_validate(data)
+    except ValidationError as exc:
+        _raise_batch_metadata_error(metadata_path, data, cause=exc)
+
+
+def _field_diff(label: str, model_cls: type[StrictBaseModel], saved: object) -> str:
+    """Compare saved dict keys against a model's fields. Returns summary line."""
+    if not isinstance(saved, dict):
+        return f"  {label}: OK"
+    expected = set(model_cls.model_fields)
+    actual = set(saved)
+    extra = sorted(actual - expected)
+    missing = sorted(expected - actual)
+    parts: list[str] = []
+    if extra:
+        parts.append(f"extra fields: {', '.join(extra)}")
+    if missing:
+        parts.append(f"missing fields: {', '.join(missing)}")
+    return f"  {label}: {'; '.join(parts)}" if parts else f"  {label}: OK"
+
+
+def _raise_batch_metadata_error(
+    metadata_path: Path, data: dict[str, object], *, cause: Exception
+) -> NoReturn:
+    """Build and raise an actionable BatchMetadataError."""
+    lines: list[str] = [
+        f"Cannot load batch metadata from {metadata_path}",
+        "",
+        "Config schema mismatch — this batch was created with a different version:",
+        _field_diff("mcts_config", DecoupledPUCTConfig, data.get("mcts_config")),
+        _field_diff("game", GameConfig, data.get("game")),
+        "",
+        "Update the config classes to include these fields, or re-sample with the current config.",
+    ]
+
+    raise BatchMetadataError("\n".join(lines)) from cause
 
 
 def get_batch_stats(batch_dir: Path | str) -> BatchStats:
