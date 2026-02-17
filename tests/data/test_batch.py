@@ -241,8 +241,8 @@ class TestBatchMetadataError:
 
     # All fields for each config, so _field_diff reports "OK" when section is clean.
     _VALID_MCTS = {
+        "backend": "python",
         "simulations": 100,
-        "gamma": 1.0,
         "c_puct": 1.5,
         "force_k": 2.0,
         "fpu_reduction": 0.2,
