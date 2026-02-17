@@ -9,12 +9,9 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any
 
 import numpy as np
-import torch
 
-from alpharat.config.checkpoint import load_model_from_checkpoint
 from alpharat.data.maze import build_maze_array
 from alpharat.nn.extraction import from_pyrat_game
-from alpharat.nn.training_utils import select_device
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -40,6 +37,11 @@ def make_batched_predict_fn(
                                      value_p1[N], value_p2[N])
         All arrays are float32.
     """
+    import torch
+
+    from alpharat.config.checkpoint import load_model_from_checkpoint
+    from alpharat.nn.training_utils import select_device
+
     model, builder, width, height = load_model_from_checkpoint(
         checkpoint_path, device=device, compile_model=True
     )
