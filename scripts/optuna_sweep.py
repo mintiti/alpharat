@@ -17,8 +17,8 @@ import optuna
 import pandas as pd
 
 from alpharat.ai import GreedyAgent
-from alpharat.ai.rust_mcts_agent import RustMCTSAgent
 from alpharat.eval.game import play_game
+from alpharat.mcts.config import RustMCTSConfig
 
 # Game parameters - 7x7 open maze
 WIDTH, HEIGHT = 7, 7
@@ -67,13 +67,13 @@ def objective(trial: optuna.Trial) -> tuple[float, int]:
 
     wins = 0.0
     for game_idx in range(GAMES_PER_CONFIG):
-        agent = RustMCTSAgent(
+        agent = RustMCTSConfig(
             simulations=n_sims,
             c_puct=c_puct,
             force_k=force_k,
             fpu_reduction=fpu_reduction,
             batch_size=16,
-        )
+        ).build_agent()
         opponent = GreedyAgent()
 
         result = play_game(
