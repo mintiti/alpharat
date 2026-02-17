@@ -50,6 +50,7 @@ alpharat/
 ├── eval/           # Evaluation: game execution, tournaments
 └── experiments/    # Experiment management: ExperimentManager, manifest
 
+crates/             # Rust MCTS implementation + Python bindings (built by uv sync)
 scripts/            # Entry points: sample.py, train.py, iterate.py, benchmark.py, manifest.py
 configs/            # YAML config templates for sampling, training, evaluation
 tests/              # Mirrors alpharat/ structure
@@ -65,6 +66,7 @@ experiments/        # Data folder (NOT in git): batches, shards, runs, benchmark
 | `decoupled_puct.py` | `DecoupledPUCTSearch` — each player picks via PUCT formula, returns visit-proportional policy |
 | `reduction.py` | Boundary translation between 5-action and outcome-indexed space |
 | `numba_ops.py` | JIT-compiled hot paths: backup, PUCT scores, marginal Q |
+| `config.py` | `MCTSConfig` — discriminated union of `PythonMCTSConfig \| RustMCTSConfig`, each with `build_searcher()` and `build_agent()` |
 
 ### alpharat/data/
 
@@ -118,7 +120,8 @@ Each architecture folder contains `config.py` (ModelConfig, OptimConfig) and `lo
 | File | Purpose |
 |------|---------|
 | `base.py` | `Agent` ABC — `get_move(game, player) -> int` |
-| `mcts_agent.py` | `MCTSAgent` — uses MCTS search, samples from visit-proportional policy |
+| `mcts_agent.py` | `MCTSAgent` — Python MCTS search, samples from visit-proportional policy |
+| `rust_mcts_agent.py` | `RustMCTSAgent` — Rust MCTS backend, same interface as `MCTSAgent` |
 | `random_agent.py` | `RandomAgent` — baseline |
 | `greedy_agent.py` | `GreedyAgent` — moves toward closest cheese |
 

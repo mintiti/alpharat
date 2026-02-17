@@ -96,6 +96,34 @@ alpharat-manifest runs     # See training runs + which shards they used
 - `alpharat/ai/` — Agents (MCTS, random, greedy baselines)
 - `alpharat/eval/` — Running games and tournaments
 
+## Rust MCTS backend
+
+There's a Rust implementation of the same MCTS algorithm. Same interface, faster search.
+
+`uv sync` builds it automatically (requires a Rust toolchain). To use it, set `backend: rust` in your MCTS config or override via CLI:
+
+```bash
+# Use the tuned Rust config for sampling
+alpharat-sample configs/sample.yaml mcts=7x7_rust_tuned --group my_batch
+
+# Or for iteration
+alpharat-iterate configs/iterate.yaml --prefix rust_7x7 mcts=7x7_rust_tuned
+```
+
+Pre-tuned Rust configs in `configs/mcts/`: `7x7_rust_tuned`, `7x7_rust_fast`, `7x7_rust_strong` (from an Optuna sweep, 3956 trials).
+
+In Python:
+
+```python
+from alpharat.mcts.config import RustMCTSConfig
+
+config = RustMCTSConfig(simulations=1897, c_puct=0.512)
+searcher = config.build_searcher()               # uniform priors
+searcher = config.build_searcher(checkpoint=...)  # NN-guided
+```
+
+Both backends implement the `Searcher` protocol — consumers don't need to know which one they're using.
+
 ## The approach
 
 When both players move at once, you can't just maximize — the opponent is choosing too. Each node stores scalar value estimates (expected remaining cheese per player), and action selection uses decoupled PUCT where each player independently picks via exploration bonus. The final policy is visit-proportional.
