@@ -2,31 +2,25 @@
 
 from __future__ import annotations
 
-import copy
 import time
 from dataclasses import dataclass
 from multiprocessing import Process, Queue
 from typing import TYPE_CHECKING, Any
 
-import numpy as np
-
 from alpharat.ai.utils import select_action_from_strategy
 from alpharat.config.base import StrictBaseModel
-from alpharat.config.checkpoint import make_predict_fn
 from alpharat.config.game import GameConfig  # noqa: TC001
 from alpharat.data.recorder import GameBundler, GameRecorder
 from alpharat.eval.game import is_terminal
-from alpharat.mcts import DecoupledPUCTConfig  # noqa: TC001
-from alpharat.mcts.node import MCTSNode
-from alpharat.mcts.tree import MCTSTree
+from alpharat.mcts.config import MCTSConfig  # noqa: TC001
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
     from pathlib import Path
 
     from pyrat_engine.core.game import PyRat
 
     from alpharat.data.types import GameData
+    from alpharat.mcts.searcher import Searcher
 
 
 # --- Config Models ---
@@ -57,7 +51,7 @@ class SamplingParams(StrictBaseModel):
 class SamplingConfig(StrictBaseModel):
     """Full configuration for a sampling run."""
 
-    mcts: DecoupledPUCTConfig
+    mcts: MCTSConfig
     game: GameConfig
     sampling: SamplingParams
     group: str  # Required: human-readable grouping name (e.g., "uniform_5x5")
@@ -204,43 +198,17 @@ def load_nn_context(checkpoint_path: str, device: str = "cpu") -> NNContext:
 # --- Helper Functions ---
 
 
-def build_tree(
-    game: PyRat,
-    gamma: float,
-    predict_fn: Callable[[Any], tuple[np.ndarray, np.ndarray, float, float]] | None = None,
-) -> MCTSTree:
-    """Build fresh MCTS tree for search.
-
-    The tree will initialize the root with smart uniform priors that only
-    assign probability to distinct effective actions (blocked moves get 0),
-    or use NN predictions if predict_fn is provided.
+def _build_searcher(config: SamplingConfig, device: str) -> Searcher:
+    """Build a Searcher from SamplingConfig.
 
     Args:
-        game: Current game state (will be deep-copied for simulation).
-        gamma: Discount factor for value backup.
-        predict_fn: Optional NN prediction function for priors.
+        config: Sampling configuration with mcts and checkpoint.
+        device: Device for NN inference.
 
     Returns:
-        MCTSTree ready for search.
+        Configured Searcher instance.
     """
-    simulator = copy.deepcopy(game)
-
-    # Dummy priors - tree will overwrite with smart uniform via _init_root_priors()
-    # or use NN priors if predict_fn is provided
-    dummy = np.ones(5) / 5
-
-    root = MCTSNode(
-        game_state=None,
-        prior_policy_p1=dummy,
-        prior_policy_p2=dummy,
-        nn_value_p1=0.0,
-        nn_value_p2=0.0,
-        parent=None,
-        p1_mud_turns_remaining=simulator.player1_mud_turns,
-        p2_mud_turns_remaining=simulator.player2_mud_turns,
-    )
-
-    return MCTSTree(game=simulator, root=root, gamma=gamma, predict_fn=predict_fn)
+    return config.mcts.build_searcher(checkpoint=config.checkpoint, device=device)
 
 
 def create_game(config: GameConfig, seed: int) -> PyRat:
@@ -263,7 +231,7 @@ def play_and_record_game(
     config: SamplingConfig,
     games_dir: Path,
     seed: int,
-    nn_ctx: NNContext | None = None,
+    searcher: Searcher,
     *,
     auto_save: bool = True,
 ) -> tuple[GameStats, GameData | None]:
@@ -271,10 +239,9 @@ def play_and_record_game(
 
     Args:
         config: Sampling configuration.
-        games_dir: Directory to save the game file (used even if auto_save=False
-            since GameRecorder requires it for output_dir validation).
+        games_dir: Directory to save the game file.
         seed: Random seed for game generation.
-        nn_ctx: Optional NN context for guided search.
+        searcher: Searcher instance for MCTS search.
         auto_save: If True (default), save to disk. If False, return GameData
             for external handling (e.g., bundling).
 
@@ -285,76 +252,22 @@ def play_and_record_game(
     game = create_game(config.game, seed)
     cheese_available = config.game.cheese_count
     positions = 0
-    total_simulations = 0
-    nn_calls = 0
-    nn_total_time = 0.0
+    simulations = config.mcts.simulations
 
     with GameRecorder(
         game, games_dir, config.game.width, config.game.height, auto_save=auto_save
     ) as recorder:
         while not is_terminal(game):
-            predict_fn = None
-            if nn_ctx is not None:
-                simulator = copy.deepcopy(game)
-                raw_predict_fn = make_predict_fn(
-                    nn_ctx.model,
-                    nn_ctx.builder,
-                    simulator,
-                    nn_ctx.width,
-                    nn_ctx.height,
-                    nn_ctx.device,
-                )
-
-                def timed_predict_fn(
-                    obs: Any, *, _raw: Any = raw_predict_fn
-                ) -> tuple[np.ndarray, np.ndarray, float, float]:
-                    nonlocal nn_calls, nn_total_time
-                    start = time.perf_counter()
-                    result: tuple[np.ndarray, np.ndarray, float, float] = _raw(obs)
-                    nn_total_time += time.perf_counter() - start
-                    nn_calls += 1
-                    return result
-
-                predict_fn = timed_predict_fn
-                dummy = np.ones(5) / 5
-                root = MCTSNode(
-                    game_state=None,
-                    prior_policy_p1=dummy,
-                    prior_policy_p2=dummy,
-                    nn_value_p1=0.0,
-                    nn_value_p2=0.0,
-                    parent=None,
-                    p1_mud_turns_remaining=simulator.player1_mud_turns,
-                    p2_mud_turns_remaining=simulator.player2_mud_turns,
-                )
-                tree = MCTSTree(
-                    game=simulator, root=root, gamma=config.mcts.gamma, predict_fn=predict_fn
-                )
-            else:
-                tree = build_tree(game, config.mcts.gamma)
-
-            search = config.mcts.build(tree)
-            result = search.search()
+            result = searcher.search(game)
 
             positions += 1
-            total_simulations += config.mcts.simulations
 
             # Sample actions from search policies
             a1 = select_action_from_strategy(result.policy_p1)
             a2 = select_action_from_strategy(result.policy_p2)
 
             # Record position before making move
-            # Use pruned visit counts from SearchResult (forced visits removed)
-            recorder.record_position(
-                game=game,
-                search_result=result,
-                prior_p1=tree.root.prior_policy_p1,
-                prior_p2=tree.root.prior_policy_p2,
-                visit_counts_p1=result.visit_counts_p1,
-                visit_counts_p2=result.visit_counts_p2,
-                action_p1=a1,
-                action_p2=a2,
-            )
+            recorder.record_position(game, result, a1, a2)
 
             game.make_move(a1, a2)
 
@@ -369,14 +282,14 @@ def play_and_record_game(
 
     game_stats = GameStats(
         positions=positions,
-        simulations=total_simulations,
+        simulations=positions * simulations,
         winner=winner,
         score_p1=score_p1,
         score_p2=score_p2,
         turns=game.turn,
         cheese_available=cheese_available,
-        nn_calls=nn_calls,
-        nn_time_s=nn_total_time,
+        nn_calls=0,
+        nn_time_s=0.0,
     )
 
     # Return game data if not auto-saving (for bundling)
@@ -396,8 +309,8 @@ def _worker_loop(
 ) -> None:
     """Worker process that continuously processes games from the queue.
 
-    Runs until it receives None (sentinel) from the work queue. If a checkpoint
-    is configured, loads the model once at startup and uses it for all games.
+    Runs until it receives None (sentinel) from the work queue. Builds a Searcher
+    once at startup and reuses it for all games.
 
     Args:
         config: Sampling configuration.
@@ -408,10 +321,8 @@ def _worker_loop(
         use_bundler: If True (default), buffer games and write bundles. If False,
             write individual game files (legacy behavior).
     """
-    # Load NN model once per worker if checkpoint configured
-    nn_ctx: NNContext | None = None
-    if config.checkpoint is not None:
-        nn_ctx = load_nn_context(config.checkpoint, device=device)
+    # Build searcher once per worker (loads NN if checkpoint configured)
+    searcher = _build_searcher(config, device)
 
     # Create bundler for this worker if enabled
     bundler: GameBundler | None = None
@@ -431,7 +342,7 @@ def _worker_loop(
             break
 
         game_stats, game_data = play_and_record_game(
-            config, games_dir, seed, nn_ctx=nn_ctx, auto_save=not use_bundler
+            config, games_dir, seed, searcher, auto_save=not use_bundler
         )
 
         if bundler is not None and game_data is not None:

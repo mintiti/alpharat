@@ -40,7 +40,7 @@ from alpharat.config.base import StrictBaseModel
 from alpharat.config.display import format_config_summary
 from alpharat.config.game import GameConfig  # noqa: TC001
 from alpharat.config.loader import load_config, split_config_path
-from alpharat.mcts import DecoupledPUCTConfig  # noqa: TC001
+from alpharat.mcts.config import MCTSConfig  # noqa: TC001
 from alpharat.nn.config import ModelConfig, OptimConfig  # noqa: TC001
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
@@ -86,7 +86,7 @@ class IterateConfig(StrictBaseModel):
     """Full configuration for an iteration run."""
 
     game: GameConfig
-    mcts: DecoupledPUCTConfig
+    mcts: MCTSConfig
     model: ModelConfig = Field(discriminator="architecture")
     optim: OptimConfig = Field(discriminator="architecture")
     iteration: IterationParams = Field(default_factory=IterationParams)

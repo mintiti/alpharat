@@ -2,6 +2,7 @@
 # Per-node PUCT normalization (Q / value_scale → [0, 1])
 # 35.0% win rate vs Greedy — for cheap self-play
 # See scripts/optuna_sweep.py, study fpu_7x7
+backend: python
 simulations: 290
 c_puct: 0.561
 force_k: 0.050

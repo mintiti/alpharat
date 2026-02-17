@@ -14,7 +14,7 @@ from pydantic import ValidationError
 from alpharat.config.base import StrictBaseModel
 from alpharat.config.game import GameConfig  # noqa: TC001
 from alpharat.data.types import GameFileKey
-from alpharat.mcts import DecoupledPUCTConfig  # noqa: TC001
+from alpharat.mcts.config import MCTSConfig, MCTSConfigBase  # noqa: TC001
 
 
 class BatchMetadataError(Exception):
@@ -34,7 +34,7 @@ class BatchMetadata(StrictBaseModel):
     batch_id: str
     created_at: datetime
     checkpoint_path: str | None
-    mcts_config: DecoupledPUCTConfig
+    mcts_config: MCTSConfig
     game: GameConfig
 
 
@@ -51,7 +51,7 @@ class BatchStats(StrictBaseModel):
 def create_batch(
     parent_dir: Path | str,
     checkpoint_path: str | None,
-    mcts_config: DecoupledPUCTConfig,
+    mcts_config: MCTSConfigBase,
     game: GameConfig,
 ) -> Path:
     """Create a new batch directory with metadata.
@@ -81,7 +81,7 @@ def create_batch(
         batch_id=batch_id,
         created_at=datetime.now(UTC),
         checkpoint_path=checkpoint_path,
-        mcts_config=mcts_config,
+        mcts_config=mcts_config,  # type: ignore[arg-type]
         game=game,
     )
 

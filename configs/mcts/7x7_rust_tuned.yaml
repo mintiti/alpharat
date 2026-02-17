@@ -1,6 +1,7 @@
 # Balanced Rust MCTS params from rust_fpu_7x7 Pareto front (3956 trials)
 # 42.9% win rate vs Greedy — default for self-play
 # See scripts/optuna_sweep.py, study rust_fpu_7x7
+backend: rust
 simulations: 1897
 c_puct: 0.512
 force_k: 0.103

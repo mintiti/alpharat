@@ -254,6 +254,12 @@ pub struct SearchResult {
     /// Expected remaining cheese for each player.
     pub value_p1: f32,
     pub value_p2: f32,
+    /// Pruned visit counts in 5-action space.
+    pub visit_counts_p1: [f32; 5],
+    pub visit_counts_p2: [f32; 5],
+    /// NN/uniform prior at root in 5-action space.
+    pub prior_p1: [f32; 5],
+    pub prior_p2: [f32; 5],
     /// Root visit count after search.
     pub total_visits: u32,
 }
@@ -500,32 +506,41 @@ fn extract_result(
     let node = &arena[root];
     let total_visits = node.total_visits();
 
-    let (policy_p1, value_p1) =
+    let (policy_p1, visit_counts_p1, value_p1) =
         extract_half(&node.p1, node.v1(), node.value_scale(), total_visits, config);
-    let (policy_p2, value_p2) =
+    let (policy_p2, visit_counts_p2, value_p2) =
         extract_half(&node.p2, node.v2(), node.value_scale(), total_visits, config);
+
+    let prior_p1 = node.p1.expand_prior();
+    let prior_p2 = node.p2.expand_prior();
 
     SearchResult {
         policy_p1,
         policy_p2,
         value_p1,
         value_p2,
+        visit_counts_p1,
+        visit_counts_p2,
+        prior_p1,
+        prior_p2,
         total_visits,
     }
 }
 
-/// Extract policy and value for one player from root.
+/// Extract policy, visit counts, and value for one player from root.
+///
+/// Returns (policy, visit_counts, value) all in 5-action space.
 fn extract_half(
     half: &HalfNode,
     node_value: f32,
     value_scale: f32,
     total_visits: u32,
     config: &SearchConfig,
-) -> ([f32; 5], f32) {
+) -> ([f32; 5], [f32; 5], f32) {
     let n = half.n_outcomes();
 
     if n == 0 {
-        return ([0.0; 5], node_value);
+        return ([0.0; 5], [0.0; 5], node_value);
     }
 
     // Compute FPU for unvisited outcomes.
@@ -555,13 +570,14 @@ fn extract_half(
     let pruned = compute_pruned_visits(&q_norm, &prior, &raw_visits, n, total_visits, config.c_puct);
 
     // Expand pruned visits to 5-action space.
-    let mut policy = [0.0f32; 5];
+    let mut visit_counts = [0.0f32; 5];
     for (i, &pv) in pruned.iter().enumerate().take(n) {
         let action = half.outcome_action(i) as usize;
-        policy[action] = pv;
+        visit_counts[action] = pv;
     }
 
-    // Normalize policy to sum=1.
+    // Normalize to get policy.
+    let mut policy = visit_counts;
     let policy_sum: f32 = policy.iter().sum();
     if policy_sum > 0.0 {
         for p in &mut policy {
@@ -581,7 +597,7 @@ fn extract_half(
         node_value
     };
 
-    (policy, value)
+    (policy, visit_counts, value)
 }
 
 // ---------------------------------------------------------------------------

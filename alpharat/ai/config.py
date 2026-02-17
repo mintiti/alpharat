@@ -15,12 +15,14 @@ Example YAML:
       mcts_baseline:
         variant: mcts
         mcts:
+          backend: python
           simulations: 200
           c_puct: 4.73
           force_k: 0.0
       mcts_with_nn:
         variant: mcts
         mcts:
+          backend: python
           simulations: 200
         checkpoint: checkpoints/best_model.pt
 """
@@ -33,7 +35,7 @@ from typing import TYPE_CHECKING, Annotated, Literal
 from pydantic import Field
 
 from alpharat.config.base import StrictBaseModel
-from alpharat.mcts import DecoupledPUCTConfig  # noqa: TC001
+from alpharat.mcts.config import MCTSConfig, PythonMCTSConfig  # noqa: TC001
 
 if TYPE_CHECKING:
     from alpharat.ai.base import Agent
@@ -95,15 +97,9 @@ class NNAgentConfig(AgentConfigBase):
     temperature: float = 0.0  # 0 = argmax
 
     def build(self, device: str = "cpu") -> Agent:
-        """Build an MCTSAgent with simulations=0 (pure NN mode)."""
-        from alpharat.ai.mcts_agent import MCTSAgent
-        from alpharat.mcts.decoupled_puct import DecoupledPUCTConfig
-
-        # Create a dummy config with simulations=0 (pure NN mode)
-        mcts_config = DecoupledPUCTConfig(simulations=0)
-
-        return MCTSAgent(
-            mcts_config=mcts_config,
+        """Build an agent with simulations=0 (pure NN mode)."""
+        config = PythonMCTSConfig(simulations=0)
+        return config.build_agent(
             checkpoint=self.checkpoint,
             temperature=self.temperature,
             device=device,
@@ -113,7 +109,7 @@ class NNAgentConfig(AgentConfigBase):
 class MCTSAgentConfig(AgentConfigBase):
     """Configuration for MCTS agent with optional NN priors.
 
-    The `mcts` field contains the search configuration (DecoupledPUCTConfig).
+    The `mcts` field contains the search configuration (MCTSConfig).
     This is the single source of truth for MCTS parameters like simulations, c_puct, and force_k.
 
     When checkpoint is set, uses NN predictions as priors during search.
@@ -121,16 +117,13 @@ class MCTSAgentConfig(AgentConfigBase):
     """
 
     variant: Literal["mcts"] = "mcts"
-    mcts: DecoupledPUCTConfig
+    mcts: MCTSConfig
     checkpoint: str | None = None
     temperature: float = 1.0  # Softmax temperature for action sampling
 
     def build(self, device: str = "cpu") -> Agent:
-        """Build an MCTSAgent."""
-        from alpharat.ai.mcts_agent import MCTSAgent
-
-        return MCTSAgent(
-            mcts_config=self.mcts,
+        """Build an MCTS agent via the config's build_agent method."""
+        return self.mcts.build_agent(
             checkpoint=self.checkpoint,
             temperature=self.temperature,
             device=device,

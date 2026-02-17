@@ -15,7 +15,8 @@ from alpharat.config.game import GameConfig
 from alpharat.config.loader import load_config, load_raw_config
 from alpharat.data.sampling import SamplingConfig
 from alpharat.eval.tournament import TournamentConfig
-from alpharat.mcts import DecoupledPUCTConfig
+from alpharat.mcts import MCTSConfigBase, PythonMCTSConfig, RustMCTSConfig
+from alpharat.mcts.config import MCTSConfig
 from alpharat.nn.config import TrainConfig
 
 PROJECT_ROOT = Path(__file__).parent.parent.parent
@@ -60,15 +61,20 @@ class TestGameConfigs:
 
 
 class TestMCTSConfigs:
-    """All MCTS sub-configs resolve to valid DecoupledPUCTConfig."""
+    """All MCTS sub-configs resolve to valid MCTSConfig."""
 
     @pytest.fixture(params=get_tracked_configs("mcts"))
     def config_name(self, request: pytest.FixtureRequest) -> str:
         return str(request.param)
 
     def test_resolves_to_mcts_config(self, config_name: str) -> None:
-        """MCTS config loads and validates."""
-        config = load_config(DecoupledPUCTConfig, CONFIGS / "mcts", config_name)
+        """MCTS config loads and validates via discriminated union."""
+        from pydantic import TypeAdapter
+
+        raw = load_raw_config(CONFIGS / "mcts", config_name)
+        adapter: TypeAdapter[PythonMCTSConfig | RustMCTSConfig] = TypeAdapter(MCTSConfig)
+        config = adapter.validate_python(raw)
+        assert isinstance(config, (PythonMCTSConfig, RustMCTSConfig))
         assert config.simulations > 0
         assert config.c_puct > 0
 
@@ -92,7 +98,7 @@ class TestSampleConfigs:
         # Load from configs root with sample/ prefix (Hydra resolves defaults)
         config = load_config(SamplingConfig, CONFIGS, f"sample/{config_name}")
         assert isinstance(config.game, GameConfig)
-        assert isinstance(config.mcts, DecoupledPUCTConfig)
+        assert isinstance(config.mcts, MCTSConfigBase)
         assert config.sampling.num_games > 0
 
 
@@ -127,7 +133,7 @@ class TestEntryPointConfigs:
         """Main sample.yaml composes into valid SamplingConfig."""
         config = load_config(SamplingConfig, CONFIGS, "sample")
         assert isinstance(config.game, GameConfig)
-        assert isinstance(config.mcts, DecoupledPUCTConfig)
+        assert isinstance(config.mcts, MCTSConfigBase)
 
     def test_train_yaml(self) -> None:
         """Main train.yaml composes into valid TrainConfig."""

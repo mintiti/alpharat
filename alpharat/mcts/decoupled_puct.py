@@ -6,7 +6,6 @@ Q-values. Returns visit-proportional policies instead of Nash equilibrium.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 import numpy as np
@@ -15,30 +14,11 @@ from alpharat.config.base import StrictBaseModel
 from alpharat.mcts.forced_playouts import compute_pruned_visits
 from alpharat.mcts.numba_ops import compute_puct_scores, select_max_with_tiebreak
 from alpharat.mcts.reduction import expand_prior
+from alpharat.mcts.result import SearchResult
 
 if TYPE_CHECKING:
     from alpharat.mcts.node import MCTSNode
     from alpharat.mcts.tree import MCTSTree
-
-
-@dataclass
-class SearchResult:
-    """Result of MCTS search containing policy and value information.
-
-    policy_p1: np.ndarray  # [5] visit-proportional policy
-    policy_p2: np.ndarray  # [5] visit-proportional policy
-    value_p1: float  # Root value estimate for P1
-    value_p2: float  # Root value estimate for P2
-    visit_counts_p1: np.ndarray  # [5] pruned visit counts for P1
-    visit_counts_p2: np.ndarray  # [5] pruned visit counts for P2
-    """
-
-    policy_p1: np.ndarray
-    policy_p2: np.ndarray
-    value_p1: float
-    value_p2: float
-    visit_counts_p1: np.ndarray
-    visit_counts_p2: np.ndarray
 
 
 class DecoupledPUCTConfig(StrictBaseModel):
@@ -97,6 +77,9 @@ class DecoupledPUCTSearch:
             value_p2=root.v2,
             visit_counts_p1=np.zeros(5, dtype=np.float64),
             visit_counts_p2=np.zeros(5, dtype=np.float64),
+            prior_p1=root.prior_policy_p1.copy(),
+            prior_p2=root.prior_policy_p2.copy(),
+            total_visits=0,
         )
 
     def _make_result(self) -> SearchResult:
@@ -145,6 +128,9 @@ class DecoupledPUCTSearch:
             value_p2=value_p2,
             visit_counts_p1=n1_expanded.astype(np.float64),
             visit_counts_p2=n2_expanded.astype(np.float64),
+            prior_p1=root.prior_policy_p1.copy(),
+            prior_p2=root.prior_policy_p2.copy(),
+            total_visits=root.total_visits,
         )
 
     def _simulate(self) -> None:

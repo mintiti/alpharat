@@ -16,7 +16,7 @@ from alpharat.config.game import GameConfig
 from alpharat.data.loader import is_bundle_file, iter_games_from_bundle, load_game_data
 from alpharat.data.sampling import SamplingConfig, SamplingParams, run_sampling
 from alpharat.data.sharding import load_training_set_manifest, prepare_training_set
-from alpharat.mcts import DecoupledPUCTConfig
+from alpharat.mcts import PythonMCTSConfig
 from alpharat.nn.builders.flat import FlatObservationBuilder
 from alpharat.nn.extraction import from_game_arrays
 from alpharat.nn.targets import build_targets
@@ -235,7 +235,7 @@ class TestPipelineIntegrity:
 
         # === Config: Real game, fast MCTS ===
         config = SamplingConfig(
-            mcts=DecoupledPUCTConfig(simulations=30, gamma=1.0, c_puct=1.5),
+            mcts=PythonMCTSConfig(simulations=30, gamma=1.0, c_puct=1.5),
             game=GameConfig(
                 width=width,
                 height=height,
@@ -301,7 +301,7 @@ class TestPipelineIntegrity:
         width, height = 5, 5
 
         config = SamplingConfig(
-            mcts=DecoupledPUCTConfig(simulations=20, gamma=1.0, c_puct=1.5),
+            mcts=PythonMCTSConfig(simulations=20, gamma=1.0, c_puct=1.5),
             game=GameConfig(
                 width=width,
                 height=height,
@@ -346,7 +346,7 @@ class TestPipelineIntegrity:
         width, height = 5, 5
 
         config = SamplingConfig(
-            mcts=DecoupledPUCTConfig(simulations=25, gamma=1.0, c_puct=1.5),
+            mcts=PythonMCTSConfig(simulations=25, gamma=1.0, c_puct=1.5),
             game=GameConfig(
                 width=width,
                 height=height,

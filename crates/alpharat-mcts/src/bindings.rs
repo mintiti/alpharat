@@ -51,6 +51,26 @@ impl PySearchResult {
     }
 
     #[getter]
+    fn visit_counts_p1<'py>(&self, py: Python<'py>) -> Bound<'py, PyArray1<f32>> {
+        PyArray1::from_slice(py, &self.inner.visit_counts_p1)
+    }
+
+    #[getter]
+    fn visit_counts_p2<'py>(&self, py: Python<'py>) -> Bound<'py, PyArray1<f32>> {
+        PyArray1::from_slice(py, &self.inner.visit_counts_p2)
+    }
+
+    #[getter]
+    fn prior_p1<'py>(&self, py: Python<'py>) -> Bound<'py, PyArray1<f32>> {
+        PyArray1::from_slice(py, &self.inner.prior_p1)
+    }
+
+    #[getter]
+    fn prior_p2<'py>(&self, py: Python<'py>) -> Bound<'py, PyArray1<f32>> {
+        PyArray1::from_slice(py, &self.inner.prior_p2)
+    }
+
+    #[getter]
     fn total_visits(&self) -> u32 {
         self.inner.total_visits
     }
