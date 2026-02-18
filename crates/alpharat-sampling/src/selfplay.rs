@@ -4,8 +4,12 @@ use rand::distributions::WeightedIndex;
 use rand::prelude::Distribution;
 use rand::rngs::SmallRng;
 use rand::SeedableRng;
+use std::io;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering::Relaxed};
 use std::time::Instant;
+
+use crate::recording::BundleWriter;
 
 // ---------------------------------------------------------------------------
 // Data structures
@@ -97,12 +101,13 @@ pub struct SelfPlayStats {
 }
 
 impl SelfPlayStats {
-    pub fn from_games(games: &[GameRecord], elapsed_secs: f64) -> Self {
-        let mut stats = Self {
-            total_games: games.len() as u32,
+    /// Create empty stats for incremental accumulation.
+    pub fn new() -> Self {
+        Self {
+            total_games: 0,
             total_positions: 0,
             total_simulations: 0,
-            elapsed_secs,
+            elapsed_secs: 0.0,
             p1_wins: 0,
             p2_wins: 0,
             draws: 0,
@@ -110,24 +115,34 @@ impl SelfPlayStats {
             total_cheese_available: 0,
             min_turns: u32::MAX,
             max_turns: 0,
-        };
+        }
+    }
 
+    /// Incrementally add one game's data to the stats.
+    pub fn add_game(&mut self, game: &GameRecord) {
+        self.total_games += 1;
+        let n = game.positions.len() as u64;
+        self.total_positions += n;
+        self.total_simulations += game.total_simulations;
+        self.total_cheese_collected += game.final_p1_score + game.final_p2_score;
+        self.total_cheese_available += game.cheese_available as u32;
+
+        let turns = n as u32;
+        self.min_turns = self.min_turns.min(turns);
+        self.max_turns = self.max_turns.max(turns);
+
+        match game.result {
+            GameOutcome::P1Win => self.p1_wins += 1,
+            GameOutcome::P2Win => self.p2_wins += 1,
+            GameOutcome::Draw => self.draws += 1,
+        }
+    }
+
+    pub fn from_games(games: &[GameRecord], elapsed_secs: f64) -> Self {
+        let mut stats = Self::new();
+        stats.elapsed_secs = elapsed_secs;
         for g in games {
-            let n = g.positions.len() as u64;
-            stats.total_positions += n;
-            stats.total_simulations += g.total_simulations;
-            stats.total_cheese_collected += g.final_p1_score + g.final_p2_score;
-            stats.total_cheese_available += g.cheese_available as u32;
-
-            let turns = n as u32;
-            stats.min_turns = stats.min_turns.min(turns);
-            stats.max_turns = stats.max_turns.max(turns);
-
-            match g.result {
-                GameOutcome::P1Win => stats.p1_wins += 1,
-                GameOutcome::P2Win => stats.p2_wins += 1,
-                GameOutcome::Draw => stats.draws += 1,
-            }
+            stats.add_game(g);
         }
 
         if games.is_empty() {
@@ -531,6 +546,118 @@ pub fn run_self_play(
         games: game_records,
         stats,
     }
+}
+
+// ---------------------------------------------------------------------------
+// Self-play to disk (writer thread pattern)
+// ---------------------------------------------------------------------------
+
+/// Result of `run_self_play_to_disk`.
+#[derive(Clone, Debug)]
+pub struct SelfPlayToDiskResult {
+    pub stats: SelfPlayStats,
+    pub written_paths: Vec<PathBuf>,
+}
+
+/// Run self-play and stream completed games to disk via a writer thread.
+///
+/// Game threads play games and send records through a channel. A dedicated
+/// writer thread accumulates records and flushes bundles when full.
+/// The channel is unbounded — game threads never block on I/O.
+pub fn run_self_play_to_disk(
+    games: &[GameState],
+    backend: &dyn Backend,
+    search_config: &SearchConfig,
+    config: &SelfPlayConfig,
+    output_dir: &Path,
+    max_games_per_bundle: usize,
+    progress: Option<&SelfPlayProgress>,
+) -> io::Result<SelfPlayToDiskResult> {
+    if games.is_empty() {
+        return Ok(SelfPlayToDiskResult {
+            stats: SelfPlayStats::from_games(&[], 0.0),
+            written_paths: Vec::new(),
+        });
+    }
+
+    let start = Instant::now();
+    let width = games[0].width as u8;
+    let height = games[0].height as u8;
+
+    // Channel for game results (unbounded).
+    let (tx, rx) = std::sync::mpsc::channel::<GameRecord>();
+
+    // Writer thread — owns rx and BundleWriter, no borrows.
+    let output_dir_owned = output_dir.to_path_buf();
+    let writer_handle = std::thread::spawn(move || -> io::Result<(Vec<PathBuf>, SelfPlayStats)> {
+        let mut writer = BundleWriter::new(&output_dir_owned, width, height, max_games_per_bundle);
+        let mut stats = SelfPlayStats::new();
+
+        while let Ok(record) = rx.recv() {
+            stats.add_game(&record);
+            writer.add_game(record)?;
+        }
+
+        let paths = writer.finish()?;
+        Ok((paths, stats))
+    });
+
+    // Game threads (scoped — borrow games, backend, etc.)
+    let next_game = AtomicU32::new(0);
+    let n_games = games.len();
+
+    std::thread::scope(|s| {
+        for _ in 0..config.num_threads {
+            let tx = tx.clone();
+            s.spawn({
+                let next_game = &next_game;
+                move || {
+                    let mut rng = SmallRng::from_entropy();
+                    loop {
+                        let idx = next_game.fetch_add(1, Relaxed) as usize;
+                        if idx >= n_games {
+                            break;
+                        }
+                        let record = play_game(
+                            games[idx].clone(),
+                            backend,
+                            search_config,
+                            config,
+                            &mut rng,
+                            idx as u32,
+                        );
+
+                        if let Some(p) = progress {
+                            p.positions_completed
+                                .fetch_add(record.positions.len() as u64, Relaxed);
+                            p.simulations_completed
+                                .fetch_add(record.total_simulations, Relaxed);
+                            p.games_completed.fetch_add(1, Relaxed);
+                        }
+
+                        // If writer errored and rx is dropped, we still finish playing
+                        // but the record is lost. That's fine.
+                        let _ = tx.send(record);
+                    }
+                }
+            });
+        }
+    });
+
+    // Drop the original sender to close the channel.
+    drop(tx);
+
+    // Join writer thread.
+    let (written_paths, mut stats) = writer_handle.join().unwrap()?;
+    stats.elapsed_secs = start.elapsed().as_secs_f64();
+    if stats.total_games == 0 {
+        stats.min_turns = 0;
+    }
+
+    Ok(SelfPlayToDiskResult {
+        stats,
+        written_paths,
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -1213,5 +1340,194 @@ mod tests {
         for (i, record) in result.games.iter().enumerate() {
             assert_eq!(record.game_index, i as u32);
         }
+    }
+
+    // ---- run_self_play_to_disk ----
+
+    #[test]
+    fn run_self_play_to_disk_writes_bundles() {
+        let dir = std::env::temp_dir().join("selfplay_to_disk_test");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let games: Vec<GameState> = (0..4).map(|_| short_game()).collect();
+        let search = SearchConfig::default();
+        let sp = SelfPlayConfig { n_sims: 8, batch_size: 8, num_threads: 2 };
+
+        let result =
+            run_self_play_to_disk(&games, &BACKEND, &search, &sp, &dir, 2, None).unwrap();
+
+        assert_eq!(result.stats.total_games, 4);
+        // 4 games with max_per_bundle=2 → 2 bundle files
+        assert_eq!(result.written_paths.len(), 2);
+        for p in &result.written_paths {
+            assert!(p.exists());
+        }
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn run_self_play_to_disk_stats_match() {
+        let dir = std::env::temp_dir().join("selfplay_to_disk_stats_test");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let games: Vec<GameState> = (0..4).map(|_| short_game()).collect();
+        let search = SearchConfig::default();
+        let sp = SelfPlayConfig { n_sims: 8, batch_size: 8, num_threads: 2 };
+
+        let disk_result =
+            run_self_play_to_disk(&games, &BACKEND, &search, &sp, &dir, 100, None).unwrap();
+
+        // Stats should be consistent
+        assert_eq!(disk_result.stats.total_games, 4);
+        assert!(disk_result.stats.total_positions > 0);
+        assert!(disk_result.stats.total_simulations > 0);
+        assert_eq!(
+            disk_result.stats.p1_wins + disk_result.stats.p2_wins + disk_result.stats.draws,
+            4
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn run_self_play_to_disk_zero_games() {
+        let dir = std::env::temp_dir().join("selfplay_to_disk_zero_test");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let games: Vec<GameState> = vec![];
+        let search = SearchConfig::default();
+        let sp = SelfPlayConfig { n_sims: 8, batch_size: 8, num_threads: 2 };
+
+        let result =
+            run_self_play_to_disk(&games, &BACKEND, &search, &sp, &dir, 100, None).unwrap();
+
+        assert_eq!(result.stats.total_games, 0);
+        assert!(result.written_paths.is_empty());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // ---- stats incremental ----
+
+    #[test]
+    fn stats_add_game_matches_from_games() {
+        let records = vec![
+            GameRecord {
+                width: 5,
+                height: 5,
+                max_turns: 10,
+                maze: vec![],
+                initial_cheese: vec![],
+                positions: vec![
+                    PositionRecord {
+                        p1_pos: [0, 0],
+                        p2_pos: [4, 4],
+                        p1_score: 0.0,
+                        p2_score: 0.0,
+                        p1_mud: 0,
+                        p2_mud: 0,
+                        turn: 0,
+                        cheese_mask: vec![],
+                        value_p1: 0.0,
+                        value_p2: 0.0,
+                        visit_counts_p1: [0.0; 5],
+                        visit_counts_p2: [0.0; 5],
+                        prior_p1: [0.0; 5],
+                        prior_p2: [0.0; 5],
+                        policy_p1: [0.0; 5],
+                        policy_p2: [0.0; 5],
+                        action_p1: 0,
+                        action_p2: 0,
+                    },
+                ],
+                final_p1_score: 3.0,
+                final_p2_score: 2.0,
+                result: GameOutcome::P1Win,
+                total_simulations: 100,
+                cheese_available: 5,
+                game_index: 0,
+                cheese_outcomes: vec![],
+            },
+            GameRecord {
+                width: 5,
+                height: 5,
+                max_turns: 10,
+                maze: vec![],
+                initial_cheese: vec![],
+                positions: vec![
+                    PositionRecord {
+                        p1_pos: [0, 0],
+                        p2_pos: [4, 4],
+                        p1_score: 0.0,
+                        p2_score: 0.0,
+                        p1_mud: 0,
+                        p2_mud: 0,
+                        turn: 0,
+                        cheese_mask: vec![],
+                        value_p1: 0.0,
+                        value_p2: 0.0,
+                        visit_counts_p1: [0.0; 5],
+                        visit_counts_p2: [0.0; 5],
+                        prior_p1: [0.0; 5],
+                        prior_p2: [0.0; 5],
+                        policy_p1: [0.0; 5],
+                        policy_p2: [0.0; 5],
+                        action_p1: 0,
+                        action_p2: 0,
+                    },
+                    PositionRecord {
+                        p1_pos: [1, 0],
+                        p2_pos: [3, 4],
+                        p1_score: 1.0,
+                        p2_score: 0.0,
+                        p1_mud: 0,
+                        p2_mud: 0,
+                        turn: 1,
+                        cheese_mask: vec![],
+                        value_p1: 0.0,
+                        value_p2: 0.0,
+                        visit_counts_p1: [0.0; 5],
+                        visit_counts_p2: [0.0; 5],
+                        prior_p1: [0.0; 5],
+                        prior_p2: [0.0; 5],
+                        policy_p1: [0.0; 5],
+                        policy_p2: [0.0; 5],
+                        action_p1: 0,
+                        action_p2: 0,
+                    },
+                ],
+                final_p1_score: 2.0,
+                final_p2_score: 3.0,
+                result: GameOutcome::P2Win,
+                total_simulations: 200,
+                cheese_available: 5,
+                game_index: 1,
+                cheese_outcomes: vec![],
+            },
+        ];
+
+        let batch = SelfPlayStats::from_games(&records, 1.0);
+
+        let mut incremental = SelfPlayStats::new();
+        for g in &records {
+            incremental.add_game(g);
+        }
+        incremental.elapsed_secs = 1.0;
+
+        assert_eq!(batch.total_games, incremental.total_games);
+        assert_eq!(batch.total_positions, incremental.total_positions);
+        assert_eq!(batch.total_simulations, incremental.total_simulations);
+        assert_eq!(batch.p1_wins, incremental.p1_wins);
+        assert_eq!(batch.p2_wins, incremental.p2_wins);
+        assert_eq!(batch.draws, incremental.draws);
+        assert_eq!(batch.min_turns, incremental.min_turns);
+        assert_eq!(batch.max_turns, incremental.max_turns);
+        assert!(
+            (batch.total_cheese_collected - incremental.total_cheese_collected).abs() < f32::EPSILON
+        );
     }
 }
