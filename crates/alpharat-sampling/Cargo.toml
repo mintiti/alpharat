@@ -1,0 +1,19 @@
+[package]
+name = "alpharat-sampling"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+alpharat-mcts = { path = "../alpharat-mcts" }
+pyrat = { package = "pyrat-rust", git = "https://github.com/mintiti/pyrat-rust", branch = "main", default-features = false }
+ort = { version = "2.0.0-rc.11", optional = true, default-features = false, features = ["std", "download-binaries", "copy-dylibs", "tls-native"] }
+
+[dev-dependencies]
+serde_json = "1"
+serde = { version = "1", features = ["derive"] }
+
+[features]
+default = []
+onnx = ["dep:ort"]
+onnx-coreml = ["onnx", "ort/coreml"]
+onnx-cuda = ["onnx", "ort/cuda"]
