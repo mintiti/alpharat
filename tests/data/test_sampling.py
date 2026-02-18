@@ -18,7 +18,7 @@ class TestCreateGame:
             cheese_count=3,
             wall_density=0.0,
         )
-        game = create_game(params, seed=42)
+        game = create_game(params)
 
         assert len(game.wall_entries()) == 0
 
@@ -31,7 +31,7 @@ class TestCreateGame:
             cheese_count=3,
             mud_density=0.0,
         )
-        game = create_game(params, seed=42)
+        game = create_game(params)
 
         assert len(game.mud_entries()) == 0
 
@@ -45,7 +45,7 @@ class TestCreateGame:
             wall_density=None,
             mud_density=None,
         )
-        game = create_game(params, seed=42)
+        game = create_game(params)
 
         # PyRat defaults produce walls and mud
         assert len(game.wall_entries()) > 0
@@ -59,7 +59,7 @@ class TestCreateGame:
             max_turns=50,
             cheese_count=5,
         )
-        game = create_game(params, seed=123)
+        game = create_game(params)
 
         assert game.width == 7
         assert game.height == 9

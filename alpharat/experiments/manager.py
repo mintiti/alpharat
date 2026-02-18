@@ -217,7 +217,6 @@ class ExperimentManager:
         mcts_config: MCTSConfigBase,
         game: GameConfig,
         checkpoint_path: str | None = None,
-        seed_start: int = 0,
         created_at: datetime | None = None,
     ) -> None:
         """Register a completed batch in the manifest.
@@ -230,7 +229,6 @@ class ExperimentManager:
             mcts_config: MCTS algorithm configuration.
             game: Game configuration.
             checkpoint_path: Optional parent checkpoint path.
-            seed_start: Starting seed for game generation.
             created_at: Timestamp override (defaults to now).
         """
         batch_id = f"{group}/{batch_uuid}"
@@ -241,7 +239,6 @@ class ExperimentManager:
             parent_checkpoint=checkpoint_path,
             mcts_config=mcts_config.model_dump(),
             game=game.model_dump(),
-            seed_start=seed_start,
         )
         manifest = self._load_manifest()
         manifest.batches[batch_id] = entry
@@ -253,7 +250,6 @@ class ExperimentManager:
         mcts_config: MCTSConfigBase,
         game: GameConfig,
         checkpoint_path: str | None = None,
-        seed_start: int = 0,
     ) -> Path:
         """Create a new batch directory and register it in manifest.
 
@@ -264,7 +260,6 @@ class ExperimentManager:
             mcts_config: MCTS algorithm configuration.
             game: Game configuration (GameConfig).
             checkpoint_path: Optional path to parent checkpoint for NN-guided sampling.
-            seed_start: Starting seed for game generation (game N uses seed_start + N).
 
         Returns:
             Path to the created batch directory.
@@ -281,7 +276,6 @@ class ExperimentManager:
             mcts_config=mcts_config,
             game=game,
             checkpoint_path=checkpoint_path,
-            seed_start=seed_start,
         )
         return batch_dir
 

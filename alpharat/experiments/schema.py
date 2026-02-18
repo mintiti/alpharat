@@ -29,7 +29,6 @@ class BatchEntry(StrictBaseModel):
     parent_checkpoint: str | None
     mcts_config: dict[str, Any]
     game: dict[str, Any]
-    seed_start: int = 0  # First game uses this seed, increments from there
 
 
 class ShardEntry(StrictBaseModel):

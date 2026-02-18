@@ -60,6 +60,8 @@ pub struct GameRecord {
     pub total_simulations: u64,
     /// Initial cheese count.
     pub cheese_available: u16,
+    /// Index of this game in the self-play batch (for identity, not seeding).
+    pub game_index: u32,
 }
 
 /// Aggregate stats computed from a set of GameRecords.
@@ -303,7 +305,8 @@ pub fn play_game(
     search_config: &SearchConfig,
     n_sims: u32,
     batch_size: u32,
-    seed: u64,
+    rng: &mut impl rand::Rng,
+    game_index: u32,
 ) -> GameRecord {
     let w = game.width as u8;
     let h = game.height as u8;
@@ -312,17 +315,16 @@ pub fn play_game(
     let initial_cheese = build_cheese_mask(&game);
     let cheese_available = game.cheese.remaining_cheese() as u16;
 
-    let mut rng = SmallRng::seed_from_u64(seed);
     let mut tree = MCTSTree::new(&game);
     let mut positions = Vec::new();
     let mut total_simulations: u64 = 0;
 
     while !game.check_game_over() {
-        let result = run_search(&mut tree, &game, backend, search_config, n_sims, batch_size, &mut rng);
+        let result = run_search(&mut tree, &game, backend, search_config, n_sims, batch_size, rng);
         total_simulations += result.total_visits as u64;
 
-        let a1 = sample_action(&result.policy_p1, &mut rng);
-        let a2 = sample_action(&result.policy_p2, &mut rng);
+        let a1 = sample_action(&result.policy_p1, rng);
+        let a2 = sample_action(&result.policy_p2, rng);
 
         positions.push(record_position(&game, &result, a1, a2));
 
@@ -359,6 +361,7 @@ pub fn play_game(
         result,
         total_simulations,
         cheese_available,
+        game_index,
     }
 }
 
@@ -369,7 +372,8 @@ pub fn play_game(
 /// Run self-play on a slice of games using `num_threads` worker threads.
 ///
 /// Each thread claims games by atomic index, clones + plays them.
-/// `games` slice provides the starting position for each game.
+/// Each thread uses its own entropy-seeded RNG (no deterministic seeding).
+/// Results are sorted by `game_index` before returning.
 pub fn run_self_play(
     games: &[GameState],
     backend: &dyn Backend,
@@ -377,7 +381,6 @@ pub fn run_self_play(
     n_sims: u32,
     batch_size: u32,
     num_threads: u32,
-    base_seed: u64,
     progress: Option<&SelfPlayProgress>,
 ) -> SelfPlayResult {
     let start = Instant::now();
@@ -388,16 +391,22 @@ pub fn run_self_play(
         let handles: Vec<_> = (0..num_threads)
             .map(|_| {
                 s.spawn(|| {
+                    let mut rng = SmallRng::from_entropy();
                     let mut local = Vec::new();
                     loop {
                         let idx = next_game.fetch_add(1, Relaxed) as usize;
                         if idx >= n_games {
                             break;
                         }
-                        // Per-game seed: deterministic from base_seed + game index.
-                        let seed = base_seed.wrapping_add(idx as u64);
-                        let record =
-                            play_game(games[idx].clone(), backend, search_config, n_sims, batch_size, seed);
+                        let record = play_game(
+                            games[idx].clone(),
+                            backend,
+                            search_config,
+                            n_sims,
+                            batch_size,
+                            &mut rng,
+                            idx as u32,
+                        );
 
                         if let Some(p) = progress {
                             p.positions_completed
@@ -417,7 +426,9 @@ pub fn run_self_play(
         handles.into_iter().map(|h| h.join().unwrap()).collect()
     });
 
-    let game_records: Vec<GameRecord> = all_results.into_iter().flatten().collect();
+    let mut game_records: Vec<GameRecord> = all_results.into_iter().flatten().collect();
+    game_records.sort_by_key(|g| g.game_index);
+
     let elapsed = start.elapsed().as_secs_f64();
     let stats = SelfPlayStats::from_games(&game_records, elapsed);
 
@@ -571,7 +582,8 @@ mod tests {
     fn test_play_game_completes() {
         let game = short_game();
         let config = SearchConfig::default();
-        let record = play_game(game, &BACKEND, &config, 16, 8, 42);
+        let mut rng = SmallRng::seed_from_u64(42);
+        let record = play_game(game, &BACKEND, &config, 16, 8, &mut rng, 0);
 
         assert!(!record.positions.is_empty(), "should have at least one position");
         assert!(record.positions.len() <= 5, "max 5 turns");
@@ -580,13 +592,15 @@ mod tests {
         assert!(matches!(record.result, GameOutcome::P1Win | GameOutcome::P2Win | GameOutcome::Draw));
         assert_eq!(record.width, 5);
         assert_eq!(record.height, 5);
+        assert_eq!(record.game_index, 0);
     }
 
     #[test]
     fn test_play_game_position_fields() {
         let game = short_game();
         let config = SearchConfig::default();
-        let record = play_game(game, &BACKEND, &config, 16, 8, 42);
+        let mut rng = SmallRng::seed_from_u64(42);
+        let record = play_game(game, &BACKEND, &config, 16, 8, &mut rng, 0);
 
         let first = &record.positions[0];
         assert_eq!(first.p1_pos, [0, 0], "P1 starts at (0,0)");
@@ -607,7 +621,8 @@ mod tests {
         let game = short_game();
         let config = SearchConfig::default();
         let n_sims = 32;
-        let record = play_game(game, &BACKEND, &config, n_sims, 8, 42);
+        let mut rng = SmallRng::seed_from_u64(42);
+        let record = play_game(game, &BACKEND, &config, n_sims, 8, &mut rng, 0);
 
         assert!(record.total_simulations > 0);
         // Should be approximately n_sims * num_positions
@@ -625,7 +640,8 @@ mod tests {
     fn test_play_game_maze_and_cheese_recorded() {
         let game = standard_game();
         let config = SearchConfig::default();
-        let record = play_game(game, &BACKEND, &config, 8, 8, 42);
+        let mut rng = SmallRng::seed_from_u64(42);
+        let record = play_game(game, &BACKEND, &config, 8, 8, &mut rng, 0);
 
         assert_eq!(record.maze.len(), 5 * 5 * 4);
         assert_eq!(record.initial_cheese.len(), 25);
@@ -639,27 +655,22 @@ mod tests {
         let games: Vec<GameState> = (0..10).map(|_| short_game()).collect();
         let config = SearchConfig::default();
 
-        let result = run_self_play(&games, &BACKEND, &config, 8, 8, 2, 42, None);
+        let result = run_self_play(&games, &BACKEND, &config, 8, 8, 2, None);
 
         assert_eq!(result.games.len(), 10);
         assert_eq!(result.stats.total_games, 10);
     }
 
     #[test]
-    fn test_run_self_play_deterministic() {
-        let games: Vec<GameState> = (0..4).map(|_| short_game()).collect();
+    fn test_run_self_play_game_index_order() {
+        let games: Vec<GameState> = (0..8).map(|_| short_game()).collect();
         let config = SearchConfig::default();
 
-        let r1 = run_self_play(&games, &BACKEND, &config, 8, 8, 1, 42, None);
-        let r2 = run_self_play(&games, &BACKEND, &config, 8, 8, 1, 42, None);
+        let result = run_self_play(&games, &BACKEND, &config, 8, 8, 4, None);
 
-        // Same seeds, single thread → same results
-        assert_eq!(r1.games.len(), r2.games.len());
-        for (g1, g2) in r1.games.iter().zip(r2.games.iter()) {
-            assert_eq!(g1.positions.len(), g2.positions.len());
-            assert_eq!(g1.final_p1_score, g2.final_p1_score);
-            assert_eq!(g1.final_p2_score, g2.final_p2_score);
-            assert_eq!(g1.result, g2.result);
+        // Results should be sorted by game_index
+        for (i, record) in result.games.iter().enumerate() {
+            assert_eq!(record.game_index, i as u32, "game_index mismatch at position {i}");
         }
     }
 
@@ -669,7 +680,7 @@ mod tests {
         let config = SearchConfig::default();
         let progress = SelfPlayProgress::new();
 
-        let result = run_self_play(&games, &BACKEND, &config, 8, 8, 2, 42, Some(&progress));
+        let result = run_self_play(&games, &BACKEND, &config, 8, 8, 2, Some(&progress));
 
         assert_eq!(progress.games_completed.load(Relaxed), 4);
         assert_eq!(
@@ -700,6 +711,7 @@ mod tests {
                 result: GameOutcome::P1Win,
                 total_simulations: 100,
                 cheese_available: 5,
+                game_index: 0,
             },
             GameRecord {
                 width: 5,
@@ -755,6 +767,7 @@ mod tests {
                 result: GameOutcome::Draw,
                 total_simulations: 200,
                 cheese_available: 5,
+                game_index: 1,
             },
             GameRecord {
                 width: 5,
@@ -789,6 +802,7 @@ mod tests {
                 result: GameOutcome::P2Win,
                 total_simulations: 50,
                 cheese_available: 5,
+                game_index: 2,
             },
         ];
 
