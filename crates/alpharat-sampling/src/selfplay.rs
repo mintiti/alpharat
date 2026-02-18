@@ -20,6 +20,18 @@ pub enum GameOutcome {
     P2Win = 2,
 }
 
+/// Per-cheese outcome from P1's perspective.
+///
+/// Values match Python's `CheeseOutcome` IntEnum exactly.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+pub enum CheeseOutcome {
+    P1Win = 0,
+    Simultaneous = 1,
+    Uncollected = 2,
+    P2Win = 3,
+}
+
 /// One position snapshot from a game.
 pub struct PositionRecord {
     pub p1_pos: [u8; 2],
@@ -62,6 +74,8 @@ pub struct GameRecord {
     pub cheese_available: u16,
     /// Index of this game in the self-play batch (for identity, not seeding).
     pub game_index: u32,
+    /// H*W, y-major, CheeseOutcome values — who collected each cheese.
+    pub cheese_outcomes: Vec<u8>,
 }
 
 /// Aggregate stats computed from a set of GameRecords.
@@ -257,6 +271,68 @@ pub fn build_cheese_mask(game: &GameState) -> Vec<u8> {
     mask
 }
 
+/// Compute per-cell cheese outcomes by diffing consecutive cheese masks.
+///
+/// For each position, compares current cheese mask to the next one (or final game state).
+/// When a cheese disappears, checks which player(s) are at that cell to assign the outcome.
+fn compute_cheese_outcomes(
+    positions: &[PositionRecord],
+    game: &GameState,
+    w: u8,
+    h: u8,
+) -> Vec<u8> {
+    let size = h as usize * w as usize;
+    let mut outcomes = vec![CheeseOutcome::Uncollected as u8; size];
+
+    let n = positions.len();
+    for i in 0..n {
+        let current_mask = &positions[i].cheese_mask;
+
+        // Next state: either the next position's snapshot or the final game state.
+        let (next_mask_owned, next_p1, next_p2);
+        if i + 1 < n {
+            next_mask_owned = None;
+            let next = &positions[i + 1];
+            next_p1 = next.p1_pos;
+            next_p2 = next.p2_pos;
+        } else {
+            next_mask_owned = Some(build_cheese_mask(game));
+            next_p1 = [game.player1.current_pos.x, game.player1.current_pos.y];
+            next_p2 = [game.player2.current_pos.x, game.player2.current_pos.y];
+        }
+        let next_mask = match &next_mask_owned {
+            Some(m) => m.as_slice(),
+            None => positions[i + 1].cheese_mask.as_slice(),
+        };
+
+        // Find cells where cheese disappeared (1 → 0).
+        for idx in 0..size {
+            if current_mask[idx] == 1 && next_mask[idx] == 0 {
+                let x = (idx % w as usize) as u8;
+                let y = (idx / w as usize) as u8;
+                let cell = [x, y];
+
+                let p1_there = next_p1 == cell;
+                let p2_there = next_p2 == cell;
+
+                outcomes[idx] = if p1_there && p2_there {
+                    CheeseOutcome::Simultaneous as u8
+                } else if p1_there {
+                    CheeseOutcome::P1Win as u8
+                } else if p2_there {
+                    CheeseOutcome::P2Win as u8
+                } else {
+                    // Cheese vanished but neither player is there — shouldn't happen
+                    // in normal gameplay, but default to Uncollected.
+                    CheeseOutcome::Uncollected as u8
+                };
+            }
+        }
+    }
+
+    outcomes
+}
+
 /// Sample an action from a policy distribution. Falls back to STAY (4) if all zero.
 pub fn sample_action(policy: &[f32; 5], rng: &mut impl rand::Rng) -> u8 {
     match WeightedIndex::new(policy) {
@@ -349,6 +425,8 @@ pub fn play_game(
         GameOutcome::Draw
     };
 
+    let cheese_outcomes = compute_cheese_outcomes(&positions, &game, w, h);
+
     GameRecord {
         width: w,
         height: h,
@@ -362,6 +440,7 @@ pub fn play_game(
         total_simulations,
         cheese_available,
         game_index,
+        cheese_outcomes,
     }
 }
 
@@ -712,6 +791,7 @@ mod tests {
                 total_simulations: 100,
                 cheese_available: 5,
                 game_index: 0,
+                cheese_outcomes: vec![],
             },
             GameRecord {
                 width: 5,
@@ -768,6 +848,7 @@ mod tests {
                 total_simulations: 200,
                 cheese_available: 5,
                 game_index: 1,
+                cheese_outcomes: vec![],
             },
             GameRecord {
                 width: 5,
@@ -803,6 +884,7 @@ mod tests {
                 total_simulations: 50,
                 cheese_available: 5,
                 game_index: 2,
+                cheese_outcomes: vec![],
             },
         ];
 
@@ -821,5 +903,199 @@ mod tests {
         assert!((stats.avg_turns() - 1.0).abs() < 0.01); // 3 / 3
         assert!((stats.cheese_utilization() - 14.0 / 15.0).abs() < 0.01);
         assert!((stats.draw_rate() - 1.0 / 3.0).abs() < 0.01);
+    }
+
+    // ---- compute_cheese_outcomes ----
+
+    /// Helper: build a 3x3 cheese mask with cheese at given positions.
+    fn mask_3x3(cheese_positions: &[(u8, u8)]) -> Vec<u8> {
+        let mut mask = vec![0u8; 9];
+        for &(x, y) in cheese_positions {
+            mask[y as usize * 3 + x as usize] = 1;
+        }
+        mask
+    }
+
+    /// Helper: build a minimal PositionRecord for cheese outcome tests.
+    fn pos_record(p1: [u8; 2], p2: [u8; 2], cheese: &[(u8, u8)]) -> PositionRecord {
+        PositionRecord {
+            p1_pos: p1,
+            p2_pos: p2,
+            p1_score: 0.0,
+            p2_score: 0.0,
+            p1_mud: 0,
+            p2_mud: 0,
+            turn: 0,
+            cheese_mask: mask_3x3(cheese),
+            value_p1: 0.0,
+            value_p2: 0.0,
+            visit_counts_p1: [0.0; 5],
+            visit_counts_p2: [0.0; 5],
+            prior_p1: [0.0; 5],
+            prior_p2: [0.0; 5],
+            policy_p1: [0.0; 5],
+            policy_p2: [0.0; 5],
+            action_p1: 0,
+            action_p2: 0,
+        }
+    }
+
+    #[test]
+    fn test_cheese_outcomes_p1_collects() {
+        // 3x3 grid, cheese at (1,1). P1 moves to (1,1) and collects it.
+        let positions = vec![
+            pos_record([0, 0], [2, 2], &[(1, 1)]),
+            pos_record([1, 1], [2, 2], &[]),       // cheese gone, P1 is there
+        ];
+        // Build a 3x3 game with no cheese left (final state).
+        let game = GameState::new_with_config(
+            3, 3, HashMap::new(), Default::default(), &[], // no cheese remaining
+            Coordinates::new(1, 1), Coordinates::new(2, 2), 10,
+        );
+        let outcomes = compute_cheese_outcomes(&positions, &game, 3, 3);
+        let idx = 1 * 3 + 1; // y=1, x=1
+        assert_eq!(outcomes[idx], CheeseOutcome::P1Win as u8);
+    }
+
+    #[test]
+    fn test_cheese_outcomes_p2_collects() {
+        let positions = vec![
+            pos_record([0, 0], [2, 2], &[(2, 2)]),
+            pos_record([0, 0], [2, 2], &[]),       // cheese gone, P2 was already there
+        ];
+        let game = GameState::new_with_config(
+            3, 3, HashMap::new(), Default::default(), &[],
+            Coordinates::new(0, 0), Coordinates::new(2, 2), 10,
+        );
+        let outcomes = compute_cheese_outcomes(&positions, &game, 3, 3);
+        let idx = 2 * 3 + 2; // y=2, x=2
+        assert_eq!(outcomes[idx], CheeseOutcome::P2Win as u8);
+    }
+
+    #[test]
+    fn test_cheese_outcomes_simultaneous() {
+        // Both players land on the same cheese cell.
+        let positions = vec![
+            pos_record([0, 0], [2, 2], &[(1, 1)]),
+            pos_record([1, 1], [1, 1], &[]),       // both at (1,1)
+        ];
+        let game = GameState::new_with_config(
+            3, 3, HashMap::new(), Default::default(), &[],
+            Coordinates::new(1, 1), Coordinates::new(1, 1), 10,
+        );
+        let outcomes = compute_cheese_outcomes(&positions, &game, 3, 3);
+        let idx = 1 * 3 + 1;
+        assert_eq!(outcomes[idx], CheeseOutcome::Simultaneous as u8);
+    }
+
+    #[test]
+    fn test_cheese_outcomes_uncollected() {
+        // Cheese at (1,1) never collected — still present in final state.
+        let positions = vec![
+            pos_record([0, 0], [2, 2], &[(1, 1)]),
+        ];
+        let game = GameState::new_with_config(
+            3, 3, HashMap::new(), Default::default(),
+            &[Coordinates::new(1, 1)], // cheese still there
+            Coordinates::new(0, 0), Coordinates::new(2, 2), 10,
+        );
+        let outcomes = compute_cheese_outcomes(&positions, &game, 3, 3);
+        let idx = 1 * 3 + 1;
+        assert_eq!(outcomes[idx], CheeseOutcome::Uncollected as u8);
+    }
+
+    #[test]
+    fn test_cheese_outcomes_non_cheese_cells() {
+        // Cells that never had cheese should be Uncollected.
+        let positions = vec![
+            pos_record([0, 0], [2, 2], &[(1, 1)]),
+            pos_record([1, 1], [2, 2], &[]),
+        ];
+        let game = GameState::new_with_config(
+            3, 3, HashMap::new(), Default::default(), &[],
+            Coordinates::new(1, 1), Coordinates::new(2, 2), 10,
+        );
+        let outcomes = compute_cheese_outcomes(&positions, &game, 3, 3);
+        // (0,0) never had cheese
+        assert_eq!(outcomes[0], CheeseOutcome::Uncollected as u8);
+        // (1,1) was collected by P1
+        assert_eq!(outcomes[1 * 3 + 1], CheeseOutcome::P1Win as u8);
+    }
+
+    #[test]
+    fn test_cheese_outcomes_empty_positions() {
+        // No positions recorded — all cheese is Uncollected.
+        let game = GameState::new_with_config(
+            3, 3, HashMap::new(), Default::default(),
+            &[Coordinates::new(1, 1)],
+            Coordinates::new(0, 0), Coordinates::new(2, 2), 10,
+        );
+        let outcomes = compute_cheese_outcomes(&[], &game, 3, 3);
+        for &o in &outcomes {
+            assert_eq!(o, CheeseOutcome::Uncollected as u8);
+        }
+    }
+
+    #[test]
+    fn test_cheese_outcomes_multi_turn() {
+        // Turn 0: cheese at (0,0) and (2,2)
+        // Turn 1: P1 collects (0,0), cheese at (2,2) remains
+        // Turn 2: P2 collects (2,2)
+        let positions = vec![
+            pos_record([1, 0], [1, 2], &[(0, 0), (2, 2)]),
+            pos_record([0, 0], [1, 2], &[(2, 2)]),        // P1 at (0,0), cheese gone
+            pos_record([0, 0], [2, 2], &[]),               // P2 at (2,2), cheese gone
+        ];
+        let game = GameState::new_with_config(
+            3, 3, HashMap::new(), Default::default(), &[],
+            Coordinates::new(0, 0), Coordinates::new(2, 2), 10,
+        );
+        let outcomes = compute_cheese_outcomes(&positions, &game, 3, 3);
+        assert_eq!(outcomes[0 * 3 + 0], CheeseOutcome::P1Win as u8);   // (0,0)
+        assert_eq!(outcomes[2 * 3 + 2], CheeseOutcome::P2Win as u8);   // (2,2)
+    }
+
+    #[test]
+    fn test_cheese_outcomes_last_turn_uses_final_state() {
+        // Only one position, cheese collected on that move → uses final game state.
+        // P1 starts at (0,0), moves to (1,0) where cheese is.
+        let positions = vec![
+            pos_record([0, 0], [2, 2], &[(1, 0)]),
+        ];
+        // Final state: P1 at (1,0), no cheese left.
+        let game = GameState::new_with_config(
+            3, 3, HashMap::new(), Default::default(), &[],
+            Coordinates::new(1, 0), Coordinates::new(2, 2), 10,
+        );
+        let outcomes = compute_cheese_outcomes(&positions, &game, 3, 3);
+        assert_eq!(outcomes[0 * 3 + 1], CheeseOutcome::P1Win as u8); // (1,0) → idx=0*3+1=1
+    }
+
+    #[test]
+    fn test_play_game_cheese_outcomes_populated() {
+        let game = standard_game(); // 5x5, 3 cheese
+        let config = SearchConfig::default();
+        let mut rng = SmallRng::seed_from_u64(42);
+        let record = play_game(game, &BACKEND, &config, 16, 8, &mut rng, 0);
+
+        assert_eq!(record.cheese_outcomes.len(), 25, "should be H*W");
+
+        // Non-cheese cells must be Uncollected.
+        let initial_cheese_positions: Vec<usize> = record
+            .initial_cheese
+            .iter()
+            .enumerate()
+            .filter(|(_, &v)| v == 1)
+            .map(|(i, _)| i)
+            .collect();
+        for idx in 0..25 {
+            if !initial_cheese_positions.contains(&idx) {
+                assert_eq!(
+                    record.cheese_outcomes[idx],
+                    CheeseOutcome::Uncollected as u8,
+                    "non-cheese cell {idx} should be Uncollected"
+                );
+            }
+        }
     }
 }
