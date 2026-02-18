@@ -33,6 +33,7 @@ pub enum CheeseOutcome {
 }
 
 /// One position snapshot from a game.
+#[derive(Clone, Debug)]
 pub struct PositionRecord {
     pub p1_pos: [u8; 2],
     pub p2_pos: [u8; 2],
@@ -56,6 +57,7 @@ pub struct PositionRecord {
 }
 
 /// Complete record of one game.
+#[derive(Clone, Debug)]
 pub struct GameRecord {
     pub width: u8,
     pub height: u8,
@@ -79,6 +81,7 @@ pub struct GameRecord {
 }
 
 /// Aggregate stats computed from a set of GameRecords.
+#[derive(Clone, Debug)]
 pub struct SelfPlayStats {
     pub total_games: u32,
     pub total_positions: u64,
@@ -89,7 +92,6 @@ pub struct SelfPlayStats {
     pub draws: u32,
     pub total_cheese_collected: f32,
     pub total_cheese_available: u32,
-    pub total_turns: u64,
     pub min_turns: u32,
     pub max_turns: u32,
 }
@@ -106,7 +108,6 @@ impl SelfPlayStats {
             draws: 0,
             total_cheese_collected: 0.0,
             total_cheese_available: 0,
-            total_turns: 0,
             min_turns: u32::MAX,
             max_turns: 0,
         };
@@ -117,7 +118,6 @@ impl SelfPlayStats {
             stats.total_simulations += g.total_simulations;
             stats.total_cheese_collected += g.final_p1_score + g.final_p2_score;
             stats.total_cheese_available += g.cheese_available as u32;
-            stats.total_turns += n;
 
             let turns = n as u32;
             stats.min_turns = stats.min_turns.min(turns);
@@ -171,7 +171,7 @@ impl SelfPlayStats {
 
     pub fn avg_turns(&self) -> f64 {
         if self.total_games > 0 {
-            self.total_turns as f64 / self.total_games as f64
+            self.total_positions as f64 / self.total_games as f64
         } else {
             0.0
         }
@@ -187,12 +187,24 @@ impl SelfPlayStats {
 }
 
 /// Result of a self-play session.
+#[derive(Clone, Debug)]
+#[must_use]
 pub struct SelfPlayResult {
     pub games: Vec<GameRecord>,
     pub stats: SelfPlayStats,
 }
 
+/// Parameters for self-play games.
+#[derive(Clone, Debug)]
+pub struct SelfPlayConfig {
+    pub n_sims: u32,
+    pub batch_size: u32,
+    /// Number of worker threads (only used by `run_self_play`).
+    pub num_threads: u32,
+}
+
 /// Atomic counters for tracking self-play progress from outside.
+#[derive(Debug)]
 pub struct SelfPlayProgress {
     pub games_completed: AtomicU32,
     pub positions_completed: AtomicU64,
@@ -379,8 +391,7 @@ pub fn play_game(
     mut game: GameState,
     backend: &dyn Backend,
     search_config: &SearchConfig,
-    n_sims: u32,
-    batch_size: u32,
+    config: &SelfPlayConfig,
     rng: &mut impl rand::Rng,
     game_index: u32,
 ) -> GameRecord {
@@ -392,11 +403,19 @@ pub fn play_game(
     let cheese_available = game.cheese.remaining_cheese() as u16;
 
     let mut tree = MCTSTree::new(&game);
-    let mut positions = Vec::new();
+    let mut positions = Vec::with_capacity(game.max_turns as usize);
     let mut total_simulations: u64 = 0;
 
     while !game.check_game_over() {
-        let result = run_search(&mut tree, &game, backend, search_config, n_sims, batch_size, rng);
+        let result = run_search(
+            &mut tree,
+            &game,
+            backend,
+            search_config,
+            config.n_sims,
+            config.batch_size,
+            rng,
+        );
         total_simulations += result.total_visits as u64;
 
         let a1 = sample_action(&result.policy_p1, rng);
@@ -448,7 +467,7 @@ pub fn play_game(
 // Multi-game orchestration
 // ---------------------------------------------------------------------------
 
-/// Run self-play on a slice of games using `num_threads` worker threads.
+/// Run self-play on a slice of games using `config.num_threads` worker threads.
 ///
 /// Each thread claims games by atomic index, clones + plays them.
 /// Each thread uses its own entropy-seeded RNG (no deterministic seeding).
@@ -457,9 +476,7 @@ pub fn run_self_play(
     games: &[GameState],
     backend: &dyn Backend,
     search_config: &SearchConfig,
-    n_sims: u32,
-    batch_size: u32,
-    num_threads: u32,
+    config: &SelfPlayConfig,
     progress: Option<&SelfPlayProgress>,
 ) -> SelfPlayResult {
     let start = Instant::now();
@@ -467,7 +484,7 @@ pub fn run_self_play(
     let n_games = games.len();
 
     let all_results: Vec<Vec<GameRecord>> = std::thread::scope(|s| {
-        let handles: Vec<_> = (0..num_threads)
+        let handles: Vec<_> = (0..config.num_threads)
             .map(|_| {
                 s.spawn(|| {
                     let mut rng = SmallRng::from_entropy();
@@ -481,8 +498,7 @@ pub fn run_self_play(
                             games[idx].clone(),
                             backend,
                             search_config,
-                            n_sims,
-                            batch_size,
+                            config,
                             &mut rng,
                             idx as u32,
                         );
@@ -525,16 +541,17 @@ pub fn run_self_play(
 mod tests {
     use super::*;
     use alpharat_mcts::SmartUniformBackend;
+    use pyrat::game::types::MudMap;
     use std::collections::HashMap;
 
     const BACKEND: SmartUniformBackend = SmartUniformBackend;
 
-    fn open_5x5_game(p1: Coordinates, p2: Coordinates, cheese: &[Coordinates]) -> GameState {
-        GameState::new_with_config(5, 5, HashMap::new(), Default::default(), cheese, p1, p2, 100)
+    fn open_5x5(p1: Coordinates, p2: Coordinates, cheese: &[Coordinates]) -> GameState {
+        GameState::new_with_config(5, 5, HashMap::new(), MudMap::new(), cheese, p1, p2, 100)
     }
 
     fn standard_game() -> GameState {
-        open_5x5_game(
+        open_5x5(
             Coordinates::new(0, 0),
             Coordinates::new(4, 4),
             &[
@@ -550,7 +567,7 @@ mod tests {
             5,
             5,
             HashMap::new(),
-            Default::default(),
+            MudMap::new(),
             &[Coordinates::new(1, 0)],
             Coordinates::new(0, 0),
             Coordinates::new(4, 4),
@@ -561,7 +578,7 @@ mod tests {
     // ---- sample_action ----
 
     #[test]
-    fn test_sample_action_deterministic() {
+    fn sample_action_deterministic() {
         let mut rng = SmallRng::seed_from_u64(0);
         let policy = [1.0, 0.0, 0.0, 0.0, 0.0];
         for _ in 0..20 {
@@ -570,7 +587,7 @@ mod tests {
     }
 
     #[test]
-    fn test_sample_action_zero_fallback() {
+    fn sample_action_zero_fallback() {
         let mut rng = SmallRng::seed_from_u64(0);
         let policy = [0.0, 0.0, 0.0, 0.0, 0.0];
         assert_eq!(sample_action(&policy, &mut rng), 4);
@@ -579,8 +596,8 @@ mod tests {
     // ---- build_maze_array ----
 
     #[test]
-    fn test_build_maze_array_open() {
-        let game = open_5x5_game(
+    fn build_maze_array_open() {
+        let game = open_5x5(
             Coordinates::new(2, 2),
             Coordinates::new(2, 2),
             &[Coordinates::new(0, 0)],
@@ -603,7 +620,7 @@ mod tests {
     }
 
     #[test]
-    fn test_build_maze_array_walls() {
+    fn build_maze_array_walls() {
         let mut walls = HashMap::new();
         walls.insert(
             Coordinates::new(2, 2),
@@ -617,7 +634,7 @@ mod tests {
             5,
             5,
             walls,
-            Default::default(),
+            MudMap::new(),
             &[Coordinates::new(0, 0)],
             Coordinates::new(0, 0),
             Coordinates::new(4, 4),
@@ -638,9 +655,9 @@ mod tests {
     // ---- build_cheese_mask ----
 
     #[test]
-    fn test_build_cheese_mask() {
+    fn build_cheese_mask_positions() {
         let cheese = [Coordinates::new(0, 0), Coordinates::new(2, 3), Coordinates::new(4, 4)];
-        let game = open_5x5_game(Coordinates::new(1, 1), Coordinates::new(3, 3), &cheese);
+        let game = open_5x5(Coordinates::new(1, 1), Coordinates::new(3, 3), &cheese);
         let mask = build_cheese_mask(&game);
         assert_eq!(mask.len(), 25);
 
@@ -658,11 +675,12 @@ mod tests {
     // ---- play_game ----
 
     #[test]
-    fn test_play_game_completes() {
+    fn play_game_completes() {
         let game = short_game();
-        let config = SearchConfig::default();
+        let search = SearchConfig::default();
+        let sp = SelfPlayConfig { n_sims: 16, batch_size: 8, num_threads: 1 };
         let mut rng = SmallRng::seed_from_u64(42);
-        let record = play_game(game, &BACKEND, &config, 16, 8, &mut rng, 0);
+        let record = play_game(game, &BACKEND, &search, &sp, &mut rng, 0);
 
         assert!(!record.positions.is_empty(), "should have at least one position");
         assert!(record.positions.len() <= 5, "max 5 turns");
@@ -675,11 +693,12 @@ mod tests {
     }
 
     #[test]
-    fn test_play_game_position_fields() {
+    fn play_game_position_fields() {
         let game = short_game();
-        let config = SearchConfig::default();
+        let search = SearchConfig::default();
+        let sp = SelfPlayConfig { n_sims: 16, batch_size: 8, num_threads: 1 };
         let mut rng = SmallRng::seed_from_u64(42);
-        let record = play_game(game, &BACKEND, &config, 16, 8, &mut rng, 0);
+        let record = play_game(game, &BACKEND, &search, &sp, &mut rng, 0);
 
         let first = &record.positions[0];
         assert_eq!(first.p1_pos, [0, 0], "P1 starts at (0,0)");
@@ -696,16 +715,16 @@ mod tests {
     }
 
     #[test]
-    fn test_play_game_simulations_tracked() {
+    fn play_game_simulations_tracked() {
         let game = short_game();
-        let config = SearchConfig::default();
-        let n_sims = 32;
+        let search = SearchConfig::default();
+        let sp = SelfPlayConfig { n_sims: 32, batch_size: 8, num_threads: 1 };
         let mut rng = SmallRng::seed_from_u64(42);
-        let record = play_game(game, &BACKEND, &config, n_sims, 8, &mut rng, 0);
+        let record = play_game(game, &BACKEND, &search, &sp, &mut rng, 0);
 
         assert!(record.total_simulations > 0);
         // Should be approximately n_sims * num_positions
-        let expected_approx = n_sims as u64 * record.positions.len() as u64;
+        let expected_approx = sp.n_sims as u64 * record.positions.len() as u64;
         // Allow some variance (terminal nodes, etc.)
         assert!(
             record.total_simulations >= expected_approx / 2,
@@ -716,11 +735,12 @@ mod tests {
     }
 
     #[test]
-    fn test_play_game_maze_and_cheese_recorded() {
+    fn play_game_maze_and_cheese_recorded() {
         let game = standard_game();
-        let config = SearchConfig::default();
+        let search = SearchConfig::default();
+        let sp = SelfPlayConfig { n_sims: 8, batch_size: 8, num_threads: 1 };
         let mut rng = SmallRng::seed_from_u64(42);
-        let record = play_game(game, &BACKEND, &config, 8, 8, &mut rng, 0);
+        let record = play_game(game, &BACKEND, &search, &sp, &mut rng, 0);
 
         assert_eq!(record.maze.len(), 5 * 5 * 4);
         assert_eq!(record.initial_cheese.len(), 25);
@@ -730,22 +750,24 @@ mod tests {
     // ---- run_self_play ----
 
     #[test]
-    fn test_run_self_play_game_count() {
+    fn run_self_play_game_count() {
         let games: Vec<GameState> = (0..10).map(|_| short_game()).collect();
-        let config = SearchConfig::default();
+        let search = SearchConfig::default();
+        let sp = SelfPlayConfig { n_sims: 8, batch_size: 8, num_threads: 2 };
 
-        let result = run_self_play(&games, &BACKEND, &config, 8, 8, 2, None);
+        let result = run_self_play(&games, &BACKEND, &search, &sp, None);
 
         assert_eq!(result.games.len(), 10);
         assert_eq!(result.stats.total_games, 10);
     }
 
     #[test]
-    fn test_run_self_play_game_index_order() {
+    fn run_self_play_game_index_order() {
         let games: Vec<GameState> = (0..8).map(|_| short_game()).collect();
-        let config = SearchConfig::default();
+        let search = SearchConfig::default();
+        let sp = SelfPlayConfig { n_sims: 8, batch_size: 8, num_threads: 4 };
 
-        let result = run_self_play(&games, &BACKEND, &config, 8, 8, 4, None);
+        let result = run_self_play(&games, &BACKEND, &search, &sp, None);
 
         // Results should be sorted by game_index
         for (i, record) in result.games.iter().enumerate() {
@@ -754,12 +776,13 @@ mod tests {
     }
 
     #[test]
-    fn test_run_self_play_progress() {
+    fn run_self_play_progress() {
         let games: Vec<GameState> = (0..4).map(|_| short_game()).collect();
-        let config = SearchConfig::default();
+        let search = SearchConfig::default();
+        let sp = SelfPlayConfig { n_sims: 8, batch_size: 8, num_threads: 2 };
         let progress = SelfPlayProgress::new();
 
-        let result = run_self_play(&games, &BACKEND, &config, 8, 8, 2, Some(&progress));
+        let result = run_self_play(&games, &BACKEND, &search, &sp, Some(&progress));
 
         assert_eq!(progress.games_completed.load(Relaxed), 4);
         assert_eq!(
@@ -775,7 +798,7 @@ mod tests {
     // ---- stats ----
 
     #[test]
-    fn test_stats_from_games() {
+    fn stats_from_games() {
         // Construct known GameRecords
         let records = vec![
             GameRecord {
@@ -941,7 +964,7 @@ mod tests {
     }
 
     #[test]
-    fn test_cheese_outcomes_p1_collects() {
+    fn cheese_outcomes_p1_collects() {
         // 3x3 grid, cheese at (1,1). P1 moves to (1,1) and collects it.
         let positions = vec![
             pos_record([0, 0], [2, 2], &[(1, 1)]),
@@ -949,7 +972,7 @@ mod tests {
         ];
         // Build a 3x3 game with no cheese left (final state).
         let game = GameState::new_with_config(
-            3, 3, HashMap::new(), Default::default(), &[], // no cheese remaining
+            3, 3, HashMap::new(), MudMap::new(), &[], // no cheese remaining
             Coordinates::new(1, 1), Coordinates::new(2, 2), 10,
         );
         let outcomes = compute_cheese_outcomes(&positions, &game, 3, 3);
@@ -958,13 +981,13 @@ mod tests {
     }
 
     #[test]
-    fn test_cheese_outcomes_p2_collects() {
+    fn cheese_outcomes_p2_collects() {
         let positions = vec![
             pos_record([0, 0], [2, 2], &[(2, 2)]),
             pos_record([0, 0], [2, 2], &[]),       // cheese gone, P2 was already there
         ];
         let game = GameState::new_with_config(
-            3, 3, HashMap::new(), Default::default(), &[],
+            3, 3, HashMap::new(), MudMap::new(), &[],
             Coordinates::new(0, 0), Coordinates::new(2, 2), 10,
         );
         let outcomes = compute_cheese_outcomes(&positions, &game, 3, 3);
@@ -973,14 +996,14 @@ mod tests {
     }
 
     #[test]
-    fn test_cheese_outcomes_simultaneous() {
+    fn cheese_outcomes_simultaneous() {
         // Both players land on the same cheese cell.
         let positions = vec![
             pos_record([0, 0], [2, 2], &[(1, 1)]),
             pos_record([1, 1], [1, 1], &[]),       // both at (1,1)
         ];
         let game = GameState::new_with_config(
-            3, 3, HashMap::new(), Default::default(), &[],
+            3, 3, HashMap::new(), MudMap::new(), &[],
             Coordinates::new(1, 1), Coordinates::new(1, 1), 10,
         );
         let outcomes = compute_cheese_outcomes(&positions, &game, 3, 3);
@@ -989,13 +1012,13 @@ mod tests {
     }
 
     #[test]
-    fn test_cheese_outcomes_uncollected() {
+    fn cheese_outcomes_uncollected() {
         // Cheese at (1,1) never collected — still present in final state.
         let positions = vec![
             pos_record([0, 0], [2, 2], &[(1, 1)]),
         ];
         let game = GameState::new_with_config(
-            3, 3, HashMap::new(), Default::default(),
+            3, 3, HashMap::new(), MudMap::new(),
             &[Coordinates::new(1, 1)], // cheese still there
             Coordinates::new(0, 0), Coordinates::new(2, 2), 10,
         );
@@ -1005,14 +1028,14 @@ mod tests {
     }
 
     #[test]
-    fn test_cheese_outcomes_non_cheese_cells() {
+    fn cheese_outcomes_non_cheese_cells() {
         // Cells that never had cheese should be Uncollected.
         let positions = vec![
             pos_record([0, 0], [2, 2], &[(1, 1)]),
             pos_record([1, 1], [2, 2], &[]),
         ];
         let game = GameState::new_with_config(
-            3, 3, HashMap::new(), Default::default(), &[],
+            3, 3, HashMap::new(), MudMap::new(), &[],
             Coordinates::new(1, 1), Coordinates::new(2, 2), 10,
         );
         let outcomes = compute_cheese_outcomes(&positions, &game, 3, 3);
@@ -1023,10 +1046,10 @@ mod tests {
     }
 
     #[test]
-    fn test_cheese_outcomes_empty_positions() {
+    fn cheese_outcomes_empty_positions() {
         // No positions recorded — all cheese is Uncollected.
         let game = GameState::new_with_config(
-            3, 3, HashMap::new(), Default::default(),
+            3, 3, HashMap::new(), MudMap::new(),
             &[Coordinates::new(1, 1)],
             Coordinates::new(0, 0), Coordinates::new(2, 2), 10,
         );
@@ -1037,7 +1060,7 @@ mod tests {
     }
 
     #[test]
-    fn test_cheese_outcomes_multi_turn() {
+    fn cheese_outcomes_multi_turn() {
         // Turn 0: cheese at (0,0) and (2,2)
         // Turn 1: P1 collects (0,0), cheese at (2,2) remains
         // Turn 2: P2 collects (2,2)
@@ -1047,7 +1070,7 @@ mod tests {
             pos_record([0, 0], [2, 2], &[]),               // P2 at (2,2), cheese gone
         ];
         let game = GameState::new_with_config(
-            3, 3, HashMap::new(), Default::default(), &[],
+            3, 3, HashMap::new(), MudMap::new(), &[],
             Coordinates::new(0, 0), Coordinates::new(2, 2), 10,
         );
         let outcomes = compute_cheese_outcomes(&positions, &game, 3, 3);
@@ -1056,7 +1079,7 @@ mod tests {
     }
 
     #[test]
-    fn test_cheese_outcomes_last_turn_uses_final_state() {
+    fn cheese_outcomes_last_turn_uses_final_state() {
         // Only one position, cheese collected on that move → uses final game state.
         // P1 starts at (0,0), moves to (1,0) where cheese is.
         let positions = vec![
@@ -1064,7 +1087,7 @@ mod tests {
         ];
         // Final state: P1 at (1,0), no cheese left.
         let game = GameState::new_with_config(
-            3, 3, HashMap::new(), Default::default(), &[],
+            3, 3, HashMap::new(), MudMap::new(), &[],
             Coordinates::new(1, 0), Coordinates::new(2, 2), 10,
         );
         let outcomes = compute_cheese_outcomes(&positions, &game, 3, 3);
@@ -1072,11 +1095,12 @@ mod tests {
     }
 
     #[test]
-    fn test_play_game_cheese_outcomes_populated() {
+    fn play_game_cheese_outcomes_populated() {
         let game = standard_game(); // 5x5, 3 cheese
-        let config = SearchConfig::default();
+        let search = SearchConfig::default();
+        let sp = SelfPlayConfig { n_sims: 16, batch_size: 8, num_threads: 1 };
         let mut rng = SmallRng::seed_from_u64(42);
-        let record = play_game(game, &BACKEND, &config, 16, 8, &mut rng, 0);
+        let record = play_game(game, &BACKEND, &search, &sp, &mut rng, 0);
 
         assert_eq!(record.cheese_outcomes.len(), 25, "should be H*W");
 
@@ -1096,6 +1120,98 @@ mod tests {
                     "non-cheese cell {idx} should be Uncollected"
                 );
             }
+        }
+    }
+
+    // ---- new test coverage ----
+
+    #[test]
+    fn build_maze_array_mud() {
+        // Mud between (2,2) and (2,3) with cost 3.
+        let mut mud = MudMap::new();
+        mud.insert(Coordinates::new(2, 2), Coordinates::new(2, 3), 3);
+
+        let game = GameState::new_with_config(
+            5,
+            5,
+            HashMap::new(),
+            mud,
+            &[Coordinates::new(0, 0)],
+            Coordinates::new(0, 0),
+            Coordinates::new(4, 4),
+            100,
+        );
+        let maze = build_maze_array(&game);
+
+        // UP from (2,2) → (2,3) should be mud cost (3)
+        let idx_22 = (2 * 5 + 2) * 4;
+        assert_eq!(maze[idx_22 + 0], 3, "UP from (2,2) through mud should be 3");
+        // RIGHT from (2,2) → (3,2) should be normal passage
+        assert_eq!(maze[idx_22 + 1], 1, "RIGHT from (2,2) should be 1");
+
+        // DOWN from (2,3) → (2,2) should also be mud cost
+        let idx_23 = (3 * 5 + 2) * 4;
+        assert_eq!(maze[idx_23 + 2], 3, "DOWN from (2,3) through mud should be 3");
+    }
+
+    #[test]
+    fn advance_root_fallback_reinit() {
+        // With n_sims=1 the chosen action pair likely wasn't explored,
+        // forcing the reinit fallback path in play_game.
+        let game = short_game();
+        let search = SearchConfig::default();
+        let sp = SelfPlayConfig { n_sims: 1, batch_size: 1, num_threads: 1 };
+        let mut rng = SmallRng::seed_from_u64(42);
+        let record = play_game(game, &BACKEND, &search, &sp, &mut rng, 0);
+
+        // Should still complete without panicking.
+        assert!(!record.positions.is_empty());
+        assert!(record.total_simulations > 0);
+    }
+
+    #[test]
+    fn play_game_result_matches_scores() {
+        let game = standard_game();
+        let search = SearchConfig::default();
+        let sp = SelfPlayConfig { n_sims: 16, batch_size: 8, num_threads: 1 };
+        let mut rng = SmallRng::seed_from_u64(42);
+        let record = play_game(game, &BACKEND, &search, &sp, &mut rng, 0);
+
+        match record.result {
+            GameOutcome::P1Win => assert!(record.final_p1_score > record.final_p2_score),
+            GameOutcome::P2Win => assert!(record.final_p2_score > record.final_p1_score),
+            GameOutcome::Draw => {
+                assert!((record.final_p1_score - record.final_p2_score).abs() < f32::EPSILON)
+            }
+        }
+    }
+
+    #[test]
+    fn run_self_play_zero_games() {
+        let games: Vec<GameState> = vec![];
+        let search = SearchConfig::default();
+        let sp = SelfPlayConfig { n_sims: 8, batch_size: 8, num_threads: 2 };
+
+        let result = run_self_play(&games, &BACKEND, &search, &sp, None);
+
+        assert!(result.games.is_empty());
+        assert_eq!(result.stats.total_games, 0);
+        assert_eq!(result.stats.total_positions, 0);
+        assert_eq!(result.stats.min_turns, 0);
+    }
+
+    #[test]
+    fn run_self_play_more_threads_than_games() {
+        let games: Vec<GameState> = (0..2).map(|_| short_game()).collect();
+        let search = SearchConfig::default();
+        let sp = SelfPlayConfig { n_sims: 8, batch_size: 8, num_threads: 8 };
+
+        let result = run_self_play(&games, &BACKEND, &search, &sp, None);
+
+        assert_eq!(result.games.len(), 2);
+        assert_eq!(result.stats.total_games, 2);
+        for (i, record) in result.games.iter().enumerate() {
+            assert_eq!(record.game_index, i as u32);
         }
     }
 }
