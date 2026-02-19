@@ -1,3 +1,5 @@
+#[cfg(feature = "python")]
+pub mod bindings;
 pub mod encoder;
 pub mod flat_encoder;
 pub mod mux_backend;
@@ -8,7 +10,7 @@ pub mod selfplay;
 
 pub use encoder::ObservationEncoder;
 pub use flat_encoder::FlatEncoder;
-pub use mux_backend::{MuxBackend, MuxConfig};
+pub use mux_backend::{MuxBackend, MuxConfig, MuxStats};
 pub use recording::{write_bundle, BundleWriter};
 pub use selfplay::{
     play_game, run_self_play, run_self_play_to_disk, CheeseOutcome, GameRecord, PositionRecord,

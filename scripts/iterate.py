@@ -105,34 +105,42 @@ def run_sampling_phase(
     experiments_dir: Path,
     device: str,
 ) -> Path:
-    """Run the sampling phase.
+    """Run the sampling phase using the Rust self-play pipeline.
 
     Args:
         config: Iteration config.
         batch_group: Name for the batch group.
         checkpoint_path: Path to checkpoint for NN-guided sampling, or None.
         experiments_dir: Experiments directory.
-        device: Device for NN inference.
+        device: Device for NN inference (unused — Rust uses ONNX CPU).
 
     Returns:
         Path to the created batch directory.
     """
-    from alpharat.data.sampling import SamplingConfig, SamplingParams, run_sampling
+    from alpharat.data.rust_sampling import run_rust_sampling
+    from alpharat.mcts.config import RustMCTSConfig
 
-    sampling_config = SamplingConfig(
-        mcts=config.mcts,
+    # Build a RustMCTSConfig from whatever mcts config we have.
+    # If already a RustMCTSConfig, use it directly. Otherwise, adapt.
+    if isinstance(config.mcts, RustMCTSConfig):
+        rust_mcts = config.mcts
+    else:
+        rust_mcts = RustMCTSConfig(
+            simulations=config.mcts.simulations,
+            c_puct=config.mcts.c_puct,
+            fpu_reduction=config.mcts.fpu_reduction,
+            force_k=config.mcts.force_k,
+        )
+
+    batch_dir, _metrics = run_rust_sampling(
         game=config.game,
-        sampling=SamplingParams(
-            num_games=config.iteration.games,
-            workers=config.sampling.workers,
-            device=device,
-        ),
+        mcts=rust_mcts,
+        num_games=config.iteration.games,
         group=batch_group,
-        experiments_dir=str(experiments_dir),
+        num_threads=config.sampling.workers,
         checkpoint=str(checkpoint_path) if checkpoint_path else None,
+        experiments_dir=experiments_dir,
     )
-
-    batch_dir, _metrics = run_sampling(sampling_config)
     return batch_dir
 
 

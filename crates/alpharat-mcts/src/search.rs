@@ -275,6 +275,19 @@ pub struct SearchResult {
     pub prior_p2: [f32; 5],
     /// Root visit count after search.
     pub total_visits: u32,
+    /// Number of descents that required NN evaluation.
+    pub nn_evals: u32,
+    /// Number of descents that hit terminal nodes (free — no NN call).
+    pub terminals: u32,
+    /// Number of descents that collided (wasted — no backup).
+    pub collisions: u32,
+}
+
+/// Per-batch counters from simulate_batch.
+struct BatchStats {
+    nn_evals: u32,
+    terminals: u32,
+    collisions: u32,
 }
 
 // ---------------------------------------------------------------------------
@@ -321,14 +334,24 @@ pub fn run_search(
     rng: &mut impl Rng,
 ) -> SearchResult {
     let mut remaining = n_sims;
+    let mut total_nn_evals = 0u32;
+    let mut total_terminals = 0u32;
+    let mut total_collisions = 0u32;
     while remaining > 0 {
         let actual = remaining.min(batch_size);
-        simulate_batch(tree, game, backend, config, actual, rng);
+        let batch = simulate_batch(tree, game, backend, config, actual, rng);
+        total_nn_evals += batch.nn_evals;
+        total_terminals += batch.terminals;
+        total_collisions += batch.collisions;
         remaining -= actual;
     }
 
     let root = tree.root();
-    extract_result(tree.arena(), root, config, rng)
+    let mut result = extract_result(tree.arena(), root, config, rng);
+    result.nn_evals = total_nn_evals;
+    result.terminals = total_terminals;
+    result.collisions = total_collisions;
+    result
 }
 
 // ---------------------------------------------------------------------------
@@ -381,7 +404,7 @@ fn simulate_batch(
     config: &SearchConfig,
     batch_size: u32,
     rng: &mut impl Rng,
-) {
+) -> BatchStats {
     let root = tree.root();
     let max_collisions = if config.max_collisions > 0 {
         config.max_collisions
@@ -399,6 +422,7 @@ fn simulate_batch(
     let max_ooo = 2 * batch_size; // Lc0 uses 2.4x; 2x is conservative enough
     let mut nn_outcomes: Vec<DescentOutcome> = Vec::with_capacity(batch_size as usize);
     let mut collisions = 0u32;
+    let mut terminals = 0u32;
     let mut n_ooo = 0u32;
 
     while (nn_outcomes.len() as u32) < batch_size
@@ -422,6 +446,7 @@ fn simulate_batch(
                 backup(tree.arena_mut(), path, leaf_idx, 0.0, 0.0);
                 let claimed = if leaf_claimed { Some(leaf_idx) } else { None };
                 cleanup_descent(tree.arena_mut(), path, claimed);
+                terminals += 1;
                 n_ooo += 1;
             }
             DescentOutcome::Collision { ref path } => {
@@ -430,6 +455,8 @@ fn simulate_batch(
             }
         }
     }
+
+    let nn_evals = nn_outcomes.len() as u32;
 
     // ---- Eval Phase ----
     let needs_eval_refs: Vec<&GameState> = nn_outcomes
@@ -477,6 +504,12 @@ fn simulate_batch(
             backup(tree.arena_mut(), &path, leaf_idx, eval.value_p1, eval.value_p2);
             cleanup_descent(tree.arena_mut(), &path, Some(leaf_idx));
         }
+    }
+
+    BatchStats {
+        nn_evals,
+        terminals,
+        collisions,
     }
 }
 
@@ -615,6 +648,10 @@ fn extract_result(
         prior_p1,
         prior_p2,
         total_visits,
+        // Filled in by run_search after accumulation.
+        nn_evals: 0,
+        terminals: 0,
+        collisions: 0,
     }
 }
 

@@ -105,6 +105,9 @@ fn make_game_0() -> GameRecord {
         cheese_available: 1,
         game_index: 0,
         cheese_outcomes,
+        total_nn_evals: 0,
+        total_terminals: 0,
+        total_collisions: 0,
     }
 }
 
@@ -159,5 +162,8 @@ fn make_game_1() -> GameRecord {
         cheese_available: 2,
         game_index: 1,
         cheese_outcomes,
+        total_nn_evals: 0,
+        total_terminals: 0,
+        total_collisions: 0,
     }
 }

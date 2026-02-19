@@ -180,6 +180,7 @@ fn format_shape(shape: &[usize]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
 
     #[test]
     fn format_shape_cases() {

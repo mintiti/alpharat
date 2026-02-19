@@ -50,8 +50,8 @@ alpharat/
 ├── eval/           # Evaluation: game execution, tournaments
 └── experiments/    # Experiment management: ExperimentManager, manifest
 
-crates/             # Rust MCTS implementation + Python bindings (built by uv sync)
-scripts/            # Entry points: sample.py, train.py, iterate.py, benchmark.py, manifest.py
+crates/             # Rust MCTS + sampling implementation + Python bindings (built by uv sync)
+scripts/            # Entry points: sample.py, rust_sample.py, train.py, iterate.py, benchmark.py, manifest.py
 configs/            # YAML config templates for sampling, training, evaluation
 tests/              # Mirrors alpharat/ structure
 experiments/        # Data folder (NOT in git): batches, shards, runs, benchmarks
@@ -74,7 +74,8 @@ experiments/        # Data folder (NOT in git): batches, shards, runs, benchmark
 |------|---------|
 | `types.py` | `PositionData`, `GameData` — data structures for recorded games |
 | `recorder.py` | `GameRecorder` — saves games as .npz during self-play |
-| `sampling.py` | `run_sampling()` — multi-worker self-play with MCTS agents |
+| `sampling.py` | `run_sampling()` — multi-worker Python self-play with MCTS agents |
+| `rust_sampling.py` | `run_rust_sampling()` — Rust self-play pipeline wrapper (ONNX auto-export, progress, ExperimentManager) |
 | `batch.py` | Batch organization and metadata |
 | `sharding.py` | `prepare_training_set()` — loads batches, shuffles globally, writes shards |
 | `loader.py` | `load_game_data()` — reconstruct GameData from .npz |
@@ -362,9 +363,16 @@ Line length 100. Enabled: pycodestyle, pyflakes, isort, pep8-naming, pyupgrade, 
 
 **Core:** numpy, numba, pydantic, pyyaml, pyrat-engine (Rust-backed)
 
+**Rust sampling:** alpharat-sampling (ONNX + multi-threaded self-play, exposed via `alpharat_sampling` Python package)
+
 **Training (optional):** torch, tensorboard
 
 **Visualization:** optuna, plotly, pandas, matplotlib
+
+**alpharat_sampling imports:**
+```python
+from alpharat_sampling import rust_self_play, SelfPlayStats, SelfPlayProgress
+```
 
 **pyrat-engine imports:**
 ```python
@@ -581,7 +589,7 @@ alpharat-iterate configs/iterate.yaml --prefix sym_5x5 --start-iteration 2
 alpharat-iterate configs/iterate.yaml --prefix sym_5x5 --benchmark-every 2
 ```
 
-The script chains: **Sample → Shard → Train → (Benchmark) → repeat**, with automatic lineage tracking via ExperimentManager. Each phase checks for existing artifacts and skips if already done.
+The script chains: **Sample → Shard → Train → (Benchmark) → repeat**, with automatic lineage tracking via ExperimentManager. Sampling uses the Rust self-play pipeline (`run_rust_sampling()`) with ONNX inference — auto-exports `.pt` checkpoints to ONNX when needed.
 
 **Artifact naming convention:**
 
@@ -598,8 +606,8 @@ For more control, run each step separately:
 
 **First iteration (no NN yet):**
 ```bash
-# 1. Sample games with pure MCTS (uniform priors)
-alpharat-sample configs/sample.yaml --group iteration_0
+# 1. Sample games with Rust self-play (SmartUniform priors)
+alpharat-rust-sample configs/iterate.yaml --group iteration_0 --num-games 1000
 
 # 2. Convert games to training shards
 alpharat-prepare-shards --architecture mlp --group iter0_shards --batches iteration_0
@@ -610,8 +618,8 @@ alpharat-train-and-benchmark configs/train.yaml --name mlp_v1 --shards iter0_sha
 
 **Subsequent iterations (with NN):**
 ```bash
-# 1. Sample using trained NN as MCTS prior
-alpharat-sample configs/sample.yaml --group iteration_1 \
+# 1. Sample using trained NN (auto-exports to ONNX)
+alpharat-rust-sample configs/iterate.yaml --group iteration_1 --num-games 1000 \
     --checkpoint experiments/runs/mlp_v1/checkpoints/best_model.pt
 
 # 2. Create shards from new games
@@ -625,7 +633,9 @@ alpharat-benchmark configs/tournament.yaml
 ```
 
 **Scripts:**
-- `iterate.py` — full auto-iteration loop (recommended for most experiments)
+- `iterate.py` — full auto-iteration loop using Rust sampling (recommended)
+- `rust_sample.py` — standalone Rust self-play CLI (`alpharat-rust-sample`)
+- `sample.py` — legacy Python self-play CLI (`alpharat-sample`)
 - `train_and_benchmark.py` — single iteration: trains then auto-benchmarks
 - `train.py` + `benchmark.py` — separate scripts for fine-grained control
 

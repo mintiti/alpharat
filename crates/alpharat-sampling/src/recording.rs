@@ -290,6 +290,9 @@ mod tests {
             cheese_available: 1,
             game_index: index,
             cheese_outcomes,
+            total_nn_evals: 0,
+            total_terminals: 0,
+            total_collisions: 0,
         }
     }
 

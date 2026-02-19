@@ -82,6 +82,12 @@ pub struct GameRecord {
     pub game_index: u32,
     /// H*W, y-major, CheeseOutcome values — who collected each cheese.
     pub cheese_outcomes: Vec<u8>,
+    /// Total NN evaluations across all search calls in this game.
+    pub total_nn_evals: u64,
+    /// Total terminal descents (game-over leaves — free, no NN call).
+    pub total_terminals: u64,
+    /// Total collision descents (wasted — no backup).
+    pub total_collisions: u64,
 }
 
 /// Aggregate stats computed from a set of GameRecords.
@@ -98,6 +104,12 @@ pub struct SelfPlayStats {
     pub total_cheese_available: u32,
     pub min_turns: u32,
     pub max_turns: u32,
+    /// Total NN evaluations (descents that hit the NN).
+    pub total_nn_evals: u64,
+    /// Total terminal descents (free — no NN call).
+    pub total_terminals: u64,
+    /// Total collision descents (wasted — no backup).
+    pub total_collisions: u64,
 }
 
 impl SelfPlayStats {
@@ -115,6 +127,9 @@ impl SelfPlayStats {
             total_cheese_available: 0,
             min_turns: u32::MAX,
             max_turns: 0,
+            total_nn_evals: 0,
+            total_terminals: 0,
+            total_collisions: 0,
         }
     }
 
@@ -124,6 +139,9 @@ impl SelfPlayStats {
         let n = game.positions.len() as u64;
         self.total_positions += n;
         self.total_simulations += game.total_simulations;
+        self.total_nn_evals += game.total_nn_evals;
+        self.total_terminals += game.total_terminals;
+        self.total_collisions += game.total_collisions;
         self.total_cheese_collected += game.final_p1_score + game.final_p2_score;
         self.total_cheese_available += game.cheese_available as u32;
 
@@ -199,6 +217,45 @@ impl SelfPlayStats {
             0.0
         }
     }
+
+    /// NN evaluations per second (lc0's EPS).
+    pub fn nn_evals_per_second(&self) -> f64 {
+        if self.elapsed_secs > 0.0 {
+            self.total_nn_evals as f64 / self.elapsed_secs
+        } else {
+            0.0
+        }
+    }
+
+    /// Fraction of total simulations that were NN evals.
+    pub fn nn_eval_fraction(&self) -> f64 {
+        if self.total_simulations > 0 {
+            self.total_nn_evals as f64 / self.total_simulations as f64
+        } else {
+            0.0
+        }
+    }
+
+    /// Fraction of total simulations that were terminal.
+    pub fn terminal_fraction(&self) -> f64 {
+        if self.total_simulations > 0 {
+            self.total_terminals as f64 / self.total_simulations as f64
+        } else {
+            0.0
+        }
+    }
+
+    /// Fraction of total descents that were collisions.
+    /// Denominator includes collisions (nn_evals + terminals + collisions).
+    pub fn collision_fraction(&self) -> f64 {
+        let total_descents =
+            self.total_nn_evals + self.total_terminals + self.total_collisions;
+        if total_descents > 0 {
+            self.total_collisions as f64 / total_descents as f64
+        } else {
+            0.0
+        }
+    }
 }
 
 /// Result of a self-play session.
@@ -224,6 +281,7 @@ pub struct SelfPlayProgress {
     pub games_completed: AtomicU32,
     pub positions_completed: AtomicU64,
     pub simulations_completed: AtomicU64,
+    pub nn_evals_completed: AtomicU64,
 }
 
 impl SelfPlayProgress {
@@ -232,6 +290,7 @@ impl SelfPlayProgress {
             games_completed: AtomicU32::new(0),
             positions_completed: AtomicU64::new(0),
             simulations_completed: AtomicU64::new(0),
+            nn_evals_completed: AtomicU64::new(0),
         }
     }
 }
@@ -420,6 +479,9 @@ pub fn play_game(
     let mut tree = MCTSTree::new(&game);
     let mut positions = Vec::with_capacity(game.max_turns as usize);
     let mut total_simulations: u64 = 0;
+    let mut total_nn_evals: u64 = 0;
+    let mut total_terminals: u64 = 0;
+    let mut total_collisions: u64 = 0;
 
     while !game.check_game_over() {
         let result = run_search(
@@ -432,6 +494,9 @@ pub fn play_game(
             rng,
         );
         total_simulations += result.total_visits as u64;
+        total_nn_evals += result.nn_evals as u64;
+        total_terminals += result.terminals as u64;
+        total_collisions += result.collisions as u64;
 
         let a1 = sample_action(&result.policy_p1, rng);
         let a2 = sample_action(&result.policy_p2, rng);
@@ -475,6 +540,9 @@ pub fn play_game(
         cheese_available,
         game_index,
         cheese_outcomes,
+        total_nn_evals,
+        total_terminals,
+        total_collisions,
     }
 }
 
@@ -523,6 +591,8 @@ pub fn run_self_play(
                                 .fetch_add(record.positions.len() as u64, Relaxed);
                             p.simulations_completed
                                 .fetch_add(record.total_simulations, Relaxed);
+                            p.nn_evals_completed
+                                .fetch_add(record.total_nn_evals, Relaxed);
                             p.games_completed.fetch_add(1, Relaxed);
                         }
 
@@ -632,6 +702,8 @@ pub fn run_self_play_to_disk(
                                 .fetch_add(record.positions.len() as u64, Relaxed);
                             p.simulations_completed
                                 .fetch_add(record.total_simulations, Relaxed);
+                            p.nn_evals_completed
+                                .fetch_add(record.total_nn_evals, Relaxed);
                             p.games_completed.fetch_add(1, Relaxed);
                         }
 
@@ -942,6 +1014,9 @@ mod tests {
                 cheese_available: 5,
                 game_index: 0,
                 cheese_outcomes: vec![],
+                total_nn_evals: 0,
+                total_terminals: 0,
+                total_collisions: 0,
             },
             GameRecord {
                 width: 5,
@@ -999,6 +1074,9 @@ mod tests {
                 cheese_available: 5,
                 game_index: 1,
                 cheese_outcomes: vec![],
+                total_nn_evals: 0,
+                total_terminals: 0,
+                total_collisions: 0,
             },
             GameRecord {
                 width: 5,
@@ -1035,6 +1113,9 @@ mod tests {
                 cheese_available: 5,
                 game_index: 2,
                 cheese_outcomes: vec![],
+                total_nn_evals: 0,
+                total_terminals: 0,
+                total_collisions: 0,
             },
         ];
 
@@ -1451,6 +1532,9 @@ mod tests {
                 cheese_available: 5,
                 game_index: 0,
                 cheese_outcomes: vec![],
+                total_nn_evals: 0,
+                total_terminals: 0,
+                total_collisions: 0,
             },
             GameRecord {
                 width: 5,
@@ -1507,6 +1591,9 @@ mod tests {
                 cheese_available: 5,
                 game_index: 1,
                 cheese_outcomes: vec![],
+                total_nn_evals: 0,
+                total_terminals: 0,
+                total_collisions: 0,
             },
         ];
 

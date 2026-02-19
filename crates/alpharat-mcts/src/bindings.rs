@@ -75,6 +75,21 @@ impl PySearchResult {
         self.inner.total_visits
     }
 
+    #[getter]
+    fn nn_evals(&self) -> u32 {
+        self.inner.nn_evals
+    }
+
+    #[getter]
+    fn terminals(&self) -> u32 {
+        self.inner.terminals
+    }
+
+    #[getter]
+    fn collisions(&self) -> u32 {
+        self.inner.collisions
+    }
+
     fn __repr__(&self) -> String {
         format!(
             "SearchResult(value_p1={:.4}, value_p2={:.4}, total_visits={})",

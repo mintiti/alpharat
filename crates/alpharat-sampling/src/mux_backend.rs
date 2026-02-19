@@ -1,14 +1,67 @@
 use alpharat_mcts::{Backend, EvalResult};
 use pyrat::GameState;
 use std::collections::VecDeque;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc;
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread;
+use std::time::Instant;
 
 /// Configuration for the multiplexing layer.
 pub struct MuxConfig {
     /// Max game states per merged batch (determines GPU tensor size).
     pub max_batch_size: usize,
+}
+
+/// Mux worker thread timing and batch statistics (atomic, lock-free reads).
+pub struct MuxStats {
+    /// Number of inner backend evaluate_batch calls.
+    pub total_batches: AtomicU64,
+    /// Total positions sent to the inner backend.
+    pub total_positions: AtomicU64,
+    /// Cumulative time in nanoseconds spent in inner evaluate_batch.
+    pub nn_time_ns: AtomicU64,
+    /// Cumulative time in nanoseconds the worker spent waiting for requests.
+    pub wait_time_ns: AtomicU64,
+}
+
+impl MuxStats {
+    fn new() -> Self {
+        Self {
+            total_batches: AtomicU64::new(0),
+            total_positions: AtomicU64::new(0),
+            nn_time_ns: AtomicU64::new(0),
+            wait_time_ns: AtomicU64::new(0),
+        }
+    }
+
+    /// Average positions per inner backend call.
+    pub fn avg_batch_size(&self) -> f64 {
+        let b = self.total_batches.load(Ordering::Relaxed);
+        if b == 0 {
+            return 0.0;
+        }
+        self.total_positions.load(Ordering::Relaxed) as f64 / b as f64
+    }
+
+    /// Fraction of worker time spent in NN inference (vs waiting for requests).
+    pub fn nn_utilization(&self) -> f64 {
+        let nn = self.nn_time_ns.load(Ordering::Relaxed) as f64;
+        let wait = self.wait_time_ns.load(Ordering::Relaxed) as f64;
+        let total = nn + wait;
+        if total == 0.0 {
+            return 0.0;
+        }
+        nn / total
+    }
+
+    pub fn nn_time_secs(&self) -> f64 {
+        self.nn_time_ns.load(Ordering::Relaxed) as f64 / 1e9
+    }
+
+    pub fn wait_time_secs(&self) -> f64 {
+        self.wait_time_ns.load(Ordering::Relaxed) as f64 / 1e9
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -116,23 +169,32 @@ impl BatchQueue {
 /// into one batch, calls the inner backend, and scatters results back.
 pub struct MuxBackend {
     queue: Arc<BatchQueue>,
+    stats: Arc<MuxStats>,
     worker: Option<thread::JoinHandle<()>>,
 }
 
 impl MuxBackend {
     pub fn new(inner: impl Backend + 'static, config: MuxConfig) -> Self {
         let queue = Arc::new(BatchQueue::new());
+        let stats = Arc::new(MuxStats::new());
         let worker_queue = queue.clone();
+        let worker_stats = stats.clone();
         let max_batch_size = config.max_batch_size;
 
         let worker = thread::spawn(move || {
-            worker_loop(&worker_queue, &inner, max_batch_size);
+            worker_loop(&worker_queue, &inner, max_batch_size, &worker_stats);
         });
 
         Self {
             queue,
+            stats,
             worker: Some(worker),
         }
+    }
+
+    /// Access accumulated mux worker statistics.
+    pub fn stats(&self) -> &Arc<MuxStats> {
+        &self.stats
     }
 }
 
@@ -166,8 +228,21 @@ impl Backend for MuxBackend {
     }
 }
 
-fn worker_loop(queue: &BatchQueue, inner: &dyn Backend, max_batch_size: usize) {
-    while let Some(requests) = queue.wait_drain(max_batch_size) {
+fn worker_loop(
+    queue: &BatchQueue,
+    inner: &dyn Backend,
+    max_batch_size: usize,
+    stats: &MuxStats,
+) {
+    loop {
+        let wait_start = Instant::now();
+        let requests = match queue.wait_drain(max_batch_size) {
+            Some(r) => r,
+            None => break,
+        };
+        let wait_ns = wait_start.elapsed().as_nanos() as u64;
+        stats.wait_time_ns.fetch_add(wait_ns, Ordering::Relaxed);
+
         // Merge all game states into one flat slice.
         // SAFETY: Pointers are valid — calling threads are blocked on rx.recv()
         // and won't drop their GameStates until we send results back.
@@ -176,7 +251,14 @@ fn worker_loop(queue: &BatchQueue, inner: &dyn Backend, max_batch_size: usize) {
             .flat_map(|r| r.games.iter().map(|p| unsafe { &**p }))
             .collect();
 
+        let n_positions = all_games.len() as u64;
+        let nn_start = Instant::now();
         let all_results = inner.evaluate_batch(&all_games);
+        let nn_ns = nn_start.elapsed().as_nanos() as u64;
+
+        stats.total_batches.fetch_add(1, Ordering::Relaxed);
+        stats.total_positions.fetch_add(n_positions, Ordering::Relaxed);
+        stats.nn_time_ns.fetch_add(nn_ns, Ordering::Relaxed);
 
         // Scatter results back to each requester.
         let mut offset = 0;
@@ -184,7 +266,6 @@ fn worker_loop(queue: &BatchQueue, inner: &dyn Backend, max_batch_size: usize) {
             let n = req.games.len();
             let results = all_results[offset..offset + n].to_vec();
             offset += n;
-            // Ignore send error — the receiver might have been dropped.
             let _ = req.tx.send(results);
         }
     }

@@ -24,6 +24,7 @@ name = "alpharat-mcts-python"
 version = "0.1.0"
 dependencies = [
  "alpharat-mcts",
+ "alpharat-sampling",
  "numpy",
  "pyo3",
  "pyrat-rust",
@@ -34,7 +35,9 @@ name = "alpharat-sampling"
 version = "0.1.0"
 dependencies = [
  "alpharat-mcts",
+ "numpy",
  "ort",
+ "pyo3",
  "pyrat-rust",
  "rand 0.8.5",
  "serde",

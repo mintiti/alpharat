@@ -13,4 +13,4 @@ requires-python = ">=3.11"
 # the same .so (PyO3 types can't be passed across separate extension modules).
 module-name = "pyrat_engine._core"
 python-source = "python"
-python-packages = ["pyrat_engine", "alpharat_mcts"]
+python-packages = ["pyrat_engine", "alpharat_mcts", "alpharat_sampling"]

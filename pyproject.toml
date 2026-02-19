@@ -38,6 +38,7 @@ train = [
     "torch>=2.0",
     "tensorboard>=2.15",
     "tqdm>=4.66",
+    "onnx>=1.15",          # Required by torch.onnx.export for Rust sampling pipeline
 ]
 
 [project.scripts]
@@ -49,6 +50,7 @@ alpharat-benchmark = "scripts.benchmark:main"
 alpharat-manifest = "scripts.manifest:main"
 alpharat-iterate = "scripts.iterate:main"
 alpharat-export-onnx = "scripts.export_onnx:main"
+alpharat-rust-sample = "scripts.rust_sample:main"
 
 [build-system]
 requires = ["hatchling"]
