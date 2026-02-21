@@ -82,6 +82,7 @@ impl Backend for CachedBackend {
         let n = games.len();
         let mut results: Vec<Option<EvalResult>> = vec![None; n];
         let mut miss_indices: Vec<usize> = Vec::new();
+        let mut miss_hashes: Vec<u64> = Vec::new();
         let mut miss_games: Vec<&GameState> = Vec::new();
 
         // Phase 1: check cache for each game state.
@@ -91,6 +92,7 @@ impl Backend for CachedBackend {
                 results[i] = Some(cached);
             } else {
                 miss_indices.push(i);
+                miss_hashes.push(hash);
                 miss_games.push(game);
             }
         }
@@ -104,10 +106,9 @@ impl Backend for CachedBackend {
         if !miss_games.is_empty() {
             let miss_results = self.inner.evaluate_batch(&miss_games);
 
-            // Phase 3: cache results and place into output.
+            // Phase 3: cache results and place into output (reuse hashes from Phase 1).
             for (j, &orig_idx) in miss_indices.iter().enumerate() {
-                let hash = position_hash(games[orig_idx]);
-                cache.insert(hash, miss_results[j]);
+                cache.insert(miss_hashes[j], miss_results[j]);
                 results[orig_idx] = Some(miss_results[j]);
             }
         }
@@ -120,11 +121,11 @@ impl Backend for CachedBackend {
 /// Compute a hash for a game state that captures everything the NN sees.
 ///
 /// Fields hashed: player positions, scores, mud timers, turn, max_turns,
-/// board dimensions, and cheese positions.
+/// board dimensions, cheese positions, and maze topology (walls + mud).
 ///
-/// Within a single game (fixed maze), transpositions that reach the same
-/// dynamic state will produce the same hash. Cross-game collisions are
-/// unlikely due to different cheese configurations.
+/// Maze topology is static per game but varies across games (random mazes).
+/// Including it prevents cross-game cache collisions when the thread-local
+/// cache persists across games within a thread.
 fn position_hash(game: &GameState) -> u64 {
     // FNV-1a: fast, simple, good distribution for small keys.
     const FNV_OFFSET: u64 = 0xcbf29ce484222325;
@@ -161,18 +162,33 @@ fn position_hash(game: &GameState) -> u64 {
     mix!(game.width);
     mix!(game.height);
 
-    // Cheese state: iterate all cells and hash the bitboard.
-    // This is O(cells) but cells are small (25 for 5x5, 49 for 7x7)
-    // and vastly cheaper than an NN eval.
     let w = game.width;
     let h_board = game.height;
+
     for y in 0..h_board {
         for x in 0..w {
-            if game.cheese.has_cheese(Coordinates::new(x, y)) {
-                // Mix in the cell index so different cheese patterns hash differently.
+            let pos = Coordinates::new(x, y);
+
+            // Cheese state
+            if game.cheese.has_cheese(pos) {
                 mix!(y as u64 * w as u64 + x as u64 + 1);
             }
+
+            // Wall topology: pre-computed 4-bit bitmask per cell.
+            mix!(game.move_table.get_valid_moves(pos) as u64);
         }
+    }
+
+    // Mud topology: sorted for deterministic order (MudMap is HashMap-backed).
+    // iter() returns deduped entries (pos1 < pos2). Typically 0-10 entries.
+    let mut mud_entries: Vec<_> = game.mud.iter().collect();
+    mud_entries.sort_unstable_by_key(|((p1, p2), _)| (p1.x, p1.y, p2.x, p2.y));
+    for ((p1, p2), cost) in &mud_entries {
+        mix!(p1.x as u64);
+        mix!(p1.y as u64);
+        mix!(p2.x as u64);
+        mix!(p2.y as u64);
+        mix!(*cost as u64);
     }
 
     h
@@ -262,25 +278,26 @@ mod tests {
 
     #[test]
     fn thread_isolation() {
-        use std::sync::Arc;
+        use std::sync::{Arc, Barrier};
         use std::thread;
 
         let backend = Arc::new(CachedBackend::new(Box::new(SmartUniformBackend), 64));
+        // Barrier ensures both threads' first evals overlap — neither finishes
+        // and populates a shared cache before the other starts.
+        let barrier = Arc::new(Barrier::new(2));
 
-        let handles: Vec<_> = (0..4)
-            .map(|i| {
+        let handles: Vec<_> = (0..2)
+            .map(|_| {
                 let backend = backend.clone();
+                let barrier = barrier.clone();
                 thread::spawn(move || {
-                    let x = (i % 5) as u8;
                     let game = open_5x5(
-                        Coordinates::new(x, 0),
+                        Coordinates::new(0, 0),
                         Coordinates::new(4, 4),
                         &[Coordinates::new(2, 2)],
                     );
-                    // Each thread evaluates the same game twice.
-                    let r1 = backend.evaluate(&game);
-                    let r2 = backend.evaluate(&game);
-                    assert_eq!(r1.policy_p1, r2.policy_p1);
+                    barrier.wait();
+                    let _ = backend.evaluate(&game);
                 })
             })
             .collect();
@@ -289,11 +306,10 @@ mod tests {
             h.join().unwrap();
         }
 
-        // 4 threads × 2 evals = 4 misses + 4 hits.
-        let total = backend.stats.hits.load(Ordering::Relaxed)
-            + backend.stats.misses.load(Ordering::Relaxed);
-        assert_eq!(total, 8);
-        assert_eq!(backend.stats.hits.load(Ordering::Relaxed), 4);
+        // Thread-local caches: both threads miss (2 misses, 0 hits).
+        // A shared cache would give 1 miss + 1 hit.
+        assert_eq!(backend.stats.misses.load(Ordering::Relaxed), 2);
+        assert_eq!(backend.stats.hits.load(Ordering::Relaxed), 0);
     }
 
     #[test]
@@ -335,5 +351,74 @@ mod tests {
         );
 
         assert_eq!(position_hash(&g1), position_hash(&g2));
+    }
+
+    #[test]
+    fn different_walls_different_hash() {
+        let cheese = [Coordinates::new(2, 2)];
+        let p1 = Coordinates::new(0, 0);
+        let p2 = Coordinates::new(4, 4);
+
+        // Open maze
+        let g1 = open_5x5(p1, p2, &cheese);
+
+        // Same positions/cheese, but with a wall between (1,1) and (1,2)
+        let mut walls = HashMap::new();
+        walls.insert(Coordinates::new(1, 1), vec![Coordinates::new(1, 2)]);
+        walls.insert(Coordinates::new(1, 2), vec![Coordinates::new(1, 1)]);
+        let g2 = GameState::new_with_config(5, 5, walls, MudMap::new(), &cheese, p1, p2, 100);
+
+        assert_ne!(
+            position_hash(&g1),
+            position_hash(&g2),
+            "different wall layouts should produce different hashes"
+        );
+    }
+
+    #[test]
+    fn different_mud_different_hash() {
+        let cheese = [Coordinates::new(2, 2)];
+        let p1 = Coordinates::new(0, 0);
+        let p2 = Coordinates::new(4, 4);
+
+        // No mud
+        let g1 = open_5x5(p1, p2, &cheese);
+
+        // Same positions/cheese, but with mud between (2,2) and (2,3)
+        let mut mud = MudMap::new();
+        mud.insert(Coordinates::new(2, 2), Coordinates::new(2, 3), 3);
+        let g2 =
+            GameState::new_with_config(5, 5, HashMap::new(), mud, &cheese, p1, p2, 100);
+
+        assert_ne!(
+            position_hash(&g1),
+            position_hash(&g2),
+            "different mud layouts should produce different hashes"
+        );
+    }
+
+    #[test]
+    fn same_maze_same_hash() {
+        let cheese = [Coordinates::new(2, 2)];
+        let p1 = Coordinates::new(0, 0);
+        let p2 = Coordinates::new(4, 4);
+
+        // Build identical games with walls + mud independently
+        let make_game = || {
+            let mut walls = HashMap::new();
+            walls.insert(Coordinates::new(1, 1), vec![Coordinates::new(1, 2)]);
+            walls.insert(Coordinates::new(1, 2), vec![Coordinates::new(1, 1)]);
+            let mut mud = MudMap::new();
+            mud.insert(Coordinates::new(3, 3), Coordinates::new(3, 4), 4);
+            GameState::new_with_config(5, 5, walls, mud, &cheese, p1, p2, 100)
+        };
+
+        let g1 = make_game();
+        let g2 = make_game();
+        assert_eq!(
+            position_hash(&g1),
+            position_hash(&g2),
+            "identical mazes should produce identical hashes"
+        );
     }
 }
