@@ -7,6 +7,41 @@ mod inner {
     use pyrat::GameState;
     use std::sync::Mutex;
 
+    /// Execution provider for ONNX Runtime.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub enum ExecutionProvider {
+        Cpu,
+        #[cfg(feature = "onnx-cuda")]
+        Cuda,
+        #[cfg(feature = "onnx-coreml")]
+        CoreMl,
+    }
+
+    impl TryFrom<&str> for ExecutionProvider {
+        type Error = String;
+
+        fn try_from(s: &str) -> Result<Self, Self::Error> {
+            match s {
+                "cpu" => Ok(Self::Cpu),
+                #[cfg(feature = "onnx-cuda")]
+                "cuda" => Ok(Self::Cuda),
+                #[cfg(feature = "onnx-coreml")]
+                "coreml" => Ok(Self::CoreMl),
+                other => {
+                    #[allow(unused_mut)]
+                    let mut supported = vec!["cpu"];
+                    #[cfg(feature = "onnx-cuda")]
+                    supported.push("cuda");
+                    #[cfg(feature = "onnx-coreml")]
+                    supported.push("coreml");
+                    Err(format!(
+                        "unknown execution provider '{other}', supported: {supported:?}"
+                    ))
+                }
+            }
+        }
+    }
+
     /// ONNX Runtime backend for neural network inference.
     ///
     /// Wraps an `ort::Session` and an `ObservationEncoder` to evaluate game
@@ -72,6 +107,21 @@ mod inner {
                 .commit_from_file(model_path)
                 .map_err(|e| BackendError::msg(format!("failed to load ONNX model: {e}")))?;
             Self::build(session, encoder)
+        }
+
+        /// Create an ONNX backend with the given execution provider.
+        pub fn with_provider(
+            model_path: impl AsRef<std::path::Path>,
+            encoder: E,
+            provider: ExecutionProvider,
+        ) -> Self {
+            match provider {
+                ExecutionProvider::Cpu => Self::new(model_path, encoder),
+                #[cfg(feature = "onnx-cuda")]
+                ExecutionProvider::Cuda => Self::with_cuda(model_path, encoder),
+                #[cfg(feature = "onnx-coreml")]
+                ExecutionProvider::CoreMl => Self::with_coreml(model_path, encoder),
+            }
         }
 
         /// Validate encoder/model compatibility, then construct.
@@ -162,7 +212,7 @@ mod inner {
                         value_p1: v1_data[i],
                         value_p2: v2_data[i],
                     };
-                    debug_assert!(
+                    assert!(
                         result.policy_p1.iter().all(|v| v.is_finite())
                             && result.policy_p2.iter().all(|v| v.is_finite())
                             && result.value_p1.is_finite()
@@ -177,4 +227,4 @@ mod inner {
 }
 
 #[cfg(feature = "onnx")]
-pub use inner::OnnxBackend;
+pub use inner::{ExecutionProvider, OnnxBackend};
