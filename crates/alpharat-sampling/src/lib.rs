@@ -1,14 +1,17 @@
 #[cfg(feature = "python")]
 pub mod bindings;
+pub mod cached_backend;
 pub mod encoder;
 pub mod flat_encoder;
 pub mod mux_backend;
+pub mod nn_cache;
 pub mod npz_writer;
 pub mod onnx_backend;
 pub mod recording;
 pub mod selfplay;
 pub mod tensorrt_backend;
 
+pub use cached_backend::{CacheStats, CachedBackend};
 pub use encoder::ObservationEncoder;
 pub use flat_encoder::FlatEncoder;
 pub use mux_backend::{MuxBackend, MuxConfig, MuxStats};

@@ -110,6 +110,10 @@ pub struct SelfPlayStats {
     pub total_terminals: u64,
     /// Total collision descents (wasted — no backup).
     pub total_collisions: u64,
+    /// NN cache hits (positions served from cache, skipping backend).
+    pub cache_hits: u64,
+    /// NN cache misses (positions forwarded to backend).
+    pub cache_misses: u64,
 }
 
 impl SelfPlayStats {
@@ -130,6 +134,8 @@ impl SelfPlayStats {
             total_nn_evals: 0,
             total_terminals: 0,
             total_collisions: 0,
+            cache_hits: 0,
+            cache_misses: 0,
         }
     }
 
@@ -252,6 +258,16 @@ impl SelfPlayStats {
             self.total_nn_evals + self.total_terminals + self.total_collisions;
         if total_descents > 0 {
             self.total_collisions as f64 / total_descents as f64
+        } else {
+            0.0
+        }
+    }
+
+    /// Cache hit rate (0.0 if no cache or no evaluations).
+    pub fn cache_hit_rate(&self) -> f64 {
+        let total = self.cache_hits + self.cache_misses;
+        if total > 0 {
+            self.cache_hits as f64 / total as f64
         } else {
             0.0
         }
