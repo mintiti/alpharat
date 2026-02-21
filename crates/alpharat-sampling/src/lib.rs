@@ -22,4 +22,4 @@ pub use selfplay::{
 pub use onnx_backend::{ExecutionProvider, OnnxBackend};
 
 #[cfg(feature = "tensorrt")]
-pub use tensorrt_backend::{load_trt_libs, TensorrtBackend, TensorrtConfig};
+pub use tensorrt_backend::{load_trt_libs, TensorrtBackend, TensorrtConfig, TrtTimingInfo};

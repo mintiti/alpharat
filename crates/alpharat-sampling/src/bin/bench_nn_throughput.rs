@@ -76,7 +76,7 @@ fn main() {
         #[cfg(feature = "onnx-cuda")]
         "cuda" => run_ort_benchmark(model_path, &encoded_buf, obs_dim, &batch_sizes, true),
         #[cfg(feature = "tensorrt")]
-        "tensorrt" => run_trt_benchmark(model_path, &encoded_buf, obs_dim, &batch_sizes, max_batch),
+        "tensorrt" => run_trt_benchmark(model_path, &encoded_buf, obs_dim, &batch_sizes, max_batch, width, height),
         other => {
             let mut supported = vec![];
             if cfg!(feature = "onnx") {
@@ -299,136 +299,35 @@ fn run_trt_benchmark(
     obs_dim: usize,
     batch_sizes: &[usize],
     max_batch: usize,
+    width: u8,
+    height: u8,
 ) {
-    use std::ffi::{c_void, CString};
+    use alpharat_sampling::{FlatEncoder, TensorrtBackend, TensorrtConfig};
 
-    // Raw CUDA + TRT shim FFI
-    extern "C" {
-        fn cudaMalloc(ptr: *mut *mut c_void, size: usize) -> i32;
-        fn cudaFree(ptr: *mut c_void) -> i32;
-        fn cudaMemcpy(dst: *mut c_void, src: *const c_void, count: usize, kind: i32) -> i32;
-        fn cudaStreamCreate(stream: *mut *mut c_void) -> i32;
-        fn cudaStreamSynchronize(stream: *mut c_void) -> i32;
-        fn cudaStreamDestroy(stream: *mut c_void) -> i32;
-
-        fn trt_build_engine(
-            onnx_data: *const c_void,
-            onnx_len: usize,
-            min_batch: i32,
-            opt_batch: i32,
-            max_batch: i32,
-            workspace_mb: usize,
-            out_data: *mut *mut c_void,
-            out_len: *mut usize,
-        ) -> i32;
-        fn trt_free_buffer(data: *mut c_void);
-        fn trt_create_session(engine_data: *const c_void, engine_len: usize) -> *mut c_void;
-        fn trt_destroy_session(handle: *mut c_void);
-        fn trt_set_tensor_address(handle: *mut c_void, name: *const i8, ptr: *mut c_void) -> i32;
-        fn trt_set_input_shape(
-            handle: *mut c_void,
-            name: *const i8,
-            ndims: i32,
-            shape: *const i64,
-        ) -> i32;
-        fn trt_enqueue_v3(handle: *mut c_void, stream: *mut c_void) -> i32;
-    }
-    const H2D: i32 = 1;
-    const D2H: i32 = 2;
-
-    fn cuda_check(code: i32, op: &str) {
-        assert_eq!(code, 0, "CUDA {op} failed with error code {code}");
-    }
-
-    // Load TRT-RTX dynamic libs (must be in LD_LIBRARY_PATH)
-    alpharat_sampling::load_trt_libs();
-
-    let trt_max_batch = max_batch;
-    let num_games = encoded_buf.len() / obs_dim;
-    let f = std::mem::size_of::<f32>();
-
-    // Build engine
-    eprintln!("Building TensorRT engine (max_batch={})...", trt_max_batch);
-    let onnx_bytes = std::fs::read(model_path).expect("failed to read ONNX model");
-    let mut out_data: *mut c_void = std::ptr::null_mut();
-    let mut out_len: usize = 0;
-    let rc = unsafe {
-        trt_build_engine(
-            onnx_bytes.as_ptr() as *const c_void,
-            onnx_bytes.len(),
-            1,
-            trt_max_batch as i32,
-            trt_max_batch as i32,
-            2048,
-            &mut out_data,
-            &mut out_len,
-        )
+    let encoder = FlatEncoder::new(width, height);
+    let config = TensorrtConfig {
+        max_batch,
+        cache_dir: None,
     };
-    assert!(rc == 0 && !out_data.is_null(), "Engine build failed ({rc})");
-    let engine_data = unsafe { std::slice::from_raw_parts(out_data as *const u8, out_len) };
-    eprintln!("Engine built ({} bytes)", out_len);
+    let backend = TensorrtBackend::new(model_path, encoder, config)
+        .expect("failed to create TensorRT backend");
 
-    // Create session
-    let session = unsafe { trt_create_session(engine_data.as_ptr() as *const c_void, out_len) };
-    assert!(!session.is_null(), "Failed to create TRT session");
-    unsafe { trt_free_buffer(out_data) };
-
-    // Allocate GPU buffers for max batch
-    let mut d_input: *mut c_void = std::ptr::null_mut();
-    let mut d_pp1: *mut c_void = std::ptr::null_mut();
-    let mut d_pp2: *mut c_void = std::ptr::null_mut();
-    let mut d_v1: *mut c_void = std::ptr::null_mut();
-    let mut d_v2: *mut c_void = std::ptr::null_mut();
-    unsafe {
-        cuda_check(cudaMalloc(&mut d_input, trt_max_batch * obs_dim * f), "malloc input");
-        cuda_check(cudaMalloc(&mut d_pp1, trt_max_batch * 5 * f), "malloc pp1");
-        cuda_check(cudaMalloc(&mut d_pp2, trt_max_batch * 5 * f), "malloc pp2");
-        cuda_check(cudaMalloc(&mut d_v1, trt_max_batch * f), "malloc v1");
-        cuda_check(cudaMalloc(&mut d_v2, trt_max_batch * f), "malloc v2");
-    }
-
-    // Bind tensor addresses
-    let obs_name = CString::new("observation").unwrap();
-    let pp1_name = CString::new("policy_p1").unwrap();
-    let pp2_name = CString::new("policy_p2").unwrap();
-    let vp1_name = CString::new("pred_value_p1").unwrap();
-    let vp2_name = CString::new("pred_value_p2").unwrap();
-    unsafe {
-        assert_eq!(trt_set_tensor_address(session, obs_name.as_ptr(), d_input), 0);
-        assert_eq!(trt_set_tensor_address(session, pp1_name.as_ptr(), d_pp1), 0);
-        assert_eq!(trt_set_tensor_address(session, pp2_name.as_ptr(), d_pp2), 0);
-        assert_eq!(trt_set_tensor_address(session, vp1_name.as_ptr(), d_v1), 0);
-        assert_eq!(trt_set_tensor_address(session, vp2_name.as_ptr(), d_v2), 0);
-    }
-
-    // Create CUDA stream
-    let mut stream: *mut c_void = std::ptr::null_mut();
-    cuda_check(unsafe { cudaStreamCreate(&mut stream) }, "stream create");
-
-    // Host output buffers
-    let mut h_pp1 = vec![0.0f32; trt_max_batch * 5];
-
+    let num_games = encoded_buf.len() / obs_dim;
     print_header();
     let mut peak_pos_s: f64 = 0.0;
 
     for &batch_size in batch_sizes {
-        if batch_size > num_games || batch_size > trt_max_batch {
+        if batch_size > num_games || batch_size > max_batch {
             break;
         }
 
         let iters = (5000 / batch_size).max(10).min(500);
         let warmup = (iters / 10).max(5);
         let batch_data = &encoded_buf[..batch_size * obs_dim];
-        let shape = [batch_size as i64, obs_dim as i64];
 
         // Warmup
         for _ in 0..warmup {
-            unsafe {
-                trt_set_input_shape(session, obs_name.as_ptr(), 2, shape.as_ptr());
-                cudaMemcpy(d_input, batch_data.as_ptr() as *const c_void, batch_size * obs_dim * f, H2D);
-                trt_enqueue_v3(session, stream);
-                cudaStreamSynchronize(stream);
-            }
+            let _ = backend.evaluate_encoded_timed(batch_data, batch_size);
         }
 
         // Timed runs
@@ -437,39 +336,10 @@ fn run_trt_benchmark(
         let mut d2h_us_total: f64 = 0.0;
 
         for _ in 0..iters {
-            // 1. Set input shape + H2D copy
-            let t0 = Instant::now();
-            unsafe {
-                trt_set_input_shape(session, obs_name.as_ptr(), 2, shape.as_ptr());
-                cudaMemcpy(
-                    d_input,
-                    batch_data.as_ptr() as *const c_void,
-                    batch_size * obs_dim * f,
-                    H2D,
-                );
-            }
-            h2d_us_total += t0.elapsed().as_micros() as f64;
-
-            // 2. GPU inference + sync
-            let t1 = Instant::now();
-            unsafe {
-                trt_enqueue_v3(session, stream);
-                cudaStreamSynchronize(stream);
-            }
-            infer_us_total += t1.elapsed().as_micros() as f64;
-
-            // 3. D2H copy (just policy_p1 to represent real extraction)
-            let t2 = Instant::now();
-            unsafe {
-                cudaMemcpy(
-                    h_pp1.as_mut_ptr() as *mut c_void,
-                    d_pp1,
-                    batch_size * 5 * f,
-                    D2H,
-                );
-            }
-            std::hint::black_box(h_pp1[0]);
-            d2h_us_total += t2.elapsed().as_micros() as f64;
+            let (_results, timing) = backend.evaluate_encoded_timed(batch_data, batch_size);
+            h2d_us_total += timing.h2d_us;
+            infer_us_total += timing.infer_us;
+            d2h_us_total += timing.d2h_us;
         }
 
         let h2d_us = h2d_us_total / iters as f64;
@@ -489,15 +359,4 @@ fn run_trt_benchmark(
     }
 
     print_footer(peak_pos_s);
-
-    // Cleanup
-    unsafe {
-        cudaStreamDestroy(stream);
-        cudaFree(d_input);
-        cudaFree(d_pp1);
-        cudaFree(d_pp2);
-        cudaFree(d_v1);
-        cudaFree(d_v2);
-        trt_destroy_session(session);
-    }
 }

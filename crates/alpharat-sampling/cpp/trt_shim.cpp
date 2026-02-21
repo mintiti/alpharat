@@ -14,6 +14,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <dlfcn.h>
+#include <mutex>
 
 using namespace nvinfer1;
 
@@ -48,27 +49,30 @@ static SimpleLogger& get_logger() {
 
 /// Load TRT-RTX shared libraries via dlopen. Call before any other trt_* function.
 /// Returns 0 on success, -1 on failure.
-/// Safe to call multiple times (idempotent).
+/// Thread-safe via std::call_once (won't retry on failure — Rust side panics anyway).
 extern "C" int trt_load_libs(const char* trt_lib_path, const char* parser_lib_path) {
-    static bool loaded = false;
-    if (loaded) return 0;
+    static std::once_flag flag;
+    static int result = 0;
 
-    void* h1 = dlopen(trt_lib_path ? trt_lib_path : "libtensorrt_rtx.so",
-                       RTLD_NOW | RTLD_GLOBAL);
-    if (!h1) {
-        fprintf(stderr, "[TensorRT] dlopen(libtensorrt_rtx.so): %s\n", dlerror());
-        return -1;
-    }
+    std::call_once(flag, [&]() {
+        void* h1 = dlopen(trt_lib_path ? trt_lib_path : "libtensorrt_rtx.so",
+                           RTLD_NOW | RTLD_GLOBAL);
+        if (!h1) {
+            fprintf(stderr, "[TensorRT] dlopen(libtensorrt_rtx.so): %s\n", dlerror());
+            result = -1;
+            return;
+        }
 
-    void* h2 = dlopen(parser_lib_path ? parser_lib_path : "libtensorrt_onnxparser_rtx.so",
-                       RTLD_NOW | RTLD_GLOBAL);
-    if (!h2) {
-        fprintf(stderr, "[TensorRT] dlopen(libtensorrt_onnxparser_rtx.so): %s\n", dlerror());
-        return -1;
-    }
+        void* h2 = dlopen(parser_lib_path ? parser_lib_path : "libtensorrt_onnxparser_rtx.so",
+                           RTLD_NOW | RTLD_GLOBAL);
+        if (!h2) {
+            fprintf(stderr, "[TensorRT] dlopen(libtensorrt_onnxparser_rtx.so): %s\n", dlerror());
+            result = -1;
+            return;
+        }
+    });
 
-    loaded = true;
-    return 0;
+    return result;
 }
 
 // ---------------------------------------------------------------------------
@@ -295,6 +299,14 @@ extern "C" int trt_set_input_shape(
 extern "C" int trt_enqueue_v3(void* handle, void* stream) {
     auto* s = static_cast<TrtSession*>(handle);
     return s->context->enqueueV3(static_cast<cudaStream_t>(stream)) ? 0 : -1;
+}
+
+// ---------------------------------------------------------------------------
+// Version query
+// ---------------------------------------------------------------------------
+
+extern "C" int32_t trt_get_version() {
+    return NV_TENSORRT_VERSION;
 }
 
 // ---------------------------------------------------------------------------
