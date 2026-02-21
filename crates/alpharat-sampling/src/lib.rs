@@ -7,6 +7,7 @@ pub mod npz_writer;
 pub mod onnx_backend;
 pub mod recording;
 pub mod selfplay;
+pub mod tensorrt_backend;
 
 pub use encoder::ObservationEncoder;
 pub use flat_encoder::FlatEncoder;
@@ -20,3 +21,6 @@ pub use selfplay::{
 
 #[cfg(feature = "onnx")]
 pub use onnx_backend::OnnxBackend;
+
+#[cfg(feature = "tensorrt")]
+pub use tensorrt_backend::{load_trt_libs, TensorrtBackend, TensorrtConfig};
