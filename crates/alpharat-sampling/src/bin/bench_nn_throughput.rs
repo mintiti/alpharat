@@ -9,6 +9,9 @@
 //!   # ORT CUDA
 //!   cargo run --release -p alpharat-sampling --features onnx-cuda --bin bench_nn_throughput -- <model.onnx> --device cuda
 //!
+//!   # ORT CoreML (macOS)
+//!   cargo run --release -p alpharat-sampling --features onnx-coreml --bin bench_nn_throughput -- <model.onnx> --device coreml
+//!
 //!   # TensorRT-RTX  (requires TENSORRT_RTX_ROOT + libs in LD_LIBRARY_PATH)
 //!   cargo run --release -p alpharat-sampling --features tensorrt --bin bench_nn_throughput -- <model.onnx> --device tensorrt
 //!
@@ -72,9 +75,11 @@ fn main() {
 
     match device {
         #[cfg(feature = "onnx")]
-        "cpu" => run_ort_benchmark(model_path, &encoded_buf, obs_dim, &batch_sizes, false),
+        "cpu" => run_ort_benchmark(model_path, &encoded_buf, obs_dim, &batch_sizes, "cpu"),
         #[cfg(feature = "onnx-cuda")]
-        "cuda" => run_ort_benchmark(model_path, &encoded_buf, obs_dim, &batch_sizes, true),
+        "cuda" => run_ort_benchmark(model_path, &encoded_buf, obs_dim, &batch_sizes, "cuda"),
+        #[cfg(feature = "onnx-coreml")]
+        "coreml" => run_ort_benchmark(model_path, &encoded_buf, obs_dim, &batch_sizes, "coreml"),
         #[cfg(feature = "tensorrt")]
         "tensorrt" => run_trt_benchmark(model_path, &encoded_buf, obs_dim, &batch_sizes, max_batch, width, height),
         other => {
@@ -84,6 +89,9 @@ fn main() {
             }
             if cfg!(feature = "onnx-cuda") {
                 supported.push("cuda");
+            }
+            if cfg!(feature = "onnx-coreml") {
+                supported.push("coreml");
             }
             if cfg!(feature = "tensorrt") {
                 supported.push("tensorrt");
@@ -183,14 +191,20 @@ fn run_ort_benchmark(
     encoded_buf: &[f32],
     obs_dim: usize,
     batch_sizes: &[usize],
-    use_cuda: bool,
+    device: &str,
 ) {
     use ort::session::Session;
     use ort::value::Tensor;
 
-    let mut session = if use_cuda {
+    let mut session = match device {
+        "cpu" => Session::builder()
+            .expect("session builder")
+            .with_intra_threads(4)
+            .expect("set threads")
+            .commit_from_file(model_path)
+            .expect("load model"),
         #[cfg(feature = "onnx-cuda")]
-        {
+        "cuda" => {
             let cuda_ep = ort::execution_providers::CUDAExecutionProvider::default();
             match cuda_ep.is_available() {
                 Ok(true) => eprintln!("CUDA EP: available"),
@@ -199,23 +213,27 @@ fn run_ort_benchmark(
             }
             Session::builder()
                 .expect("session builder")
-                .with_execution_providers([cuda_ep.build()])
+                .with_execution_providers([cuda_ep.build().error_on_failure()])
                 .expect("register CUDA EP")
                 .commit_from_file(model_path)
                 .expect("load model")
         }
-        #[cfg(not(feature = "onnx-cuda"))]
-        {
-            eprintln!("CUDA EP not compiled. Build with --features onnx-cuda");
-            std::process::exit(1);
+        #[cfg(feature = "onnx-coreml")]
+        "coreml" => {
+            eprintln!("Registering CoreML EP...");
+            Session::builder()
+                .expect("session builder")
+                .with_execution_providers([
+                    ort::execution_providers::CoreMLExecutionProvider::default()
+                        .with_profile_compute_plan(true)
+                        .build()
+                        .error_on_failure(),
+                ])
+                .expect("register CoreML EP")
+                .commit_from_file(model_path)
+                .expect("load model")
         }
-    } else {
-        Session::builder()
-            .expect("session builder")
-            .with_intra_threads(4)
-            .expect("set threads")
-            .commit_from_file(model_path)
-            .expect("load model")
+        _ => unreachable!("unsupported device: {device}"),
     };
 
     let num_games = encoded_buf.len() / obs_dim;
