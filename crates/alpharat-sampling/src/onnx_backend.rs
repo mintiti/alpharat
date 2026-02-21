@@ -76,7 +76,10 @@ mod inner {
                 .with_intra_threads(1)
                 .expect("failed to set intra-op thread count")
                 .with_execution_providers([
-                    ort::execution_providers::CoreMLExecutionProvider::default().build(),
+                    ort::execution_providers::CoreMLExecutionProvider::default()
+                        .with_profile_compute_plan(true)
+                        .build()
+                        .error_on_failure(),
                 ])
                 .expect("failed to register CoreML EP")
                 .commit_from_file(model_path)
@@ -92,7 +95,9 @@ mod inner {
                 .with_intra_threads(1)
                 .expect("failed to set intra-op thread count")
                 .with_execution_providers([
-                    ort::execution_providers::CUDAExecutionProvider::default().build(),
+                    ort::execution_providers::CUDAExecutionProvider::default()
+                        .build()
+                        .error_on_failure(),
                 ])
                 .expect("failed to register CUDA EP")
                 .commit_from_file(model_path)
