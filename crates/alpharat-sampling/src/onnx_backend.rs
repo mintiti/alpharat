@@ -82,7 +82,10 @@ mod inner {
                 .with_intra_threads(1)
                 .map_err(|e| BackendError::msg(format!("failed to set intra-op thread count: {e}")))?
                 .with_execution_providers([
-                    ort::execution_providers::CoreMLExecutionProvider::default().build(),
+                    ort::execution_providers::CoreMLExecutionProvider::default()
+                        .with_profile_compute_plan(true)
+                        .build()
+                        .error_on_failure(),
                 ])
                 .map_err(|e| BackendError::msg(format!("failed to register CoreML EP: {e}")))?
                 .commit_from_file(model_path)
@@ -101,7 +104,9 @@ mod inner {
                 .with_intra_threads(1)
                 .map_err(|e| BackendError::msg(format!("failed to set intra-op thread count: {e}")))?
                 .with_execution_providers([
-                    ort::execution_providers::CUDAExecutionProvider::default().build(),
+                    ort::execution_providers::CUDAExecutionProvider::default()
+                        .build()
+                        .error_on_failure(),
                 ])
                 .map_err(|e| BackendError::msg(format!("failed to register CUDA EP: {e}")))?
                 .commit_from_file(model_path)
