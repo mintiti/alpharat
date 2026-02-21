@@ -10,10 +10,14 @@ use pyrat::{CheeseConfig, GameState, MazeConfig};
 
 use crate::selfplay::{self, SelfPlayConfig, SelfPlayStats};
 
-#[cfg(feature = "onnx")]
+#[cfg(any(feature = "onnx", feature = "tensorrt"))]
 use crate::mux_backend::{MuxBackend, MuxConfig};
+#[cfg(any(feature = "onnx", feature = "tensorrt"))]
+use crate::FlatEncoder;
 #[cfg(feature = "onnx")]
-use crate::{FlatEncoder, OnnxBackend};
+use crate::{ExecutionProvider, OnnxBackend};
+#[cfg(feature = "tensorrt")]
+use crate::{TensorrtBackend, TensorrtConfig};
 
 // ---------------------------------------------------------------------------
 // PySelfPlayStats
@@ -217,6 +221,7 @@ impl PySelfPlayProgress {
     max_games_per_bundle = 32,
     onnx_model_path = None,
     mux_max_batch_size = 256,
+    device = None,
     progress = None,
 ))]
 #[allow(clippy::too_many_arguments)]
@@ -247,6 +252,8 @@ fn rust_self_play(
     // NN (optional)
     onnx_model_path: Option<&str>,
     mux_max_batch_size: usize,
+    // Device (optional, default CPU)
+    device: Option<&str>,
     // Progress (optional)
     progress: Option<PySelfPlayProgress>,
 ) -> PyResult<PySelfPlayStats> {
@@ -285,22 +292,76 @@ fn rust_self_play(
     // Build backend and run (GIL released)
     let result = py.allow_threads(move || {
         let progress_ref = progress_arc.as_deref();
+        let device_str = device.unwrap_or("cpu");
 
-        // Choose backend based on whether an ONNX model path was provided
+        // Choose backend based on model path + device
         match onnx_model_path {
-            #[cfg(feature = "onnx")]
             Some(model_path) => {
-                let encoder = FlatEncoder::new(width, height);
-                let onnx = OnnxBackend::new(model_path, encoder);
-                let backend: Box<dyn Backend> = if num_threads > 1 {
-                    Box::new(MuxBackend::new(
-                        onnx,
-                        MuxConfig {
-                            max_batch_size: mux_max_batch_size,
-                        },
-                    ))
-                } else {
-                    Box::new(onnx)
+                let backend: Box<dyn Backend> = match device_str {
+                    // --- TensorRT-RTX backend ---
+                    #[cfg(feature = "tensorrt")]
+                    "tensorrt" => {
+                        let encoder = FlatEncoder::new(width, height);
+                        let cache_dir =
+                            Path::new(output_dir).parent().map(|p| p.join(".trt_cache"));
+                        let config = TensorrtConfig {
+                            max_batch: mux_max_batch_size,
+                            cache_dir,
+                        };
+                        let trt = TensorrtBackend::new(model_path, encoder, config)
+                            .map_err(|e| {
+                                std::io::Error::new(std::io::ErrorKind::Other, e)
+                            })?;
+                        if num_threads > 1 {
+                            Box::new(MuxBackend::new(
+                                trt,
+                                MuxConfig {
+                                    max_batch_size: mux_max_batch_size,
+                                },
+                            ))
+                        } else {
+                            Box::new(trt)
+                        }
+                    }
+                    #[cfg(not(feature = "tensorrt"))]
+                    "tensorrt" => {
+                        return Err(std::io::Error::new(
+                            std::io::ErrorKind::Unsupported,
+                            "TensorRT support not compiled (build with --features tensorrt)",
+                        ));
+                    }
+
+                    // --- ONNX Runtime backend (cpu, cuda, coreml) ---
+                    _ => {
+                        #[cfg(feature = "onnx")]
+                        {
+                            let provider =
+                                ExecutionProvider::try_from(device_str).map_err(|e| {
+                                    std::io::Error::new(std::io::ErrorKind::InvalidInput, e)
+                                })?;
+                            let encoder = FlatEncoder::new(width, height);
+                            let onnx =
+                                OnnxBackend::with_provider(model_path, encoder, provider);
+                            if num_threads > 1 {
+                                Box::new(MuxBackend::new(
+                                    onnx,
+                                    MuxConfig {
+                                        max_batch_size: mux_max_batch_size,
+                                    },
+                                ))
+                            } else {
+                                Box::new(onnx)
+                            }
+                        }
+                        #[cfg(not(feature = "onnx"))]
+                        {
+                            let _ = device_str;
+                            return Err(std::io::Error::new(
+                                std::io::ErrorKind::Unsupported,
+                                "ONNX support not compiled (build with --features onnx)",
+                            ));
+                        }
+                    }
                 };
                 selfplay::run_self_play_to_disk(
                     &games,
@@ -311,13 +372,6 @@ fn rust_self_play(
                     max_games_per_bundle,
                     progress_ref,
                 )
-            }
-            #[cfg(not(feature = "onnx"))]
-            Some(_) => {
-                return Err(std::io::Error::new(
-                    std::io::ErrorKind::Unsupported,
-                    "ONNX support not compiled in (build with --features onnx)",
-                ));
             }
             None => {
                 let backend = SmartUniformBackend;
