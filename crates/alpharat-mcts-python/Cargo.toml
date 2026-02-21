@@ -10,7 +10,11 @@ crate-type = ["cdylib"]
 
 [dependencies]
 alpharat-mcts = { path = "../alpharat-mcts", features = ["python"] }
-alpharat-sampling = { path = "../alpharat-sampling", features = ["python", "onnx"] }
+alpharat-sampling = { path = "../alpharat-sampling", features = ["python", "onnx", "onnx-cuda", "tensorrt"] }
 pyrat = { package = "pyrat-rust", git = "https://github.com/mintiti/pyrat-rust", branch = "main", features = ["python"] }
 pyo3 = { version = "0.25", features = ["extension-module"] }
 numpy = "0.25"
+
+[features]
+default = []
+tensorrt = ["alpharat-sampling/tensorrt"]
