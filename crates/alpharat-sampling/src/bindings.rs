@@ -10,6 +10,7 @@ use pyrat::{CheeseConfig, GameState, MazeConfig};
 
 use crate::selfplay::{self, SelfPlayConfig, SelfPlayError, SelfPlayStats};
 
+use crate::CachedBackend;
 #[cfg(any(feature = "onnx", feature = "tensorrt"))]
 use crate::backends::mux::{MuxBackend, MuxConfig};
 #[cfg(any(feature = "onnx", feature = "tensorrt"))]
@@ -130,6 +131,18 @@ impl PySelfPlayStats {
     #[getter]
     fn collision_fraction(&self) -> f64 {
         self.inner.collision_fraction()
+    }
+    #[getter]
+    fn cache_hits(&self) -> u64 {
+        self.inner.cache_hits
+    }
+    #[getter]
+    fn cache_misses(&self) -> u64 {
+        self.inner.cache_misses
+    }
+    #[getter]
+    fn cache_hit_rate(&self) -> f64 {
+        self.inner.cache_hit_rate()
     }
 
     fn __repr__(&self) -> String {
@@ -300,6 +313,7 @@ fn create_onnx_backend(
     onnx_model_path = None,
     device = "auto",
     mux_max_batch_size = 256,
+    cache_size = 0,
     progress = None,
 ))]
 #[allow(clippy::too_many_arguments)]
@@ -331,6 +345,8 @@ fn rust_self_play(
     onnx_model_path: Option<&str>,
     device: &str,
     mux_max_batch_size: usize,
+    // Cache (optional, 0 = disabled)
+    cache_size: usize,
     // Progress (optional)
     progress: Option<PySelfPlayProgress>,
 ) -> PyResult<PySelfPlayStats> {
@@ -420,15 +436,31 @@ fn rust_self_play(
             None => Box::new(SmartUniformBackend),
         };
 
-        selfplay::run_self_play_to_disk(
-            &games,
-            backend.as_ref(),
-            &search_config,
-            &selfplay_config,
-            output_path,
-            max_games_per_bundle,
-            progress_ref,
-        )
+        if cache_size > 0 {
+            let cached = CachedBackend::new(backend, cache_size);
+            let mut disk_result = selfplay::run_self_play_to_disk(
+                &games,
+                &cached,
+                &search_config,
+                &selfplay_config,
+                output_path,
+                max_games_per_bundle,
+                progress_ref,
+            )?;
+            disk_result.stats.cache_hits = cached.stats.hits.load(Relaxed);
+            disk_result.stats.cache_misses = cached.stats.misses.load(Relaxed);
+            Ok(disk_result)
+        } else {
+            selfplay::run_self_play_to_disk(
+                &games,
+                backend.as_ref(),
+                &search_config,
+                &selfplay_config,
+                output_path,
+                max_games_per_bundle,
+                progress_ref,
+            )
+        }
     });
 
     match result {

@@ -9,6 +9,7 @@ pyrat = { package = "pyrat-rust", git = "https://github.com/mintiti/pyrat-rust",
 rand = { version = "0.8", features = ["small_rng"] }
 ort = { version = "2.0.0-rc.11", optional = true, default-features = false, features = ["std", "download-binaries", "copy-dylibs", "tls-native"] }
 zip = { version = "2", default-features = false, features = ["deflate"] }
+thread_local = "1"
 uuid = { version = "1", features = ["v4"] }
 pyo3 = { version = "0.25", optional = true }
 numpy = { version = "0.25", optional = true }
