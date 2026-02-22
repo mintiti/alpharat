@@ -112,7 +112,7 @@ def run_sampling_phase(
         batch_group: Name for the batch group.
         checkpoint_path: Path to checkpoint for NN-guided sampling, or None.
         experiments_dir: Experiments directory.
-        device: Device for NN inference (unused — Rust uses ONNX CPU).
+        device: Resolved ONNX execution provider (cpu, cuda, coreml, tensorrt).
 
     Returns:
         Path to the created batch directory.
@@ -140,6 +140,7 @@ def run_sampling_phase(
         num_threads=config.sampling.workers,
         checkpoint=str(checkpoint_path) if checkpoint_path else None,
         experiments_dir=experiments_dir,
+        device=device,
     )
     return batch_dir
 
@@ -410,7 +411,7 @@ def main() -> None:
         "--device",
         type=str,
         default="auto",
-        help="Device for training/inference (auto, cpu, cuda, mps)",
+        help="Device for training/sampling (auto, cpu, cuda, coreml, mps, tensorrt)",
     )
     args = parser.parse_args()
 
@@ -419,9 +420,13 @@ def main() -> None:
     # Load config
     config = load_config(IterateConfig, config_dir, config_name)
 
+    from alpharat.data.rust_sampling import resolve_sampling_device, resolve_training_device
+
     prefix = args.prefix
     experiments_dir = args.experiments_dir
     device = args.device
+    sampling_device = resolve_sampling_device(device)
+    training_device = resolve_training_device(device)
 
     # Determine benchmark frequency
     benchmark_every = 0 if args.no_benchmark else args.benchmark_every
@@ -441,7 +446,7 @@ def main() -> None:
         ("Benchmark", config.benchmark),
     )
     logger.info("\n%s", summary)
-    logger.info("Device: %s", device)
+    logger.info("Device: %s (sampling: %s, training: %s)", device, sampling_device, training_device)
     logger.info("")
 
     # Initialize state
@@ -475,7 +480,7 @@ def main() -> None:
                 batch_group,
                 current_checkpoint,
                 experiments_dir,
-                device,
+                sampling_device,
             )
 
             # --- Phase 2: Sharding ---
@@ -500,7 +505,7 @@ def main() -> None:
                 run_name,
                 shard_id,
                 experiments_dir,
-                device,
+                training_device,
                 resume_from=current_checkpoint,
             )
 
@@ -518,7 +523,7 @@ def main() -> None:
                     checkpoint_path,
                     current_checkpoint,  # The checkpoint we trained from
                     experiments_dir,
-                    device,
+                    training_device,
                 )
 
             # Update state for next iteration

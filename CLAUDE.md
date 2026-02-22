@@ -381,6 +381,58 @@ from pyrat_engine.core.types import Coordinates, Direction, Wall, Mud
 
 ---
 
+## Inference Backends
+
+The Rust sampling pipeline (`alpharat-sampling`) supports multiple inference backends via the `device` parameter. The build is platform-conditional — `uv sync` gives you what works on your platform.
+
+### What you get per platform
+
+| Platform | `uv sync` gives you | GPU opt-in |
+|----------|---------------------|------------|
+| macOS | CPU + CoreML | Automatic (CoreML) |
+| Linux | CPU only | `MATURIN_PEP517_ARGS="--features cuda" uv sync` |
+| Linux + TRT | CPU only | `MATURIN_PEP517_ARGS="--features cuda,tensorrt" uv sync` |
+
+### Device parameter
+
+A single `--device` flag controls both sampling (ONNX RT) and training (PyTorch). Two resolvers in `alpharat/data/rust_sampling.py` handle the translation:
+
+| `--device` | Sampling (ONNX RT) | Training (PyTorch) |
+|------------|--------------------|--------------------|
+| `auto` | CoreML on macOS, CPU elsewhere | `auto` (PyTorch probes hardware) |
+| `cpu` | CPU EP | `cpu` |
+| `cuda` | CUDA EP | `cuda` |
+| `coreml` | CoreML EP | `mps` |
+| `mps` | CoreML EP | `mps` |
+| `tensorrt` | TensorRT-RTX | `cuda` |
+
+The logic: if you said you have X hardware for sampling, training uses the fastest PyTorch backend for that hardware.
+
+CLI usage:
+```bash
+alpharat-rust-sample configs/iterate.yaml --group test --num-games 100 --device auto
+alpharat-iterate configs/iterate.yaml --prefix sym_5x5 --device cuda
+```
+
+Python:
+```python
+from alpharat.data.rust_sampling import resolve_sampling_device, resolve_training_device
+
+resolve_sampling_device("tensorrt")  # -> "tensorrt"
+resolve_training_device("tensorrt")  # -> "cuda"
+```
+
+### Build details
+
+The Cargo feature layout (`crates/alpharat-mcts-python/Cargo.toml`):
+- Base deps enable `onnx` only (CPU, works everywhere)
+- macOS auto-gets `onnx-coreml` via `[target.'cfg(target_os = "macos")'.dependencies]`
+- `cuda` and `tensorrt` are opt-in features, activated via `MATURIN_PEP517_ARGS`
+
+For the full backend architecture, decision tree, and setup instructions, see `.mt/briefs/inference-backends.md`.
+
+---
+
 ## pyrat_engine Types — Use Them, Don't Reinvent Them
 
 The pyrat_engine types are the **source of truth** for coordinates, directions, and maze topology. Don't reimplement their behavior — use them directly.

@@ -124,6 +124,27 @@ searcher = config.build_searcher(checkpoint=...)  # NN-guided
 
 Both backends implement the `Searcher` protocol — consumers don't need to know which one they're using.
 
+### GPU inference
+
+On macOS, CoreML is enabled automatically. On Linux, GPU backends are opt-in:
+
+```bash
+# Linux with NVIDIA GPU
+MATURIN_PEP517_ARGS="--features cuda" uv sync
+
+# Or with TensorRT-RTX for max throughput
+MATURIN_PEP517_ARGS="--features cuda,tensorrt" uv sync
+```
+
+Use `--device` to select the backend at runtime:
+
+```bash
+alpharat-rust-sample configs/iterate.yaml --group test --num-games 1000 --device auto
+alpharat-iterate configs/iterate.yaml --prefix sym_5x5 --device cuda
+```
+
+`auto` picks CoreML on macOS, CPU elsewhere. See [CLAUDE.md](CLAUDE.md#inference-backends) for the full list.
+
 ## The approach
 
 When both players move at once, you can't just maximize — the opponent is choosing too. Each node stores scalar value estimates (expected remaining cheese per player), and action selection uses decoupled PUCT where each player independently picks via exploration bonus. The final policy is visit-proportional.
