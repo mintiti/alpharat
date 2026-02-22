@@ -61,6 +61,12 @@ def main() -> None:
         help="Inference backend (auto, cpu, cuda, coreml, mps, tensorrt)",
     )
     parser.add_argument("--quiet", action="store_true", help="Suppress progress bar")
+    parser.add_argument(
+        "--device",
+        type=str,
+        default="auto",
+        help="ONNX execution provider (auto, cpu, cuda, coreml, tensorrt)",
+    )
     args = parser.parse_args()
 
     config_dir, config_name = split_config_path(args.config)
@@ -80,7 +86,10 @@ def main() -> None:
         args.checkpoint or "(none)",
     )
 
-    from alpharat.data.rust_sampling import run_rust_sampling
+    from alpharat.data.rust_sampling import resolve_sampling_device, run_rust_sampling
+
+    resolved_device = resolve_sampling_device(args.device)
+    logger.info("Device: %s (resolved: %s)", args.device, resolved_device)
 
     batch_dir, metrics = run_rust_sampling(
         game=config.game,
@@ -91,9 +100,9 @@ def main() -> None:
         max_games_per_bundle=args.max_bundle,
         mux_max_batch_size=args.mux_batch,
         checkpoint=args.checkpoint,
-        device=args.device,
         experiments_dir=args.experiments_dir,
         verbose=not args.quiet,
+        device=resolved_device,
     )
 
     logger.info("")

@@ -20,6 +20,36 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
+def resolve_sampling_device(device: str) -> str:
+    """Map user-facing device names to ONNX RT execution providers.
+
+    Handles the mismatch between PyTorch naming (mps, cuda, auto)
+    and ONNX Runtime naming (coreml, cuda, cpu).
+    """
+    import platform
+
+    if device == "auto":
+        if platform.system() == "Darwin":
+            return "coreml"
+        return "cpu"
+    if device == "mps":
+        return "coreml"
+    return device  # cpu, cuda, coreml, tensorrt pass through
+
+
+def resolve_training_device(device: str) -> str:
+    """Map user-facing device names to PyTorch device names.
+
+    If the user picked a sampling backend that implies specific hardware,
+    use the fastest PyTorch device for that hardware.
+    """
+    if device in ("tensorrt", "cuda"):
+        return "cuda"
+    if device in ("coreml", "mps"):
+        return "mps"
+    return device  # auto, cpu pass through (auto is handled by select_device)
+
+
 @dataclass
 class RustSamplingMetrics:
     """Metrics from a Rust sampling run."""
