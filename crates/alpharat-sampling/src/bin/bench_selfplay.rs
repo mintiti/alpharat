@@ -127,7 +127,8 @@ fn run_bench_uniform(
             batch_size,
             num_threads,
         };
-        let result = run_self_play(&games[..num_games], &backend, search_config, &config, None);
+        let result = run_self_play(&games[..num_games], &backend, search_config, &config, None)
+            .expect("SmartUniform self-play failed");
         print_row(num_threads, batch_size, "-", num_games, &result.stats, None);
     }
 }
@@ -137,15 +138,18 @@ fn make_onnx_backend(model_path: &str, width: u8, height: u8) -> OnnxBackend<Fla
     let encoder = FlatEncoder::new(width, height);
 
     #[cfg(feature = "onnx-coreml")]
-    let onnx_backend = OnnxBackend::with_coreml(model_path, encoder);
+    let onnx_backend = OnnxBackend::with_coreml(model_path, encoder)
+        .expect("failed to create CoreML ONNX backend");
     #[cfg(all(feature = "onnx-cuda", not(feature = "onnx-coreml")))]
-    let onnx_backend = OnnxBackend::with_cuda(model_path, encoder);
+    let onnx_backend = OnnxBackend::with_cuda(model_path, encoder)
+        .expect("failed to create CUDA ONNX backend");
     #[cfg(all(
         feature = "onnx",
         not(feature = "onnx-coreml"),
         not(feature = "onnx-cuda")
     ))]
-    let onnx_backend = OnnxBackend::new(model_path, encoder);
+    let onnx_backend = OnnxBackend::new(model_path, encoder)
+        .expect("failed to create CPU ONNX backend");
 
     onnx_backend
 }
@@ -174,7 +178,7 @@ fn run_bench_onnx(
     // Without this, the first config in the sweep eats the cold-start cost.
     {
         let warmup_backend = make_onnx_backend(model_path, width, height);
-        let _ = warmup_backend.evaluate(&games[0]);
+        let _ = warmup_backend.evaluate(&games[0]).expect("warmup eval failed");
     }
 
     print_header(label);
@@ -209,7 +213,8 @@ fn run_bench_onnx(
                 };
 
                 let result =
-                    run_self_play(&games[..num_games], backend.as_ref(), search_config, &config, None);
+                    run_self_play(&games[..num_games], backend.as_ref(), search_config, &config, None)
+                        .expect("ONNX self-play failed");
                 let mux_label = format!("{}", mux_max);
                 print_row(
                     num_threads,

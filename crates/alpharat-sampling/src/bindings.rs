@@ -8,7 +8,7 @@ use std::sync::Arc;
 use alpharat_mcts::{Backend, SearchConfig, SmartUniformBackend};
 use pyrat::{CheeseConfig, GameState, MazeConfig};
 
-use crate::selfplay::{self, SelfPlayConfig, SelfPlayStats};
+use crate::selfplay::{self, SelfPlayConfig, SelfPlayError, SelfPlayStats};
 
 #[cfg(feature = "onnx")]
 use crate::mux_backend::{MuxBackend, MuxConfig};
@@ -216,6 +216,7 @@ impl PySelfPlayProgress {
     output_dir,
     max_games_per_bundle = 32,
     onnx_model_path = None,
+    device = "auto",
     mux_max_batch_size = 256,
     progress = None,
 ))]
@@ -246,6 +247,7 @@ fn rust_self_play(
     max_games_per_bundle: usize,
     // NN (optional)
     onnx_model_path: Option<&str>,
+    device: &str,
     mux_max_batch_size: usize,
     // Progress (optional)
     progress: Option<PySelfPlayProgress>,
@@ -291,7 +293,27 @@ fn rust_self_play(
             #[cfg(feature = "onnx")]
             Some(model_path) => {
                 let encoder = FlatEncoder::new(width, height);
-                let onnx = OnnxBackend::new(model_path, encoder);
+                let onnx = match device {
+                    "cpu" => OnnxBackend::new(model_path, encoder),
+                    #[cfg(feature = "onnx-coreml")]
+                    "coreml" | "mps" => OnnxBackend::with_coreml(model_path, encoder),
+                    #[cfg(feature = "onnx-cuda")]
+                    "cuda" => OnnxBackend::with_cuda(model_path, encoder),
+                    "auto" => {
+                        // CoreML on macOS when compiled with onnx-coreml
+                        #[cfg(feature = "onnx-coreml")]
+                        { OnnxBackend::with_coreml(model_path, encoder) }
+                        // CUDA when compiled with onnx-cuda (and no coreml)
+                        #[cfg(all(feature = "onnx-cuda", not(feature = "onnx-coreml")))]
+                        { OnnxBackend::with_cuda(model_path, encoder) }
+                        // Fallback to CPU
+                        #[cfg(all(not(feature = "onnx-coreml"), not(feature = "onnx-cuda")))]
+                        { OnnxBackend::new(model_path, encoder) }
+                    }
+                    other => return Err(SelfPlayError::Backend(
+                        alpharat_mcts::BackendError::msg(format!("unknown device: {other}"))
+                    )),
+                }?;
                 let backend: Box<dyn Backend> = if num_threads > 1 {
                     Box::new(MuxBackend::new(
                         onnx,
@@ -314,10 +336,10 @@ fn rust_self_play(
             }
             #[cfg(not(feature = "onnx"))]
             Some(_) => {
-                return Err(std::io::Error::new(
+                return Err(SelfPlayError::Io(std::io::Error::new(
                     std::io::ErrorKind::Unsupported,
                     "ONNX support not compiled in (build with --features onnx)",
-                ));
+                )));
             }
             None => {
                 let backend = SmartUniformBackend;
@@ -338,7 +360,10 @@ fn rust_self_play(
         Ok(disk_result) => Ok(PySelfPlayStats {
             inner: disk_result.stats,
         }),
-        Err(e) => Err(pyo3::exceptions::PyIOError::new_err(e.to_string())),
+        Err(SelfPlayError::Backend(e)) => {
+            Err(pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))
+        }
+        Err(SelfPlayError::Io(e)) => Err(pyo3::exceptions::PyIOError::new_err(e.to_string())),
     }
 }
 

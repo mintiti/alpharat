@@ -54,6 +54,12 @@ def main() -> None:
     parser.add_argument(
         "--experiments-dir", type=Path, default=Path("experiments"), help="Experiments directory"
     )
+    parser.add_argument(
+        "--device",
+        type=str,
+        default="auto",
+        help="ONNX execution provider (auto, cpu, coreml, mps, cuda)",
+    )
     parser.add_argument("--quiet", action="store_true", help="Suppress progress bar")
     args = parser.parse_args()
 
@@ -85,6 +91,7 @@ def main() -> None:
         max_games_per_bundle=args.max_bundle,
         mux_max_batch_size=args.mux_batch,
         checkpoint=args.checkpoint,
+        device=args.device,
         experiments_dir=args.experiments_dir,
         verbose=not args.quiet,
     )

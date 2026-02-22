@@ -1,5 +1,47 @@
 use crate::tree::smart_uniform_prior;
 use pyrat::GameState;
+use std::fmt;
+
+// ---------------------------------------------------------------------------
+// BackendError — error type for backend evaluation failures
+// ---------------------------------------------------------------------------
+
+/// Error from backend evaluation (ONNX session, model mismatch, etc.).
+///
+/// Wraps `Box<dyn Error + Send + Sync>` so `alpharat-mcts` stays decoupled
+/// from ONNX-specific error types.
+#[derive(Debug)]
+pub struct BackendError(Box<dyn std::error::Error + Send + Sync>);
+
+impl BackendError {
+    /// Wrap any error into a BackendError.
+    pub fn new(err: impl std::error::Error + Send + Sync + 'static) -> Self {
+        Self(Box::new(err))
+    }
+
+    /// Create from a string message.
+    pub fn msg(msg: impl Into<String>) -> Self {
+        Self(msg.into().into())
+    }
+}
+
+impl fmt::Display for BackendError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
+impl std::error::Error for BackendError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        self.0.source()
+    }
+}
+
+impl From<String> for BackendError {
+    fn from(s: String) -> Self {
+        Self::msg(s)
+    }
+}
 
 // ---------------------------------------------------------------------------
 // EvalResult — return type from any backend
@@ -31,10 +73,10 @@ pub struct EvalResult {
 /// `Send + Sync` because backends are shared across game threads via `Arc`
 /// (lc0 pattern: single shared backend, per-thread computation).
 pub trait Backend: Send + Sync {
-    fn evaluate(&self, game: &GameState) -> EvalResult;
+    fn evaluate(&self, game: &GameState) -> Result<EvalResult, BackendError>;
 
     /// Batch evaluation — sequential fallback, real backends override for GPU batching.
-    fn evaluate_batch(&self, games: &[&GameState]) -> Vec<EvalResult> {
+    fn evaluate_batch(&self, games: &[&GameState]) -> Result<Vec<EvalResult>, BackendError> {
         games.iter().map(|g| self.evaluate(g)).collect()
     }
 }
@@ -50,13 +92,13 @@ pub trait Backend: Send + Sync {
 pub struct SmartUniformBackend;
 
 impl Backend for SmartUniformBackend {
-    fn evaluate(&self, game: &GameState) -> EvalResult {
-        EvalResult {
+    fn evaluate(&self, game: &GameState) -> Result<EvalResult, BackendError> {
+        Ok(EvalResult {
             policy_p1: smart_uniform_prior(&game.effective_actions_p1()),
             policy_p2: smart_uniform_prior(&game.effective_actions_p2()),
             value_p1: 0.0,
             value_p2: 0.0,
-        }
+        })
     }
 }
 
@@ -76,13 +118,13 @@ pub(crate) struct ConstantValueBackend {
 
 #[cfg(test)]
 impl Backend for ConstantValueBackend {
-    fn evaluate(&self, game: &GameState) -> EvalResult {
-        EvalResult {
+    fn evaluate(&self, game: &GameState) -> Result<EvalResult, BackendError> {
+        Ok(EvalResult {
             policy_p1: smart_uniform_prior(&game.effective_actions_p1()),
             policy_p2: smart_uniform_prior(&game.effective_actions_p2()),
             value_p1: self.value_p1,
             value_p2: self.value_p2,
-        }
+        })
     }
 }
 
@@ -107,7 +149,7 @@ mod tests {
     fn smart_uniform_open_center() {
         // Both players in open space — 5 unique outcomes each
         let game = open_5x5_game(Coordinates::new(2, 2), Coordinates::new(2, 2), &CHEESE);
-        let result = BACKEND.evaluate(&game);
+        let result = BACKEND.evaluate(&game).unwrap();
 
         for &p in &result.policy_p1 {
             assert!((p - 0.2).abs() < 1e-6);
@@ -122,7 +164,7 @@ mod tests {
         // P1 at (0,0): DOWN and LEFT blocked → 3 unique (UP, RIGHT, STAY)
         // P2 at center: 5 unique
         let game = open_5x5_game(Coordinates::new(0, 0), Coordinates::new(2, 2), &CHEESE);
-        let result = BACKEND.evaluate(&game);
+        let result = BACKEND.evaluate(&game).unwrap();
 
         let third = 1.0 / 3.0;
         assert!((result.policy_p1[0] - third).abs() < 1e-6); // UP
@@ -140,7 +182,7 @@ mod tests {
     fn smart_uniform_corner_top_right() {
         // P1 open, P2 at (4,4): UP and RIGHT blocked → 3 unique (DOWN, LEFT, STAY)
         let game = open_5x5_game(Coordinates::new(2, 2), Coordinates::new(4, 4), &CHEESE);
-        let result = BACKEND.evaluate(&game);
+        let result = BACKEND.evaluate(&game).unwrap();
 
         for &p in &result.policy_p1 {
             assert!((p - 0.2).abs() < 1e-6);
@@ -158,7 +200,7 @@ mod tests {
     fn smart_uniform_edge_bottom() {
         // P1 at (2,0): DOWN blocked → 4 unique (UP, RIGHT, LEFT, STAY)
         let game = open_5x5_game(Coordinates::new(2, 0), Coordinates::new(2, 2), &CHEESE);
-        let result = BACKEND.evaluate(&game);
+        let result = BACKEND.evaluate(&game).unwrap();
 
         let quarter = 0.25;
         assert!((result.policy_p1[0] - quarter).abs() < 1e-6); // UP
@@ -176,7 +218,7 @@ mod tests {
         walls.insert(Coordinates::new(2, 3), vec![Coordinates::new(2, 2)]);
 
         let game = wall_game(Coordinates::new(2, 2), Coordinates::new(0, 0), walls, &CHEESE);
-        let result = BACKEND.evaluate(&game);
+        let result = BACKEND.evaluate(&game).unwrap();
 
         // P1: UP blocked at (2,2) → 4 unique (RIGHT, DOWN, LEFT, STAY)
         let quarter = 0.25;
@@ -190,7 +232,7 @@ mod tests {
     #[test]
     fn smart_uniform_mud_p1_stuck() {
         let game = mud_game_p1_stuck();
-        let result = BACKEND.evaluate(&game);
+        let result = BACKEND.evaluate(&game).unwrap();
 
         // P1: all actions → STAY, 1 unique outcome
         for a in 0..4 {
@@ -202,7 +244,7 @@ mod tests {
     #[test]
     fn smart_uniform_mud_both_stuck() {
         let game = mud_game_both_stuck();
-        let result = BACKEND.evaluate(&game);
+        let result = BACKEND.evaluate(&game).unwrap();
 
         // Both players: all actions → STAY
         for a in 0..4 {
@@ -225,7 +267,7 @@ mod tests {
         ];
 
         for game in &games {
-            let result = BACKEND.evaluate(game);
+            let result = BACKEND.evaluate(game).unwrap();
             let sum_p1: f32 = result.policy_p1.iter().sum();
             let sum_p2: f32 = result.policy_p2.iter().sum();
             assert!((sum_p1 - 1.0).abs() < 1e-6, "P1 prior doesn't sum to 1: {sum_p1}");
@@ -243,7 +285,7 @@ mod tests {
         ];
 
         for game in &games {
-            let result = BACKEND.evaluate(game);
+            let result = BACKEND.evaluate(game).unwrap();
             for policy in [&result.policy_p1, &result.policy_p2] {
                 let nonzero: Vec<f32> = policy.iter().copied().filter(|&p| p > 0.0).collect();
                 if nonzero.len() > 1 {
@@ -276,7 +318,7 @@ mod tests {
         ];
 
         for (game, label) in &test_cases {
-            let result = BACKEND.evaluate(game);
+            let result = BACKEND.evaluate(game).unwrap();
 
             // Check P1
             let eff_p1 = game.effective_actions_p1();
@@ -332,7 +374,7 @@ mod tests {
         ];
 
         for game in &games {
-            let result = BACKEND.evaluate(game);
+            let result = BACKEND.evaluate(game).unwrap();
             assert_eq!(result.value_p1, 0.0);
             assert_eq!(result.value_p2, 0.0);
         }
@@ -343,7 +385,7 @@ mod tests {
     #[test]
     fn backend_to_halfnode_open() {
         let game = open_5x5_game(Coordinates::new(2, 2), Coordinates::new(2, 2), &CHEESE);
-        let result = BACKEND.evaluate(&game);
+        let result = BACKEND.evaluate(&game).unwrap();
         let eff = game.effective_actions_p1();
         let half = HalfNode::new(result.policy_p1, eff);
 
@@ -357,7 +399,7 @@ mod tests {
     #[test]
     fn backend_to_halfnode_corner() {
         let game = open_5x5_game(Coordinates::new(0, 0), Coordinates::new(2, 2), &CHEESE);
-        let result = BACKEND.evaluate(&game);
+        let result = BACKEND.evaluate(&game).unwrap();
         let eff = game.effective_actions_p1();
         let half = HalfNode::new(result.policy_p1, eff);
 
@@ -376,7 +418,7 @@ mod tests {
     #[test]
     fn backend_to_halfnode_mud() {
         let game = mud_game_p1_stuck();
-        let result = BACKEND.evaluate(&game);
+        let result = BACKEND.evaluate(&game).unwrap();
         let eff = game.effective_actions_p1();
         let half = HalfNode::new(result.policy_p1, eff);
 
@@ -392,7 +434,7 @@ mod tests {
         walls.insert(Coordinates::new(2, 3), vec![Coordinates::new(2, 2)]);
 
         let game = wall_game(Coordinates::new(2, 2), Coordinates::new(0, 0), walls, &CHEESE);
-        let result = BACKEND.evaluate(&game);
+        let result = BACKEND.evaluate(&game).unwrap();
         let eff = game.effective_actions_p1();
         let half = HalfNode::new(result.policy_p1, eff);
 
@@ -413,7 +455,7 @@ mod tests {
         // P2 at center (2,2): 5 outcomes (all open)
         // Verifies both halves — a P1/P2 swap would give wrong outcome counts
         let game = open_5x5_game(Coordinates::new(0, 0), Coordinates::new(2, 2), &CHEESE);
-        let result = BACKEND.evaluate(&game);
+        let result = BACKEND.evaluate(&game).unwrap();
 
         let half_p1 = HalfNode::new(result.policy_p1, game.effective_actions_p1());
         let half_p2 = HalfNode::new(result.policy_p2, game.effective_actions_p2());

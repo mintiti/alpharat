@@ -1,7 +1,7 @@
 use rand::Rng;
 use rand_distr::Gamma;
 
-use crate::backend::Backend;
+use crate::backend::{Backend, BackendError};
 use crate::node::{HalfNode, Node, NodeArena, NodeIndex};
 use crate::tree::{compute_rewards, find_or_extend_child, populate_node, MCTSTree};
 use pyrat::{Direction, GameState};
@@ -332,14 +332,14 @@ pub fn run_search(
     n_sims: u32,
     batch_size: u32,
     rng: &mut impl Rng,
-) -> SearchResult {
+) -> Result<SearchResult, BackendError> {
     let mut remaining = n_sims;
     let mut total_nn_evals = 0u32;
     let mut total_terminals = 0u32;
     let mut total_collisions = 0u32;
     while remaining > 0 {
         let actual = remaining.min(batch_size);
-        let batch = simulate_batch(tree, game, backend, config, actual, rng);
+        let batch = simulate_batch(tree, game, backend, config, actual, rng)?;
         total_nn_evals += batch.nn_evals;
         total_terminals += batch.terminals;
         total_collisions += batch.collisions;
@@ -351,7 +351,7 @@ pub fn run_search(
     result.nn_evals = total_nn_evals;
     result.terminals = total_terminals;
     result.collisions = total_collisions;
-    result
+    Ok(result)
 }
 
 // ---------------------------------------------------------------------------
@@ -404,7 +404,7 @@ fn simulate_batch(
     config: &SearchConfig,
     batch_size: u32,
     rng: &mut impl Rng,
-) -> BatchStats {
+) -> Result<BatchStats, BackendError> {
     let root = tree.root();
     let max_collisions = if config.max_collisions > 0 {
         config.max_collisions
@@ -470,7 +470,7 @@ fn simulate_batch(
     let eval_results = if needs_eval_refs.is_empty() {
         Vec::new()
     } else {
-        backend.evaluate_batch(&needs_eval_refs)
+        backend.evaluate_batch(&needs_eval_refs)?
     };
 
     // ---- Backup Phase (NeedsEval only) ----
@@ -506,11 +506,11 @@ fn simulate_batch(
         }
     }
 
-    BatchStats {
+    Ok(BatchStats {
         nn_evals,
         terminals,
         collisions,
-    }
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -1920,7 +1920,7 @@ mod tests {
         let config = default_config();
         let mut r = search_rng();
 
-        let result = run_search(&mut tree, &game, &BACKEND, &config, 1, 1, &mut r);
+        let result = run_search(&mut tree, &game, &BACKEND, &config, 1, 1, &mut r).unwrap();
 
         assert_eq!(result.total_visits, 1);
         // SmartUniform values are 0 → root value should be 0.
@@ -1944,7 +1944,7 @@ mod tests {
         let config = default_config();
         let mut r = search_rng();
 
-        let result = run_search(&mut tree, &game, &BACKEND, &config, 2, 1, &mut r);
+        let result = run_search(&mut tree, &game, &BACKEND, &config, 2, 1, &mut r).unwrap();
 
         assert_eq!(result.total_visits, 2);
 
@@ -1978,7 +1978,7 @@ mod tests {
         let mut r = search_rng();
 
         // batch_size=1 to avoid collisions → exact visit count.
-        let result = run_search(&mut tree, &game, &BACKEND, &config, 50, 1, &mut r);
+        let result = run_search(&mut tree, &game, &BACKEND, &config, 50, 1, &mut r).unwrap();
         assert_eq!(result.total_visits, 50);
 
         // Walk all nodes: for visited interior nodes,
@@ -2022,7 +2022,7 @@ mod tests {
         let config = default_config();
         let mut r = search_rng();
 
-        let result = run_search(&mut tree, &game, &BACKEND, &config, 50, 4, &mut r);
+        let result = run_search(&mut tree, &game, &BACKEND, &config, 50, 4, &mut r).unwrap();
 
         // P1 at (0,0) in corridor: UP blocked by wall, DOWN blocked by edge.
         // Only RIGHT, LEFT, STAY are effective — but LEFT is blocked by edge too.
@@ -2046,7 +2046,7 @@ mod tests {
         let config = default_config();
         let mut r = search_rng();
 
-        let result = run_search(&mut tree, &game, &BACKEND, &config, 100, 4, &mut r);
+        let result = run_search(&mut tree, &game, &BACKEND, &config, 100, 4, &mut r).unwrap();
 
         // P1 at (0,0), cheese at (1,0). RIGHT collects it.
         // With enough sims, RIGHT should dominate.
@@ -2067,7 +2067,7 @@ mod tests {
         let mut r = search_rng();
 
         // batch_size=1 to avoid collisions.
-        let result = run_search(&mut tree, &game, &BACKEND, &config, 50, 1, &mut r);
+        let result = run_search(&mut tree, &game, &BACKEND, &config, 50, 1, &mut r).unwrap();
 
         // Should complete without panics. 3-turn game means terminals appear.
         // OOO may add free terminal visits beyond n_sims.
@@ -2093,7 +2093,7 @@ mod tests {
         let config = default_config();
         let mut r = search_rng();
 
-        let result = run_search(&mut tree, &game, &BACKEND, &config, 10, 4, &mut r);
+        let result = run_search(&mut tree, &game, &BACKEND, &config, 10, 4, &mut r).unwrap();
 
         // Root is terminal → values should be 0.
         assert!((result.value_p1).abs() < 1e-6, "Terminal root v1 should be 0, got {}", result.value_p1);
@@ -2108,7 +2108,7 @@ mod tests {
         let config = default_config();
         let mut r = search_rng();
 
-        let result = run_search(&mut tree, &game, &BACKEND, &config, 20, 4, &mut r);
+        let result = run_search(&mut tree, &game, &BACKEND, &config, 20, 4, &mut r).unwrap();
 
         // P1 stuck in mud: only STAY is valid.
         assert!(
@@ -2139,7 +2139,7 @@ mod tests {
         for (gi, game) in games.iter().enumerate() {
             let mut tree = MCTSTree::new(game);
             let mut r = search_rng();
-            let result = run_search(&mut tree, game, &BACKEND, &config, 30, 4, &mut r);
+            let result = run_search(&mut tree, game, &BACKEND, &config, 30, 4, &mut r).unwrap();
 
             let sum_p1: f32 = result.policy_p1.iter().sum();
             let sum_p2: f32 = result.policy_p2.iter().sum();
@@ -2167,7 +2167,7 @@ mod tests {
         let config = default_config();
         let mut r = search_rng();
 
-        let result = run_search(&mut tree, &game, &BACKEND, &config, 30, 4, &mut r);
+        let result = run_search(&mut tree, &game, &BACKEND, &config, 30, 4, &mut r).unwrap();
 
         assert_eq!(result.policy_p1[2], 0.0, "DOWN should be 0 (board edge)");
         assert_eq!(result.policy_p1[3], 0.0, "LEFT should be 0 (board edge)");
@@ -2187,7 +2187,7 @@ mod tests {
         let config = default_config();
         let mut r = search_rng();
 
-        let result = run_search(&mut tree, &game, &BACKEND, &config, 100, 4, &mut r);
+        let result = run_search(&mut tree, &game, &BACKEND, &config, 100, 4, &mut r).unwrap();
 
         // Values should be non-negative and bounded by remaining cheese.
         // SmartUniform starts at 0, so values stay near 0. Allow some slack.
@@ -2228,7 +2228,7 @@ mod tests {
         let config = default_config();
         let mut r = search_rng();
 
-        let _ = run_search(&mut tree, &game, &BACKEND, &config, 20, 4, &mut r);
+        let _ = run_search(&mut tree, &game, &BACKEND, &config, 20, 4, &mut r).unwrap();
 
         // For each child of root, replay the move and verify effective actions match.
         let root = tree.root();
@@ -2295,7 +2295,7 @@ mod tests {
         let config = default_config();
         let mut r = search_rng();
 
-        let _ = run_search(&mut tree, &game, &BACKEND, &config, 30, 4, &mut r);
+        let _ = run_search(&mut tree, &game, &BACKEND, &config, 30, 4, &mut r).unwrap();
 
         let arena = tree.arena();
         for i in 0..arena.len() {
@@ -2342,7 +2342,7 @@ mod tests {
         // batch_size=10 but only n_sims=3. With batch_size > n_sims, we run one
         // batch of 3 descents. Some may collide (root is unvisited), so
         // total_visits <= 3. At least 1 should succeed (the first descent).
-        let result = run_search(&mut tree, &game, &BACKEND, &config, 3, 10, &mut r);
+        let result = run_search(&mut tree, &game, &BACKEND, &config, 3, 10, &mut r).unwrap();
 
         assert_eq!(
             result.total_visits, 1,
@@ -2370,7 +2370,7 @@ mod tests {
         let config = default_config();
         let mut r = search_rng();
 
-        let result = run_search(&mut tree, &game, &backend, &config, 50, 1, &mut r);
+        let result = run_search(&mut tree, &game, &backend, &config, 50, 1, &mut r).unwrap();
 
         // OOO may add free terminal visits beyond n_sims.
         assert!(result.total_visits >= 50, "expected >= 50, got {}", result.total_visits);
@@ -2403,7 +2403,7 @@ mod tests {
         let config = default_config();
         let mut r = search_rng();
 
-        let _ = run_search(&mut tree, &game, &backend, &config, 30, 1, &mut r);
+        let _ = run_search(&mut tree, &game, &backend, &config, 30, 1, &mut r).unwrap();
 
         let root = &tree.arena()[tree.root()];
         for i in 0..root.p1.n_outcomes() {
@@ -2445,7 +2445,7 @@ mod tests {
         let config = default_config();
         let mut r = search_rng();
 
-        let result = run_search(&mut tree, &game, &backend, &config, 50, 1, &mut r);
+        let result = run_search(&mut tree, &game, &backend, &config, 50, 1, &mut r).unwrap();
         assert_eq!(result.total_visits, 50);
 
         let arena = tree.arena();
@@ -2588,7 +2588,7 @@ mod tests {
         let mut r1 = SmallRng::seed_from_u64(42);
         let result_no_noise = run_search(
             &mut tree_no_noise, &game, &BACKEND, &config_no_noise, 50, 1, &mut r1,
-        );
+        ).unwrap();
 
         // With noise.
         let mut tree_noise = MCTSTree::new(&game);
@@ -2600,7 +2600,7 @@ mod tests {
         let mut r2 = SmallRng::seed_from_u64(42);
         let result_noise = run_search(
             &mut tree_noise, &game, &BACKEND, &config_noise, 50, 1, &mut r2,
-        );
+        ).unwrap();
 
         // Priors should differ because noise was injected.
         let mut any_prior_diff = false;
@@ -2631,7 +2631,7 @@ mod tests {
 
         // Run with batch_size=8, 50 sims. OOO terminals are free, so the
         // tree accumulates more visits than the 50 NN eval budget.
-        let result = run_search(&mut tree, &game, &BACKEND, &config, 50, 8, &mut r);
+        let result = run_search(&mut tree, &game, &BACKEND, &config, 50, 8, &mut r).unwrap();
 
         assert!(
             result.total_visits > 50,
@@ -2661,7 +2661,7 @@ mod tests {
         // n_sims=1, batch_size=10, max_collisions=5.
         // First descent claims root (NeedsEval). Retries collide.
         // After 5 collisions the gather stops with 1 NN eval.
-        let result = run_search(&mut tree, &game, &BACKEND, &config, 1, 10, &mut r);
+        let result = run_search(&mut tree, &game, &BACKEND, &config, 1, 10, &mut r).unwrap();
 
         assert_eq!(
             result.total_visits, 1,
@@ -2684,12 +2684,45 @@ mod tests {
         let config = default_config();
         let mut r = search_rng();
 
-        let result = run_search(&mut tree, &game, &BACKEND, &config, 20, 1, &mut r);
+        let result = run_search(&mut tree, &game, &BACKEND, &config, 20, 1, &mut r).unwrap();
 
         assert_eq!(
             result.total_visits, 20,
             "batch_size=1: each batch is 1 descent, 20 sims = 20 visits. Got {}",
             result.total_visits
+        );
+    }
+
+    // ---- error propagation ----
+
+    /// Backend that always returns an error on evaluate_batch.
+    struct FailingBackend;
+
+    impl Backend for FailingBackend {
+        fn evaluate(
+            &self,
+            _game: &GameState,
+        ) -> Result<crate::backend::EvalResult, BackendError> {
+            Err(BackendError::msg("intentional test failure"))
+        }
+    }
+
+    #[test]
+    fn failing_backend_propagates_through_run_search() {
+        let game = test_util::open_5x5_game(
+            Coordinates::new(0, 0),
+            Coordinates::new(4, 4),
+            &[Coordinates::new(2, 2)],
+        );
+        let mut tree = MCTSTree::new(&game);
+        let config = default_config();
+        let mut r = search_rng();
+
+        let result = run_search(&mut tree, &game, &FailingBackend, &config, 10, 4, &mut r);
+        assert!(result.is_err(), "run_search should propagate backend errors");
+        assert!(
+            result.unwrap_err().to_string().contains("intentional test failure"),
+            "error message should be preserved"
         );
     }
 }

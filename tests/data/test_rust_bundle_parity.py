@@ -300,3 +300,161 @@ class TestRustBundleParity:
         }
         actual_keys = set(data.files)
         assert actual_keys == expected_keys
+
+
+# ---------------------------------------------------------------------------
+# E2E Pipeline Test
+# ---------------------------------------------------------------------------
+
+
+class TestRustBundleE2EPipeline:
+    """Verify Rust bundle data flows through the full Python training pipeline.
+
+    Tests: load bundle → build observations → build targets → prepare shards.
+    Catches silent data corruption between Rust output and Python training input.
+    """
+
+    def test_observation_building(self, bundle_path: Path) -> None:
+        """Build observations from Rust bundle data — shapes, dtype, finite values."""
+        from alpharat.data.loader import load_game_bundle
+        from alpharat.nn.builders.flat import FlatObservationBuilder
+        from alpharat.nn.extraction import from_game_arrays
+
+        games = load_game_bundle(bundle_path)
+        builder = FlatObservationBuilder(width=games[0].width, height=games[0].height)
+        expected_dim = builder.obs_shape[0]
+
+        for game in games:
+            for pos in game.positions:
+                obs_input = from_game_arrays(game, pos)
+                obs = builder.build(obs_input)
+
+                assert obs.shape == (expected_dim,), f"obs dim mismatch: {obs.shape}"
+                assert obs.dtype == np.float32
+                assert np.all(np.isfinite(obs)), "observation contains NaN or Inf"
+
+    def test_target_building(self, bundle_path: Path) -> None:
+        """Build targets from Rust bundle data — policies, values, actions."""
+        from alpharat.data.loader import load_game_bundle
+        from alpharat.nn.targets import build_targets
+
+        games = load_game_bundle(bundle_path)
+
+        for game in games:
+            total_cheese = game.final_p1_score + game.final_p2_score
+            for pos in game.positions:
+                targets = build_targets(game, pos)
+
+                # Policies sum to ~1 and are non-negative
+                assert targets.policy_p1.shape == (5,)
+                assert targets.policy_p2.shape == (5,)
+                np.testing.assert_allclose(
+                    targets.policy_p1.sum(),
+                    1.0,
+                    atol=1e-5,
+                    err_msg="P1 policy doesn't sum to 1",
+                )
+                np.testing.assert_allclose(
+                    targets.policy_p2.sum(),
+                    1.0,
+                    atol=1e-5,
+                    err_msg="P2 policy doesn't sum to 1",
+                )
+                assert np.all(targets.policy_p1 >= 0), "negative P1 policy"
+                assert np.all(targets.policy_p2 >= 0), "negative P2 policy"
+
+                # Values are remaining cheese: in [0, total_cheese]
+                assert 0 <= targets.p1_value <= total_cheese + 1e-5
+                assert 0 <= targets.p2_value <= total_cheese + 1e-5
+
+                # Actions are valid (0-4)
+                assert 0 <= targets.action_p1 <= 4
+                assert 0 <= targets.action_p2 <= 4
+
+    def test_prepare_training_set(self, bundle_path: Path, tmp_path: Path) -> None:
+        """Run full sharding pipeline on Rust bundle — verify shard contents."""
+        from alpharat.data.sharding import prepare_training_set
+        from alpharat.nn.builders.flat import FlatObservationBuilder
+        from alpharat.nn.training.keys import BatchKey
+
+        # Set up batch_dir structure: batch_dir/games/bundle.npz
+        batch_dir = tmp_path / "batch"
+        games_dir = batch_dir / "games"
+        games_dir.mkdir(parents=True)
+
+        import shutil
+
+        shutil.copy(bundle_path, games_dir / "test_bundle.npz")
+
+        builder = FlatObservationBuilder(width=3, height=3)
+        output_dir = tmp_path / "shards"
+        output_dir.mkdir()
+
+        training_set_dir = prepare_training_set(
+            batch_dirs=[batch_dir],
+            output_dir=output_dir,
+            builder=builder,
+            positions_per_shard=10000,
+            seed=42,
+        )
+
+        # Verify shard files exist
+        shard_files = sorted(training_set_dir.glob("shard_*.npz"))
+        assert len(shard_files) > 0, "No shard files produced"
+
+        # Verify manifest exists
+        manifest_path = training_set_dir / "manifest.json"
+        assert manifest_path.exists(), "No manifest.json"
+
+        # Check shard contents
+        total_positions = 0
+        obs_dim = builder.obs_shape[0]
+
+        for shard_path in shard_files:
+            shard = np.load(shard_path)
+
+            # All expected keys present
+            for key in BatchKey:
+                assert key.value in shard.files, f"Missing key: {key.value}"
+
+            n = shard[BatchKey.OBSERVATION].shape[0]
+            total_positions += n
+
+            # Observation shape and dtype
+            assert shard[BatchKey.OBSERVATION].shape == (n, obs_dim)
+            assert shard[BatchKey.OBSERVATION].dtype == np.float32
+            assert np.all(np.isfinite(shard[BatchKey.OBSERVATION]))
+
+            # Policy shapes and constraints
+            assert shard[BatchKey.POLICY_P1].shape == (n, 5)
+            assert shard[BatchKey.POLICY_P2].shape == (n, 5)
+            for i in range(n):
+                np.testing.assert_allclose(
+                    shard[BatchKey.POLICY_P1][i].sum(),
+                    1.0,
+                    atol=1e-5,
+                )
+                np.testing.assert_allclose(
+                    shard[BatchKey.POLICY_P2][i].sum(),
+                    1.0,
+                    atol=1e-5,
+                )
+
+            # Value shapes
+            assert shard[BatchKey.VALUE_P1].shape == (n,)
+            assert shard[BatchKey.VALUE_P2].shape == (n,)
+            assert shard[BatchKey.VALUE_P1].dtype == np.float32
+
+            # Action shapes and range
+            assert shard[BatchKey.ACTION_P1].shape == (n,)
+            assert shard[BatchKey.ACTION_P2].shape == (n,)
+            assert np.all(shard[BatchKey.ACTION_P1] >= 0)
+            assert np.all(shard[BatchKey.ACTION_P1] <= 4)
+            assert np.all(shard[BatchKey.ACTION_P2] >= 0)
+            assert np.all(shard[BatchKey.ACTION_P2] <= 4)
+
+            # Cheese outcomes shape
+            assert shard[BatchKey.CHEESE_OUTCOMES].shape == (n, 3, 3)
+
+        # Bundle has 2 games with 2 + 1 = 3 positions
+        assert total_positions == 3, f"Expected 3 positions, got {total_positions}"

@@ -769,7 +769,7 @@ mod tests {
 
         // Populate with SmartUniformBackend
         let backend = SmartUniformBackend;
-        let eval = backend.evaluate(&game);
+        let eval = backend.evaluate(&game).unwrap();
         populate_node(&mut arena, child_idx, Some(&eval));
 
         // Verify: expand_prior matches backend output

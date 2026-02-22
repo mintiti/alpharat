@@ -112,6 +112,7 @@ def run_rust_sampling(
     max_games_per_bundle: int = 32,
     mux_max_batch_size: int = 256,
     checkpoint: str | None = None,
+    device: str = "auto",
     experiments_dir: str | Path = "experiments",
     verbose: bool = True,
 ) -> tuple[Path, RustSamplingMetrics]:
@@ -129,6 +130,7 @@ def run_rust_sampling(
         max_games_per_bundle: Max games per NPZ bundle file.
         mux_max_batch_size: Max batch size for ONNX mux backend.
         checkpoint: Path to .pt checkpoint for NN-guided sampling.
+        device: ONNX execution provider — "auto", "cpu", "coreml", "mps", "cuda".
         experiments_dir: Experiments root directory.
         verbose: Show progress bar.
 
@@ -177,6 +179,7 @@ def run_rust_sampling(
         "output_dir": str(output_dir),
         "max_games_per_bundle": max_games_per_bundle,
         "onnx_model_path": onnx_path,
+        "device": device,
         "mux_max_batch_size": mux_max_batch_size,
     }
 

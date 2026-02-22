@@ -1,4 +1,4 @@
-use alpharat_mcts::{Backend, EvalResult};
+use alpharat_mcts::{Backend, BackendError, EvalResult};
 use pyrat::GameState;
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -74,7 +74,7 @@ struct BatchRequest {
     // tx.send(), which happens after the worker is done reading these
     // pointers. GameStates are guaranteed alive for the duration of access.
     games: Vec<*const GameState>,
-    tx: mpsc::SyncSender<Vec<EvalResult>>,
+    tx: mpsc::SyncSender<Result<Vec<EvalResult>, BackendError>>,
 }
 
 // SAFETY: Raw pointers are valid for the duration of worker access
@@ -202,19 +202,20 @@ impl Drop for MuxBackend {
     fn drop(&mut self) {
         self.queue.close();
         if let Some(handle) = self.worker.take() {
-            handle.join().expect("mux worker panicked");
+            // Don't double-panic if the worker panicked — just log it.
+            let _ = handle.join();
         }
     }
 }
 
 impl Backend for MuxBackend {
-    fn evaluate(&self, game: &GameState) -> EvalResult {
-        self.evaluate_batch(&[game])[0]
+    fn evaluate(&self, game: &GameState) -> Result<EvalResult, BackendError> {
+        Ok(self.evaluate_batch(&[game])?[0])
     }
 
-    fn evaluate_batch(&self, games: &[&GameState]) -> Vec<EvalResult> {
+    fn evaluate_batch(&self, games: &[&GameState]) -> Result<Vec<EvalResult>, BackendError> {
         if games.is_empty() {
-            return Vec::new();
+            return Ok(Vec::new());
         }
 
         let (tx, rx) = mpsc::sync_channel(1);
@@ -224,6 +225,8 @@ impl Backend for MuxBackend {
         };
 
         self.queue.push(request);
+        // Outer expect: worker dropping the channel = bug (programming error).
+        // Inner Result: propagates backend errors from the worker.
         rx.recv().expect("mux worker dropped without sending result")
     }
 }
@@ -253,20 +256,31 @@ fn worker_loop(
 
         let n_positions = all_games.len() as u64;
         let nn_start = Instant::now();
-        let all_results = inner.evaluate_batch(&all_games);
+        let batch_result = inner.evaluate_batch(&all_games);
         let nn_ns = nn_start.elapsed().as_nanos() as u64;
 
         stats.total_batches.fetch_add(1, Ordering::Relaxed);
         stats.total_positions.fetch_add(n_positions, Ordering::Relaxed);
         stats.nn_time_ns.fetch_add(nn_ns, Ordering::Relaxed);
 
-        // Scatter results back to each requester.
-        let mut offset = 0;
-        for req in requests {
-            let n = req.games.len();
-            let results = all_results[offset..offset + n].to_vec();
-            offset += n;
-            let _ = req.tx.send(results);
+        match batch_result {
+            Ok(all_results) => {
+                // Scatter results back to each requester.
+                let mut offset = 0;
+                for req in requests {
+                    let n = req.games.len();
+                    let results = all_results[offset..offset + n].to_vec();
+                    offset += n;
+                    let _ = req.tx.send(Ok(results));
+                }
+            }
+            Err(e) => {
+                // Send error to all requesters, continue processing (don't kill worker).
+                let msg = e.to_string();
+                for req in requests {
+                    let _ = req.tx.send(Err(BackendError::msg(msg.clone())));
+                }
+            }
         }
     }
 }
@@ -313,14 +327,46 @@ mod tests {
     struct SpyBackendHandle<B: Backend>(Arc<SpyBackend<B>>);
 
     impl<B: Backend> Backend for SpyBackendHandle<B> {
-        fn evaluate(&self, game: &GameState) -> EvalResult {
+        fn evaluate(&self, game: &GameState) -> Result<EvalResult, BackendError> {
             self.0.inner.evaluate(game)
         }
 
-        fn evaluate_batch(&self, games: &[&GameState]) -> Vec<EvalResult> {
+        fn evaluate_batch(&self, games: &[&GameState]) -> Result<Vec<EvalResult>, BackendError> {
             self.0.call_count.fetch_add(1, Ordering::SeqCst);
             self.0.batch_sizes.lock().unwrap().push(games.len());
             self.0.inner.evaluate_batch(games)
+        }
+    }
+
+    // ---- FailingBackend: returns Err after N successful calls ----
+
+    struct FailingBackend {
+        calls_before_fail: AtomicUsize,
+    }
+
+    impl FailingBackend {
+        fn new(succeed_count: usize) -> Self {
+            Self {
+                calls_before_fail: AtomicUsize::new(succeed_count),
+            }
+        }
+    }
+
+    impl Backend for FailingBackend {
+        fn evaluate(&self, _game: &GameState) -> Result<EvalResult, BackendError> {
+            Err(BackendError::msg("intentional failure"))
+        }
+
+        fn evaluate_batch(&self, games: &[&GameState]) -> Result<Vec<EvalResult>, BackendError> {
+            let remaining = self.calls_before_fail.fetch_sub(1, Ordering::SeqCst);
+            if remaining == 0 {
+                return Err(BackendError::msg("intentional batch failure"));
+            }
+            // Return dummy results
+            Ok(games
+                .iter()
+                .map(|g| SmartUniformBackend.evaluate(g).unwrap())
+                .collect())
         }
     }
 
@@ -334,8 +380,8 @@ mod tests {
         );
         let game = open_5x5(Coordinates::new(2, 2), Coordinates::new(0, 0));
 
-        let mux_result = mux.evaluate(&game);
-        let direct_result = SmartUniformBackend.evaluate(&game);
+        let mux_result = mux.evaluate(&game).unwrap();
+        let direct_result = SmartUniformBackend.evaluate(&game).unwrap();
 
         assert_eq!(mux_result.policy_p1, direct_result.policy_p1);
         assert_eq!(mux_result.policy_p2, direct_result.policy_p2);
@@ -357,8 +403,8 @@ mod tests {
         ];
 
         for game in &games {
-            let mux_result = mux.evaluate(game);
-            let direct_result = SmartUniformBackend.evaluate(game);
+            let mux_result = mux.evaluate(game).unwrap();
+            let direct_result = SmartUniformBackend.evaluate(game).unwrap();
             assert_eq!(mux_result.policy_p1, direct_result.policy_p1);
             assert_eq!(mux_result.policy_p2, direct_result.policy_p2);
         }
@@ -377,8 +423,8 @@ mod tests {
         ];
         let refs: Vec<&GameState> = games.iter().collect();
 
-        let mux_results = mux.evaluate_batch(&refs);
-        let direct_results = SmartUniformBackend.evaluate_batch(&refs);
+        let mux_results = mux.evaluate_batch(&refs).unwrap();
+        let direct_results = SmartUniformBackend.evaluate_batch(&refs).unwrap();
 
         assert_eq!(mux_results.len(), 2);
         for (m, d) in mux_results.iter().zip(direct_results.iter()) {
@@ -404,8 +450,8 @@ mod tests {
                     let game = open_5x5(Coordinates::new(x, 0), Coordinates::new(2, 2));
                     let refs: Vec<&GameState> = vec![&game];
 
-                    let mux_result = mux.evaluate_batch(&refs);
-                    let direct_result = SmartUniformBackend.evaluate(&game);
+                    let mux_result = mux.evaluate_batch(&refs).unwrap();
+                    let direct_result = SmartUniformBackend.evaluate(&game).unwrap();
 
                     assert_eq!(mux_result.len(), 1);
                     assert_eq!(mux_result[0].policy_p1, direct_result.policy_p1);
@@ -500,7 +546,7 @@ mod tests {
             MuxConfig { max_batch_size: 64 },
         );
 
-        let results = mux.evaluate_batch(&[]);
+        let results = mux.evaluate_batch(&[]).unwrap();
         assert!(results.is_empty());
     }
 
@@ -524,5 +570,39 @@ mod tests {
         let game = open_5x5(Coordinates::new(2, 2), Coordinates::new(0, 0));
         let _ = mux.evaluate(&game);
         drop(mux); // should not hang or panic
+    }
+
+    #[test]
+    fn failing_backend_propagates_error() {
+        let mux = MuxBackend::new(
+            FailingBackend::new(0),
+            MuxConfig { max_batch_size: 64 },
+        );
+        let game = open_5x5(Coordinates::new(2, 2), Coordinates::new(0, 0));
+
+        let result = mux.evaluate(&game);
+        assert!(result.is_err());
+        assert!(
+            result.unwrap_err().to_string().contains("intentional"),
+            "error message should mention the failure reason"
+        );
+    }
+
+    #[test]
+    fn failing_backend_worker_continues() {
+        // After an error, the mux worker should still process subsequent requests.
+        let mux = MuxBackend::new(
+            FailingBackend::new(1), // first call succeeds, second fails
+            MuxConfig { max_batch_size: 64 },
+        );
+        let game = open_5x5(Coordinates::new(2, 2), Coordinates::new(0, 0));
+
+        // First call succeeds
+        let result1 = mux.evaluate(&game);
+        assert!(result1.is_ok());
+
+        // Second call fails
+        let result2 = mux.evaluate(&game);
+        assert!(result2.is_err());
     }
 }

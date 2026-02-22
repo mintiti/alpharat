@@ -112,7 +112,7 @@ def run_sampling_phase(
         batch_group: Name for the batch group.
         checkpoint_path: Path to checkpoint for NN-guided sampling, or None.
         experiments_dir: Experiments directory.
-        device: Device for NN inference (unused — Rust uses ONNX CPU).
+        device: ONNX execution provider — "auto", "cpu", "coreml", "mps", "cuda".
 
     Returns:
         Path to the created batch directory.
@@ -139,6 +139,7 @@ def run_sampling_phase(
         group=batch_group,
         num_threads=config.sampling.workers,
         checkpoint=str(checkpoint_path) if checkpoint_path else None,
+        device=device,
         experiments_dir=experiments_dir,
     )
     return batch_dir

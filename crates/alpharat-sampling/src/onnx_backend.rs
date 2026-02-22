@@ -1,7 +1,7 @@
 #[cfg(feature = "onnx")]
 mod inner {
     use crate::encoder::ObservationEncoder;
-    use alpharat_mcts::{Backend, EvalResult};
+    use alpharat_mcts::{Backend, BackendError, EvalResult};
     use ort::session::Session;
     use ort::value::Tensor;
     use pyrat::GameState;
@@ -23,78 +23,89 @@ mod inner {
 
     impl<E: ObservationEncoder> OnnxBackend<E> {
         /// Create an ONNX backend with CPU execution provider.
-        pub fn new(model_path: impl AsRef<std::path::Path>, encoder: E) -> Self {
+        pub fn new(
+            model_path: impl AsRef<std::path::Path>,
+            encoder: E,
+        ) -> Result<Self, BackendError> {
             let session = Session::builder()
-                .expect("failed to create ONNX session builder")
+                .map_err(|e| BackendError::msg(format!("failed to create ONNX session builder: {e}")))?
                 .with_intra_threads(1)
-                .expect("failed to set intra-op thread count")
+                .map_err(|e| BackendError::msg(format!("failed to set intra-op thread count: {e}")))?
                 .commit_from_file(model_path)
-                .expect("failed to load ONNX model");
+                .map_err(|e| BackendError::msg(format!("failed to load ONNX model: {e}")))?;
             Self::build(session, encoder)
         }
 
         /// Create an ONNX backend with CoreML execution provider (macOS).
         #[cfg(feature = "onnx-coreml")]
-        pub fn with_coreml(model_path: impl AsRef<std::path::Path>, encoder: E) -> Self {
+        pub fn with_coreml(
+            model_path: impl AsRef<std::path::Path>,
+            encoder: E,
+        ) -> Result<Self, BackendError> {
             let session = Session::builder()
-                .expect("failed to create ONNX session builder")
+                .map_err(|e| BackendError::msg(format!("failed to create ONNX session builder: {e}")))?
                 .with_intra_threads(1)
-                .expect("failed to set intra-op thread count")
+                .map_err(|e| BackendError::msg(format!("failed to set intra-op thread count: {e}")))?
                 .with_execution_providers([
                     ort::execution_providers::CoreMLExecutionProvider::default().build(),
                 ])
-                .expect("failed to register CoreML EP")
+                .map_err(|e| BackendError::msg(format!("failed to register CoreML EP: {e}")))?
                 .commit_from_file(model_path)
-                .expect("failed to load ONNX model");
+                .map_err(|e| BackendError::msg(format!("failed to load ONNX model: {e}")))?;
             Self::build(session, encoder)
         }
 
         /// Create an ONNX backend with CUDA execution provider (Linux).
         #[cfg(feature = "onnx-cuda")]
-        pub fn with_cuda(model_path: impl AsRef<std::path::Path>, encoder: E) -> Self {
+        pub fn with_cuda(
+            model_path: impl AsRef<std::path::Path>,
+            encoder: E,
+        ) -> Result<Self, BackendError> {
             let session = Session::builder()
-                .expect("failed to create ONNX session builder")
+                .map_err(|e| BackendError::msg(format!("failed to create ONNX session builder: {e}")))?
                 .with_intra_threads(1)
-                .expect("failed to set intra-op thread count")
+                .map_err(|e| BackendError::msg(format!("failed to set intra-op thread count: {e}")))?
                 .with_execution_providers([
                     ort::execution_providers::CUDAExecutionProvider::default().build(),
                 ])
-                .expect("failed to register CUDA EP")
+                .map_err(|e| BackendError::msg(format!("failed to register CUDA EP: {e}")))?
                 .commit_from_file(model_path)
-                .expect("failed to load ONNX model");
+                .map_err(|e| BackendError::msg(format!("failed to load ONNX model: {e}")))?;
             Self::build(session, encoder)
         }
 
         /// Validate encoder/model compatibility, then construct.
-        fn build(session: Session, encoder: E) -> Self {
+        fn build(session: Session, encoder: E) -> Result<Self, BackendError> {
             let inputs = session.inputs();
-            assert!(!inputs.is_empty(), "ONNX model has no inputs");
+            if inputs.is_empty() {
+                return Err(BackendError::msg("ONNX model has no inputs"));
+            }
             if let Some(shape) = inputs[0].dtype().tensor_shape() {
                 // shape[1] is obs_dim in [batch, obs_dim]
                 if shape.len() >= 2 && shape[1] >= 0 {
                     // -1 means dynamic, skip check
-                    assert_eq!(
-                        shape[1] as usize,
-                        encoder.obs_dim(),
-                        "encoder obs_dim ({}) doesn't match ONNX model input dim ({})",
-                        encoder.obs_dim(),
-                        shape[1]
-                    );
+                    if shape[1] as usize != encoder.obs_dim() {
+                        return Err(BackendError::msg(format!(
+                            "encoder obs_dim ({}) doesn't match ONNX model input dim ({})",
+                            encoder.obs_dim(),
+                            shape[1]
+                        )));
+                    }
                 }
             }
-            Self {
+            Ok(Self {
                 session: Mutex::new(session),
                 encoder,
-            }
+            })
         }
     }
 
     impl<E: ObservationEncoder> Backend for OnnxBackend<E> {
-        fn evaluate(&self, game: &GameState) -> EvalResult {
-            self.evaluate_batch(&[game])[0]
+        fn evaluate(&self, game: &GameState) -> Result<EvalResult, BackendError> {
+            Ok(self.evaluate_batch(&[game])?[0])
         }
 
-        fn evaluate_batch(&self, games: &[&GameState]) -> Vec<EvalResult> {
+        fn evaluate_batch(&self, games: &[&GameState]) -> Result<Vec<EvalResult>, BackendError> {
             let n = games.len();
             let obs_dim = self.encoder.obs_dim();
 
@@ -106,30 +117,30 @@ mod inner {
 
             // Create input tensor from (shape, data) — no ndarray needed
             let input = Tensor::from_array(([n, obs_dim], buf))
-                .expect("failed to create ONNX input tensor");
+                .map_err(|e| BackendError::msg(format!("failed to create ONNX input tensor: {e}")))?;
 
             // Run inference (needs &mut session)
             let mut session = self.session.lock().expect("session lock poisoned");
             let outputs = session
                 .run(ort::inputs!["observation" => input])
-                .expect("ONNX inference failed");
+                .map_err(|e| BackendError::msg(format!("ONNX inference failed: {e}")))?;
 
             // Extract outputs by name as flat slices:
             //   policy_p1[N,5], policy_p2[N,5], pred_value_p1[N], pred_value_p2[N]
             let (_shape, pp1_data) = outputs["policy_p1"]
                 .try_extract_tensor::<f32>()
-                .expect("failed to extract policy_p1");
+                .map_err(|e| BackendError::msg(format!("failed to extract policy_p1: {e}")))?;
             let (_shape, pp2_data) = outputs["policy_p2"]
                 .try_extract_tensor::<f32>()
-                .expect("failed to extract policy_p2");
+                .map_err(|e| BackendError::msg(format!("failed to extract policy_p2: {e}")))?;
             let (_shape, v1_data) = outputs["pred_value_p1"]
                 .try_extract_tensor::<f32>()
-                .expect("failed to extract pred_value_p1");
+                .map_err(|e| BackendError::msg(format!("failed to extract pred_value_p1: {e}")))?;
             let (_shape, v2_data) = outputs["pred_value_p2"]
                 .try_extract_tensor::<f32>()
-                .expect("failed to extract pred_value_p2");
+                .map_err(|e| BackendError::msg(format!("failed to extract pred_value_p2: {e}")))?;
 
-            (0..n)
+            Ok((0..n)
                 .map(|i| {
                     let p1_off = i * 5;
                     let p2_off = i * 5;
@@ -160,7 +171,7 @@ mod inner {
                     );
                     result
                 })
-                .collect()
+                .collect())
         }
     }
 }

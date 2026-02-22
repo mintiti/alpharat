@@ -1,4 +1,4 @@
-use alpharat_mcts::{run_search, Backend, MCTSTree, SearchConfig, SearchResult};
+use alpharat_mcts::{run_search, Backend, BackendError, MCTSTree, SearchConfig, SearchResult};
 use pyrat::{Coordinates, Direction, GameState};
 use rand::distributions::WeightedIndex;
 use rand::prelude::Distribution;
@@ -10,6 +10,47 @@ use std::sync::atomic::{AtomicU32, AtomicU64, Ordering::Relaxed};
 use std::time::Instant;
 
 use crate::recording::BundleWriter;
+
+// ---------------------------------------------------------------------------
+// SelfPlayError — wraps backend + I/O errors
+// ---------------------------------------------------------------------------
+
+/// Error from self-play: either a backend evaluation failure or an I/O error.
+#[derive(Debug)]
+pub enum SelfPlayError {
+    Backend(BackendError),
+    Io(io::Error),
+}
+
+impl std::fmt::Display for SelfPlayError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Backend(e) => write!(f, "backend error: {e}"),
+            Self::Io(e) => write!(f, "I/O error: {e}"),
+        }
+    }
+}
+
+impl std::error::Error for SelfPlayError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Backend(e) => Some(e),
+            Self::Io(e) => Some(e),
+        }
+    }
+}
+
+impl From<BackendError> for SelfPlayError {
+    fn from(e: BackendError) -> Self {
+        Self::Backend(e)
+    }
+}
+
+impl From<io::Error> for SelfPlayError {
+    fn from(e: io::Error) -> Self {
+        Self::Io(e)
+    }
+}
 
 // ---------------------------------------------------------------------------
 // Data structures
@@ -468,7 +509,7 @@ pub fn play_game(
     config: &SelfPlayConfig,
     rng: &mut impl rand::Rng,
     game_index: u32,
-) -> GameRecord {
+) -> Result<GameRecord, BackendError> {
     let w = game.width as u8;
     let h = game.height as u8;
 
@@ -492,7 +533,7 @@ pub fn play_game(
             config.n_sims,
             config.batch_size,
             rng,
-        );
+        )?;
         total_simulations += result.total_visits as u64;
         total_nn_evals += result.nn_evals as u64;
         total_terminals += result.terminals as u64;
@@ -526,7 +567,7 @@ pub fn play_game(
 
     let cheese_outcomes = compute_cheese_outcomes(&positions, &game, w, h);
 
-    GameRecord {
+    Ok(GameRecord {
         width: w,
         height: h,
         max_turns: game.max_turns as u16,
@@ -543,7 +584,7 @@ pub fn play_game(
         total_nn_evals,
         total_terminals,
         total_collisions,
-    }
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -561,12 +602,12 @@ pub fn run_self_play(
     search_config: &SearchConfig,
     config: &SelfPlayConfig,
     progress: Option<&SelfPlayProgress>,
-) -> SelfPlayResult {
+) -> Result<SelfPlayResult, BackendError> {
     let start = Instant::now();
     let next_game = AtomicU32::new(0);
     let n_games = games.len();
 
-    let all_results: Vec<Vec<GameRecord>> = std::thread::scope(|s| {
+    let all_results: Vec<Result<Vec<GameRecord>, BackendError>> = std::thread::scope(|s| {
         let handles: Vec<_> = (0..config.num_threads)
             .map(|_| {
                 s.spawn(|| {
@@ -584,7 +625,7 @@ pub fn run_self_play(
                             config,
                             &mut rng,
                             idx as u32,
-                        );
+                        )?;
 
                         if let Some(p) = progress {
                             p.positions_completed
@@ -598,7 +639,7 @@ pub fn run_self_play(
 
                         local.push(record);
                     }
-                    local
+                    Ok(local)
                 })
             })
             .collect();
@@ -606,16 +647,20 @@ pub fn run_self_play(
         handles.into_iter().map(|h| h.join().unwrap()).collect()
     });
 
-    let mut game_records: Vec<GameRecord> = all_results.into_iter().flatten().collect();
+    // Fail fast: return first error
+    let mut game_records: Vec<GameRecord> = Vec::new();
+    for result in all_results {
+        game_records.extend(result?);
+    }
     game_records.sort_by_key(|g| g.game_index);
 
     let elapsed = start.elapsed().as_secs_f64();
     let stats = SelfPlayStats::from_games(&game_records, elapsed);
 
-    SelfPlayResult {
+    Ok(SelfPlayResult {
         games: game_records,
         stats,
-    }
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -642,7 +687,7 @@ pub fn run_self_play_to_disk(
     output_dir: &Path,
     max_games_per_bundle: usize,
     progress: Option<&SelfPlayProgress>,
-) -> io::Result<SelfPlayToDiskResult> {
+) -> Result<SelfPlayToDiskResult, SelfPlayError> {
     if games.is_empty() {
         return Ok(SelfPlayToDiskResult {
             stats: SelfPlayStats::from_games(&[], 0.0),
@@ -673,51 +718,62 @@ pub fn run_self_play_to_disk(
     });
 
     // Game threads (scoped — borrow games, backend, etc.)
+    // Collect thread results to propagate backend errors.
     let next_game = AtomicU32::new(0);
     let n_games = games.len();
 
-    std::thread::scope(|s| {
-        for _ in 0..config.num_threads {
-            let tx = tx.clone();
-            s.spawn({
-                let next_game = &next_game;
-                move || {
-                    let mut rng = SmallRng::from_entropy();
-                    loop {
-                        let idx = next_game.fetch_add(1, Relaxed) as usize;
-                        if idx >= n_games {
-                            break;
-                        }
-                        let record = play_game(
-                            games[idx].clone(),
-                            backend,
-                            search_config,
-                            config,
-                            &mut rng,
-                            idx as u32,
-                        );
+    let thread_results: Vec<Result<(), BackendError>> = std::thread::scope(|s| {
+        let handles: Vec<_> = (0..config.num_threads)
+            .map(|_| {
+                let tx = tx.clone();
+                s.spawn({
+                    let next_game = &next_game;
+                    move || -> Result<(), BackendError> {
+                        let mut rng = SmallRng::from_entropy();
+                        loop {
+                            let idx = next_game.fetch_add(1, Relaxed) as usize;
+                            if idx >= n_games {
+                                break;
+                            }
+                            let record = play_game(
+                                games[idx].clone(),
+                                backend,
+                                search_config,
+                                config,
+                                &mut rng,
+                                idx as u32,
+                            )?;
 
-                        if let Some(p) = progress {
-                            p.positions_completed
-                                .fetch_add(record.positions.len() as u64, Relaxed);
-                            p.simulations_completed
-                                .fetch_add(record.total_simulations, Relaxed);
-                            p.nn_evals_completed
-                                .fetch_add(record.total_nn_evals, Relaxed);
-                            p.games_completed.fetch_add(1, Relaxed);
-                        }
+                            if let Some(p) = progress {
+                                p.positions_completed
+                                    .fetch_add(record.positions.len() as u64, Relaxed);
+                                p.simulations_completed
+                                    .fetch_add(record.total_simulations, Relaxed);
+                                p.nn_evals_completed
+                                    .fetch_add(record.total_nn_evals, Relaxed);
+                                p.games_completed.fetch_add(1, Relaxed);
+                            }
 
-                        // If writer errored and rx is dropped, we still finish playing
-                        // but the record is lost. That's fine.
-                        let _ = tx.send(record);
+                            // If writer errored and rx is dropped, we still finish playing
+                            // but the record is lost. That's fine.
+                            let _ = tx.send(record);
+                        }
+                        Ok(())
                     }
-                }
-            });
-        }
+                })
+            })
+            .collect();
+
+        handles.into_iter().map(|h| h.join().unwrap()).collect()
     });
 
     // Drop the original sender to close the channel.
     drop(tx);
+
+    // Check for backend errors from game threads.
+    for result in thread_results {
+        result?;
+    }
 
     // Join writer thread.
     let (written_paths, mut stats) = writer_handle.join().unwrap()?;
@@ -879,7 +935,7 @@ mod tests {
         let search = SearchConfig::default();
         let sp = SelfPlayConfig { n_sims: 16, batch_size: 8, num_threads: 1 };
         let mut rng = SmallRng::seed_from_u64(42);
-        let record = play_game(game, &BACKEND, &search, &sp, &mut rng, 0);
+        let record = play_game(game, &BACKEND, &search, &sp, &mut rng, 0).unwrap();
 
         assert!(!record.positions.is_empty(), "should have at least one position");
         assert!(record.positions.len() <= 5, "max 5 turns");
@@ -897,7 +953,7 @@ mod tests {
         let search = SearchConfig::default();
         let sp = SelfPlayConfig { n_sims: 16, batch_size: 8, num_threads: 1 };
         let mut rng = SmallRng::seed_from_u64(42);
-        let record = play_game(game, &BACKEND, &search, &sp, &mut rng, 0);
+        let record = play_game(game, &BACKEND, &search, &sp, &mut rng, 0).unwrap();
 
         let first = &record.positions[0];
         assert_eq!(first.p1_pos, [0, 0], "P1 starts at (0,0)");
@@ -919,7 +975,7 @@ mod tests {
         let search = SearchConfig::default();
         let sp = SelfPlayConfig { n_sims: 32, batch_size: 8, num_threads: 1 };
         let mut rng = SmallRng::seed_from_u64(42);
-        let record = play_game(game, &BACKEND, &search, &sp, &mut rng, 0);
+        let record = play_game(game, &BACKEND, &search, &sp, &mut rng, 0).unwrap();
 
         assert!(record.total_simulations > 0);
         // Should be approximately n_sims * num_positions
@@ -939,7 +995,7 @@ mod tests {
         let search = SearchConfig::default();
         let sp = SelfPlayConfig { n_sims: 8, batch_size: 8, num_threads: 1 };
         let mut rng = SmallRng::seed_from_u64(42);
-        let record = play_game(game, &BACKEND, &search, &sp, &mut rng, 0);
+        let record = play_game(game, &BACKEND, &search, &sp, &mut rng, 0).unwrap();
 
         assert_eq!(record.maze.len(), 5 * 5 * 4);
         assert_eq!(record.initial_cheese.len(), 25);
@@ -954,7 +1010,7 @@ mod tests {
         let search = SearchConfig::default();
         let sp = SelfPlayConfig { n_sims: 8, batch_size: 8, num_threads: 2 };
 
-        let result = run_self_play(&games, &BACKEND, &search, &sp, None);
+        let result = run_self_play(&games, &BACKEND, &search, &sp, None).unwrap();
 
         assert_eq!(result.games.len(), 10);
         assert_eq!(result.stats.total_games, 10);
@@ -966,7 +1022,7 @@ mod tests {
         let search = SearchConfig::default();
         let sp = SelfPlayConfig { n_sims: 8, batch_size: 8, num_threads: 4 };
 
-        let result = run_self_play(&games, &BACKEND, &search, &sp, None);
+        let result = run_self_play(&games, &BACKEND, &search, &sp, None).unwrap();
 
         // Results should be sorted by game_index
         for (i, record) in result.games.iter().enumerate() {
@@ -981,7 +1037,7 @@ mod tests {
         let sp = SelfPlayConfig { n_sims: 8, batch_size: 8, num_threads: 2 };
         let progress = SelfPlayProgress::new();
 
-        let result = run_self_play(&games, &BACKEND, &search, &sp, Some(&progress));
+        let result = run_self_play(&games, &BACKEND, &search, &sp, Some(&progress)).unwrap();
 
         assert_eq!(progress.games_completed.load(Relaxed), 4);
         assert_eq!(
@@ -1308,7 +1364,7 @@ mod tests {
         let search = SearchConfig::default();
         let sp = SelfPlayConfig { n_sims: 16, batch_size: 8, num_threads: 1 };
         let mut rng = SmallRng::seed_from_u64(42);
-        let record = play_game(game, &BACKEND, &search, &sp, &mut rng, 0);
+        let record = play_game(game, &BACKEND, &search, &sp, &mut rng, 0).unwrap();
 
         assert_eq!(record.cheese_outcomes.len(), 25, "should be H*W");
 
@@ -1370,7 +1426,7 @@ mod tests {
         let search = SearchConfig::default();
         let sp = SelfPlayConfig { n_sims: 1, batch_size: 1, num_threads: 1 };
         let mut rng = SmallRng::seed_from_u64(42);
-        let record = play_game(game, &BACKEND, &search, &sp, &mut rng, 0);
+        let record = play_game(game, &BACKEND, &search, &sp, &mut rng, 0).unwrap();
 
         // Should still complete without panicking.
         assert!(!record.positions.is_empty());
@@ -1383,7 +1439,7 @@ mod tests {
         let search = SearchConfig::default();
         let sp = SelfPlayConfig { n_sims: 16, batch_size: 8, num_threads: 1 };
         let mut rng = SmallRng::seed_from_u64(42);
-        let record = play_game(game, &BACKEND, &search, &sp, &mut rng, 0);
+        let record = play_game(game, &BACKEND, &search, &sp, &mut rng, 0).unwrap();
 
         match record.result {
             GameOutcome::P1Win => assert!(record.final_p1_score > record.final_p2_score),
@@ -1400,7 +1456,7 @@ mod tests {
         let search = SearchConfig::default();
         let sp = SelfPlayConfig { n_sims: 8, batch_size: 8, num_threads: 2 };
 
-        let result = run_self_play(&games, &BACKEND, &search, &sp, None);
+        let result = run_self_play(&games, &BACKEND, &search, &sp, None).unwrap();
 
         assert!(result.games.is_empty());
         assert_eq!(result.stats.total_games, 0);
@@ -1414,7 +1470,7 @@ mod tests {
         let search = SearchConfig::default();
         let sp = SelfPlayConfig { n_sims: 8, batch_size: 8, num_threads: 8 };
 
-        let result = run_self_play(&games, &BACKEND, &search, &sp, None);
+        let result = run_self_play(&games, &BACKEND, &search, &sp, None).unwrap();
 
         assert_eq!(result.games.len(), 2);
         assert_eq!(result.stats.total_games, 2);

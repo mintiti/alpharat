@@ -14,7 +14,8 @@ pub use mux_backend::{MuxBackend, MuxConfig, MuxStats};
 pub use recording::{write_bundle, BundleWriter};
 pub use selfplay::{
     play_game, run_self_play, run_self_play_to_disk, CheeseOutcome, GameRecord, PositionRecord,
-    SelfPlayConfig, SelfPlayProgress, SelfPlayResult, SelfPlayStats, SelfPlayToDiskResult,
+    SelfPlayConfig, SelfPlayError, SelfPlayProgress, SelfPlayResult, SelfPlayStats,
+    SelfPlayToDiskResult,
 };
 
 #[cfg(feature = "onnx")]
