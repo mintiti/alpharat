@@ -17,6 +17,7 @@ import optuna
 import pandas as pd
 
 from alpharat.ai import GreedyAgent
+from alpharat.config.game import GameConfig
 from alpharat.eval.game import play_game
 from alpharat.mcts.config import RustMCTSConfig
 
@@ -57,6 +58,16 @@ SEED_CONFIGS = [
     {**cfg, "fpu_reduction": fpu} for cfg in _PARETO_FRONT for fpu in (0.2, 0.33)
 ] + _TUNED_CONFIGS
 
+_ENGINE_CFG = GameConfig(
+    width=WIDTH,
+    height=HEIGHT,
+    cheese_count=CHEESE_COUNT,
+    max_turns=MAX_TURNS,
+    wall_density=WALL_DENSITY,
+    mud_density=MUD_DENSITY,
+    symmetric=True,
+).to_engine_config()
+
 
 def objective(trial: optuna.Trial) -> tuple[float, int]:
     """Run games vs Greedy, return win rate."""
@@ -76,17 +87,8 @@ def objective(trial: optuna.Trial) -> tuple[float, int]:
         ).build_agent()
         opponent = GreedyAgent()
 
-        result = play_game(
-            agent,
-            opponent,
-            seed=game_idx,
-            width=WIDTH,
-            height=HEIGHT,
-            cheese_count=CHEESE_COUNT,
-            max_turns=MAX_TURNS,
-            wall_density=WALL_DENSITY,
-            mud_density=MUD_DENSITY,
-        )
+        game = _ENGINE_CFG.create(seed=game_idx)
+        result = play_game(agent, opponent, game)
         if result.winner == 1:
             wins += 1
         elif result.winner == 0:

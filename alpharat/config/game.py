@@ -15,6 +15,7 @@ from pydantic import Field, model_validator
 from alpharat.config.base import StrictBaseModel
 
 if TYPE_CHECKING:
+    from pyrat_engine.core import GameConfig as EngineGameConfig
     from pyrat_engine.core.game import PyRat
 
 
@@ -70,14 +71,10 @@ class GameConfig(StrictBaseModel):
             )
         return self
 
-    def build(self, seed: int) -> PyRat:
-        """Create a PyRat game instance from this config.
+    def to_engine_config(self) -> EngineGameConfig:
+        """Build a reusable pyrat_engine GameConfig template.
 
-        Args:
-            seed: Random seed for maze generation.
-
-        Returns:
-            Configured PyRat game instance.
+        The returned config can stamp out game instances cheaply via .create(seed=N).
         """
         from pyrat_engine.core import GameBuilder
 
@@ -93,4 +90,15 @@ class GameConfig(StrictBaseModel):
             builder = builder.with_classic_maze()
         builder = builder.with_corner_positions()
         builder = builder.with_random_cheese(self.cheese_count, symmetric=self.symmetric)
-        return builder.build().create(seed=seed)
+        return builder.build()
+
+    def build(self, seed: int) -> PyRat:
+        """Create a PyRat game instance from this config.
+
+        Args:
+            seed: Random seed for maze generation.
+
+        Returns:
+            Configured PyRat game instance.
+        """
+        return self.to_engine_config().create(seed=seed)
