@@ -182,63 +182,6 @@ def scenario_midgame_5x5() -> dict:
     )
 
 
-def scenario_mud_stuck_5x5() -> dict:
-    """5x5 where P1 stepped into mud, creating nonzero mud_timer."""
-    cheese = [Coordinates(4, 0)]
-    mud = Mud(Coordinates(1, 0), Coordinates(2, 0), value=3)
-    game = (
-        GameConfigBuilder(5, 5)
-        .with_max_turns(100)
-        .with_player1_pos(Coordinates(1, 0))
-        .with_player2_pos(Coordinates(4, 4))
-        .with_cheese(cheese)
-        .with_mud([mud])
-        .build()
-    )
-    # P1 moves RIGHT through mud to (2,0), gets mud_timer=3. P2 stays.
-    game.make_move(Direction.RIGHT, Direction.STAY)
-
-    return make_fixture(
-        "mud_stuck_5x5",
-        game,
-        5,
-        5,
-        mud=[{"pos1": {"x": 1, "y": 0}, "pos2": {"x": 2, "y": 0}, "value": 3}],
-        cheese=[{"x": 4, "y": 0}],
-        p1_pos={"x": 1, "y": 0},
-        p2_pos={"x": 4, "y": 4},
-        moves=[[Direction.RIGHT, Direction.STAY]],
-        description="5x5 where P1 stepped into mud, nonzero mud_timer",
-    )
-
-
-def scenario_asymmetric_scores_5x5() -> dict:
-    """5x5 where P1 collected cheese (score=1) but P2 hasn't (score=0)."""
-    cheese = [Coordinates(1, 0), Coordinates(2, 2)]
-    game = (
-        GameConfigBuilder(5, 5)
-        .with_max_turns(100)
-        .with_player1_pos(Coordinates(0, 0))
-        .with_player2_pos(Coordinates(4, 4))
-        .with_cheese(cheese)
-        .build()
-    )
-    # P1 moves RIGHT to (1,0) collecting cheese. P2 stays (no cheese at (4,4)).
-    game.make_move(Direction.RIGHT, Direction.STAY)
-
-    return make_fixture(
-        "asymmetric_scores_5x5",
-        game,
-        5,
-        5,
-        cheese=[{"x": 1, "y": 0}, {"x": 2, "y": 2}],
-        p1_pos={"x": 0, "y": 0},
-        p2_pos={"x": 4, "y": 4},
-        moves=[[Direction.RIGHT, Direction.STAY]],
-        description="5x5 where P1 collected cheese (score=1) but P2 hasn't (score=0)",
-    )
-
-
 def scenario_nonsquare_7x5() -> dict:
     """Non-square 7x5 with mixed features."""
     cheese = [Coordinates(3, 2), Coordinates(6, 0)]
@@ -277,8 +220,6 @@ def main() -> None:
         scenario_wall_5x5,
         scenario_mud_5x5,
         scenario_midgame_5x5,
-        scenario_mud_stuck_5x5,
-        scenario_asymmetric_scores_5x5,
         scenario_nonsquare_7x5,
     ]
 

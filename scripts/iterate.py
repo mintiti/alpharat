@@ -411,7 +411,7 @@ def main() -> None:
         "--device",
         type=str,
         default="auto",
-        help="Device for inference (auto, cpu, cuda, coreml, mps, tensorrt)",
+        help="Device for training/inference (auto, cpu, cuda, mps)",
     )
     args = parser.parse_args()
 

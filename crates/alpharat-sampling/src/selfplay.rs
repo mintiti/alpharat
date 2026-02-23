@@ -591,54 +591,6 @@ pub fn play_game(
 // Multi-game orchestration
 // ---------------------------------------------------------------------------
 
-/// Work-stealing game loop shared by `run_self_play` and `run_self_play_to_disk`.
-///
-/// Each call claims games via `next_game`, plays them, updates progress counters,
-/// and passes completed records to `on_record`. Only the record destination differs
-/// between callers (vec push vs channel send).
-fn game_worker_loop<F>(
-    games: &[GameState],
-    backend: &dyn Backend,
-    search_config: &SearchConfig,
-    config: &SelfPlayConfig,
-    next_game: &AtomicU32,
-    progress: Option<&SelfPlayProgress>,
-    mut on_record: F,
-) -> Result<(), BackendError>
-where
-    F: FnMut(GameRecord),
-{
-    let n_games = games.len();
-    let mut rng = SmallRng::from_entropy();
-    loop {
-        let idx = next_game.fetch_add(1, Relaxed) as usize;
-        if idx >= n_games {
-            break;
-        }
-        let record = play_game(
-            games[idx].clone(),
-            backend,
-            search_config,
-            config,
-            &mut rng,
-            idx as u32,
-        )?;
-
-        if let Some(p) = progress {
-            p.positions_completed
-                .fetch_add(record.positions.len() as u64, Relaxed);
-            p.simulations_completed
-                .fetch_add(record.total_simulations, Relaxed);
-            p.nn_evals_completed
-                .fetch_add(record.total_nn_evals, Relaxed);
-            p.games_completed.fetch_add(1, Relaxed);
-        }
-
-        on_record(record);
-    }
-    Ok(())
-}
-
 /// Run self-play on a slice of games using `config.num_threads` worker threads.
 ///
 /// Each thread claims games by atomic index, clones + plays them.
@@ -653,21 +605,40 @@ pub fn run_self_play(
 ) -> Result<SelfPlayResult, BackendError> {
     let start = Instant::now();
     let next_game = AtomicU32::new(0);
+    let n_games = games.len();
 
     let all_results: Vec<Result<Vec<GameRecord>, BackendError>> = std::thread::scope(|s| {
         let handles: Vec<_> = (0..config.num_threads)
             .map(|_| {
                 s.spawn(|| {
+                    let mut rng = SmallRng::from_entropy();
                     let mut local = Vec::new();
-                    game_worker_loop(
-                        games,
-                        backend,
-                        search_config,
-                        config,
-                        &next_game,
-                        progress,
-                        |record| local.push(record),
-                    )?;
+                    loop {
+                        let idx = next_game.fetch_add(1, Relaxed) as usize;
+                        if idx >= n_games {
+                            break;
+                        }
+                        let record = play_game(
+                            games[idx].clone(),
+                            backend,
+                            search_config,
+                            config,
+                            &mut rng,
+                            idx as u32,
+                        )?;
+
+                        if let Some(p) = progress {
+                            p.positions_completed
+                                .fetch_add(record.positions.len() as u64, Relaxed);
+                            p.simulations_completed
+                                .fetch_add(record.total_simulations, Relaxed);
+                            p.nn_evals_completed
+                                .fetch_add(record.total_nn_evals, Relaxed);
+                            p.games_completed.fetch_add(1, Relaxed);
+                        }
+
+                        local.push(record);
+                    }
                     Ok(local)
                 })
             })
@@ -749,26 +720,46 @@ pub fn run_self_play_to_disk(
     // Game threads (scoped — borrow games, backend, etc.)
     // Collect thread results to propagate backend errors.
     let next_game = AtomicU32::new(0);
+    let n_games = games.len();
 
     let thread_results: Vec<Result<(), BackendError>> = std::thread::scope(|s| {
-        let next_game = &next_game;
         let handles: Vec<_> = (0..config.num_threads)
             .map(|_| {
                 let tx = tx.clone();
-                s.spawn(move || {
-                    game_worker_loop(
-                        games,
-                        backend,
-                        search_config,
-                        config,
-                        next_game,
-                        progress,
-                        |record| {
+                s.spawn({
+                    let next_game = &next_game;
+                    move || -> Result<(), BackendError> {
+                        let mut rng = SmallRng::from_entropy();
+                        loop {
+                            let idx = next_game.fetch_add(1, Relaxed) as usize;
+                            if idx >= n_games {
+                                break;
+                            }
+                            let record = play_game(
+                                games[idx].clone(),
+                                backend,
+                                search_config,
+                                config,
+                                &mut rng,
+                                idx as u32,
+                            )?;
+
+                            if let Some(p) = progress {
+                                p.positions_completed
+                                    .fetch_add(record.positions.len() as u64, Relaxed);
+                                p.simulations_completed
+                                    .fetch_add(record.total_simulations, Relaxed);
+                                p.nn_evals_completed
+                                    .fetch_add(record.total_nn_evals, Relaxed);
+                                p.games_completed.fetch_add(1, Relaxed);
+                            }
+
                             // If writer errored and rx is dropped, we still finish playing
                             // but the record is lost. That's fine.
                             let _ = tx.send(record);
-                        },
-                    )
+                        }
+                        Ok(())
+                    }
                 })
             })
             .collect();

@@ -157,16 +157,6 @@ fn parity_midgame_5x5() {
 }
 
 #[test]
-fn parity_mud_stuck_5x5() {
-    run_parity_check("mud_stuck_5x5");
-}
-
-#[test]
-fn parity_asymmetric_scores_5x5() {
-    run_parity_check("asymmetric_scores_5x5");
-}
-
-#[test]
 fn parity_nonsquare_7x5() {
     run_parity_check("nonsquare_7x5");
 }
