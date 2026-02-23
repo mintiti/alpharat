@@ -15,6 +15,7 @@ from pydantic import Field, model_validator
 from alpharat.config.base import StrictBaseModel
 
 if TYPE_CHECKING:
+    from pyrat_engine.core import GameConfig as EngineGameConfig
     from pyrat_engine.core.game import PyRat
 
 
@@ -70,6 +71,27 @@ class GameConfig(StrictBaseModel):
             )
         return self
 
+    def to_engine_config(self) -> EngineGameConfig:
+        """Build a reusable pyrat_engine GameConfig template.
+
+        The returned config can stamp out game instances cheaply via .create(seed=N).
+        """
+        from pyrat_engine.core import GameBuilder
+
+        builder = GameBuilder(self.width, self.height)
+        builder = builder.with_max_turns(self.max_turns)
+        if self.wall_density is not None or self.mud_density is not None or not self.symmetric:
+            builder = builder.with_random_maze(
+                wall_density=self.wall_density if self.wall_density is not None else 0.7,
+                mud_density=self.mud_density if self.mud_density is not None else 0.1,
+                symmetric=self.symmetric,
+            )
+        else:
+            builder = builder.with_classic_maze()
+        builder = builder.with_corner_positions()
+        builder = builder.with_random_cheese(self.cheese_count, symmetric=self.symmetric)
+        return builder.build()
+
     def build(self, seed: int) -> PyRat:
         """Create a PyRat game instance from this config.
 
@@ -79,19 +101,4 @@ class GameConfig(StrictBaseModel):
         Returns:
             Configured PyRat game instance.
         """
-        from pyrat_engine.core.game import PyRat
-
-        kwargs: dict[str, int | float | bool] = {
-            "width": self.width,
-            "height": self.height,
-            "cheese_count": self.cheese_count,
-            "max_turns": self.max_turns,
-            "seed": seed,
-            "symmetric": self.symmetric,
-        }
-        if self.wall_density is not None:
-            kwargs["wall_density"] = self.wall_density
-        if self.mud_density is not None:
-            kwargs["mud_density"] = self.mud_density
-
-        return PyRat(**kwargs)  # type: ignore[arg-type]
+        return self.to_engine_config().create(seed=seed)

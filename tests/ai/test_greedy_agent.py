@@ -6,7 +6,7 @@ GreedyAgent implementation handles walls, mud, and edge cases correctly.
 
 from __future__ import annotations
 
-from pyrat_engine.core import GameConfigBuilder
+from pyrat_engine.core import GameBuilder
 from pyrat_engine.core.types import Coordinates, Direction, Mud, Wall
 
 from alpharat.ai.greedy_agent import GreedyAgent
@@ -18,11 +18,13 @@ class TestGreedyAgentBasic:
     def test_moves_toward_cheese_in_open_maze(self) -> None:
         """Agent moves toward cheese when no obstacles."""
         game = (
-            GameConfigBuilder(5, 5)
-            .with_player1_pos(Coordinates(0, 0))
-            .with_player2_pos(Coordinates(4, 4))
-            .with_cheese([Coordinates(2, 0)])  # Cheese to the right
+            GameBuilder(5, 5)
+            .with_open_maze()
+            .with_custom_positions(Coordinates(0, 0), Coordinates(4, 4))
+            .with_custom_cheese([Coordinates(2, 0)])  # Cheese to the right
+            .with_max_turns(100)
             .build()
+            .create()
         )
         agent = GreedyAgent()
         move = agent.get_move(game, player=1)
@@ -33,11 +35,13 @@ class TestGreedyAgentBasic:
     def test_returns_stay_when_no_cheese(self) -> None:
         """Agent returns STAY when no cheese remains."""
         game = (
-            GameConfigBuilder(5, 5)
-            .with_player1_pos(Coordinates(0, 0))
-            .with_player2_pos(Coordinates(4, 4))
-            .with_cheese([Coordinates(2, 2)])
+            GameBuilder(5, 5)
+            .with_open_maze()
+            .with_custom_positions(Coordinates(0, 0), Coordinates(4, 4))
+            .with_custom_cheese([Coordinates(2, 2)])
+            .with_max_turns(100)
             .build()
+            .create()
         )
 
         # Move P1 from (0,0) to (2,2) to collect cheese
@@ -58,11 +62,13 @@ class TestGreedyAgentBasic:
     def test_works_for_both_players(self) -> None:
         """Agent works correctly for both player 1 and player 2."""
         game = (
-            GameConfigBuilder(5, 5)
-            .with_player1_pos(Coordinates(0, 0))
-            .with_player2_pos(Coordinates(4, 4))
-            .with_cheese([Coordinates(2, 2)])
+            GameBuilder(5, 5)
+            .with_open_maze()
+            .with_custom_positions(Coordinates(0, 0), Coordinates(4, 4))
+            .with_custom_cheese([Coordinates(2, 2)])
+            .with_max_turns(100)
             .build()
+            .create()
         )
         agent = GreedyAgent()
 
@@ -82,12 +88,13 @@ class TestGreedyAgentWithWalls:
         """Agent goes around wall blocking direct path."""
         # P1 at (0,0), cheese at (0,2), wall between (0,0) and (0,1)
         game = (
-            GameConfigBuilder(5, 5)
-            .with_player1_pos(Coordinates(0, 0))
-            .with_player2_pos(Coordinates(4, 4))
-            .with_cheese([Coordinates(0, 2)])
-            .with_walls([Wall(Coordinates(0, 0), Coordinates(0, 1))])
+            GameBuilder(5, 5)
+            .with_custom_maze([Wall(Coordinates(0, 0), Coordinates(0, 1))], [])
+            .with_custom_positions(Coordinates(0, 0), Coordinates(4, 4))
+            .with_custom_cheese([Coordinates(0, 2)])
+            .with_max_turns(100)
             .build()
+            .create()
         )
         agent = GreedyAgent()
         move = agent.get_move(game, player=1)
@@ -100,18 +107,20 @@ class TestGreedyAgentWithWalls:
         # Create partial barrier that blocks direct horizontal path
         # Gap at y=2 allows passage
         game = (
-            GameConfigBuilder(5, 3)
-            .with_player1_pos(Coordinates(0, 1))
-            .with_player2_pos(Coordinates(4, 1))
-            .with_cheese([Coordinates(4, 1)])
-            .with_walls(
+            GameBuilder(5, 3)
+            .with_custom_maze(
                 [
                     Wall(Coordinates(2, 0), Coordinates(3, 0)),
                     Wall(Coordinates(2, 1), Coordinates(3, 1)),
                     # No wall at y=2 - gap to pass through
-                ]
+                ],
+                [],
             )
+            .with_custom_positions(Coordinates(0, 1), Coordinates(4, 1))
+            .with_custom_cheese([Coordinates(4, 1)])
+            .with_max_turns(100)
             .build()
+            .create()
         )
         agent = GreedyAgent()
         move = agent.get_move(game, player=1)
@@ -123,20 +132,22 @@ class TestGreedyAgentWithWalls:
         """Agent returns STAY when cheese is completely blocked."""
         # Complete vertical barrier between x=1 and x=2
         game = (
-            GameConfigBuilder(5, 5)
-            .with_player1_pos(Coordinates(0, 2))
-            .with_player2_pos(Coordinates(4, 2))
-            .with_cheese([Coordinates(4, 2)])  # Cheese on other side
-            .with_walls(
+            GameBuilder(5, 5)
+            .with_custom_maze(
                 [
                     Wall(Coordinates(1, 0), Coordinates(2, 0)),
                     Wall(Coordinates(1, 1), Coordinates(2, 1)),
                     Wall(Coordinates(1, 2), Coordinates(2, 2)),
                     Wall(Coordinates(1, 3), Coordinates(2, 3)),
                     Wall(Coordinates(1, 4), Coordinates(2, 4)),
-                ]
+                ],
+                [],
             )
+            .with_custom_positions(Coordinates(0, 2), Coordinates(4, 2))
+            .with_custom_cheese([Coordinates(4, 2)])  # Cheese on other side
+            .with_max_turns(100)
             .build()
+            .create()
         )
         agent = GreedyAgent()
         move = agent.get_move(game, player=1)
@@ -152,12 +163,13 @@ class TestGreedyAgentWithMud:
         """Agent chooses longer path to avoid expensive mud."""
         # Direct path has 5-turn mud, going around is faster
         game = (
-            GameConfigBuilder(5, 5)
-            .with_player1_pos(Coordinates(0, 2))
-            .with_player2_pos(Coordinates(4, 4))
-            .with_cheese([Coordinates(4, 2)])
-            .with_mud([Mud(Coordinates(2, 2), Coordinates(3, 2), 5)])
+            GameBuilder(5, 5)
+            .with_custom_maze([], [Mud(Coordinates(2, 2), Coordinates(3, 2), 5)])
+            .with_custom_positions(Coordinates(0, 2), Coordinates(4, 4))
+            .with_custom_cheese([Coordinates(4, 2)])
+            .with_max_turns(100)
             .build()
+            .create()
         )
         agent = GreedyAgent()
         move = agent.get_move(game, player=1)
@@ -170,14 +182,24 @@ class TestGreedyAgentWithMud:
 
     def test_takes_mud_when_faster_than_around(self) -> None:
         """Agent takes mud path when it's faster than alternatives."""
-        # Narrow corridor - must go through mud, no way around
+        # 3x2 grid with walls blocking the top row, mud is the only path
+        # Bottom row: (0,0) --mud-- (1,0) -- (2,0)
+        # Walls block vertical movement so bottom row is effectively a corridor
         game = (
-            GameConfigBuilder(3, 1)
-            .with_player1_pos(Coordinates(0, 0))
-            .with_player2_pos(Coordinates(2, 0))
-            .with_cheese([Coordinates(2, 0)])
-            .with_mud([Mud(Coordinates(0, 0), Coordinates(1, 0), 2)])
+            GameBuilder(3, 2)
+            .with_custom_maze(
+                [
+                    Wall(Coordinates(0, 0), Coordinates(0, 1)),
+                    Wall(Coordinates(1, 0), Coordinates(1, 1)),
+                    Wall(Coordinates(2, 0), Coordinates(2, 1)),
+                ],
+                [Mud(Coordinates(0, 0), Coordinates(1, 0), 2)],
+            )
+            .with_custom_positions(Coordinates(0, 0), Coordinates(2, 0))
+            .with_custom_cheese([Coordinates(2, 0)])
+            .with_max_turns(100)
             .build()
+            .create()
         )
         agent = GreedyAgent()
         move = agent.get_move(game, player=1)
@@ -189,17 +211,18 @@ class TestGreedyAgentWithMud:
         """Agent picks farther cheese if closer one is behind mud."""
         # Closer cheese behind expensive mud, farther cheese in clear
         game = (
-            GameConfigBuilder(7, 3)
-            .with_player1_pos(Coordinates(0, 1))
-            .with_player2_pos(Coordinates(6, 1))
-            .with_cheese(
+            GameBuilder(7, 3)
+            .with_custom_maze([], [Mud(Coordinates(0, 1), Coordinates(1, 1), 5)])
+            .with_custom_positions(Coordinates(0, 1), Coordinates(6, 1))
+            .with_custom_cheese(
                 [
                     Coordinates(1, 1),  # Close but behind 5-turn mud
                     Coordinates(4, 1),  # Farther but clear path
                 ]
             )
-            .with_mud([Mud(Coordinates(0, 1), Coordinates(1, 1), 5)])
+            .with_max_turns(100)
             .build()
+            .create()
         )
         agent = GreedyAgent()
         move = agent.get_move(game, player=1)
@@ -219,11 +242,13 @@ class TestGreedyAgentEdgeCases:
         # If we're on cheese, we've already collected it
         # This tests the case where remaining cheese is elsewhere
         game = (
-            GameConfigBuilder(5, 5)
-            .with_player1_pos(Coordinates(2, 2))
-            .with_player2_pos(Coordinates(4, 4))
-            .with_cheese([Coordinates(2, 2), Coordinates(4, 0)])
+            GameBuilder(5, 5)
+            .with_open_maze()
+            .with_custom_positions(Coordinates(2, 2), Coordinates(4, 4))
+            .with_custom_cheese([Coordinates(2, 2), Coordinates(4, 0)])
+            .with_max_turns(100)
             .build()
+            .create()
         )
 
         # Collect cheese at current position
@@ -238,10 +263,10 @@ class TestGreedyAgentEdgeCases:
     def test_multiple_equidistant_cheese(self) -> None:
         """Agent picks one cheese when multiple are equidistant."""
         game = (
-            GameConfigBuilder(5, 5)
-            .with_player1_pos(Coordinates(2, 2))
-            .with_player2_pos(Coordinates(4, 4))
-            .with_cheese(
+            GameBuilder(5, 5)
+            .with_open_maze()
+            .with_custom_positions(Coordinates(2, 2), Coordinates(4, 4))
+            .with_custom_cheese(
                 [
                     Coordinates(2, 0),  # 2 down
                     Coordinates(2, 4),  # 2 up
@@ -249,7 +274,9 @@ class TestGreedyAgentEdgeCases:
                     Coordinates(4, 2),  # 2 right
                 ]
             )
+            .with_max_turns(100)
             .build()
+            .create()
         )
         agent = GreedyAgent()
         move = agent.get_move(game, player=1)
@@ -260,11 +287,13 @@ class TestGreedyAgentEdgeCases:
     def test_corner_positions(self) -> None:
         """Agent handles corner positions correctly."""
         game = (
-            GameConfigBuilder(5, 5)
-            .with_player1_pos(Coordinates(0, 0))
-            .with_player2_pos(Coordinates(4, 4))
-            .with_cheese([Coordinates(4, 4)])
+            GameBuilder(5, 5)
+            .with_open_maze()
+            .with_custom_positions(Coordinates(0, 0), Coordinates(4, 4))
+            .with_custom_cheese([Coordinates(4, 4)])
+            .with_max_turns(100)
             .build()
+            .create()
         )
         agent = GreedyAgent()
         move = agent.get_move(game, player=1)

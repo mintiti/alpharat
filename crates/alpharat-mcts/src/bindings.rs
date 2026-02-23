@@ -13,7 +13,7 @@ use crate::backend::{Backend, BackendError, EvalResult, SmartUniformBackend};
 use crate::search::{run_search, SearchConfig, SearchResult};
 use crate::tree::MCTSTree;
 
-use pyrat::{GameState, PyRat};
+use pyrat::{GameBuilder, GameState, PyRat};
 
 // ---------------------------------------------------------------------------
 // PySearchResult
@@ -134,7 +134,17 @@ impl Backend for PyCallbackBackend {
             let py_games: Vec<Py<PyRat>> = games
                 .iter()
                 .map(|gs| {
-                    let pyrat = PyRat::from_game_state((*gs).clone(), true);
+                    let game = (*gs).clone();
+                    // Build a lightweight config to satisfy the PyRat wrapper.
+                    // The actual maze/cheese layout lives in the GameState;
+                    // the config is only metadata the wrapper stores.
+                    let config = GameBuilder::new(game.width, game.height)
+                        .with_max_turns(game.max_turns)
+                        .with_open_maze()
+                        .with_corner_positions()
+                        .with_custom_cheese(game.cheese.get_all_cheese_positions())
+                        .build();
+                    let pyrat = PyRat::from_game_state(game, config);
                     Py::new(py, pyrat).expect("failed to wrap GameState as PyRat")
                 })
                 .collect();

@@ -1,9 +1,16 @@
 use pyrat::game::types::MudMap;
-use pyrat::{Coordinates, Direction, GameState};
+use pyrat::{Coordinates, Direction, GameBuilder, GameState};
 use std::collections::HashMap;
 
 pub fn open_5x5_game(p1: Coordinates, p2: Coordinates, cheese: &[Coordinates]) -> GameState {
-    GameState::new_with_config(5, 5, HashMap::new(), Default::default(), cheese, p1, p2, 100)
+    GameBuilder::new(5, 5)
+        .with_open_maze()
+        .with_custom_positions(p1, p2)
+        .with_custom_cheese(cheese.to_vec())
+        .with_max_turns(100)
+        .build()
+        .create(None)
+        .unwrap()
 }
 
 pub fn wall_game(
@@ -12,23 +19,28 @@ pub fn wall_game(
     walls: HashMap<Coordinates, Vec<Coordinates>>,
     cheese: &[Coordinates],
 ) -> GameState {
-    GameState::new_with_config(5, 5, walls, Default::default(), cheese, p1, p2, 100)
+    GameBuilder::new(5, 5)
+        .with_custom_maze(walls, Default::default())
+        .with_custom_positions(p1, p2)
+        .with_custom_cheese(cheese.to_vec())
+        .with_max_turns(100)
+        .build()
+        .create(None)
+        .unwrap()
 }
 
 pub fn mud_game_p1_stuck() -> GameState {
     let mut mud = MudMap::new();
     mud.insert(Coordinates::new(2, 2), Coordinates::new(2, 3), 3);
 
-    let mut game = GameState::new_with_config(
-        5,
-        5,
-        HashMap::new(),
-        mud,
-        &[Coordinates::new(0, 0)],
-        Coordinates::new(2, 2), // P1 at mud start
-        Coordinates::new(4, 4),
-        100,
-    );
+    let mut game = GameBuilder::new(5, 5)
+        .with_custom_maze(HashMap::new(), mud)
+        .with_custom_positions(Coordinates::new(2, 2), Coordinates::new(4, 4))
+        .with_custom_cheese(vec![Coordinates::new(0, 0)])
+        .with_max_turns(100)
+        .build()
+        .create(None)
+        .unwrap();
 
     // Move P1 into mud passage to activate mud_timer
     let _undo = game.make_move(Direction::Up, Direction::Stay);
@@ -39,31 +51,27 @@ pub fn mud_game_p1_stuck() -> GameState {
 /// 5×5 game with 1 cheese at (1,0), P1 at (0,0), P2 at (4,4).
 /// P1 moving RIGHT collects the cheese.
 pub fn one_cheese_adjacent_game() -> GameState {
-    GameState::new_with_config(
-        5,
-        5,
-        HashMap::new(),
-        Default::default(),
-        &[Coordinates::new(1, 0)],
-        Coordinates::new(0, 0),
-        Coordinates::new(4, 4),
-        100,
-    )
+    GameBuilder::new(5, 5)
+        .with_open_maze()
+        .with_custom_positions(Coordinates::new(0, 0), Coordinates::new(4, 4))
+        .with_custom_cheese(vec![Coordinates::new(1, 0)])
+        .with_max_turns(100)
+        .build()
+        .create(None)
+        .unwrap()
 }
 
 /// 5×5 game with 1 cheese at (1,0), P1 at (0,0), P2 at (2,0).
 /// Both can reach the cheese in one move (P1 RIGHT, P2 LEFT).
 pub fn contested_cheese_game() -> GameState {
-    GameState::new_with_config(
-        5,
-        5,
-        HashMap::new(),
-        Default::default(),
-        &[Coordinates::new(1, 0)],
-        Coordinates::new(0, 0),
-        Coordinates::new(2, 0),
-        100,
-    )
+    GameBuilder::new(5, 5)
+        .with_open_maze()
+        .with_custom_positions(Coordinates::new(0, 0), Coordinates::new(2, 0))
+        .with_custom_cheese(vec![Coordinates::new(1, 0)])
+        .with_max_turns(100)
+        .build()
+        .create(None)
+        .unwrap()
 }
 
 /// Horizontal corridor: walls above and below row 0.
@@ -83,30 +91,26 @@ pub fn corridor_game() -> GameState {
             .push(Coordinates::new(x, 0));
     }
 
-    GameState::new_with_config(
-        5,
-        5,
-        walls,
-        Default::default(),
-        &[Coordinates::new(2, 0)],
-        Coordinates::new(0, 0),
-        Coordinates::new(4, 0),
-        100,
-    )
+    GameBuilder::new(5, 5)
+        .with_custom_maze(walls, Default::default())
+        .with_custom_positions(Coordinates::new(0, 0), Coordinates::new(4, 0))
+        .with_custom_cheese(vec![Coordinates::new(2, 0)])
+        .with_max_turns(100)
+        .build()
+        .create(None)
+        .unwrap()
 }
 
 /// Game that's already over: 1 cheese, max_turns=1, advance one turn so turn >= max_turns.
 pub fn terminal_game() -> GameState {
-    let mut game = GameState::new_with_config(
-        5,
-        5,
-        HashMap::new(),
-        Default::default(),
-        &[Coordinates::new(4, 4)],
-        Coordinates::new(0, 0),
-        Coordinates::new(0, 1),
-        1, // max_turns = 1
-    );
+    let mut game = GameBuilder::new(5, 5)
+        .with_open_maze()
+        .with_custom_positions(Coordinates::new(0, 0), Coordinates::new(0, 1))
+        .with_custom_cheese(vec![Coordinates::new(4, 4)])
+        .with_max_turns(1)
+        .build()
+        .create(None)
+        .unwrap();
     // Play one turn to reach max_turns
     let _undo = game.make_move(Direction::Stay, Direction::Stay);
     game
@@ -114,16 +118,14 @@ pub fn terminal_game() -> GameState {
 
 /// Game with few cheese and few turns — terminals appear within shallow search.
 pub fn short_game() -> GameState {
-    GameState::new_with_config(
-        5,
-        5,
-        HashMap::new(),
-        Default::default(),
-        &[Coordinates::new(1, 0)],
-        Coordinates::new(0, 0),
-        Coordinates::new(2, 0),
-        3, // Only 3 turns
-    )
+    GameBuilder::new(5, 5)
+        .with_open_maze()
+        .with_custom_positions(Coordinates::new(0, 0), Coordinates::new(2, 0))
+        .with_custom_cheese(vec![Coordinates::new(1, 0)])
+        .with_max_turns(3)
+        .build()
+        .create(None)
+        .unwrap()
 }
 
 pub fn mud_game_both_stuck() -> GameState {
@@ -131,16 +133,14 @@ pub fn mud_game_both_stuck() -> GameState {
     mud.insert(Coordinates::new(2, 2), Coordinates::new(2, 3), 3);
     mud.insert(Coordinates::new(3, 3), Coordinates::new(3, 4), 3);
 
-    let mut game = GameState::new_with_config(
-        5,
-        5,
-        HashMap::new(),
-        mud,
-        &[Coordinates::new(0, 0)],
-        Coordinates::new(2, 2),
-        Coordinates::new(3, 3),
-        100,
-    );
+    let mut game = GameBuilder::new(5, 5)
+        .with_custom_maze(HashMap::new(), mud)
+        .with_custom_positions(Coordinates::new(2, 2), Coordinates::new(3, 3))
+        .with_custom_cheese(vec![Coordinates::new(0, 0)])
+        .with_max_turns(100)
+        .build()
+        .create(None)
+        .unwrap();
 
     let _undo = game.make_move(Direction::Up, Direction::Up);
     assert!(game.player1.mud_timer > 0, "P1 should be stuck in mud");

@@ -5,9 +5,9 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
-from pyrat_engine.core.game import PyRat
-
 if TYPE_CHECKING:
+    from pyrat_engine.core.game import PyRat
+
     from alpharat.ai.base import Agent
 
 
@@ -47,29 +47,17 @@ def is_terminal(game: PyRat) -> bool:
 def play_game(
     agent_p1: Agent,
     agent_p2: Agent,
-    *,
-    game: PyRat | None = None,
-    width: int = 15,
-    height: int = 11,
-    cheese_count: int = 21,
-    max_turns: int = 300,
-    seed: int | None = None,
-    wall_density: float | None = None,
-    mud_density: float | None = None,
+    game: PyRat,
 ) -> GameResult:
     """Play a single game between two agents.
+
+    Callers are responsible for creating the PyRat instance (e.g. via
+    ``GameConfig.to_engine_config().create(seed=N)``).
 
     Args:
         agent_p1: Agent playing as Player 1 (Rat).
         agent_p2: Agent playing as Player 2 (Python).
-        game: Pre-configured PyRat game. If provided, ignores other game params.
-        width: Maze width (ignored if game provided).
-        height: Maze height (ignored if game provided).
-        cheese_count: Number of cheese pieces (ignored if game provided).
-        max_turns: Maximum turns before game ends (ignored if game provided).
-        seed: Random seed for maze generation (ignored if game provided).
-        wall_density: Wall density 0.0-1.0, None for pyrat default (ignored if game provided).
-        mud_density: Mud density 0.0-1.0, None for pyrat default (ignored if game provided).
+        game: Configured PyRat game instance ready to play.
 
     Returns:
         GameResult with scores and winner.
@@ -77,27 +65,6 @@ def play_game(
     # Reset agents for new game
     agent_p1.reset()
     agent_p2.reset()
-
-    # Create game if not provided
-    if game is None:
-        import random
-
-        actual_seed = seed if seed is not None else random.randint(0, 2**31)
-
-        # Build kwargs, only including density params if explicitly set
-        kwargs: dict[str, int | float] = {
-            "width": width,
-            "height": height,
-            "cheese_count": cheese_count,
-            "max_turns": max_turns,
-            "seed": actual_seed,
-        }
-        if wall_density is not None:
-            kwargs["wall_density"] = wall_density
-        if mud_density is not None:
-            kwargs["mud_density"] = mud_density
-
-        game = PyRat(**kwargs)  # type: ignore[arg-type]
 
     # Game loop
     while not is_terminal(game):

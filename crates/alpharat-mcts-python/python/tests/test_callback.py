@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING, Any
 import numpy as np
 import pytest
 from alpharat_mcts import rust_mcts_search
-from pyrat_engine.core import GameConfigBuilder
+from pyrat_engine.core import GameBuilder
 from pyrat_engine.core.types import Coordinates
 
 if TYPE_CHECKING:
@@ -18,12 +18,13 @@ if TYPE_CHECKING:
 def open_5x5() -> PyRat:
     """Open 5x5 game, both players at center."""
     return (
-        GameConfigBuilder(5, 5)
+        GameBuilder(5, 5)
         .with_max_turns(30)
-        .with_player1_pos(Coordinates(2, 2))
-        .with_player2_pos(Coordinates(2, 2))
-        .with_cheese([Coordinates(0, 0)])
+        .with_open_maze()
+        .with_custom_positions(Coordinates(2, 2), Coordinates(2, 2))
+        .with_custom_cheese([Coordinates(0, 0)])
         .build()
+        .create()
     )
 
 
@@ -31,12 +32,13 @@ def open_5x5() -> PyRat:
 def corner_game() -> PyRat:
     """P1 at (0,0), P2 at (4,4)."""
     return (
-        GameConfigBuilder(5, 5)
+        GameBuilder(5, 5)
         .with_max_turns(30)
-        .with_player1_pos(Coordinates(0, 0))
-        .with_player2_pos(Coordinates(4, 4))
-        .with_cheese([Coordinates(2, 2)])
+        .with_open_maze()
+        .with_custom_positions(Coordinates(0, 0), Coordinates(4, 4))
+        .with_custom_cheese([Coordinates(2, 2)])
         .build()
+        .create()
     )
 
 

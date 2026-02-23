@@ -331,6 +331,9 @@ def _run_matchup_batch(batch: _MatchupBatch) -> list[_GameResult]:
     agent_a = batch.agent_a_config.build(device=batch.device)
     agent_b = batch.agent_b_config.build(device=batch.device)
 
+    # Build engine config once per batch, stamp out games cheaply
+    engine_cfg = batch.game_config.to_engine_config()
+
     results: list[_GameResult] = []
     for game in batch.games:
         if game.swap_sides:
@@ -338,17 +341,8 @@ def _run_matchup_batch(batch: _MatchupBatch) -> list[_GameResult]:
         else:
             p1_agent, p2_agent = agent_a, agent_b
 
-        result = play_game(
-            p1_agent,
-            p2_agent,
-            seed=game.seed,
-            width=batch.game_config.width,
-            height=batch.game_config.height,
-            cheese_count=batch.game_config.cheese_count,
-            max_turns=batch.game_config.max_turns,
-            wall_density=batch.game_config.wall_density,
-            mud_density=batch.game_config.mud_density,
-        )
+        pyrat_game = engine_cfg.create(seed=game.seed)
+        result = play_game(p1_agent, p2_agent, pyrat_game)
 
         # Convert to agent_a/agent_b perspective
         if game.swap_sides:

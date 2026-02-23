@@ -369,7 +369,7 @@ class TestTrainInferenceConsistency:
 
     def test_both_paths_produce_identical_observation_input(self) -> None:
         """from_game_arrays and from_pyrat_game should produce identical results."""
-        from pyrat_engine.core import GameConfigBuilder
+        from pyrat_engine.core import GameBuilder
 
         from alpharat.data.maze import build_maze_array
 
@@ -377,12 +377,13 @@ class TestTrainInferenceConsistency:
         width, height = 5, 5
         max_turns = 100
         game = (
-            GameConfigBuilder(width, height)
+            GameBuilder(width, height)
             .with_max_turns(max_turns)
-            .with_player1_pos(Coordinates(1, 1))
-            .with_player2_pos(Coordinates(3, 3))
-            .with_cheese([Coordinates(2, 2), Coordinates(4, 4)])
+            .with_open_maze()
+            .with_custom_positions(Coordinates(1, 1), Coordinates(3, 3))
+            .with_custom_cheese([Coordinates(2, 2), Coordinates(4, 4)])
             .build()
+            .create()
         )
 
         # Build maze from real game
@@ -441,19 +442,20 @@ class TestTrainInferenceConsistency:
 
     def test_consistency_after_moves(self) -> None:
         """Both paths should produce identical results after game state changes."""
-        from pyrat_engine.core import GameConfigBuilder
+        from pyrat_engine.core import GameBuilder
 
         from alpharat.data.maze import build_maze_array
 
         width, height = 5, 5
         max_turns = 100
         game = (
-            GameConfigBuilder(width, height)
+            GameBuilder(width, height)
             .with_max_turns(max_turns)
-            .with_player1_pos(Coordinates(0, 0))
-            .with_player2_pos(Coordinates(4, 4))
-            .with_cheese([Coordinates(1, 0), Coordinates(3, 4)])
+            .with_open_maze()
+            .with_custom_positions(Coordinates(0, 0), Coordinates(4, 4))
+            .with_custom_cheese([Coordinates(1, 0), Coordinates(3, 4)])
             .build()
+            .create()
         )
 
         maze = build_maze_array(game, width, height)
@@ -507,18 +509,19 @@ class TestTrainInferenceConsistency:
 
     def test_consistency_with_corner_positions(self) -> None:
         """Both paths should handle corner positions identically."""
-        from pyrat_engine.core import GameConfigBuilder
+        from pyrat_engine.core import GameBuilder
 
         from alpharat.data.maze import build_maze_array
 
         width, height = 5, 5
         game = (
-            GameConfigBuilder(width, height)
+            GameBuilder(width, height)
             .with_max_turns(50)
-            .with_player1_pos(Coordinates(0, 0))
-            .with_player2_pos(Coordinates(4, 4))
-            .with_cheese([Coordinates(0, 4), Coordinates(4, 0)])
+            .with_open_maze()
+            .with_custom_positions(Coordinates(0, 0), Coordinates(4, 4))
+            .with_custom_cheese([Coordinates(0, 4), Coordinates(4, 0)])
             .build()
+            .create()
         )
 
         maze = build_maze_array(game, width, height)
@@ -565,19 +568,20 @@ class TestTrainInferenceConsistency:
 
     def test_consistency_after_cheese_collected(self) -> None:
         """Both paths should handle state after all cheese collected identically."""
-        from pyrat_engine.core import GameConfigBuilder
+        from pyrat_engine.core import GameBuilder
 
         from alpharat.data.maze import build_maze_array
 
         width, height = 5, 5
         # Place cheese where P1 will collect it on first move
         game = (
-            GameConfigBuilder(width, height)
+            GameBuilder(width, height)
             .with_max_turns(50)
-            .with_player1_pos(Coordinates(1, 1))
-            .with_player2_pos(Coordinates(3, 3))
-            .with_cheese([Coordinates(2, 1)])  # P1 can reach by moving RIGHT
+            .with_open_maze()
+            .with_custom_positions(Coordinates(1, 1), Coordinates(3, 3))
+            .with_custom_cheese([Coordinates(2, 1)])  # P1 can reach by moving RIGHT
             .build()
+            .create()
         )
 
         maze = build_maze_array(game, width, height)

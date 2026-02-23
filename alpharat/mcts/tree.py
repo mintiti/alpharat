@@ -9,7 +9,6 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any
 
 import numpy as np
-from pyrat_engine.core.types import Direction
 
 from alpharat.mcts.node import MCTSNode
 
@@ -97,7 +96,7 @@ class MCTSTree:
         p1_score_before, p2_score_before = self.game.player1_score, self.game.player2_score
 
         # Make the move and get mud information from MoveUndo
-        move_undo = self.game.make_move(Direction(action_p1), Direction(action_p2))
+        move_undo = self.game.make_move(action_p1, action_p2)
         p1_mud = move_undo.p1_mud
         p2_mud = move_undo.p2_mud
 
@@ -198,7 +197,7 @@ class MCTSTree:
             new_root = self.root.children[outcome_pair]
             # If simulator is at current root, advance game state to stay in sync
             if self.simulator_node == self.root:
-                move_undo = self.game.make_move(Direction(action_p1), Direction(action_p2))
+                move_undo = self.game.make_move(action_p1, action_p2)
                 new_root.move_undo = move_undo
         else:
             # Child doesn't exist - create via make_move_from (handles game advancement)
@@ -241,7 +240,7 @@ class MCTSTree:
                 raise RuntimeError(msg)
 
             action_p1, action_p2 = child.parent_action
-            move_undo = self.game.make_move(Direction(action_p1), Direction(action_p2))
+            move_undo = self.game.make_move(action_p1, action_p2)
             child.move_undo = move_undo
 
         # Update simulator path
@@ -287,8 +286,8 @@ class MCTSTree:
         """
         # Compute effective action mappings from current game state
         # (simulator is at the child's state after make_move)
-        p1_effective = self._compute_effective_actions(self.game.player1_position)
-        p2_effective = self._compute_effective_actions(self.game.player2_position)
+        p1_effective = list(self.game.effective_actions(self.game.player1_position))
+        p2_effective = list(self.game.effective_actions(self.game.player2_position))
 
         # Get priors and values (smart uniform uses effective mappings)
         prior_p1, prior_p2, v1, v2 = self._predict(p1_effective, p2_effective)
@@ -435,42 +434,12 @@ class MCTSTree:
         p2_eff = None
 
         if self.root.p1_mud_turns_remaining == 0:
-            p1_eff = self._compute_effective_actions(self.game.player1_position)
+            p1_eff = list(self.game.effective_actions(self.game.player1_position))
         if self.root.p2_mud_turns_remaining == 0:
-            p2_eff = self._compute_effective_actions(self.game.player2_position)
+            p2_eff = list(self.game.effective_actions(self.game.player2_position))
 
         if p1_eff is not None or p2_eff is not None:
             self.root.update_effective_actions(p1_eff, p2_eff)
-
-    def _compute_effective_actions(self, position: Any) -> list[int]:
-        """Compute effective action mapping for a player at given position.
-
-        Uses get_valid_moves to determine which actions result in actual movement.
-        Actions blocked by walls/edges map to STAY (action 4).
-
-        Args:
-            position: The player's current position (Coordinates type from pyrat)
-
-        Returns:
-            List of 5 ints mapping each action to its effective action.
-            Valid moves map to themselves, blocked moves map to STAY.
-        """
-        stay_action = 4
-        valid_moves = set(self.game.get_valid_moves(position))
-
-        effective = []
-        for action in range(5):
-            if action == stay_action:
-                # STAY always maps to itself
-                effective.append(stay_action)
-            elif action in valid_moves:
-                # Valid movement maps to itself
-                effective.append(action)
-            else:
-                # Blocked movement is equivalent to STAY
-                effective.append(stay_action)
-
-        return effective
 
     def _check_terminal(self) -> bool:
         """Check if current game state is terminal.

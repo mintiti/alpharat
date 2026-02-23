@@ -224,7 +224,7 @@ def create_game(config: GameConfig) -> PyRat:
         Configured PyRat game instance.
     """
     seed = random.randrange(2**32)
-    return config.build(seed)
+    return config.to_engine_config().create(seed=seed)
 
 
 # --- Core Sampling ---

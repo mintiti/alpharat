@@ -139,10 +139,18 @@ impl ObservationEncoder for FlatEncoder {
 mod tests {
     use super::*;
     use pyrat::game::types::MudMap;
+    use pyrat::GameBuilder;
     use std::collections::HashMap;
 
     fn open_5x5(p1: Coordinates, p2: Coordinates, cheese: &[Coordinates]) -> GameState {
-        GameState::new_with_config(5, 5, HashMap::new(), MudMap::new(), cheese, p1, p2, 100)
+        GameBuilder::new(5, 5)
+            .with_open_maze()
+            .with_custom_positions(p1, p2)
+            .with_custom_cheese(cheese.to_vec())
+            .with_max_turns(100)
+            .build()
+            .create(None)
+            .unwrap()
     }
 
     #[test]
@@ -212,16 +220,14 @@ mod tests {
         walls.insert(Coordinates::new(2, 2), vec![Coordinates::new(2, 3)]);
         walls.insert(Coordinates::new(2, 3), vec![Coordinates::new(2, 2)]);
 
-        let game = GameState::new_with_config(
-            5,
-            5,
-            walls,
-            MudMap::new(),
-            &[Coordinates::new(0, 0)],
-            Coordinates::new(0, 0),
-            Coordinates::new(4, 4),
-            100,
-        );
+        let game = GameBuilder::new(5, 5)
+            .with_custom_maze(walls, MudMap::new())
+            .with_custom_positions(Coordinates::new(0, 0), Coordinates::new(4, 4))
+            .with_custom_cheese(vec![Coordinates::new(0, 0)])
+            .with_max_turns(100)
+            .build()
+            .create(None)
+            .unwrap();
         let enc = FlatEncoder::new(5, 5);
         let mut buf = vec![0.0f32; enc.obs_dim()];
         enc.encode_into(&game, &mut buf, 0);
@@ -244,16 +250,14 @@ mod tests {
         let mut mud = MudMap::new();
         mud.insert(Coordinates::new(2, 2), Coordinates::new(2, 3), 3);
 
-        let game = GameState::new_with_config(
-            5,
-            5,
-            HashMap::new(),
-            mud,
-            &[Coordinates::new(0, 0)],
-            Coordinates::new(0, 0),
-            Coordinates::new(4, 4),
-            100,
-        );
+        let game = GameBuilder::new(5, 5)
+            .with_custom_maze(HashMap::new(), mud)
+            .with_custom_positions(Coordinates::new(0, 0), Coordinates::new(4, 4))
+            .with_custom_cheese(vec![Coordinates::new(0, 0)])
+            .with_max_turns(100)
+            .build()
+            .create(None)
+            .unwrap();
         let enc = FlatEncoder::new(5, 5);
         let mut buf = vec![0.0f32; enc.obs_dim()];
         enc.encode_into(&game, &mut buf, 0);
@@ -386,16 +390,14 @@ mod tests {
         let mut mud = MudMap::new();
         mud.insert(Coordinates::new(2, 2), Coordinates::new(2, 3), 3);
 
-        let mut game = GameState::new_with_config(
-            5,
-            5,
-            HashMap::new(),
-            mud,
-            &[Coordinates::new(0, 0)],
-            Coordinates::new(2, 2),
-            Coordinates::new(4, 4),
-            100,
-        );
+        let mut game = GameBuilder::new(5, 5)
+            .with_custom_maze(HashMap::new(), mud)
+            .with_custom_positions(Coordinates::new(2, 2), Coordinates::new(4, 4))
+            .with_custom_cheese(vec![Coordinates::new(0, 0)])
+            .with_max_turns(100)
+            .build()
+            .create(None)
+            .unwrap();
         // Move P1 into mud
         let _undo = game.make_move(Direction::Up, Direction::Stay);
         assert!(game.player1.mud_timer > 0);
@@ -444,16 +446,14 @@ mod tests {
         // 35*7 + 6 = 251
         assert_eq!(enc.obs_dim(), 251);
 
-        let game = GameState::new_with_config(
-            7,
-            5,
-            HashMap::new(),
-            MudMap::new(),
-            &[Coordinates::new(3, 2)],
-            Coordinates::new(0, 0),
-            Coordinates::new(6, 4),
-            100,
-        );
+        let game = GameBuilder::new(7, 5)
+            .with_open_maze()
+            .with_custom_positions(Coordinates::new(0, 0), Coordinates::new(6, 4))
+            .with_custom_cheese(vec![Coordinates::new(3, 2)])
+            .with_max_turns(100)
+            .build()
+            .create(None)
+            .unwrap();
         let mut buf = vec![0.0f32; enc.obs_dim()];
         enc.encode_into(&game, &mut buf, 0);
 
@@ -494,17 +494,15 @@ mod tests {
 
     #[test]
     fn max_turns_zero_progress() {
-        // Edge case: max_turns = 0 → progress = 0
-        let game = GameState::new_with_config(
-            5,
-            5,
-            HashMap::new(),
-            MudMap::new(),
-            &[Coordinates::new(2, 2)],
-            Coordinates::new(0, 0),
-            Coordinates::new(4, 4),
-            0, // max_turns = 0
-        );
+        // Edge case: turn=0, max_turns=1 → progress = 0/1 = 0
+        let game = GameBuilder::new(5, 5)
+            .with_open_maze()
+            .with_custom_positions(Coordinates::new(0, 0), Coordinates::new(4, 4))
+            .with_custom_cheese(vec![Coordinates::new(2, 2)])
+            .with_max_turns(1)
+            .build()
+            .create(None)
+            .unwrap();
         let enc = FlatEncoder::new(5, 5);
         let mut buf = vec![0.0f32; enc.obs_dim()];
         enc.encode_into(&game, &mut buf, 0);
@@ -513,7 +511,7 @@ mod tests {
         assert_eq!(
             buf[scalar_base + 1],
             0.0,
-            "progress should be 0 when max_turns=0"
+            "progress should be 0 at turn 0"
         );
     }
 }

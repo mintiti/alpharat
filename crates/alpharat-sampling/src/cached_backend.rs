@@ -199,11 +199,19 @@ mod tests {
     use super::*;
     use alpharat_mcts::SmartUniformBackend;
     use pyrat::game::types::MudMap;
+    use pyrat::GameBuilder;
     use std::collections::HashMap;
     use std::sync::atomic::Ordering;
 
     fn open_5x5(p1: Coordinates, p2: Coordinates, cheese: &[Coordinates]) -> GameState {
-        GameState::new_with_config(5, 5, HashMap::new(), MudMap::new(), cheese, p1, p2, 100)
+        GameBuilder::new(5, 5)
+            .with_open_maze()
+            .with_custom_positions(p1, p2)
+            .with_custom_cheese(cheese.to_vec())
+            .with_max_turns(100)
+            .build()
+            .create(None)
+            .unwrap()
     }
 
     #[test]
@@ -374,7 +382,14 @@ mod tests {
         let mut walls = HashMap::new();
         walls.insert(Coordinates::new(1, 1), vec![Coordinates::new(1, 2)]);
         walls.insert(Coordinates::new(1, 2), vec![Coordinates::new(1, 1)]);
-        let g2 = GameState::new_with_config(5, 5, walls, MudMap::new(), &cheese, p1, p2, 100);
+        let g2 = GameBuilder::new(5, 5)
+            .with_custom_maze(walls, MudMap::new())
+            .with_custom_positions(p1, p2)
+            .with_custom_cheese(cheese.to_vec())
+            .with_max_turns(100)
+            .build()
+            .create(None)
+            .unwrap();
 
         assert_ne!(
             position_hash(&g1),
@@ -395,8 +410,14 @@ mod tests {
         // Same positions/cheese, but with mud between (2,2) and (2,3)
         let mut mud = MudMap::new();
         mud.insert(Coordinates::new(2, 2), Coordinates::new(2, 3), 3);
-        let g2 =
-            GameState::new_with_config(5, 5, HashMap::new(), mud, &cheese, p1, p2, 100);
+        let g2 = GameBuilder::new(5, 5)
+            .with_custom_maze(HashMap::new(), mud)
+            .with_custom_positions(p1, p2)
+            .with_custom_cheese(cheese.to_vec())
+            .with_max_turns(100)
+            .build()
+            .create(None)
+            .unwrap();
 
         assert_ne!(
             position_hash(&g1),
@@ -418,7 +439,14 @@ mod tests {
             walls.insert(Coordinates::new(1, 2), vec![Coordinates::new(1, 1)]);
             let mut mud = MudMap::new();
             mud.insert(Coordinates::new(3, 3), Coordinates::new(3, 4), 4);
-            GameState::new_with_config(5, 5, walls, mud, &cheese, p1, p2, 100)
+            GameBuilder::new(5, 5)
+                .with_custom_maze(walls, mud)
+                .with_custom_positions(p1, p2)
+                .with_custom_cheese(cheese.to_vec())
+                .with_max_turns(100)
+                .build()
+                .create(None)
+                .unwrap()
         };
 
         let g1 = make_game();

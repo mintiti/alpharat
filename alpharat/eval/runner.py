@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
+from alpharat.config.game import GameConfig  # noqa: TC001
 from alpharat.eval.game import GameResult, play_game
 
 if TYPE_CHECKING:
@@ -58,12 +59,9 @@ def evaluate(
     agent2: Agent,
     n_games: int = 10,
     *,
+    game_config: GameConfig,
     alternate_sides: bool = True,
     verbose: bool = True,
-    width: int = 15,
-    height: int = 11,
-    cheese_count: int = 21,
-    max_turns: int = 300,
 ) -> EvalResult:
     """Evaluate two agents across multiple games.
 
@@ -71,16 +69,15 @@ def evaluate(
         agent1: First agent.
         agent2: Second agent.
         n_games: Number of games to play.
+        game_config: Game configuration for creating game instances.
         alternate_sides: If True, agents swap P1/P2 roles each game.
         verbose: If True, print progress.
-        width: Maze width.
-        height: Maze height.
-        cheese_count: Number of cheese pieces.
-        max_turns: Maximum turns before game ends.
 
     Returns:
         EvalResult with aggregated statistics.
     """
+    engine_cfg = game_config.to_engine_config()
+
     games: list[GameResult] = []
     agent1_wins = 0
     agent2_wins = 0
@@ -98,15 +95,8 @@ def evaluate(
             agent1_is_p1 = True
 
         # Use game index as seed for reproducibility
-        result = play_game(
-            p1_agent,
-            p2_agent,
-            seed=i,
-            width=width,
-            height=height,
-            cheese_count=cheese_count,
-            max_turns=max_turns,
-        )
+        game = engine_cfg.create(seed=i)
+        result = play_game(p1_agent, p2_agent, game)
         games.append(result)
 
         # Track scores from agent1's perspective

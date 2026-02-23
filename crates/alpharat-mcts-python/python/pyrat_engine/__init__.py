@@ -12,11 +12,10 @@ Key Features:
     - Customizable game parameters
 
 Example:
-    >>> from pyrat_engine import PyRat, Direction
-    >>> game = PyRat(width=15, height=15)
-    >>> # Make moves
-    >>> game_over, collected = game.step(Direction.RIGHT, Direction.LEFT)
-    >>> # Check game state
+    >>> from pyrat_engine.core import GameConfig
+    >>> config = GameConfig.classic(15, 15, 21)
+    >>> game = config.create(seed=42)
+    >>> game_over, collected = game.step(1, 3)  # RIGHT, LEFT
     >>> print(f"Player 1 score: {game.player1_score}")
 """
 

@@ -11,7 +11,7 @@
 use alpharat_mcts::{SearchConfig, SmartUniformBackend};
 use alpharat_sampling::selfplay::{run_self_play, SelfPlayConfig, SelfPlayStats};
 use alpharat_sampling::MuxStats;
-use pyrat::{CheeseConfig, GameState, MazeConfig};
+use pyrat::{GameBuilder, GameState, MazeParams};
 use std::sync::Arc;
 
 #[cfg(feature = "onnx")]
@@ -26,23 +26,19 @@ use alpharat_sampling::OnnxBackend;
 fn make_games(n: usize, width: u8, height: u8, cheese: u16, max_turns: u16) -> Vec<GameState> {
     (0..n)
         .map(|i| {
-            let maze_config = MazeConfig {
-                width,
-                height,
-                target_density: 0.0,
-                connected: true,
-                symmetry: true,
-                mud_density: 0.0,
-                mud_range: 0,
-                seed: Some(i as u64),
-            };
-            let cheese_config = CheeseConfig {
-                count: cheese,
-                symmetry: true,
-            };
-            let mut game = GameState::new_random(width, height, maze_config, cheese_config);
-            game.max_turns = max_turns;
-            game
+            let config = GameBuilder::new(width, height)
+                .with_max_turns(max_turns)
+                .with_random_maze(MazeParams {
+                    wall_density: 0.0,
+                    mud_density: 0.0,
+                    mud_range: 2,
+                    connected: true,
+                    symmetric: true,
+                })
+                .with_corner_positions()
+                .with_random_cheese(cheese, true)
+                .build();
+            config.create(Some(i as u64)).unwrap()
         })
         .collect()
 }

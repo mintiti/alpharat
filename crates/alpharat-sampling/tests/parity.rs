@@ -9,7 +9,7 @@
 
 use alpharat_sampling::{FlatEncoder, ObservationEncoder};
 use pyrat::game::types::MudMap;
-use pyrat::{Coordinates, Direction, GameState};
+use pyrat::{Coordinates, Direction, GameBuilder, GameState};
 use serde::Deserialize;
 use std::collections::HashMap;
 
@@ -85,8 +85,14 @@ fn build_game(f: &Fixture) -> GameState {
     let p1 = Coordinates::new(f.p1_pos.x, f.p1_pos.y);
     let p2 = Coordinates::new(f.p2_pos.x, f.p2_pos.y);
 
-    let mut game =
-        GameState::new_with_config(f.width, f.height, walls, mud, &cheese, p1, p2, f.max_turns);
+    let mut game = GameBuilder::new(f.width, f.height)
+        .with_custom_maze(walls, mud)
+        .with_custom_positions(p1, p2)
+        .with_custom_cheese(cheese)
+        .with_max_turns(f.max_turns)
+        .build()
+        .create(None)
+        .unwrap();
 
     // Replay moves
     for [p1_dir, p2_dir] in &f.moves {

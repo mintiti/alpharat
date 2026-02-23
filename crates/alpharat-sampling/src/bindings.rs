@@ -6,7 +6,7 @@ use std::sync::atomic::Ordering::Relaxed;
 use std::sync::Arc;
 
 use alpharat_mcts::{Backend, SearchConfig, SmartUniformBackend};
-use pyrat::{CheeseConfig, GameState, MazeConfig};
+use pyrat::{GameBuilder, GameState, MazeParams};
 
 use crate::selfplay::{self, SelfPlayConfig, SelfPlayError, SelfPlayStats};
 
@@ -498,27 +498,22 @@ fn make_games(
     wall_density: f32,
     mud_density: f32,
 ) -> Vec<GameState> {
-    let mud_range: u8 = if mud_density > 0.0 { 3 } else { 0 };
-    (0..n)
-        .map(|_| {
-            let maze_config = MazeConfig {
-                width,
-                height,
-                target_density: wall_density,
-                connected: true,
-                symmetry: symmetric,
-                mud_density,
-                mud_range,
-                seed: None,
-            };
-            let cheese_config = CheeseConfig {
-                count: cheese_count,
-                symmetry: symmetric,
-            };
-            let mut game = GameState::new_random(width, height, maze_config, cheese_config);
-            game.max_turns = max_turns;
-            game
+    let mud_range: u8 = if mud_density > 0.0 { 3 } else { 2 };
+    let config = GameBuilder::new(width, height)
+        .with_max_turns(max_turns)
+        .with_random_maze(MazeParams {
+            wall_density,
+            mud_density,
+            mud_range,
+            connected: true,
+            symmetric,
         })
+        .with_corner_positions()
+        .with_random_cheese(cheese_count, symmetric)
+        .build();
+
+    (0..n)
+        .map(|_| config.create(None).expect("game creation failed"))
         .collect()
 }
 
