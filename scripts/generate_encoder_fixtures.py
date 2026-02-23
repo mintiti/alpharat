@@ -188,13 +188,13 @@ def scenario_mud_stuck_5x5() -> dict:
     cheese = [Coordinates(4, 0)]
     mud = Mud(Coordinates(1, 0), Coordinates(2, 0), value=3)
     game = (
-        GameConfigBuilder(5, 5)
+        GameBuilder(5, 5)
         .with_max_turns(100)
-        .with_player1_pos(Coordinates(1, 0))
-        .with_player2_pos(Coordinates(4, 4))
-        .with_cheese(cheese)
-        .with_mud([mud])
+        .with_custom_maze([], [mud])
+        .with_custom_positions(Coordinates(1, 0), Coordinates(4, 4))
+        .with_custom_cheese(cheese)
         .build()
+        .create()
     )
     # P1 moves RIGHT through mud to (2,0), gets mud_timer=3. P2 stays.
     game.make_move(Direction.RIGHT, Direction.STAY)
@@ -217,12 +217,13 @@ def scenario_asymmetric_scores_5x5() -> dict:
     """5x5 where P1 collected cheese (score=1) but P2 hasn't (score=0)."""
     cheese = [Coordinates(1, 0), Coordinates(2, 2)]
     game = (
-        GameConfigBuilder(5, 5)
+        GameBuilder(5, 5)
         .with_max_turns(100)
-        .with_player1_pos(Coordinates(0, 0))
-        .with_player2_pos(Coordinates(4, 4))
-        .with_cheese(cheese)
+        .with_open_maze()
+        .with_custom_positions(Coordinates(0, 0), Coordinates(4, 4))
+        .with_custom_cheese(cheese)
         .build()
+        .create()
     )
     # P1 moves RIGHT to (1,0) collecting cheese. P2 stays (no cheese at (4,4)).
     game.make_move(Direction.RIGHT, Direction.STAY)
