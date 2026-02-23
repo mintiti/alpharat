@@ -177,21 +177,21 @@ mod inner {
             // Run inference (needs &mut session)
             let mut session = self.session.lock().expect("session lock poisoned");
             let outputs = session
-                .run(ort::inputs!["observation" => input])
+                .run(ort::inputs![crate::TENSOR_INPUT => input])
                 .map_err(|e| BackendError::msg(format!("ONNX inference failed: {e}")))?;
 
             // Extract outputs by name as flat slices:
             //   policy_p1[N,5], policy_p2[N,5], pred_value_p1[N], pred_value_p2[N]
-            let (_shape, pp1_data) = outputs["policy_p1"]
+            let (_shape, pp1_data) = outputs[crate::TENSOR_POLICY_P1]
                 .try_extract_tensor::<f32>()
                 .map_err(|e| BackendError::msg(format!("failed to extract policy_p1: {e}")))?;
-            let (_shape, pp2_data) = outputs["policy_p2"]
+            let (_shape, pp2_data) = outputs[crate::TENSOR_POLICY_P2]
                 .try_extract_tensor::<f32>()
                 .map_err(|e| BackendError::msg(format!("failed to extract policy_p2: {e}")))?;
-            let (_shape, v1_data) = outputs["pred_value_p1"]
+            let (_shape, v1_data) = outputs[crate::TENSOR_VALUE_P1]
                 .try_extract_tensor::<f32>()
                 .map_err(|e| BackendError::msg(format!("failed to extract pred_value_p1: {e}")))?;
-            let (_shape, v2_data) = outputs["pred_value_p2"]
+            let (_shape, v2_data) = outputs[crate::TENSOR_VALUE_P2]
                 .try_extract_tensor::<f32>()
                 .map_err(|e| BackendError::msg(format!("failed to extract pred_value_p2: {e}")))?;
 
