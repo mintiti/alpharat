@@ -21,20 +21,15 @@ logger = logging.getLogger(__name__)
 
 
 def resolve_sampling_device(device: str) -> str:
-    """Map user-facing device names to ONNX RT execution providers.
+    """Map user-facing device names to Rust backend strings.
 
-    Handles the mismatch between PyTorch naming (mps, cuda, auto)
-    and ONNX Runtime naming (coreml, cuda, cpu).
+    Only handles aliases that Rust doesn't understand (mps → coreml).
+    Everything else passes through — Rust resolves "auto" via compile-time
+    feature flags (onnx-cuda → CUDA, onnx-coreml → CoreML, else CPU).
     """
-    import platform
-
-    if device == "auto":
-        if platform.system() == "Darwin":
-            return "coreml"
-        return "cpu"
     if device == "mps":
         return "coreml"
-    return device  # cpu, cuda, coreml, tensorrt pass through
+    return device  # auto, cpu, cuda, coreml, tensorrt pass through
 
 
 def resolve_training_device(device: str) -> str:

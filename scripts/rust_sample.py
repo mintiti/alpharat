@@ -60,13 +60,13 @@ def main() -> None:
         default="auto",
         help="Inference backend (auto, cpu, cuda, coreml, mps, tensorrt)",
     )
-    parser.add_argument("--quiet", action="store_true", help="Suppress progress bar")
     parser.add_argument(
-        "--device",
-        type=str,
-        default="auto",
-        help="ONNX execution provider (auto, cpu, cuda, coreml, tensorrt)",
+        "--cache-size",
+        type=int,
+        default=0,
+        help="Thread-local NN eval cache capacity (0 = disabled)",
     )
+    parser.add_argument("--quiet", action="store_true", help="Suppress progress bar")
     args = parser.parse_args()
 
     config_dir, config_name = split_config_path(args.config)
@@ -103,6 +103,7 @@ def main() -> None:
         experiments_dir=args.experiments_dir,
         verbose=not args.quiet,
         device=resolved_device,
+        cache_size=args.cache_size,
     )
 
     logger.info("")

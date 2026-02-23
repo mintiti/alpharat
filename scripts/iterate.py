@@ -62,6 +62,7 @@ class IterateSamplingParams(StrictBaseModel):
     """Sampling-specific settings for iteration."""
 
     workers: int = 4
+    cache_size: int = 0
 
 
 class ShardingParams(StrictBaseModel):
@@ -141,6 +142,7 @@ def run_sampling_phase(
         checkpoint=str(checkpoint_path) if checkpoint_path else None,
         experiments_dir=experiments_dir,
         device=device,
+        cache_size=config.sampling.cache_size,
     )
     return batch_dir
 
