@@ -108,7 +108,7 @@ fn main() {
 fn pre_encode_games(width: u8, height: u8, max_batch: usize) -> (Vec<f32>, usize) {
     use alpharat_sampling::encoder::ObservationEncoder;
     use alpharat_sampling::FlatEncoder;
-    use pyrat::{CheeseConfig, GameState, MazeConfig};
+    use pyrat::{GameBuilder, GameState, MazeParams};
 
     let encoder = FlatEncoder::new(width, height);
     let obs_dim = encoder.obs_dim();

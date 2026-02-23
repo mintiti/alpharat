@@ -6,7 +6,7 @@ use std::sync::atomic::Ordering::Relaxed;
 use std::sync::Arc;
 
 use alpharat_mcts::{Backend, SearchConfig, SmartUniformBackend};
-use pyrat::{GameBuilder, GameConfig, GameState, MazeParams};
+use pyrat::{GameBuilder, GameState, MazeParams};
 
 use crate::selfplay::{self, SelfPlayConfig, SelfPlayError, SelfPlayStats};
 

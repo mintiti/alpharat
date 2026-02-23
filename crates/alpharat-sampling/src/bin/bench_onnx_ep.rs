@@ -12,7 +12,7 @@ fn main() {
     let args: Vec<String> = std::env::args().collect();
     let model_path = args.get(1).expect("usage: bench_onnx_ep <model.onnx>");
 
-    let encoder = FlatEncoder::new(7, 7);
+    let _encoder = FlatEncoder::new(7, 7);
 
     // Create some test games
     let games: Vec<GameState> = (0..64)
