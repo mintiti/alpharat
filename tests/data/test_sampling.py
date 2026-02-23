@@ -36,18 +36,22 @@ class TestCreateGame:
         assert len(game.mud_entries()) == 0
 
     def test_none_density_uses_pyrat_defaults(self) -> None:
-        """Verify None density uses PyRat defaults (non-zero walls/mud)."""
+        """Verify None density uses PyRat defaults (non-zero walls/mud).
+
+        Uses a larger grid because 5x5 with 0.1 mud density can produce
+        0 mud entries depending on seed (~15% of the time).
+        """
         params = GameConfig(
-            width=5,
-            height=5,
-            max_turns=30,
-            cheese_count=3,
+            width=15,
+            height=11,
+            max_turns=100,
+            cheese_count=10,
             wall_density=None,
             mud_density=None,
         )
         game = create_game(params)
 
-        # PyRat defaults produce walls and mud
+        # PyRat defaults produce walls and mud on a large enough grid
         assert len(game.wall_entries()) > 0
         assert len(game.mud_entries()) > 0
 
