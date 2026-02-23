@@ -21,10 +21,15 @@ Python 3.11+, strict mypy, `uv` for package management.
 ## Development Commands
 
 ```bash
-# Setup
-uv sync --extra dev --extra train    # All deps: dev tools + PyTorch
-uv run pre-commit install            # Install hooks
+# Setup (CPU-only ONNX backend — works everywhere, including CI)
+uv sync --extra dev --extra train
+uv run pre-commit install
 uv pip install torch --torch-backend=cpu --reinstall  # Force CPU-only (optional)
+
+# With accelerator backends (opt-in via MATURIN_PEP517_ARGS)
+MATURIN_PEP517_ARGS="--features=coreml" uv sync --extra dev --extra train   # macOS
+MATURIN_PEP517_ARGS="--features=cuda" uv sync --extra dev --extra train     # Linux + NVIDIA
+MATURIN_PEP517_ARGS="--features=cuda,tensorrt" uv sync --extra dev --extra train  # + TensorRT
 
 # Testing
 uv run pytest                        # All tests with coverage

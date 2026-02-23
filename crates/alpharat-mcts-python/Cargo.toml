@@ -15,13 +15,8 @@ pyrat = { package = "pyrat-rust", git = "https://github.com/mintiti/pyrat-rust",
 pyo3 = { version = "0.25", features = ["extension-module"] }
 numpy = "0.25"
 
-[target.'cfg(target_os = "linux")'.dependencies]
-alpharat-sampling = { path = "../alpharat-sampling", features = ["onnx-cuda", "tensorrt"] }
-
-[target.'cfg(target_os = "macos")'.dependencies]
-alpharat-sampling = { path = "../alpharat-sampling", features = ["onnx-coreml"] }
-
 [features]
 default = []
 cuda = ["alpharat-sampling/onnx-cuda"]
+coreml = ["alpharat-sampling/onnx-coreml"]
 tensorrt = ["alpharat-sampling/tensorrt"]
