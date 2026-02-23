@@ -11,7 +11,7 @@ use pyrat::{CheeseConfig, GameState, MazeConfig};
 use crate::selfplay::{self, SelfPlayConfig, SelfPlayError, SelfPlayStats};
 
 #[cfg(any(feature = "onnx", feature = "tensorrt"))]
-use crate::mux_backend::{MuxBackend, MuxConfig};
+use crate::backends::mux::{MuxBackend, MuxConfig};
 #[cfg(any(feature = "onnx", feature = "tensorrt"))]
 use crate::FlatEncoder;
 #[cfg(feature = "onnx")]
