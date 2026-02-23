@@ -35,9 +35,9 @@ def run_games(
     searcher: Searcher,
 ) -> None:
     """Run N games sequentially (the part we're profiling)."""
-    for seed in range(num_games):
-        play_and_record_game(config, games_dir, seed, searcher)
-        print(f"  Game {seed + 1}/{num_games} done")
+    for i in range(num_games):
+        play_and_record_game(config, games_dir, searcher)
+        print(f"  Game {i + 1}/{num_games} done")
 
 
 def main() -> None:

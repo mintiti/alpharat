@@ -9,7 +9,7 @@ use pyo3::types::PyTuple;
 use rand::rngs::SmallRng;
 use rand::SeedableRng;
 
-use crate::backend::{Backend, EvalResult, SmartUniformBackend};
+use crate::backend::{Backend, BackendError, EvalResult, SmartUniformBackend};
 use crate::search::{run_search, SearchConfig, SearchResult};
 use crate::tree::MCTSTree;
 
@@ -75,6 +75,21 @@ impl PySearchResult {
         self.inner.total_visits
     }
 
+    #[getter]
+    fn nn_evals(&self) -> u32 {
+        self.inner.nn_evals
+    }
+
+    #[getter]
+    fn terminals(&self) -> u32 {
+        self.inner.terminals
+    }
+
+    #[getter]
+    fn collisions(&self) -> u32 {
+        self.inner.collisions
+    }
+
     fn __repr__(&self) -> String {
         format!(
             "SearchResult(value_p1={:.4}, value_p2={:.4}, total_visits={})",
@@ -109,11 +124,11 @@ struct PyCallbackBackend {
 // The GIL is acquired inside evaluate_batch when needed.
 
 impl Backend for PyCallbackBackend {
-    fn evaluate(&self, game: &GameState) -> EvalResult {
-        self.evaluate_batch(&[game]).into_iter().next().unwrap()
+    fn evaluate(&self, game: &GameState) -> Result<EvalResult, BackendError> {
+        Ok(self.evaluate_batch(&[game])?.into_iter().next().unwrap())
     }
 
-    fn evaluate_batch(&self, games: &[&GameState]) -> Vec<EvalResult> {
+    fn evaluate_batch(&self, games: &[&GameState]) -> Result<Vec<EvalResult>, BackendError> {
         Python::with_gil(|py| {
             // Wrap each GameState as a PyRat Python object.
             let py_games: Vec<Py<PyRat>> = games
@@ -128,9 +143,9 @@ impl Backend for PyCallbackBackend {
             let result = self
                 .predict_fn
                 .call1(py, (py_games,))
-                .expect("predict_fn raised an exception");
+                .map_err(|e| BackendError::msg(format!("predict_fn raised an exception: {e}")))?;
 
-            parse_eval_results(result.bind(py), games.len())
+            Ok(parse_eval_results(result.bind(py), games.len()))
         })
     }
 }
@@ -264,7 +279,10 @@ fn rust_mcts_search(
         }
     };
 
-    Ok(PySearchResult { inner: result })
+    match result {
+        Ok(r) => Ok(PySearchResult { inner: r }),
+        Err(e) => Err(pyo3::exceptions::PyRuntimeError::new_err(e.to_string())),
+    }
 }
 
 // ---------------------------------------------------------------------------

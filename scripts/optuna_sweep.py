@@ -129,7 +129,7 @@ def main() -> None:
 
     journal_path = f"results/{args.study_name}.log"
     storage = optuna.storages.JournalStorage(
-        optuna.storages.journal.JournalFileBackend(journal_path),
+        optuna.storages.journal.JournalFileBackend(journal_path),  # type: ignore[attr-defined]
     )
 
     study = optuna.create_study(

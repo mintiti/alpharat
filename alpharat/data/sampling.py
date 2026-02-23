@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import random
 import time
 from dataclasses import dataclass
 from multiprocessing import Process, Queue
@@ -211,16 +212,18 @@ def _build_searcher(config: SamplingConfig, device: str) -> Searcher:
     return config.mcts.build_searcher(checkpoint=config.checkpoint, device=device)
 
 
-def create_game(config: GameConfig, seed: int) -> PyRat:
+def create_game(config: GameConfig) -> PyRat:
     """Create a new game from configuration.
+
+    Generates a random seed internally — each game gets independent randomness.
 
     Args:
         config: Game configuration.
-        seed: Random seed for maze generation.
 
     Returns:
         Configured PyRat game instance.
     """
+    seed = random.randrange(2**32)
     return config.build(seed)
 
 
@@ -230,7 +233,6 @@ def create_game(config: GameConfig, seed: int) -> PyRat:
 def play_and_record_game(
     config: SamplingConfig,
     games_dir: Path,
-    seed: int,
     searcher: Searcher,
     *,
     auto_save: bool = True,
@@ -240,7 +242,6 @@ def play_and_record_game(
     Args:
         config: Sampling configuration.
         games_dir: Directory to save the game file.
-        seed: Random seed for game generation.
         searcher: Searcher instance for MCTS search.
         auto_save: If True (default), save to disk. If False, return GameData
             for external handling (e.g., bundling).
@@ -249,7 +250,7 @@ def play_and_record_game(
         Tuple of (GameStats, GameData or None). GameData is only returned if
         auto_save=False.
     """
-    game = create_game(config.game, seed)
+    game = create_game(config.game)
     cheese_available = config.game.cheese_count
     positions = 0
     simulations = config.mcts.simulations
@@ -315,7 +316,7 @@ def _worker_loop(
     Args:
         config: Sampling configuration.
         games_dir: Directory to save game files.
-        work_queue: Queue of seeds to process (None = stop).
+        work_queue: Queue of game indices to process (None = stop).
         results_queue: Queue to send completed game stats.
         device: Device for NN inference (if checkpoint configured).
         use_bundler: If True (default), buffer games and write bundles. If False,
@@ -334,15 +335,15 @@ def _worker_loop(
         )
 
     while True:
-        seed = work_queue.get()
-        if seed is None:
+        game_index = work_queue.get()
+        if game_index is None:
             # Sentinel received, flush bundler and exit
             if bundler is not None:
                 bundler.flush()
             break
 
         game_stats, game_data = play_and_record_game(
-            config, games_dir, seed, searcher, auto_save=not use_bundler
+            config, games_dir, searcher, auto_save=not use_bundler
         )
 
         if bundler is not None and game_data is not None:
@@ -424,24 +425,24 @@ def run_sampling(config: SamplingConfig, *, verbose: bool = True) -> tuple[Path,
     for worker in workers:
         worker.start()
 
-    # Track how many seeds we've submitted and results collected
-    next_seed = 0
+    # Track how many game indices we've submitted and results collected
+    next_index = 0
     completed = 0
 
     # Initially fill the queue (non-blocking since queue_size > 0)
-    while next_seed < num_games and next_seed < queue_size:
-        work_queue.put(next_seed)
-        next_seed += 1
+    while next_index < num_games and next_index < queue_size:
+        work_queue.put(next_index)
+        next_index += 1
 
     # Collect results and submit more work as slots free up
     while completed < num_games:
         game_stats = results_queue.get()
         completed += 1
 
-        # Submit next seed if any remain
-        if next_seed < num_games:
-            work_queue.put(next_seed)
-            next_seed += 1
+        # Submit next game index if any remain
+        if next_index < num_games:
+            work_queue.put(next_index)
+            next_index += 1
 
         # Throughput stats
         total_positions += game_stats.positions
@@ -508,7 +509,6 @@ def run_sampling(config: SamplingConfig, *, verbose: bool = True) -> tuple[Path,
         mcts_config=config.mcts,
         game=config.game,
         checkpoint_path=config.checkpoint,
-        seed_start=0,
     )
 
     metrics = SamplingMetrics(

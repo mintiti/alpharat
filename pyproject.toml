@@ -28,7 +28,7 @@ dependencies = [
 dev = [
     "pytest>=8.0.0",
     "pytest-cov>=4.1.0",
-    "mypy>=1.8.0",
+    "mypy>=1.19.0",
     "ruff>=0.8.0",
     "pre-commit>=3.6.0",
     "types-pyyaml>=6.0",
@@ -38,6 +38,7 @@ train = [
     "torch>=2.0",
     "tensorboard>=2.15",
     "tqdm>=4.66",
+    "onnx>=1.15",          # Required by torch.onnx.export for Rust sampling pipeline
 ]
 
 [project.scripts]
@@ -48,6 +49,8 @@ alpharat-prepare-shards = "scripts.prepare_shards:main"
 alpharat-benchmark = "scripts.benchmark:main"
 alpharat-manifest = "scripts.manifest:main"
 alpharat-iterate = "scripts.iterate:main"
+alpharat-export-onnx = "scripts.export_onnx:main"
+alpharat-rust-sample = "scripts.rust_sample:main"
 
 [build-system]
 requires = ["hatchling"]

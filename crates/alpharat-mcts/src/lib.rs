@@ -8,7 +8,7 @@ pub mod tree;
 #[cfg(test)]
 pub(crate) mod test_util;
 
-pub use backend::{Backend, EvalResult, SmartUniformBackend};
+pub use backend::{Backend, BackendError, EvalResult, SmartUniformBackend};
 pub use node::{HalfEdge, HalfNode, Node, NodeArena, NodeIndex};
 pub use search::{
     backup, compute_pruned_visits, run_search, select_actions, SearchConfig, SearchPath,
