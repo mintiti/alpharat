@@ -49,7 +49,10 @@ alpharat/
 ├── eval/           # Evaluation: game execution, tournaments
 └── experiments/    # Experiment management: ExperimentManager, manifest
 
-crates/             # Rust MCTS + sampling implementation + Python bindings (built by uv sync)
+crates/
+├── alpharat-mcts/          # Rust MCTS: Backend trait, tree, search
+├── alpharat-sampling/      # Self-play pipeline: ONNX/TRT backends, encoder, mux, NPZ writer
+└── alpharat-mcts-python/   # PyO3 bindings (cdylib), alpharat_sampling Python package
 scripts/            # Entry points: sample.py, rust_sample.py, train.py, iterate.py, benchmark.py, manifest.py
 configs/            # YAML config templates for sampling, training, evaluation
 tests/              # Mirrors alpharat/ structure
@@ -371,6 +374,7 @@ Line length 100. Enabled: pycodestyle, pyflakes, isort, pep8-naming, pyupgrade, 
 **alpharat_sampling imports:**
 ```python
 from alpharat_sampling import rust_self_play, SelfPlayStats, SelfPlayProgress
+from alpharat_sampling import preload_cuda_libs, preload_tensorrt_libs
 ```
 
 **pyrat-engine imports:**
@@ -378,6 +382,36 @@ from alpharat_sampling import rust_self_play, SelfPlayStats, SelfPlayProgress
 from pyrat_engine.core.game import PyRat, MoveUndo
 from pyrat_engine.core.types import Coordinates, Direction, Wall, Mud
 ```
+
+---
+
+## Inference Backends
+
+The Rust self-play pipeline evaluates game states through a `Backend` trait. The `--device` flag on CLI commands selects the backend:
+
+| `--device` | Backend | When to use |
+|------------|---------|-------------|
+| `auto` | Auto-detect | Default. CoreML on macOS, CUDA on Linux, else CPU |
+| `cpu` | ONNX Runtime (CPU) | Always works, no GPU setup needed |
+| `cuda` | ONNX Runtime (CUDA EP) | Linux + NVIDIA GPU + CUDA 12/13 |
+| `coreml` | ONNX Runtime (CoreML EP) | macOS (Apple Silicon). Uses GPU/Neural Engine |
+| `mps` | (alias for `coreml`) | Accepted for PyTorch naming consistency |
+| `tensorrt` | Native TensorRT-RTX | Linux + NVIDIA GPU. Max throughput, Blackwell support |
+
+### TensorRT setup
+
+1. Set `TENSORRT_RTX_ROOT` to the SDK root (e.g., `/path/to/TensorRT-RTX-1.3.0.35`)
+2. Ensure CUDA toolkit is installed (for headers + `libcudart`)
+3. At Python runtime, call `preload_tensorrt_libs()` (done automatically by the sampling pipeline)
+4. First inference builds an optimized engine for your GPU (~10-30s), cached to disk after that
+
+### CUDA setup
+
+`preload_cuda_libs()` is called automatically. CUDA + cuDNN 9.x must be on PATH. See `.mt/briefs/inference-backends.md` for version detection details.
+
+### ONNX export
+
+Use `alpharat-export-onnx` to convert a PyTorch checkpoint to ONNX format for the Rust pipeline.
 
 ---
 
@@ -588,7 +622,7 @@ alpharat-iterate configs/iterate.yaml --prefix sym_5x5 --start-iteration 2
 alpharat-iterate configs/iterate.yaml --prefix sym_5x5 --benchmark-every 2
 ```
 
-The script chains: **Sample → Shard → Train → (Benchmark) → repeat**, with automatic lineage tracking via ExperimentManager. Sampling uses the Rust self-play pipeline (`run_rust_sampling()`) with ONNX inference — auto-exports `.pt` checkpoints to ONNX when needed.
+The script chains: **Sample → Shard → Train → (Benchmark) → repeat**, with automatic lineage tracking via ExperimentManager. Sampling uses the Rust self-play pipeline (`run_rust_sampling()`) with ONNX inference — auto-exports `.pt` checkpoints to ONNX when needed. Use `--device` to select the inference backend (e.g., `--device cuda`, `--device tensorrt`).
 
 **Artifact naming convention:**
 
@@ -606,7 +640,7 @@ For more control, run each step separately:
 **First iteration (no NN yet):**
 ```bash
 # 1. Sample games with Rust self-play (SmartUniform priors)
-alpharat-rust-sample configs/iterate.yaml --group iteration_0 --num-games 1000
+alpharat-rust-sample configs/iterate.yaml --group iteration_0 --num-games 1000 --device cuda
 
 # 2. Convert games to training shards
 alpharat-prepare-shards --architecture mlp --group iter0_shards --batches iteration_0
@@ -618,7 +652,7 @@ alpharat-train-and-benchmark configs/train.yaml --name mlp_v1 --shards iter0_sha
 **Subsequent iterations (with NN):**
 ```bash
 # 1. Sample using trained NN (auto-exports to ONNX)
-alpharat-rust-sample configs/iterate.yaml --group iteration_1 --num-games 1000 \
+alpharat-rust-sample configs/iterate.yaml --group iteration_1 --num-games 1000 --device cuda \
     --checkpoint experiments/runs/mlp_v1/checkpoints/best_model.pt
 
 # 2. Create shards from new games
