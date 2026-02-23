@@ -282,22 +282,30 @@ mod tests {
         use std::thread;
 
         let backend = Arc::new(CachedBackend::new(Box::new(SmartUniformBackend), 64));
-        // Barrier ensures both threads' first evals overlap — neither finishes
-        // and populates a shared cache before the other starts.
-        let barrier = Arc::new(Barrier::new(2));
+        // Two barriers:
+        // 1. start_barrier: both threads begin evaluating at the same time
+        // 2. done_barrier: both threads stay alive until both finish
+        //
+        // The done_barrier prevents the thread_local crate from recycling
+        // a fast thread's ID before the slow thread calls get_or — which
+        // would make them share a cache slot on single-core CI runners.
+        let start_barrier = Arc::new(Barrier::new(2));
+        let done_barrier = Arc::new(Barrier::new(2));
 
         let handles: Vec<_> = (0..2)
             .map(|_| {
                 let backend = backend.clone();
-                let barrier = barrier.clone();
+                let start = start_barrier.clone();
+                let done = done_barrier.clone();
                 thread::spawn(move || {
                     let game = open_5x5(
                         Coordinates::new(0, 0),
                         Coordinates::new(4, 4),
                         &[Coordinates::new(2, 2)],
                     );
-                    barrier.wait();
+                    start.wait();
                     let _ = backend.evaluate(&game).unwrap();
+                    done.wait();
                 })
             })
             .collect();
