@@ -226,9 +226,9 @@ In PyRat, if a player tries to move UP but there's a wall, they stay in place. S
 
 The key insight: store statistics indexed by **unique outcomes**, not raw actions. When UP is blocked, UP and STAY produce the same outcome — so we only need one entry.
 
-**1. Detection (`tree.py:_compute_effective_actions`)**
+**1. Detection (`game.effective_actions(position)`)**
 
-At each position, we query `game.get_valid_moves(position)` to build the effective action mapping:
+The engine provides `effective_actions(pos)` which returns the effective action mapping:
 - Valid moves → map to themselves
 - Blocked moves (walls/edges) → map to STAY (action 4)
 - Mud → forces all actions to STAY for that player
@@ -384,6 +384,7 @@ from alpharat_sampling import preload_cuda_libs, preload_tensorrt_libs
 
 **pyrat-engine imports:**
 ```python
+from pyrat_engine.core import GameBuilder, GameConfig
 from pyrat_engine.core.game import PyRat, MoveUndo
 from pyrat_engine.core.types import Coordinates, Direction, Wall, Mud
 ```
@@ -515,6 +516,7 @@ game.wall_entries()              # → list[Wall]
 game.mud_entries()               # → list[Mud]
 game.cheese_positions()          # → list[Coordinates]
 game.get_valid_moves(position)   # → list[int] (0-3: UP, RIGHT, DOWN, LEFT)
+game.effective_actions(position) # → bytes[5] (action → effective action)
 
 # Position properties
 game.player1_position            # → Coordinates
@@ -530,25 +532,38 @@ undo = game.make_move(p1_action, p2_action)  # → MoveUndo
 game.unmake_move(undo)                       # → None
 ```
 
-### GameConfigBuilder
+### GameBuilder / GameConfig
 
-Fluent API for creating custom games (useful in tests):
+Two-phase builder: configure → build → create instances.
 
 ```python
-from pyrat_engine.core import GameConfigBuilder
+from pyrat_engine.core import GameBuilder, GameConfig
 from pyrat_engine.core.types import Coordinates, Wall, Mud
 
-game = (GameConfigBuilder(5, 5)
+# Full builder chain
+game = (GameBuilder(5, 5)
     .with_max_turns(100)
-    .with_player1_pos(Coordinates(0, 0))
-    .with_player2_pos(Coordinates(4, 4))
-    .with_cheese([Coordinates(2, 2), Coordinates(2, 3)])
-    .with_walls([Wall((1, 1), (1, 2))])
-    .with_mud([Mud((2, 2), (2, 3), value=3)])
-    .build())
+    .with_custom_maze(
+        [Wall((1, 1), (1, 2))],
+        [Mud((2, 2), (2, 3), value=3)],
+    )
+    .with_custom_positions(Coordinates(0, 0), Coordinates(4, 4))
+    .with_custom_cheese([Coordinates(2, 2), Coordinates(2, 3)])
+    .build()       # → GameConfig (reusable)
+    .create(seed=42))  # → PyRat
 
-# Or use presets: tiny (11x9), small (15x11), default, large (31x21), huge (41x31)
-game = PyRat.create_preset('small')
+# Shortcut for standard games
+game = GameConfig.classic(5, 5, 3).create(seed=42)
+
+# Maze options (pick one):  .with_open_maze()
+#                            .with_classic_maze()
+#                            .with_random_maze(wall_density=0.7, ...)
+#                            .with_custom_maze(walls, mud)
+# Position options:          .with_corner_positions()
+#                            .with_random_positions()
+#                            .with_custom_positions(p1, p2)
+# Cheese options:            .with_random_cheese(count, symmetric=True)
+#                            .with_custom_cheese(positions)
 ```
 
 ### get_observation()
