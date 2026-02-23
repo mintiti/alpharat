@@ -386,80 +386,90 @@ fn rust_self_play(
     let result = py.allow_threads(move || {
         let progress_ref = progress_arc.as_deref();
 
-        // Choose backend based on model path + device
-        let backend: Box<dyn Backend> = match onnx_model_path {
+        // Choose backend based on model path + device, then run self-play.
+        // Cache only wraps NN backends — SmartUniform is trivial arithmetic
+        // (cheaper than hashing), so caching it is pure overhead.
+        match onnx_model_path {
             #[cfg(any(feature = "onnx", feature = "tensorrt"))]
-            Some(model_path) => match device {
-                #[cfg(feature = "tensorrt")]
-                "tensorrt" => create_tensorrt_backend(
-                    model_path,
-                    width,
-                    height,
-                    mux_max_batch_size,
-                    output_dir,
-                    num_threads,
-                )?,
-                #[cfg(not(feature = "tensorrt"))]
-                "tensorrt" => {
-                    return Err(SelfPlayError::Backend(
-                        alpharat_mcts::BackendError::msg(
-                            "TensorRT support not compiled (build with --features tensorrt)",
-                        ),
-                    ));
-                }
-                #[cfg(feature = "onnx")]
-                _ => create_onnx_backend(
-                    model_path,
-                    device,
-                    width,
-                    height,
-                    mux_max_batch_size,
-                    num_threads,
-                )?,
-                #[cfg(not(feature = "onnx"))]
-                _ => {
-                    return Err(SelfPlayError::Backend(
-                        alpharat_mcts::BackendError::msg(
-                            "ONNX support not compiled (build with --features onnx)",
-                        ),
-                    ));
-                }
-            },
-            #[cfg(not(any(feature = "onnx", feature = "tensorrt")))]
-            Some(_) => {
-                return Err(SelfPlayError::Backend(
-                    alpharat_mcts::BackendError::msg(
-                        "No NN backend compiled (build with --features onnx or tensorrt)",
-                    ),
-                ));
-            }
-            None => Box::new(SmartUniformBackend),
-        };
+            Some(model_path) => {
+                let backend: Box<dyn Backend> = match device {
+                    #[cfg(feature = "tensorrt")]
+                    "tensorrt" => create_tensorrt_backend(
+                        model_path,
+                        width,
+                        height,
+                        mux_max_batch_size,
+                        output_dir,
+                        num_threads,
+                    )?,
+                    #[cfg(not(feature = "tensorrt"))]
+                    "tensorrt" => {
+                        return Err(SelfPlayError::Backend(
+                            alpharat_mcts::BackendError::msg(
+                                "TensorRT support not compiled (build with --features tensorrt)",
+                            ),
+                        ));
+                    }
+                    #[cfg(feature = "onnx")]
+                    _ => create_onnx_backend(
+                        model_path,
+                        device,
+                        width,
+                        height,
+                        mux_max_batch_size,
+                        num_threads,
+                    )?,
+                    #[cfg(not(feature = "onnx"))]
+                    _ => {
+                        return Err(SelfPlayError::Backend(
+                            alpharat_mcts::BackendError::msg(
+                                "ONNX support not compiled (build with --features onnx)",
+                            ),
+                        ));
+                    }
+                };
 
-        if cache_size > 0 {
-            let cached = CachedBackend::new(backend, cache_size);
-            let mut disk_result = selfplay::run_self_play_to_disk(
+                if cache_size > 0 {
+                    let cached = CachedBackend::new(backend, cache_size);
+                    let mut disk_result = selfplay::run_self_play_to_disk(
+                        &games,
+                        &cached,
+                        &search_config,
+                        &selfplay_config,
+                        output_path,
+                        max_games_per_bundle,
+                        progress_ref,
+                    )?;
+                    disk_result.stats.cache_hits = cached.stats.hits.load(Relaxed);
+                    disk_result.stats.cache_misses = cached.stats.misses.load(Relaxed);
+                    Ok(disk_result)
+                } else {
+                    selfplay::run_self_play_to_disk(
+                        &games,
+                        backend.as_ref(),
+                        &search_config,
+                        &selfplay_config,
+                        output_path,
+                        max_games_per_bundle,
+                        progress_ref,
+                    )
+                }
+            }
+            #[cfg(not(any(feature = "onnx", feature = "tensorrt")))]
+            Some(_) => Err(SelfPlayError::Backend(
+                alpharat_mcts::BackendError::msg(
+                    "No NN backend compiled (build with --features onnx or tensorrt)",
+                ),
+            )),
+            None => selfplay::run_self_play_to_disk(
                 &games,
-                &cached,
+                &SmartUniformBackend,
                 &search_config,
                 &selfplay_config,
                 output_path,
                 max_games_per_bundle,
                 progress_ref,
-            )?;
-            disk_result.stats.cache_hits = cached.stats.hits.load(Relaxed);
-            disk_result.stats.cache_misses = cached.stats.misses.load(Relaxed);
-            Ok(disk_result)
-        } else {
-            selfplay::run_self_play_to_disk(
-                &games,
-                backend.as_ref(),
-                &search_config,
-                &selfplay_config,
-                output_path,
-                max_games_per_bundle,
-                progress_ref,
-            )
+            ),
         }
     });
 

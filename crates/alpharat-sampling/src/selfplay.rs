@@ -1573,6 +1573,27 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    #[test]
+    fn smart_uniform_uncached_zero_cache_stats() {
+        // Mimics the None (no model) path in bindings.rs:
+        // SmartUniform runs without CachedBackend, so cache stats stay at zero.
+        let dir = std::env::temp_dir().join("selfplay_smart_uniform_cache_test");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let games: Vec<GameState> = (0..4).map(|_| short_game()).collect();
+        let search = SearchConfig::default();
+        let sp = SelfPlayConfig { n_sims: 8, batch_size: 8, num_threads: 2 };
+
+        let result =
+            run_self_play_to_disk(&games, &BACKEND, &search, &sp, &dir, 100, None).unwrap();
+        assert_eq!(result.stats.total_games, 4);
+        assert_eq!(result.stats.cache_hits, 0);
+        assert_eq!(result.stats.cache_misses, 0);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     // ---- stats incremental ----
 
     #[test]
