@@ -76,7 +76,7 @@ class TestLoadConfig:
         config = load_config(GameConfig, configs_dir, "5x5_open")
         assert config.width == 5
         assert config.height == 5
-        assert config.cheese_count == 5
+        assert config.cheese.count == 5
 
     def test_loads_config_from_subdir(self) -> None:
         """load_config loads config files from subdirectories."""

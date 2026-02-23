@@ -43,7 +43,8 @@ class TournamentConfig(StrictBaseModel):
           width: 5
           height: 5
           max_turns: 30
-          cheese_count: 5
+          cheese:
+            count: 5
         workers: 4
         device: mps
     """

@@ -54,7 +54,7 @@ class TestGameConfigs:
         config = load_config(GameConfig, CONFIGS / "game", config_name)
         assert config.width > 0
         assert config.height > 0
-        assert config.cheese_count > 0
+        assert config.cheese.count > 0
 
 
 # --- MCTS Configs ---

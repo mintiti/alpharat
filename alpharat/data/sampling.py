@@ -251,7 +251,7 @@ def play_and_record_game(
         auto_save=False.
     """
     game = create_game(config.game)
-    cheese_available = config.game.cheese_count
+    cheese_available = config.game.cheese.count
     positions = 0
     simulations = config.mcts.simulations
 

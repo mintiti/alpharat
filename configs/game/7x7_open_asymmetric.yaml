@@ -2,7 +2,9 @@
 width: 7
 height: 7
 max_turns: 50
-cheese_count: 10
-wall_density: 0.0
-mud_density: 0.0
-symmetric: false
+maze:
+  type: open
+positions: corners
+cheese:
+  count: 10
+  symmetric: false

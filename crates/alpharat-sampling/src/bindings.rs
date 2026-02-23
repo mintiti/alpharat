@@ -296,9 +296,12 @@ fn create_onnx_backend(
     cheese_count,
     max_turns,
     num_games,
-    symmetric = true,
-    wall_density = None,
-    mud_density = None,
+    cheese_symmetric = true,
+    maze_type = "open",
+    positions = "corners",
+    wall_density = 0.7,
+    mud_density = 0.1,
+    maze_symmetric = true,
     simulations,
     batch_size = 8,
     c_puct = 1.5,
@@ -325,9 +328,12 @@ fn rust_self_play(
     cheese_count: u16,
     max_turns: u16,
     num_games: usize,
-    symmetric: bool,
-    wall_density: Option<f32>,
-    mud_density: Option<f32>,
+    cheese_symmetric: bool,
+    maze_type: &str,
+    positions: &str,
+    wall_density: f32,
+    mud_density: f32,
+    maze_symmetric: bool,
     // Search
     simulations: u32,
     batch_size: u32,
@@ -357,9 +363,12 @@ fn rust_self_play(
         height,
         cheese_count,
         max_turns,
-        symmetric,
-        wall_density.unwrap_or(0.0),
-        mud_density.unwrap_or(0.0),
+        cheese_symmetric,
+        maze_type,
+        positions,
+        wall_density,
+        mud_density,
+        maze_symmetric,
     );
 
     let search_config = SearchConfig {
@@ -494,23 +503,40 @@ fn make_games(
     height: u8,
     cheese_count: u16,
     max_turns: u16,
-    symmetric: bool,
+    cheese_symmetric: bool,
+    maze_type: &str,
+    positions: &str,
     wall_density: f32,
     mud_density: f32,
+    maze_symmetric: bool,
 ) -> Vec<GameState> {
-    let mud_range: u8 = if mud_density > 0.0 { 3 } else { 2 };
-    let config = GameBuilder::new(width, height)
-        .with_max_turns(max_turns)
-        .with_random_maze(MazeParams {
-            wall_density,
-            mud_density,
-            mud_range,
-            connected: true,
-            symmetric,
-        })
-        .with_corner_positions()
-        .with_random_cheese(cheese_count, symmetric)
-        .build();
+    let base = GameBuilder::new(width, height).with_max_turns(max_turns);
+
+    // Maze axis (NeedsMaze → NeedsPlayers)
+    let with_maze = match maze_type {
+        "open" => base.with_open_maze(),
+        "classic" => base.with_classic_maze(),
+        "random" => {
+            let mud_range: u8 = if mud_density > 0.0 { 3 } else { 2 };
+            base.with_random_maze(MazeParams {
+                wall_density,
+                mud_density,
+                mud_range,
+                connected: true,
+                symmetric: maze_symmetric,
+            })
+        }
+        _ => panic!("unknown maze_type: {maze_type}"),
+    };
+
+    // Positions axis (NeedsPlayers → NeedsCheese)
+    let with_positions = match positions {
+        "corners" => with_maze.with_corner_positions(),
+        "random" => with_maze.with_random_positions(),
+        _ => panic!("unknown positions: {positions}"),
+    };
+
+    let config = with_positions.with_random_cheese(cheese_count, cheese_symmetric).build();
 
     (0..n)
         .map(|_| config.create(None).expect("game creation failed"))

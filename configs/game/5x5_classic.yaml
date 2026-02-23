@@ -1,9 +1,9 @@
-# 5x5 open maze (no walls/mud), 20% cheese density
+# 5x5 classic maze (pyrat-engine default walls/mud)
 width: 5
 height: 5
 max_turns: 30
 maze:
-  type: open
+  type: classic
 positions: corners
 cheese:
   count: 5

@@ -1,14 +1,23 @@
-"""Game configuration with semantic validation.
+"""Game configuration with three independent axes: maze, positions, cheese.
 
-GameConfig replaces GameParams with:
-- Strict field validation (ranges, constraints)
-- Semantic validators (cheese fits in grid, etc.)
-- build() method for creating PyRat instances
+GameConfig uses discriminated unions for maze type and nested CheeseConfig,
+matching the pyrat-engine two-phase builder API (GameBuilder → GameConfig → .create(seed)).
+
+Example YAML:
+    width: 5
+    height: 5
+    max_turns: 30
+    maze:
+      type: open
+    positions: corners
+    cheese:
+      count: 5
+      symmetric: true
 """
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Self
+from typing import TYPE_CHECKING, Annotated, Literal, Self
 
 from pydantic import Field, model_validator
 
@@ -19,43 +28,72 @@ if TYPE_CHECKING:
     from pyrat_engine.core.game import PyRat
 
 
-class GameConfig(StrictBaseModel):
-    """Game/environment configuration with validation.
+# --- Maze configs (discriminated union) ---
 
-    Validates:
-    - Field ranges (width/height 1-50, densities 0-1, etc.)
-    - Semantic constraints (cheese_count fits in grid)
+
+class OpenMaze(StrictBaseModel):
+    """Open maze — no walls, no mud."""
+
+    type: Literal["open"] = "open"
+
+
+class ClassicMaze(StrictBaseModel):
+    """Classic maze — pyrat-engine default wall/mud generation."""
+
+    type: Literal["classic"] = "classic"
+
+
+class RandomMaze(StrictBaseModel):
+    """Random maze with configurable densities."""
+
+    type: Literal["random"] = "random"
+    wall_density: float = Field(default=0.7, ge=0.0, le=1.0)
+    mud_density: float = Field(default=0.1, ge=0.0, le=1.0)
+    symmetric: bool = Field(default=True)
+
+
+MazeConfig = Annotated[OpenMaze | ClassicMaze | RandomMaze, Field(discriminator="type")]
+
+
+# --- Cheese config ---
+
+
+class CheeseConfig(StrictBaseModel):
+    """Cheese placement configuration."""
+
+    count: int = Field(gt=0)
+    symmetric: bool = Field(default=True)
+
+
+# --- Main GameConfig ---
+
+
+class GameConfig(StrictBaseModel):
+    """Game/environment configuration with three independent axes.
+
+    Axes:
+    - **maze**: open | classic | random (discriminated union)
+    - **positions**: corners | random
+    - **cheese**: count + symmetric
 
     Example YAML:
         width: 5
         height: 5
         max_turns: 30
-        cheese_count: 5
-        wall_density: 0.0
-        mud_density: 0.0
-        symmetric: true
+        maze:
+          type: open
+        positions: corners
+        cheese:
+          count: 5
+          symmetric: true
     """
 
-    width: int = Field(gt=0, le=50, description="Maze width (1-50)")
-    height: int = Field(gt=0, le=50, description="Maze height (1-50)")
-    max_turns: int = Field(gt=0, description="Maximum game turns")
-    cheese_count: int = Field(gt=0, description="Number of cheese pieces")
-    wall_density: float | None = Field(
-        default=None,
-        ge=0.0,
-        le=1.0,
-        description="Wall density (0-1). None uses pyrat default (0.7)",
-    )
-    mud_density: float | None = Field(
-        default=None,
-        ge=0.0,
-        le=1.0,
-        description="Mud density (0-1). None uses pyrat default (0.1)",
-    )
-    symmetric: bool = Field(
-        default=True,
-        description="Symmetric maze/cheese generation (recommended for fair games)",
-    )
+    width: int = Field(gt=0, le=50)
+    height: int = Field(gt=0, le=50)
+    max_turns: int = Field(gt=0)
+    maze: MazeConfig = Field(default_factory=OpenMaze)
+    positions: Literal["corners", "random"] = "corners"
+    cheese: CheeseConfig
 
     @model_validator(mode="after")
     def check_cheese_fits(self) -> Self:
@@ -64,9 +102,9 @@ class GameConfig(StrictBaseModel):
         Grid has width*height cells, minus 2 for player starting positions.
         """
         max_cheese = self.width * self.height - 2
-        if self.cheese_count > max_cheese:
+        if self.cheese.count > max_cheese:
             raise ValueError(
-                f"cheese_count ({self.cheese_count}) exceeds available cells "
+                f"cheese.count ({self.cheese.count}) exceeds available cells "
                 f"({max_cheese} = {self.width}x{self.height} - 2 player positions)"
             )
         return self
@@ -80,16 +118,29 @@ class GameConfig(StrictBaseModel):
 
         builder = GameBuilder(self.width, self.height)
         builder = builder.with_max_turns(self.max_turns)
-        if self.wall_density is not None or self.mud_density is not None or not self.symmetric:
-            builder = builder.with_random_maze(
-                wall_density=self.wall_density if self.wall_density is not None else 0.7,
-                mud_density=self.mud_density if self.mud_density is not None else 0.1,
-                symmetric=self.symmetric,
-            )
+
+        # Maze axis
+        match self.maze:
+            case OpenMaze():
+                builder = builder.with_open_maze()
+            case ClassicMaze():
+                builder = builder.with_classic_maze()
+            case RandomMaze(wall_density=wd, mud_density=md, symmetric=sym):
+                builder = builder.with_random_maze(
+                    wall_density=wd,
+                    mud_density=md,
+                    symmetric=sym,
+                )
+
+        # Positions axis
+        if self.positions == "corners":
+            builder = builder.with_corner_positions()
         else:
-            builder = builder.with_classic_maze()
-        builder = builder.with_corner_positions()
-        builder = builder.with_random_cheese(self.cheese_count, symmetric=self.symmetric)
+            builder = builder.with_random_positions()
+
+        # Cheese axis
+        builder = builder.with_random_cheese(self.cheese.count, symmetric=self.cheese.symmetric)
+
         return builder.build()
 
     def build(self, seed: int) -> PyRat:
