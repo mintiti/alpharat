@@ -119,7 +119,7 @@ mod inner {
             model_path: impl AsRef<std::path::Path>,
             encoder: E,
             provider: ExecutionProvider,
-        ) -> Self {
+        ) -> Result<Self, BackendError> {
             match provider {
                 ExecutionProvider::Cpu => Self::new(model_path, encoder),
                 #[cfg(feature = "onnx-cuda")]
@@ -195,7 +195,7 @@ mod inner {
                 .try_extract_tensor::<f32>()
                 .map_err(|e| BackendError::msg(format!("failed to extract pred_value_p2: {e}")))?;
 
-            Ok((0..n)
+            (0..n)
                 .map(|i| {
                     let p1_off = i * 5;
                     let p2_off = i * 5;
@@ -217,16 +217,18 @@ mod inner {
                         value_p1: v1_data[i],
                         value_p2: v2_data[i],
                     };
-                    assert!(
-                        result.policy_p1.iter().all(|v| v.is_finite())
-                            && result.policy_p2.iter().all(|v| v.is_finite())
-                            && result.value_p1.is_finite()
-                            && result.value_p2.is_finite(),
-                        "ONNX output contains non-finite values (NaN/Inf) for game {i}"
-                    );
-                    result
+                    if !result.policy_p1.iter().all(|v| v.is_finite())
+                        || !result.policy_p2.iter().all(|v| v.is_finite())
+                        || !result.value_p1.is_finite()
+                        || !result.value_p2.is_finite()
+                    {
+                        return Err(BackendError::msg(format!(
+                            "ONNX output contains non-finite values (NaN/Inf) for game {i}"
+                        )));
+                    }
+                    Ok(result)
                 })
-                .collect())
+                .collect()
         }
     }
 }

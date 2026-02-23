@@ -28,7 +28,7 @@ mod inner {
     const CUDA_MEMCPY_H2D: i32 = 1;
     const CUDA_MEMCPY_D2H: i32 = 2;
 
-    fn cuda_check(code: i32, op: &str) {
+    fn cuda_check(code: i32, op: &str) -> Result<(), BackendError> {
         if code != 0 {
             let name = unsafe {
                 let p = cudaGetErrorName(code);
@@ -48,22 +48,25 @@ mod inner {
                         .unwrap_or("no description")
                 }
             };
-            panic!("CUDA {op} failed: {name} ({code}): {msg}");
+            return Err(BackendError::msg(format!(
+                "CUDA {op} failed: {name} ({code}): {msg}"
+            )));
         }
+        Ok(())
     }
 
-    fn compute_capability() -> (i32, i32) {
+    fn compute_capability() -> Result<(i32, i32), BackendError> {
         let (mut major, mut minor) = (0i32, 0i32);
         // cudaDevAttrComputeCapabilityMajor = 75, Minor = 76
         cuda_check(
             unsafe { cudaDeviceGetAttribute(&mut major, 75, 0) },
             "cudaDeviceGetAttribute(compute_major)",
-        );
+        )?;
         cuda_check(
             unsafe { cudaDeviceGetAttribute(&mut minor, 76, 0) },
             "cudaDeviceGetAttribute(compute_minor)",
-        );
-        (major, minor)
+        )?;
+        Ok((major, minor))
     }
 
     // -----------------------------------------------------------------------
@@ -110,13 +113,15 @@ mod inner {
     /// Load TRT-RTX shared libraries via dlopen (idempotent).
     /// Called automatically by `TensorrtBackend::new`. Also available
     /// for standalone Rust binaries that don't have Python preloading.
-    pub fn load_trt_libs() {
+    pub fn load_trt_libs() -> Result<(), BackendError> {
         let rc = unsafe { trt_load_libs(std::ptr::null(), std::ptr::null()) };
-        assert_eq!(
-            rc, 0,
-            "Failed to load TensorRT-RTX libraries — \
-             is $TENSORRT_RTX_ROOT/lib in LD_LIBRARY_PATH?"
-        );
+        if rc != 0 {
+            return Err(BackendError::msg(
+                "Failed to load TensorRT-RTX libraries — \
+                 is $TENSORRT_RTX_ROOT/lib in LD_LIBRARY_PATH?",
+            ));
+        }
+        Ok(())
     }
 
     // -----------------------------------------------------------------------
@@ -156,7 +161,12 @@ mod inner {
     unsafe impl Send for GpuBuffers {}
 
     impl GpuBuffers {
-        fn alloc(max_batch: usize, obs_dim: usize) -> Self {
+        /// Allocate GPU buffers for the given batch/obs dimensions.
+        ///
+        /// On `?`-return, `Drop` runs on the partially-initialized struct.
+        /// All pointers start as `null_mut()` and `cudaFree(NULL)` is a
+        /// documented no-op, so cleanup is safe even on partial allocation.
+        fn alloc(max_batch: usize, obs_dim: usize) -> Result<Self, BackendError> {
             let f = std::mem::size_of::<f32>();
             let mut b = Self {
                 d_input: std::ptr::null_mut(),
@@ -169,25 +179,25 @@ mod inner {
                 cuda_check(
                     cudaMalloc(&mut b.d_input, max_batch * obs_dim * f),
                     "cudaMalloc(input)",
-                );
+                )?;
                 cuda_check(
                     cudaMalloc(&mut b.d_policy_p1, max_batch * 5 * f),
                     "cudaMalloc(policy_p1)",
-                );
+                )?;
                 cuda_check(
                     cudaMalloc(&mut b.d_policy_p2, max_batch * 5 * f),
                     "cudaMalloc(policy_p2)",
-                );
+                )?;
                 cuda_check(
                     cudaMalloc(&mut b.d_value_p1, max_batch * f),
                     "cudaMalloc(value_p1)",
-                );
+                )?;
                 cuda_check(
                     cudaMalloc(&mut b.d_value_p2, max_batch * f),
                     "cudaMalloc(value_p2)",
-                );
+                )?;
             }
-            b
+            Ok(b)
         }
     }
 
@@ -212,11 +222,11 @@ mod inner {
     /// Header: 4 bytes magic + 32 bytes ONNX SHA-256 hash.
     const CACHE_HEADER_SIZE: usize = 4 + 32;
 
-    fn cache_key(onnx_hash: &[u8; 32], max_batch: usize) -> String {
-        let (major, minor) = compute_capability();
+    fn cache_key(onnx_hash: &[u8; 32], max_batch: usize) -> Result<String, BackendError> {
+        let (major, minor) = compute_capability()?;
         let trt_version = unsafe { trt_get_version() };
         let hash_hex: String = onnx_hash.iter().take(8).map(|b| format!("{b:02x}")).collect();
-        format!("trt{trt_version}_sm{major}{minor}_{hash_hex}_{max_batch}.engine")
+        Ok(format!("trt{trt_version}_sm{major}{minor}_{hash_hex}_{max_batch}.engine"))
     }
 
     fn try_load_cache(cache_dir: &Path, key: &str, onnx_hash: &[u8; 32]) -> Option<Vec<u8>> {
@@ -272,7 +282,7 @@ mod inner {
 
     /// Build a serialized TensorRT engine from ONNX bytes, with optimization
     /// profiles for dynamic batch sizes.
-    fn build_engine(onnx_bytes: &[u8], max_batch: usize) -> Vec<u8> {
+    fn build_engine(onnx_bytes: &[u8], max_batch: usize) -> Result<Vec<u8>, BackendError> {
         let mut out_data: *mut c_void = std::ptr::null_mut();
         let mut out_len: usize = 0;
 
@@ -289,17 +299,18 @@ mod inner {
             )
         };
 
-        assert!(
-            rc == 0 && !out_data.is_null(),
-            "TRT engine build failed: {} (rc={rc})",
-            trt_build_error_message(rc)
-        );
+        if rc != 0 || out_data.is_null() {
+            return Err(BackendError::msg(format!(
+                "TRT engine build failed: {} (rc={rc})",
+                trt_build_error_message(rc)
+            )));
+        }
 
         let data = unsafe { std::slice::from_raw_parts(out_data as *const u8, out_len) }.to_vec();
         unsafe { trt_free_buffer(out_data) };
 
         eprintln!("[TensorRT] Engine built ({} bytes)", data.len());
-        data
+        Ok(data)
     }
 
     // -----------------------------------------------------------------------
@@ -327,12 +338,31 @@ mod inner {
     }
 
     impl TrtSession {
-        fn new(engine_data: &[u8], obs_dim: usize, max_batch: usize) -> Self {
+        fn new(engine_data: &[u8], obs_dim: usize, max_batch: usize) -> Result<Self, BackendError> {
             let handle = unsafe {
                 trt_create_session(engine_data.as_ptr() as *const c_void, engine_data.len())
             };
-            assert!(!handle.is_null(), "Failed to create TRT session");
+            if handle.is_null() {
+                return Err(BackendError::msg("Failed to create TRT session"));
+            }
 
+            match Self::init_session(handle, obs_dim, max_batch) {
+                Ok(session) => Ok(session),
+                Err(e) => {
+                    // Clean up the C++ session on init failure
+                    unsafe { trt_destroy_session(handle) };
+                    Err(e)
+                }
+            }
+        }
+
+        /// Initialize the session after handle creation. Separated so that
+        /// `new()` can destroy the handle on error.
+        fn init_session(
+            handle: *mut c_void,
+            obs_dim: usize,
+            max_batch: usize,
+        ) -> Result<Self, BackendError> {
             // Log IO tensors
             let n_io = unsafe { trt_get_nb_io_tensors(handle) };
             let names: Vec<String> = (0..n_io)
@@ -350,54 +380,43 @@ mod inner {
             eprintln!("[TensorRT] IO tensors: {names:?}");
 
             // Allocate GPU buffers
-            let buffers = GpuBuffers::alloc(max_batch, obs_dim);
+            let buffers = GpuBuffers::alloc(max_batch, obs_dim)?;
 
             // Bind tensor addresses
-            let obs_name = CString::new("observation").unwrap();
-            let pp1_name = CString::new("policy_p1").unwrap();
-            let pp2_name = CString::new("policy_p2").unwrap();
-            let vp1_name = CString::new("pred_value_p1").unwrap();
-            let vp2_name = CString::new("pred_value_p2").unwrap();
-
-            unsafe {
-                assert_eq!(
-                    trt_set_tensor_address(handle, obs_name.as_ptr(), buffers.d_input),
-                    0,
-                    "Failed to bind 'observation' tensor"
-                );
-                assert_eq!(
-                    trt_set_tensor_address(handle, pp1_name.as_ptr(), buffers.d_policy_p1),
-                    0,
-                    "Failed to bind 'policy_p1' tensor"
-                );
-                assert_eq!(
-                    trt_set_tensor_address(handle, pp2_name.as_ptr(), buffers.d_policy_p2),
-                    0,
-                    "Failed to bind 'policy_p2' tensor"
-                );
-                assert_eq!(
-                    trt_set_tensor_address(handle, vp1_name.as_ptr(), buffers.d_value_p1),
-                    0,
-                    "Failed to bind 'pred_value_p1' tensor"
-                );
-                assert_eq!(
-                    trt_set_tensor_address(handle, vp2_name.as_ptr(), buffers.d_value_p2),
-                    0,
-                    "Failed to bind 'pred_value_p2' tensor"
-                );
-            }
+            Self::bind_tensors(handle, &buffers)?;
 
             // Create dedicated CUDA stream
             let mut stream: *mut c_void = std::ptr::null_mut();
-            cuda_check(unsafe { cudaStreamCreate(&mut stream) }, "cudaStreamCreate");
+            cuda_check(unsafe { cudaStreamCreate(&mut stream) }, "cudaStreamCreate")?;
 
-            Self {
+            Ok(Self {
                 handle,
                 stream,
                 buffers,
                 max_batch,
                 obs_dim,
+            })
+        }
+
+        /// Bind the 5 named tensors (1 input + 4 outputs) to GPU buffer addresses.
+        fn bind_tensors(handle: *mut c_void, buffers: &GpuBuffers) -> Result<(), BackendError> {
+            let bindings: [(&str, *mut c_void); 5] = [
+                ("observation", buffers.d_input),
+                ("policy_p1", buffers.d_policy_p1),
+                ("policy_p2", buffers.d_policy_p2),
+                ("pred_value_p1", buffers.d_value_p1),
+                ("pred_value_p2", buffers.d_value_p2),
+            ];
+            for (name, ptr) in bindings {
+                let cname = CString::new(name).unwrap();
+                let rc = unsafe { trt_set_tensor_address(handle, cname.as_ptr(), ptr) };
+                if rc != 0 {
+                    return Err(BackendError::msg(format!(
+                        "Failed to bind '{name}' tensor (rc={rc})"
+                    )));
+                }
             }
+            Ok(())
         }
 
         /// Run inference on encoded observations. Returns (pp1, pp2, v1, v2).
@@ -405,26 +424,34 @@ mod inner {
             &mut self,
             input: &[f32],
             n: usize,
-        ) -> (Vec<f32>, Vec<f32>, Vec<f32>, Vec<f32>) {
-            assert!(
-                n <= self.max_batch,
-                "batch size {n} exceeds max_batch {}",
-                self.max_batch
-            );
-            assert_eq!(input.len(), n * self.obs_dim);
+        ) -> Result<(Vec<f32>, Vec<f32>, Vec<f32>, Vec<f32>), BackendError> {
+            if n > self.max_batch {
+                return Err(BackendError::msg(format!(
+                    "batch size {n} exceeds max_batch {}",
+                    self.max_batch
+                )));
+            }
+            if input.len() != n * self.obs_dim {
+                return Err(BackendError::msg(format!(
+                    "input length {} != expected {}",
+                    input.len(),
+                    n * self.obs_dim
+                )));
+            }
 
             let f = std::mem::size_of::<f32>();
 
             // Set dynamic input shape for this batch
             let obs_name = CString::new("observation").unwrap();
             let shape = [n as i64, self.obs_dim as i64];
-            assert_eq!(
-                unsafe {
-                    trt_set_input_shape(self.handle, obs_name.as_ptr(), 2, shape.as_ptr())
-                },
-                0,
-                "Failed to set input shape for batch size {n}"
-            );
+            let rc = unsafe {
+                trt_set_input_shape(self.handle, obs_name.as_ptr(), 2, shape.as_ptr())
+            };
+            if rc != 0 {
+                return Err(BackendError::msg(format!(
+                    "Failed to set input shape for batch size {n} (rc={rc})"
+                )));
+            }
 
             // H2D: copy observation buffer to GPU
             unsafe {
@@ -436,19 +463,18 @@ mod inner {
                         CUDA_MEMCPY_H2D,
                     ),
                     "cudaMemcpy(input H2D)",
-                );
+                )?;
             }
 
             // Run inference
-            assert_eq!(
-                unsafe { trt_enqueue_v3(self.handle, self.stream) },
-                0,
-                "TRT enqueue_v3 failed"
-            );
+            let rc = unsafe { trt_enqueue_v3(self.handle, self.stream) };
+            if rc != 0 {
+                return Err(BackendError::msg(format!("TRT enqueue_v3 failed (rc={rc})")));
+            }
             cuda_check(
                 unsafe { cudaStreamSynchronize(self.stream) },
                 "cudaStreamSynchronize",
-            );
+            )?;
 
             // D2H: copy outputs back
             let mut pp1 = vec![0.0f32; n * 5];
@@ -465,7 +491,7 @@ mod inner {
                         CUDA_MEMCPY_D2H,
                     ),
                     "cudaMemcpy(policy_p1 D2H)",
-                );
+                )?;
                 cuda_check(
                     cudaMemcpy(
                         pp2.as_mut_ptr() as *mut c_void,
@@ -474,7 +500,7 @@ mod inner {
                         CUDA_MEMCPY_D2H,
                     ),
                     "cudaMemcpy(policy_p2 D2H)",
-                );
+                )?;
                 cuda_check(
                     cudaMemcpy(
                         v1.as_mut_ptr() as *mut c_void,
@@ -483,7 +509,7 @@ mod inner {
                         CUDA_MEMCPY_D2H,
                     ),
                     "cudaMemcpy(value_p1 D2H)",
-                );
+                )?;
                 cuda_check(
                     cudaMemcpy(
                         v2.as_mut_ptr() as *mut c_void,
@@ -492,10 +518,10 @@ mod inner {
                         CUDA_MEMCPY_D2H,
                     ),
                     "cudaMemcpy(value_p2 D2H)",
-                );
+                )?;
             }
 
-            (pp1, pp2, v1, v2)
+            Ok((pp1, pp2, v1, v2))
         }
     }
 
@@ -526,7 +552,7 @@ mod inner {
             encoder: E,
             config: TensorrtConfig,
         ) -> Result<Self, BackendError> {
-            load_trt_libs();
+            load_trt_libs()?;
 
             let obs_dim = encoder.obs_dim();
             let onnx_path = model_path.as_ref();
@@ -539,7 +565,7 @@ mod inner {
             })?;
 
             let onnx_hash: [u8; 32] = Sha256::digest(&onnx_bytes).into();
-            let key = cache_key(&onnx_hash, config.max_batch);
+            let key = cache_key(&onnx_hash, config.max_batch)?;
 
             // Load cached engine or build from scratch
             let engine_data = match &config.cache_dir {
@@ -552,7 +578,7 @@ mod inner {
                         eprintln!(
                             "[TensorRT] Building engine from ONNX (this may take 10-30s)..."
                         );
-                        let data = build_engine(&onnx_bytes, config.max_batch);
+                        let data = build_engine(&onnx_bytes, config.max_batch)?;
                         save_cache(dir, &key, &data, &onnx_hash);
                         eprintln!("[TensorRT] Engine cached as {key}");
                         data
@@ -560,11 +586,11 @@ mod inner {
                 },
                 None => {
                     eprintln!("[TensorRT] Building engine (no cache dir configured)...");
-                    build_engine(&onnx_bytes, config.max_batch)
+                    build_engine(&onnx_bytes, config.max_batch)?
                 }
             };
 
-            let session = TrtSession::new(&engine_data, obs_dim, config.max_batch);
+            let session = TrtSession::new(&engine_data, obs_dim, config.max_batch)?;
 
             Ok(Self {
                 session: Mutex::new(session),
@@ -574,14 +600,14 @@ mod inner {
     }
 
     /// Parse flat output buffers from TRT inference into `EvalResult` vec.
-    /// Asserts all values are finite (catches NaN/Inf from GPU inference).
+    /// Returns an error if any values are non-finite (NaN/Inf from GPU inference).
     pub fn parse_eval_results(
         pp1: &[f32],
         pp2: &[f32],
         v1: &[f32],
         v2: &[f32],
         n: usize,
-    ) -> Vec<EvalResult> {
+    ) -> Result<Vec<EvalResult>, BackendError> {
         (0..n)
             .map(|i| {
                 let p1_off = i * 5;
@@ -604,14 +630,16 @@ mod inner {
                     value_p1: v1[i],
                     value_p2: v2[i],
                 };
-                assert!(
-                    result.policy_p1.iter().all(|v| v.is_finite())
-                        && result.policy_p2.iter().all(|v| v.is_finite())
-                        && result.value_p1.is_finite()
-                        && result.value_p2.is_finite(),
-                    "TensorRT output contains non-finite values (NaN/Inf) for position {i}"
-                );
-                result
+                if !result.policy_p1.iter().all(|v| v.is_finite())
+                    || !result.policy_p2.iter().all(|v| v.is_finite())
+                    || !result.value_p1.is_finite()
+                    || !result.value_p2.is_finite()
+                {
+                    return Err(BackendError::msg(format!(
+                        "TensorRT output contains non-finite values (NaN/Inf) for position {i}"
+                    )));
+                }
+                Ok(result)
             })
             .collect()
     }
@@ -638,27 +666,35 @@ mod inner {
             &self,
             encoded: &[f32],
             n: usize,
-        ) -> (Vec<EvalResult>, TrtTimingInfo) {
+        ) -> Result<(Vec<EvalResult>, TrtTimingInfo), BackendError> {
             let mut session = self.session.lock().expect("TRT session lock poisoned");
-            assert!(
-                n <= session.max_batch,
-                "batch size {n} exceeds max_batch {}",
-                session.max_batch
-            );
-            assert_eq!(encoded.len(), n * session.obs_dim);
+            if n > session.max_batch {
+                return Err(BackendError::msg(format!(
+                    "batch size {n} exceeds max_batch {}",
+                    session.max_batch
+                )));
+            }
+            if encoded.len() != n * session.obs_dim {
+                return Err(BackendError::msg(format!(
+                    "encoded length {} != expected {}",
+                    encoded.len(),
+                    n * session.obs_dim
+                )));
+            }
 
             let f = std::mem::size_of::<f32>();
 
             // Set dynamic input shape
             let obs_name = CString::new("observation").unwrap();
             let shape = [n as i64, session.obs_dim as i64];
-            assert_eq!(
-                unsafe {
-                    trt_set_input_shape(session.handle, obs_name.as_ptr(), 2, shape.as_ptr())
-                },
-                0,
-                "Failed to set input shape for batch size {n}"
-            );
+            let rc = unsafe {
+                trt_set_input_shape(session.handle, obs_name.as_ptr(), 2, shape.as_ptr())
+            };
+            if rc != 0 {
+                return Err(BackendError::msg(format!(
+                    "Failed to set input shape for batch size {n} (rc={rc})"
+                )));
+            }
 
             // Phase 1: H2D
             let t0 = std::time::Instant::now();
@@ -671,21 +707,20 @@ mod inner {
                         CUDA_MEMCPY_H2D,
                     ),
                     "cudaMemcpy(input H2D)",
-                );
+                )?;
             }
             let h2d_us = t0.elapsed().as_micros() as f64;
 
             // Phase 2: Inference + sync
             let t1 = std::time::Instant::now();
-            assert_eq!(
-                unsafe { trt_enqueue_v3(session.handle, session.stream) },
-                0,
-                "TRT enqueue_v3 failed"
-            );
+            let rc = unsafe { trt_enqueue_v3(session.handle, session.stream) };
+            if rc != 0 {
+                return Err(BackendError::msg(format!("TRT enqueue_v3 failed (rc={rc})")));
+            }
             cuda_check(
                 unsafe { cudaStreamSynchronize(session.stream) },
                 "cudaStreamSynchronize",
-            );
+            )?;
             let infer_us = t1.elapsed().as_micros() as f64;
 
             // Phase 3: D2H
@@ -703,7 +738,7 @@ mod inner {
                         CUDA_MEMCPY_D2H,
                     ),
                     "cudaMemcpy(policy_p1 D2H)",
-                );
+                )?;
                 cuda_check(
                     cudaMemcpy(
                         pp2.as_mut_ptr() as *mut c_void,
@@ -712,7 +747,7 @@ mod inner {
                         CUDA_MEMCPY_D2H,
                     ),
                     "cudaMemcpy(policy_p2 D2H)",
-                );
+                )?;
                 cuda_check(
                     cudaMemcpy(
                         v1.as_mut_ptr() as *mut c_void,
@@ -721,7 +756,7 @@ mod inner {
                         CUDA_MEMCPY_D2H,
                     ),
                     "cudaMemcpy(value_p1 D2H)",
-                );
+                )?;
                 cuda_check(
                     cudaMemcpy(
                         v2.as_mut_ptr() as *mut c_void,
@@ -730,17 +765,17 @@ mod inner {
                         CUDA_MEMCPY_D2H,
                     ),
                     "cudaMemcpy(value_p2 D2H)",
-                );
+                )?;
             }
             let d2h_us = t2.elapsed().as_micros() as f64;
 
-            let results = parse_eval_results(&pp1, &pp2, &v1, &v2, n);
+            let results = parse_eval_results(&pp1, &pp2, &v1, &v2, n)?;
             let timing = TrtTimingInfo {
                 h2d_us,
                 infer_us,
                 d2h_us,
             };
-            (results, timing)
+            Ok((results, timing))
         }
     }
 
@@ -761,9 +796,9 @@ mod inner {
 
             // Run TRT inference
             let mut session = self.session.lock().expect("TRT session lock poisoned");
-            let (pp1, pp2, v1, v2) = session.infer(&buf, n);
+            let (pp1, pp2, v1, v2) = session.infer(&buf, n)?;
 
-            Ok(parse_eval_results(&pp1, &pp2, &v1, &v2, n))
+            parse_eval_results(&pp1, &pp2, &v1, &v2, n)
         }
     }
 }
