@@ -7,6 +7,41 @@ mod inner {
     use pyrat::GameState;
     use std::sync::Mutex;
 
+    /// Execution provider for ONNX Runtime.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub enum ExecutionProvider {
+        Cpu,
+        #[cfg(feature = "onnx-cuda")]
+        Cuda,
+        #[cfg(feature = "onnx-coreml")]
+        CoreMl,
+    }
+
+    impl TryFrom<&str> for ExecutionProvider {
+        type Error = String;
+
+        fn try_from(s: &str) -> Result<Self, Self::Error> {
+            match s {
+                "cpu" => Ok(Self::Cpu),
+                #[cfg(feature = "onnx-cuda")]
+                "cuda" => Ok(Self::Cuda),
+                #[cfg(feature = "onnx-coreml")]
+                "coreml" => Ok(Self::CoreMl),
+                other => {
+                    #[allow(unused_mut)]
+                    let mut supported = vec!["cpu"];
+                    #[cfg(feature = "onnx-cuda")]
+                    supported.push("cuda");
+                    #[cfg(feature = "onnx-coreml")]
+                    supported.push("coreml");
+                    Err(format!(
+                        "unknown execution provider '{other}', supported: {supported:?}"
+                    ))
+                }
+            }
+        }
+    }
+
     /// ONNX Runtime backend for neural network inference.
     ///
     /// Wraps an `ort::Session` and an `ObservationEncoder` to evaluate game
@@ -47,7 +82,10 @@ mod inner {
                 .with_intra_threads(1)
                 .map_err(|e| BackendError::msg(format!("failed to set intra-op thread count: {e}")))?
                 .with_execution_providers([
-                    ort::execution_providers::CoreMLExecutionProvider::default().build(),
+                    ort::execution_providers::CoreMLExecutionProvider::default()
+                        .with_profile_compute_plan(true)
+                        .build()
+                        .error_on_failure(),
                 ])
                 .map_err(|e| BackendError::msg(format!("failed to register CoreML EP: {e}")))?
                 .commit_from_file(model_path)
@@ -66,12 +104,29 @@ mod inner {
                 .with_intra_threads(1)
                 .map_err(|e| BackendError::msg(format!("failed to set intra-op thread count: {e}")))?
                 .with_execution_providers([
-                    ort::execution_providers::CUDAExecutionProvider::default().build(),
+                    ort::execution_providers::CUDAExecutionProvider::default()
+                        .build()
+                        .error_on_failure(),
                 ])
                 .map_err(|e| BackendError::msg(format!("failed to register CUDA EP: {e}")))?
                 .commit_from_file(model_path)
                 .map_err(|e| BackendError::msg(format!("failed to load ONNX model: {e}")))?;
             Self::build(session, encoder)
+        }
+
+        /// Create an ONNX backend with the given execution provider.
+        pub fn with_provider(
+            model_path: impl AsRef<std::path::Path>,
+            encoder: E,
+            provider: ExecutionProvider,
+        ) -> Result<Self, BackendError> {
+            match provider {
+                ExecutionProvider::Cpu => Self::new(model_path, encoder),
+                #[cfg(feature = "onnx-cuda")]
+                ExecutionProvider::Cuda => Self::with_cuda(model_path, encoder),
+                #[cfg(feature = "onnx-coreml")]
+                ExecutionProvider::CoreMl => Self::with_coreml(model_path, encoder),
+            }
         }
 
         /// Validate encoder/model compatibility, then construct.
@@ -122,25 +177,25 @@ mod inner {
             // Run inference (needs &mut session)
             let mut session = self.session.lock().expect("session lock poisoned");
             let outputs = session
-                .run(ort::inputs!["observation" => input])
+                .run(ort::inputs![crate::TENSOR_INPUT => input])
                 .map_err(|e| BackendError::msg(format!("ONNX inference failed: {e}")))?;
 
             // Extract outputs by name as flat slices:
             //   policy_p1[N,5], policy_p2[N,5], pred_value_p1[N], pred_value_p2[N]
-            let (_shape, pp1_data) = outputs["policy_p1"]
+            let (_shape, pp1_data) = outputs[crate::TENSOR_POLICY_P1]
                 .try_extract_tensor::<f32>()
                 .map_err(|e| BackendError::msg(format!("failed to extract policy_p1: {e}")))?;
-            let (_shape, pp2_data) = outputs["policy_p2"]
+            let (_shape, pp2_data) = outputs[crate::TENSOR_POLICY_P2]
                 .try_extract_tensor::<f32>()
                 .map_err(|e| BackendError::msg(format!("failed to extract policy_p2: {e}")))?;
-            let (_shape, v1_data) = outputs["pred_value_p1"]
+            let (_shape, v1_data) = outputs[crate::TENSOR_VALUE_P1]
                 .try_extract_tensor::<f32>()
                 .map_err(|e| BackendError::msg(format!("failed to extract pred_value_p1: {e}")))?;
-            let (_shape, v2_data) = outputs["pred_value_p2"]
+            let (_shape, v2_data) = outputs[crate::TENSOR_VALUE_P2]
                 .try_extract_tensor::<f32>()
                 .map_err(|e| BackendError::msg(format!("failed to extract pred_value_p2: {e}")))?;
 
-            Ok((0..n)
+            (0..n)
                 .map(|i| {
                     let p1_off = i * 5;
                     let p2_off = i * 5;
@@ -162,19 +217,21 @@ mod inner {
                         value_p1: v1_data[i],
                         value_p2: v2_data[i],
                     };
-                    debug_assert!(
-                        result.policy_p1.iter().all(|v| v.is_finite())
-                            && result.policy_p2.iter().all(|v| v.is_finite())
-                            && result.value_p1.is_finite()
-                            && result.value_p2.is_finite(),
-                        "ONNX output contains non-finite values (NaN/Inf) for game {i}"
-                    );
-                    result
+                    if !result.policy_p1.iter().all(|v| v.is_finite())
+                        || !result.policy_p2.iter().all(|v| v.is_finite())
+                        || !result.value_p1.is_finite()
+                        || !result.value_p2.is_finite()
+                    {
+                        return Err(BackendError::msg(format!(
+                            "ONNX output contains non-finite values (NaN/Inf) for game {i}"
+                        )));
+                    }
+                    Ok(result)
                 })
-                .collect())
+                .collect()
         }
     }
 }
 
 #[cfg(feature = "onnx")]
-pub use inner::OnnxBackend;
+pub use inner::{ExecutionProvider, OnnxBackend};

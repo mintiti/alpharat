@@ -14,3 +14,9 @@ alpharat-sampling = { path = "../alpharat-sampling", features = ["python", "onnx
 pyrat = { package = "pyrat-rust", git = "https://github.com/mintiti/pyrat-rust", branch = "main", features = ["python"] }
 pyo3 = { version = "0.25", features = ["extension-module"] }
 numpy = "0.25"
+
+[features]
+default = []
+cuda = ["alpharat-sampling/onnx-cuda"]
+coreml = ["alpharat-sampling/onnx-coreml"]
+tensorrt = ["alpharat-sampling/tensorrt"]

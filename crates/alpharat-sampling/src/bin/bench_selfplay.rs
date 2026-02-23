@@ -17,7 +17,7 @@ use std::sync::Arc;
 #[cfg(feature = "onnx")]
 use alpharat_mcts::Backend;
 #[cfg(feature = "onnx")]
-use alpharat_sampling::mux_backend::{MuxBackend, MuxConfig};
+use alpharat_sampling::{MuxBackend, MuxConfig};
 #[cfg(feature = "onnx")]
 use alpharat_sampling::FlatEncoder;
 #[cfg(feature = "onnx")]
