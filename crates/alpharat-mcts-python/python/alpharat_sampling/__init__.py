@@ -109,7 +109,7 @@ def preload_tensorrt_libs() -> None:
 
     # --- 1. CUDA runtime from nvidia pip package ---
     try:
-        import nvidia.cuda_runtime as _cr  # type: ignore[import-not-found]
+        import nvidia.cuda_runtime as _cr
 
         cuda_lib_dir = Path(_cr.__path__[0]) / "lib"
         for name in sorted(cuda_lib_dir.glob("libcudart.so*")):

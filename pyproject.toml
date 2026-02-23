@@ -99,6 +99,10 @@ warn_redundant_casts = true
 warn_unused_ignores = true
 strict_equality = true
 
+[[tool.mypy.overrides]]
+module = "nvidia.*"
+ignore_missing_imports = true
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 python_files = ["test_*.py", "*_test.py"]
