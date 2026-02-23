@@ -20,6 +20,31 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
+def resolve_sampling_device(device: str) -> str:
+    """Map user-facing device names to Rust backend strings.
+
+    Only handles aliases that Rust doesn't understand (mps → coreml).
+    Everything else passes through — Rust resolves "auto" via compile-time
+    feature flags (onnx-cuda → CUDA, onnx-coreml → CoreML, else CPU).
+    """
+    if device == "mps":
+        return "coreml"
+    return device  # auto, cpu, cuda, coreml, tensorrt pass through
+
+
+def resolve_training_device(device: str) -> str:
+    """Map user-facing device names to PyTorch device names.
+
+    If the user picked a sampling backend that implies specific hardware,
+    use the fastest PyTorch device for that hardware.
+    """
+    if device in ("tensorrt", "cuda"):
+        return "cuda"
+    if device in ("coreml", "mps"):
+        return "mps"
+    return device  # auto, cpu pass through (auto is handled by select_device)
+
+
 @dataclass
 class RustSamplingMetrics:
     """Metrics from a Rust sampling run."""
@@ -38,6 +63,8 @@ class RustSamplingMetrics:
     total_nn_evals: int
     total_terminals: int
     total_collisions: int
+    cache_hits: int
+    cache_misses: int
 
     @property
     def games_per_second(self) -> float:
@@ -82,6 +109,11 @@ class RustSamplingMetrics:
         total = self.total_nn_evals + self.total_terminals + self.total_collisions
         return self.total_collisions / total if total > 0 else 0.0
 
+    @property
+    def cache_hit_rate(self) -> float:
+        total = self.cache_hits + self.cache_misses
+        return self.cache_hits / total if total > 0 else 0.0
+
 
 def _ensure_onnx(checkpoint_path: str) -> str | None:
     """Return path to ONNX model, auto-exporting from .pt if needed.
@@ -113,6 +145,7 @@ def run_rust_sampling(
     mux_max_batch_size: int = 256,
     checkpoint: str | None = None,
     device: str = "auto",
+    cache_size: int = 0,
     experiments_dir: str | Path = "experiments",
     verbose: bool = True,
 ) -> tuple[Path, RustSamplingMetrics]:
@@ -131,6 +164,7 @@ def run_rust_sampling(
         mux_max_batch_size: Max batch size for ONNX mux backend.
         checkpoint: Path to .pt checkpoint for NN-guided sampling.
         device: Execution provider — "auto", "cpu", "coreml", "mps", "cuda", "tensorrt".
+        cache_size: Thread-local NN eval cache capacity (0 = disabled).
         experiments_dir: Experiments root directory.
         verbose: Show progress bar.
 
@@ -190,6 +224,7 @@ def run_rust_sampling(
         "onnx_model_path": onnx_path,
         "mux_max_batch_size": mux_max_batch_size,
         "device": device,
+        "cache_size": cache_size,
     }
 
     if verbose:
@@ -221,6 +256,8 @@ def run_rust_sampling(
         total_nn_evals=stats.total_nn_evals,
         total_terminals=stats.total_terminals,
         total_collisions=stats.total_collisions,
+        cache_hits=stats.cache_hits,
+        cache_misses=stats.cache_misses,
     )
 
     logger.info(
@@ -233,6 +270,13 @@ def run_rust_sampling(
         metrics.nn_eval_fraction * 100,
         metrics.elapsed_seconds,
     )
+    if metrics.cache_hits + metrics.cache_misses > 0:
+        logger.info(
+            "NN cache: %d hits, %d misses, %.1f%% hit rate",
+            metrics.cache_hits,
+            metrics.cache_misses,
+            metrics.cache_hit_rate * 100,
+        )
 
     return batch_dir, metrics
 

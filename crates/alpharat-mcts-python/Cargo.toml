@@ -15,6 +15,10 @@ pyrat = { package = "pyrat-rust", git = "https://github.com/mintiti/pyrat-rust",
 pyo3 = { version = "0.25", features = ["extension-module"] }
 numpy = "0.25"
 
+# macOS: add CoreML automatically
+[target.'cfg(target_os = "macos")'.dependencies]
+alpharat-sampling = { path = "../alpharat-sampling", features = ["onnx-coreml"] }
+
 [features]
 default = []
 cuda = ["alpharat-sampling/onnx-cuda"]

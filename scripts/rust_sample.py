@@ -60,6 +60,12 @@ def main() -> None:
         default="auto",
         help="Inference backend (auto, cpu, cuda, coreml, mps, tensorrt)",
     )
+    parser.add_argument(
+        "--cache-size",
+        type=int,
+        default=0,
+        help="Thread-local NN eval cache capacity (0 = disabled)",
+    )
     parser.add_argument("--quiet", action="store_true", help="Suppress progress bar")
     args = parser.parse_args()
 
@@ -80,7 +86,10 @@ def main() -> None:
         args.checkpoint or "(none)",
     )
 
-    from alpharat.data.rust_sampling import run_rust_sampling
+    from alpharat.data.rust_sampling import resolve_sampling_device, run_rust_sampling
+
+    resolved_device = resolve_sampling_device(args.device)
+    logger.info("Device: %s (resolved: %s)", args.device, resolved_device)
 
     batch_dir, metrics = run_rust_sampling(
         game=config.game,
@@ -91,9 +100,10 @@ def main() -> None:
         max_games_per_bundle=args.max_bundle,
         mux_max_batch_size=args.mux_batch,
         checkpoint=args.checkpoint,
-        device=args.device,
         experiments_dir=args.experiments_dir,
         verbose=not args.quiet,
+        device=resolved_device,
+        cache_size=args.cache_size,
     )
 
     logger.info("")

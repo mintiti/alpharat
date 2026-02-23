@@ -151,6 +151,10 @@ pub struct SelfPlayStats {
     pub total_terminals: u64,
     /// Total collision descents (wasted — no backup).
     pub total_collisions: u64,
+    /// NN cache hits (positions served from cache, skipping backend).
+    pub cache_hits: u64,
+    /// NN cache misses (positions forwarded to backend).
+    pub cache_misses: u64,
 }
 
 impl SelfPlayStats {
@@ -171,6 +175,8 @@ impl SelfPlayStats {
             total_nn_evals: 0,
             total_terminals: 0,
             total_collisions: 0,
+            cache_hits: 0,
+            cache_misses: 0,
         }
     }
 
@@ -293,6 +299,16 @@ impl SelfPlayStats {
             self.total_nn_evals + self.total_terminals + self.total_collisions;
         if total_descents > 0 {
             self.total_collisions as f64 / total_descents as f64
+        } else {
+            0.0
+        }
+    }
+
+    /// Cache hit rate (0.0 if no cache or no evaluations).
+    pub fn cache_hit_rate(&self) -> f64 {
+        let total = self.cache_hits + self.cache_misses;
+        if total > 0 {
+            self.cache_hits as f64 / total as f64
         } else {
             0.0
         }
@@ -1553,6 +1569,27 @@ mod tests {
 
         assert_eq!(result.stats.total_games, 0);
         assert!(result.written_paths.is_empty());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn smart_uniform_uncached_zero_cache_stats() {
+        // Mimics the None (no model) path in bindings.rs:
+        // SmartUniform runs without CachedBackend, so cache stats stay at zero.
+        let dir = std::env::temp_dir().join("selfplay_smart_uniform_cache_test");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let games: Vec<GameState> = (0..4).map(|_| short_game()).collect();
+        let search = SearchConfig::default();
+        let sp = SelfPlayConfig { n_sims: 8, batch_size: 8, num_threads: 2 };
+
+        let result =
+            run_self_play_to_disk(&games, &BACKEND, &search, &sp, &dir, 100, None).unwrap();
+        assert_eq!(result.stats.total_games, 4);
+        assert_eq!(result.stats.cache_hits, 0);
+        assert_eq!(result.stats.cache_misses, 0);
 
         let _ = std::fs::remove_dir_all(&dir);
     }

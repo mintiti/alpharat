@@ -21,6 +21,7 @@ iteration:
 # Sampling settings
 sampling:
   workers: 4
+  # cache_size: 2000000  # thread-local NN eval cache entries (0 = disabled; matches LC0 default)
 
 # Sharding settings
 sharding:
