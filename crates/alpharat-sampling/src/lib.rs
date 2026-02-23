@@ -9,6 +9,13 @@ pub mod recording;
 pub mod selfplay;
 pub mod tensorrt_backend;
 
+/// ONNX tensor names shared between backends.
+pub const TENSOR_INPUT: &str = "observation";
+pub const TENSOR_POLICY_P1: &str = "policy_p1";
+pub const TENSOR_POLICY_P2: &str = "policy_p2";
+pub const TENSOR_VALUE_P1: &str = "pred_value_p1";
+pub const TENSOR_VALUE_P2: &str = "pred_value_p2";
+
 pub use encoder::ObservationEncoder;
 pub use flat_encoder::FlatEncoder;
 pub use mux_backend::{MuxBackend, MuxConfig, MuxStats};

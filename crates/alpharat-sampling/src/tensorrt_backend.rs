@@ -401,11 +401,11 @@ mod inner {
         /// Bind the 5 named tensors (1 input + 4 outputs) to GPU buffer addresses.
         fn bind_tensors(handle: *mut c_void, buffers: &GpuBuffers) -> Result<(), BackendError> {
             let bindings: [(&str, *mut c_void); 5] = [
-                ("observation", buffers.d_input),
-                ("policy_p1", buffers.d_policy_p1),
-                ("policy_p2", buffers.d_policy_p2),
-                ("pred_value_p1", buffers.d_value_p1),
-                ("pred_value_p2", buffers.d_value_p2),
+                (crate::TENSOR_INPUT, buffers.d_input),
+                (crate::TENSOR_POLICY_P1, buffers.d_policy_p1),
+                (crate::TENSOR_POLICY_P2, buffers.d_policy_p2),
+                (crate::TENSOR_VALUE_P1, buffers.d_value_p1),
+                (crate::TENSOR_VALUE_P2, buffers.d_value_p2),
             ];
             for (name, ptr) in bindings {
                 let cname = CString::new(name).unwrap();
@@ -442,7 +442,7 @@ mod inner {
             let f = std::mem::size_of::<f32>();
 
             // Set dynamic input shape for this batch
-            let obs_name = CString::new("observation").unwrap();
+            let obs_name = CString::new(crate::TENSOR_INPUT).unwrap();
             let shape = [n as i64, self.obs_dim as i64];
             let rc = unsafe {
                 trt_set_input_shape(self.handle, obs_name.as_ptr(), 2, shape.as_ptr())
@@ -685,7 +685,7 @@ mod inner {
             let f = std::mem::size_of::<f32>();
 
             // Set dynamic input shape
-            let obs_name = CString::new("observation").unwrap();
+            let obs_name = CString::new(crate::TENSOR_INPUT).unwrap();
             let shape = [n as i64, session.obs_dim as i64];
             let rc = unsafe {
                 trt_set_input_shape(session.handle, obs_name.as_ptr(), 2, shape.as_ptr())

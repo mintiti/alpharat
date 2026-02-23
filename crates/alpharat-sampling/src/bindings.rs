@@ -188,6 +188,84 @@ impl PySelfPlayProgress {
 }
 
 // ---------------------------------------------------------------------------
+// Backend construction helpers
+// ---------------------------------------------------------------------------
+
+/// Wrap a backend in MuxBackend if multi-threaded, otherwise return as-is.
+#[cfg(any(feature = "onnx", feature = "tensorrt"))]
+fn maybe_mux<B: Backend + 'static>(
+    backend: B,
+    max_batch_size: usize,
+    num_threads: u32,
+) -> Box<dyn Backend> {
+    if num_threads > 1 {
+        Box::new(MuxBackend::new(backend, MuxConfig { max_batch_size }))
+    } else {
+        Box::new(backend)
+    }
+}
+
+#[cfg(feature = "tensorrt")]
+fn create_tensorrt_backend(
+    model_path: &str,
+    width: u8,
+    height: u8,
+    max_batch_size: usize,
+    output_dir: &str,
+    num_threads: u32,
+) -> Result<Box<dyn Backend>, SelfPlayError> {
+    let encoder = FlatEncoder::new(width, height);
+    let cache_dir = Path::new(output_dir).parent().map(|p| p.join(".trt_cache"));
+    let config = TensorrtConfig {
+        max_batch: max_batch_size,
+        cache_dir,
+    };
+    let trt =
+        TensorrtBackend::new(model_path, encoder, config).map_err(SelfPlayError::Backend)?;
+    Ok(maybe_mux(trt, max_batch_size, num_threads))
+}
+
+#[cfg(feature = "onnx")]
+fn create_onnx_backend(
+    model_path: &str,
+    device: &str,
+    width: u8,
+    height: u8,
+    max_batch_size: usize,
+    num_threads: u32,
+) -> Result<Box<dyn Backend>, SelfPlayError> {
+    let encoder = FlatEncoder::new(width, height);
+    let onnx = match device {
+        "cpu" => OnnxBackend::new(model_path, encoder),
+        #[cfg(feature = "onnx-coreml")]
+        "coreml" | "mps" => OnnxBackend::with_coreml(model_path, encoder),
+        #[cfg(feature = "onnx-cuda")]
+        "cuda" => OnnxBackend::with_cuda(model_path, encoder),
+        "auto" => {
+            #[cfg(feature = "onnx-coreml")]
+            {
+                OnnxBackend::with_coreml(model_path, encoder)
+            }
+            #[cfg(all(feature = "onnx-cuda", not(feature = "onnx-coreml")))]
+            {
+                OnnxBackend::with_cuda(model_path, encoder)
+            }
+            #[cfg(all(not(feature = "onnx-coreml"), not(feature = "onnx-cuda")))]
+            {
+                OnnxBackend::new(model_path, encoder)
+            }
+        }
+        other => {
+            return Err(SelfPlayError::Backend(
+                alpharat_mcts::BackendError::msg(format!("unknown device: {other}")),
+            ))
+        }
+    }
+    .map_err(SelfPlayError::Backend)?;
+    Ok(maybe_mux(onnx, max_batch_size, num_threads))
+}
+
+// ---------------------------------------------------------------------------
 // rust_self_play — main entry point
 // ---------------------------------------------------------------------------
 
@@ -293,94 +371,44 @@ fn rust_self_play(
         let progress_ref = progress_arc.as_deref();
 
         // Choose backend based on model path + device
-        match onnx_model_path {
+        let backend: Box<dyn Backend> = match onnx_model_path {
             #[cfg(any(feature = "onnx", feature = "tensorrt"))]
-            Some(model_path) => {
-                let backend: Box<dyn Backend> = match device {
-                    // --- TensorRT-RTX backend ---
-                    #[cfg(feature = "tensorrt")]
-                    "tensorrt" => {
-                        let encoder = FlatEncoder::new(width, height);
-                        let cache_dir =
-                            Path::new(output_dir).parent().map(|p| p.join(".trt_cache"));
-                        let config = TensorrtConfig {
-                            max_batch: mux_max_batch_size,
-                            cache_dir,
-                        };
-                        let trt = TensorrtBackend::new(model_path, encoder, config)
-                            .map_err(SelfPlayError::Backend)?;
-                        if num_threads > 1 {
-                            Box::new(MuxBackend::new(
-                                trt,
-                                MuxConfig {
-                                    max_batch_size: mux_max_batch_size,
-                                },
-                            ))
-                        } else {
-                            Box::new(trt)
-                        }
-                    }
-                    #[cfg(not(feature = "tensorrt"))]
-                    "tensorrt" => {
-                        return Err(SelfPlayError::Backend(
-                            alpharat_mcts::BackendError::msg(
-                                "TensorRT support not compiled (build with --features tensorrt)",
-                            ),
-                        ));
-                    }
-
-                    // --- ONNX Runtime backend (cpu, cuda, coreml, auto) ---
-                    #[cfg(feature = "onnx")]
-                    _ => {
-                        let encoder = FlatEncoder::new(width, height);
-                        let onnx = match device {
-                            "cpu" => OnnxBackend::new(model_path, encoder),
-                            #[cfg(feature = "onnx-coreml")]
-                            "coreml" | "mps" => OnnxBackend::with_coreml(model_path, encoder),
-                            #[cfg(feature = "onnx-cuda")]
-                            "cuda" => OnnxBackend::with_cuda(model_path, encoder),
-                            "auto" => {
-                                #[cfg(feature = "onnx-coreml")]
-                                { OnnxBackend::with_coreml(model_path, encoder) }
-                                #[cfg(all(feature = "onnx-cuda", not(feature = "onnx-coreml")))]
-                                { OnnxBackend::with_cuda(model_path, encoder) }
-                                #[cfg(all(not(feature = "onnx-coreml"), not(feature = "onnx-cuda")))]
-                                { OnnxBackend::new(model_path, encoder) }
-                            }
-                            other => return Err(SelfPlayError::Backend(
-                                alpharat_mcts::BackendError::msg(format!("unknown device: {other}"))
-                            )),
-                        }?;
-                        if num_threads > 1 {
-                            Box::new(MuxBackend::new(
-                                onnx,
-                                MuxConfig {
-                                    max_batch_size: mux_max_batch_size,
-                                },
-                            ))
-                        } else {
-                            Box::new(onnx)
-                        }
-                    }
-                    #[cfg(not(feature = "onnx"))]
-                    _ => {
-                        return Err(SelfPlayError::Backend(
-                            alpharat_mcts::BackendError::msg(
-                                "ONNX support not compiled (build with --features onnx)",
-                            ),
-                        ));
-                    }
-                };
-                selfplay::run_self_play_to_disk(
-                    &games,
-                    backend.as_ref(),
-                    &search_config,
-                    &selfplay_config,
-                    output_path,
-                    max_games_per_bundle,
-                    progress_ref,
-                )
-            }
+            Some(model_path) => match device {
+                #[cfg(feature = "tensorrt")]
+                "tensorrt" => create_tensorrt_backend(
+                    model_path,
+                    width,
+                    height,
+                    mux_max_batch_size,
+                    output_dir,
+                    num_threads,
+                )?,
+                #[cfg(not(feature = "tensorrt"))]
+                "tensorrt" => {
+                    return Err(SelfPlayError::Backend(
+                        alpharat_mcts::BackendError::msg(
+                            "TensorRT support not compiled (build with --features tensorrt)",
+                        ),
+                    ));
+                }
+                #[cfg(feature = "onnx")]
+                _ => create_onnx_backend(
+                    model_path,
+                    device,
+                    width,
+                    height,
+                    mux_max_batch_size,
+                    num_threads,
+                )?,
+                #[cfg(not(feature = "onnx"))]
+                _ => {
+                    return Err(SelfPlayError::Backend(
+                        alpharat_mcts::BackendError::msg(
+                            "ONNX support not compiled (build with --features onnx)",
+                        ),
+                    ));
+                }
+            },
             #[cfg(not(any(feature = "onnx", feature = "tensorrt")))]
             Some(_) => {
                 return Err(SelfPlayError::Backend(
@@ -389,19 +417,18 @@ fn rust_self_play(
                     ),
                 ));
             }
-            None => {
-                let backend = SmartUniformBackend;
-                selfplay::run_self_play_to_disk(
-                    &games,
-                    &backend,
-                    &search_config,
-                    &selfplay_config,
-                    output_path,
-                    max_games_per_bundle,
-                    progress_ref,
-                )
-            }
-        }
+            None => Box::new(SmartUniformBackend),
+        };
+
+        selfplay::run_self_play_to_disk(
+            &games,
+            backend.as_ref(),
+            &search_config,
+            &selfplay_config,
+            output_path,
+            max_games_per_bundle,
+            progress_ref,
+        )
     });
 
     match result {
