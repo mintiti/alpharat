@@ -345,7 +345,9 @@ fn run_trt_benchmark(
 
         // Warmup
         for _ in 0..warmup {
-            let _ = backend.evaluate_encoded_timed(batch_data, batch_size);
+            let _ = backend
+                .evaluate_encoded_timed(batch_data, batch_size)
+                .expect("TRT inference failed during warmup");
         }
 
         // Timed runs
@@ -354,7 +356,9 @@ fn run_trt_benchmark(
         let mut d2h_us_total: f64 = 0.0;
 
         for _ in 0..iters {
-            let (_results, timing) = backend.evaluate_encoded_timed(batch_data, batch_size);
+            let (_results, timing) = backend
+                .evaluate_encoded_timed(batch_data, batch_size)
+                .expect("TRT inference failed");
             h2d_us_total += timing.h2d_us;
             infer_us_total += timing.infer_us;
             d2h_us_total += timing.d2h_us;
