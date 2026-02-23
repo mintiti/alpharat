@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING
 import numpy as np
 import pytest
 from alpharat_mcts import SearchResult, rust_mcts_search
-from pyrat_engine.core import GameConfigBuilder
+from pyrat_engine.core import GameBuilder
 from pyrat_engine.core.types import Coordinates, Wall
 
 if TYPE_CHECKING:
@@ -18,12 +18,13 @@ if TYPE_CHECKING:
 def open_5x5() -> PyRat:
     """Open 5x5 game, both players at center — all 5 actions available."""
     return (
-        GameConfigBuilder(5, 5)
+        GameBuilder(5, 5)
         .with_max_turns(30)
-        .with_player1_pos(Coordinates(2, 2))
-        .with_player2_pos(Coordinates(2, 2))
-        .with_cheese([Coordinates(0, 0)])
+        .with_open_maze()
+        .with_custom_positions(Coordinates(2, 2), Coordinates(2, 2))
+        .with_custom_cheese([Coordinates(0, 0)])
         .build()
+        .create()
     )
 
 
@@ -31,12 +32,13 @@ def open_5x5() -> PyRat:
 def corner_game() -> PyRat:
     """P1 at (0,0), P2 at (4,4) — both in corners with blocked actions."""
     return (
-        GameConfigBuilder(5, 5)
+        GameBuilder(5, 5)
         .with_max_turns(30)
-        .with_player1_pos(Coordinates(0, 0))
-        .with_player2_pos(Coordinates(4, 4))
-        .with_cheese([Coordinates(2, 2)])
+        .with_open_maze()
+        .with_custom_positions(Coordinates(0, 0), Coordinates(4, 4))
+        .with_custom_cheese([Coordinates(2, 2)])
         .build()
+        .create()
     )
 
 
@@ -44,13 +46,13 @@ def corner_game() -> PyRat:
 def wall_game() -> PyRat:
     """P1 at (2,2) with wall blocking UP — 4 unique outcomes."""
     return (
-        GameConfigBuilder(5, 5)
+        GameBuilder(5, 5)
         .with_max_turns(30)
-        .with_player1_pos(Coordinates(2, 2))
-        .with_player2_pos(Coordinates(0, 0))
-        .with_cheese([Coordinates(4, 4)])
-        .with_walls([Wall(Coordinates(2, 2), Coordinates(2, 3))])
+        .with_custom_maze([Wall(Coordinates(2, 2), Coordinates(2, 3))], [])
+        .with_custom_positions(Coordinates(2, 2), Coordinates(0, 0))
+        .with_custom_cheese([Coordinates(4, 4)])
         .build()
+        .create()
     )
 
 

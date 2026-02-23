@@ -242,7 +242,7 @@ fn alloc_root(arena: &mut NodeArena, game: &GameState) -> NodeIndex {
 mod tests {
     use super::*;
     use crate::test_util;
-    use pyrat::Coordinates;
+    use pyrat::{Coordinates, GameBuilder};
 
     // ---- find_child ----
 
@@ -997,17 +997,17 @@ mod tests {
     #[test]
     fn compute_rewards_both_collect_different() {
         // Each player collects a different cheese → (1.0, 1.0)
-        let game = GameState::new_with_config(
-            5,
-            5,
-            std::collections::HashMap::new(),
-            Default::default(),
-            &[Coordinates::new(1, 0), Coordinates::new(3, 0)],
-            Coordinates::new(0, 0), // P1 adjacent to cheese at (1,0)
-            Coordinates::new(4, 0), // P2 adjacent to cheese at (3,0)
-            100,
-        );
-        let mut game = game;
+        let mut game = GameBuilder::new(5, 5)
+            .with_open_maze()
+            .with_custom_positions(
+                Coordinates::new(0, 0), // P1 adjacent to cheese at (1,0)
+                Coordinates::new(4, 0), // P2 adjacent to cheese at (3,0)
+            )
+            .with_custom_cheese(vec![Coordinates::new(1, 0), Coordinates::new(3, 0)])
+            .with_max_turns(100)
+            .build()
+            .create(None)
+            .unwrap();
         let scores_before = (game.player1_score(), game.player2_score());
 
         // P1 RIGHT → (1,0), P2 LEFT → (3,0)

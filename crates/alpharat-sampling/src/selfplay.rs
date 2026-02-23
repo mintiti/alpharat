@@ -822,12 +822,20 @@ mod tests {
     use super::*;
     use alpharat_mcts::SmartUniformBackend;
     use pyrat::game::types::MudMap;
+    use pyrat::GameBuilder;
     use std::collections::HashMap;
 
     const BACKEND: SmartUniformBackend = SmartUniformBackend;
 
     fn open_5x5(p1: Coordinates, p2: Coordinates, cheese: &[Coordinates]) -> GameState {
-        GameState::new_with_config(5, 5, HashMap::new(), MudMap::new(), cheese, p1, p2, 100)
+        GameBuilder::new(5, 5)
+            .with_open_maze()
+            .with_custom_positions(p1, p2)
+            .with_custom_cheese(cheese.to_vec())
+            .with_max_turns(100)
+            .build()
+            .create(None)
+            .unwrap()
     }
 
     fn standard_game() -> GameState {
@@ -843,16 +851,14 @@ mod tests {
     }
 
     fn short_game() -> GameState {
-        GameState::new_with_config(
-            5,
-            5,
-            HashMap::new(),
-            MudMap::new(),
-            &[Coordinates::new(1, 0)],
-            Coordinates::new(0, 0),
-            Coordinates::new(4, 4),
-            5,
-        )
+        GameBuilder::new(5, 5)
+            .with_open_maze()
+            .with_custom_positions(Coordinates::new(0, 0), Coordinates::new(4, 4))
+            .with_custom_cheese(vec![Coordinates::new(1, 0)])
+            .with_max_turns(5)
+            .build()
+            .create(None)
+            .unwrap()
     }
 
     // ---- sample_action ----
@@ -910,16 +916,14 @@ mod tests {
             Coordinates::new(2, 3),
             vec![Coordinates::new(2, 2)],
         );
-        let game = GameState::new_with_config(
-            5,
-            5,
-            walls,
-            MudMap::new(),
-            &[Coordinates::new(0, 0)],
-            Coordinates::new(0, 0),
-            Coordinates::new(4, 4),
-            100,
-        );
+        let game = GameBuilder::new(5, 5)
+            .with_custom_maze(walls, MudMap::new())
+            .with_custom_positions(Coordinates::new(0, 0), Coordinates::new(4, 4))
+            .with_custom_cheese(vec![Coordinates::new(0, 0)])
+            .with_max_turns(100)
+            .build()
+            .create(None)
+            .unwrap();
         let maze = build_maze_array(&game);
 
         // Wall between (2,2) and (2,3): UP from (2,2) blocked
@@ -1260,10 +1264,14 @@ mod tests {
             pos_record([1, 1], [2, 2], &[]),       // cheese gone, P1 is there
         ];
         // Build a 3x3 game with no cheese left (final state).
-        let game = GameState::new_with_config(
-            3, 3, HashMap::new(), MudMap::new(), &[], // no cheese remaining
-            Coordinates::new(1, 1), Coordinates::new(2, 2), 10,
-        );
+        let game = GameBuilder::new(3, 3)
+            .with_open_maze()
+            .with_custom_positions(Coordinates::new(1, 1), Coordinates::new(2, 2))
+            .with_custom_cheese(vec![]) // no cheese remaining
+            .with_max_turns(10)
+            .build()
+            .create(None)
+            .unwrap();
         let outcomes = compute_cheese_outcomes(&positions, &game, 3, 3);
         let idx = 1 * 3 + 1; // y=1, x=1
         assert_eq!(outcomes[idx], CheeseOutcome::P1Win as u8);
@@ -1275,10 +1283,14 @@ mod tests {
             pos_record([0, 0], [2, 2], &[(2, 2)]),
             pos_record([0, 0], [2, 2], &[]),       // cheese gone, P2 was already there
         ];
-        let game = GameState::new_with_config(
-            3, 3, HashMap::new(), MudMap::new(), &[],
-            Coordinates::new(0, 0), Coordinates::new(2, 2), 10,
-        );
+        let game = GameBuilder::new(3, 3)
+            .with_open_maze()
+            .with_custom_positions(Coordinates::new(0, 0), Coordinates::new(2, 2))
+            .with_custom_cheese(vec![])
+            .with_max_turns(10)
+            .build()
+            .create(None)
+            .unwrap();
         let outcomes = compute_cheese_outcomes(&positions, &game, 3, 3);
         let idx = 2 * 3 + 2; // y=2, x=2
         assert_eq!(outcomes[idx], CheeseOutcome::P2Win as u8);
@@ -1291,10 +1303,14 @@ mod tests {
             pos_record([0, 0], [2, 2], &[(1, 1)]),
             pos_record([1, 1], [1, 1], &[]),       // both at (1,1)
         ];
-        let game = GameState::new_with_config(
-            3, 3, HashMap::new(), MudMap::new(), &[],
-            Coordinates::new(1, 1), Coordinates::new(1, 1), 10,
-        );
+        let game = GameBuilder::new(3, 3)
+            .with_open_maze()
+            .with_custom_positions(Coordinates::new(1, 1), Coordinates::new(1, 1))
+            .with_custom_cheese(vec![])
+            .with_max_turns(10)
+            .build()
+            .create(None)
+            .unwrap();
         let outcomes = compute_cheese_outcomes(&positions, &game, 3, 3);
         let idx = 1 * 3 + 1;
         assert_eq!(outcomes[idx], CheeseOutcome::Simultaneous as u8);
@@ -1306,11 +1322,14 @@ mod tests {
         let positions = vec![
             pos_record([0, 0], [2, 2], &[(1, 1)]),
         ];
-        let game = GameState::new_with_config(
-            3, 3, HashMap::new(), MudMap::new(),
-            &[Coordinates::new(1, 1)], // cheese still there
-            Coordinates::new(0, 0), Coordinates::new(2, 2), 10,
-        );
+        let game = GameBuilder::new(3, 3)
+            .with_open_maze()
+            .with_custom_positions(Coordinates::new(0, 0), Coordinates::new(2, 2))
+            .with_custom_cheese(vec![Coordinates::new(1, 1)]) // cheese still there
+            .with_max_turns(10)
+            .build()
+            .create(None)
+            .unwrap();
         let outcomes = compute_cheese_outcomes(&positions, &game, 3, 3);
         let idx = 1 * 3 + 1;
         assert_eq!(outcomes[idx], CheeseOutcome::Uncollected as u8);
@@ -1323,10 +1342,14 @@ mod tests {
             pos_record([0, 0], [2, 2], &[(1, 1)]),
             pos_record([1, 1], [2, 2], &[]),
         ];
-        let game = GameState::new_with_config(
-            3, 3, HashMap::new(), MudMap::new(), &[],
-            Coordinates::new(1, 1), Coordinates::new(2, 2), 10,
-        );
+        let game = GameBuilder::new(3, 3)
+            .with_open_maze()
+            .with_custom_positions(Coordinates::new(1, 1), Coordinates::new(2, 2))
+            .with_custom_cheese(vec![])
+            .with_max_turns(10)
+            .build()
+            .create(None)
+            .unwrap();
         let outcomes = compute_cheese_outcomes(&positions, &game, 3, 3);
         // (0,0) never had cheese
         assert_eq!(outcomes[0], CheeseOutcome::Uncollected as u8);
@@ -1337,11 +1360,14 @@ mod tests {
     #[test]
     fn cheese_outcomes_empty_positions() {
         // No positions recorded — all cheese is Uncollected.
-        let game = GameState::new_with_config(
-            3, 3, HashMap::new(), MudMap::new(),
-            &[Coordinates::new(1, 1)],
-            Coordinates::new(0, 0), Coordinates::new(2, 2), 10,
-        );
+        let game = GameBuilder::new(3, 3)
+            .with_open_maze()
+            .with_custom_positions(Coordinates::new(0, 0), Coordinates::new(2, 2))
+            .with_custom_cheese(vec![Coordinates::new(1, 1)])
+            .with_max_turns(10)
+            .build()
+            .create(None)
+            .unwrap();
         let outcomes = compute_cheese_outcomes(&[], &game, 3, 3);
         for &o in &outcomes {
             assert_eq!(o, CheeseOutcome::Uncollected as u8);
@@ -1358,10 +1384,14 @@ mod tests {
             pos_record([0, 0], [1, 2], &[(2, 2)]),        // P1 at (0,0), cheese gone
             pos_record([0, 0], [2, 2], &[]),               // P2 at (2,2), cheese gone
         ];
-        let game = GameState::new_with_config(
-            3, 3, HashMap::new(), MudMap::new(), &[],
-            Coordinates::new(0, 0), Coordinates::new(2, 2), 10,
-        );
+        let game = GameBuilder::new(3, 3)
+            .with_open_maze()
+            .with_custom_positions(Coordinates::new(0, 0), Coordinates::new(2, 2))
+            .with_custom_cheese(vec![])
+            .with_max_turns(10)
+            .build()
+            .create(None)
+            .unwrap();
         let outcomes = compute_cheese_outcomes(&positions, &game, 3, 3);
         assert_eq!(outcomes[0 * 3 + 0], CheeseOutcome::P1Win as u8);   // (0,0)
         assert_eq!(outcomes[2 * 3 + 2], CheeseOutcome::P2Win as u8);   // (2,2)
@@ -1375,10 +1405,14 @@ mod tests {
             pos_record([0, 0], [2, 2], &[(1, 0)]),
         ];
         // Final state: P1 at (1,0), no cheese left.
-        let game = GameState::new_with_config(
-            3, 3, HashMap::new(), MudMap::new(), &[],
-            Coordinates::new(1, 0), Coordinates::new(2, 2), 10,
-        );
+        let game = GameBuilder::new(3, 3)
+            .with_open_maze()
+            .with_custom_positions(Coordinates::new(1, 0), Coordinates::new(2, 2))
+            .with_custom_cheese(vec![])
+            .with_max_turns(10)
+            .build()
+            .create(None)
+            .unwrap();
         let outcomes = compute_cheese_outcomes(&positions, &game, 3, 3);
         assert_eq!(outcomes[0 * 3 + 1], CheeseOutcome::P1Win as u8); // (1,0) → idx=0*3+1=1
     }
@@ -1420,16 +1454,14 @@ mod tests {
         let mut mud = MudMap::new();
         mud.insert(Coordinates::new(2, 2), Coordinates::new(2, 3), 3);
 
-        let game = GameState::new_with_config(
-            5,
-            5,
-            HashMap::new(),
-            mud,
-            &[Coordinates::new(0, 0)],
-            Coordinates::new(0, 0),
-            Coordinates::new(4, 4),
-            100,
-        );
+        let game = GameBuilder::new(5, 5)
+            .with_custom_maze(HashMap::new(), mud)
+            .with_custom_positions(Coordinates::new(0, 0), Coordinates::new(4, 4))
+            .with_custom_cheese(vec![Coordinates::new(0, 0)])
+            .with_max_turns(100)
+            .build()
+            .create(None)
+            .unwrap();
         let maze = build_maze_array(&game);
 
         // UP from (2,2) → (2,3) should be mud cost (3)

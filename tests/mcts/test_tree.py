@@ -6,7 +6,8 @@ from typing import TYPE_CHECKING
 
 import numpy as np
 import pytest
-from pyrat_engine.core.game import PyRat
+from pyrat_engine.core import GameBuilder, GameConfig
+from pyrat_engine.core.types import Coordinates, Mud
 
 from alpharat.mcts.node import MCTSNode
 from alpharat.mcts.tree import MCTSTree
@@ -14,129 +15,56 @@ from alpharat.mcts.tree import MCTSTree
 if TYPE_CHECKING:
     from collections.abc import Callable
 
-
-class FakeMoveUndo:
-    """Undo token storing prior positions/scores/turn for FakeGame.
-
-    Matches the public API of pyrat_engine.core.game.MoveUndo.
-    """
-
-    def __init__(
-        self,
-        p1_pos: tuple[int, int],
-        p2_pos: tuple[int, int],
-        p1_score: float,
-        p2_score: float,
-        turn: int,
-        token: int,
-        p1_mud: int = 0,
-        p2_mud: int = 0,
-    ) -> None:
-        self.p1_pos = p1_pos
-        self.p2_pos = p2_pos
-        self.p1_score = p1_score
-        self.p2_score = p2_score
-        self.turn = turn
-        self.token = token
-        self.p1_mud = p1_mud
-        self.p2_mud = p2_mud
+    from pyrat_engine.core.game import PyRat
 
 
-class FakeGame:
-    """Deterministic game stub to test tree navigation/state sync.
-
-    Matches the public API of pyrat_engine.core.game.PyRat.
-    """
-
-    # Y-up coordinate system: UP increases Y, DOWN decreases Y
-    _DELTAS = {
-        0: (0, 1),  # UP
-        1: (1, 0),  # RIGHT
-        2: (0, -1),  # DOWN
-        3: (-1, 0),  # LEFT
-        4: (0, 0),  # STAY
-    }
-
-    def __init__(self) -> None:
-        self.player1_position = (5, 5)
-        self.player2_position = (5, 5)
-        self.player1_score = 0.0
-        self.player2_score = 0.0
-        self.player1_mud_turns = 0
-        self.player2_mud_turns = 0
-        self.turn = 0
-        self.max_turns = 300
-        self._token_counter = 0
-        self._cheese: list[tuple[int, int]] = [(3, 3), (7, 7), (5, 3)]
-
-    def _apply(self, pos: tuple[int, int], action: int) -> tuple[int, int]:
-        dx, dy = self._DELTAS[action]
-        return pos[0] + dx, pos[1] + dy
-
-    def make_move(self, p1_move: int, p2_move: int) -> FakeMoveUndo:
-        undo = FakeMoveUndo(
-            p1_pos=self.player1_position,
-            p2_pos=self.player2_position,
-            p1_score=self.player1_score,
-            p2_score=self.player2_score,
-            turn=self.turn,
-            token=self._token_counter,
-            p1_mud=self.player1_mud_turns,
-            p2_mud=self.player2_mud_turns,
-        )
-        self._token_counter += 1
-        self.player1_position = self._apply(self.player1_position, p1_move)
-        self.player2_position = self._apply(self.player2_position, p2_move)
-        self.turn += 1
-        return undo
-
-    def unmake_move(self, undo: FakeMoveUndo) -> None:
-        self.player1_position = undo.p1_pos
-        self.player2_position = undo.p2_pos
-        self.player1_score = undo.p1_score
-        self.player2_score = undo.p2_score
-        self.turn = undo.turn
-
-    def get_valid_moves(self, position: tuple[int, int]) -> list[int]:
-        """Return all movement directions (no walls in FakeGame)."""
-        # UP=0, RIGHT=1, DOWN=2, LEFT=3 are all valid (no walls)
-        return [0, 1, 2, 3]
-
-    def get_observation(self, is_player_one: bool = True) -> object:
-        """Return a dummy observation for predict_fn tests."""
-        return object()
-
-    def cheese_positions(self) -> list[tuple[int, int]]:
-        """Return remaining cheese positions."""
-        return self._cheese.copy()
+def _open_game(
+    cheese: list[Coordinates] | None = None,
+    max_turns: int = 300,
+) -> PyRat:
+    """11x11 open maze, both players at center, cheese away from center."""
+    if cheese is None:
+        cheese = [Coordinates(1, 1), Coordinates(9, 9), Coordinates(5, 1)]
+    return (
+        GameBuilder(11, 11)
+        .with_max_turns(max_turns)
+        .with_open_maze()
+        .with_custom_positions(Coordinates(5, 5), Coordinates(5, 5))
+        .with_custom_cheese(cheese)
+        .build()
+        .create()
+    )
 
 
-@pytest.fixture
-def fake_game() -> FakeGame:
-    """Provide a deterministic game stub for navigation tests."""
-    return FakeGame()
-
-
-@pytest.fixture
-def fake_tree(fake_game: FakeGame) -> MCTSTree:
-    """Tree backed by FakeGame."""
-    prior_p1 = np.ones(5) / 5
-    prior_p2 = np.ones(5) / 5
-    root = MCTSNode(
+def _make_root() -> MCTSNode:
+    """Root node with uniform priors."""
+    prior = np.ones(5) / 5
+    return MCTSNode(
         game_state=None,
-        prior_policy_p1=prior_p1,
-        prior_policy_p2=prior_p2,
+        prior_policy_p1=prior,
+        prior_policy_p2=prior,
         nn_value_p1=0.0,
         nn_value_p2=0.0,
         parent=None,
     )
-    return MCTSTree(game=fake_game, root=root)  # type: ignore[arg-type]
+
+
+@pytest.fixture
+def open_game() -> PyRat:
+    """Open 11x11 game, both players at center — all 5 actions available."""
+    return _open_game()
+
+
+@pytest.fixture
+def open_tree(open_game: PyRat) -> MCTSTree:
+    """Tree backed by open game."""
+    return MCTSTree(game=open_game, root=_make_root())
 
 
 @pytest.fixture
 def game() -> PyRat:
     """Create a small PyRat game for testing."""
-    return PyRat(width=5, height=5, cheese_count=3, seed=42)
+    return GameConfig.classic(5, 5, 3).create(seed=42)
 
 
 @pytest.fixture
@@ -322,57 +250,72 @@ class TestNavigation:
 class TestNavigationStateSync:
     """Navigation should keep simulator aligned with the tree."""
 
-    def test_replays_actions_when_switching_branches(self, fake_tree: MCTSTree) -> None:
+    def test_replays_actions_when_switching_branches(self, open_tree: MCTSTree) -> None:
         """After moving to a sibling branch, simulator should match replayed actions."""
-        game = fake_tree.game
+        game = open_tree.game
 
         # Path: root -> a (RIGHT, RIGHT) -> a1 (DOWN, LEFT)
-        a, _ = fake_tree.make_move_from(fake_tree.root, 1, 1)
-        fake_tree.make_move_from(a, 2, 3)
+        a, _ = open_tree.make_move_from(open_tree.root, 1, 1)
+        open_tree.make_move_from(a, 2, 3)
 
         # Now jump to sibling root -> b (UP, DOWN), which requires navigation
-        b, _ = fake_tree.make_move_from(fake_tree.root, 0, 2)
+        b, _ = open_tree.make_move_from(open_tree.root, 0, 2)
 
-        # Expected positions if we start from root and only apply (UP, DOWN)
+        # Expected positions if we start from (5,5) and only apply (UP, DOWN)
         # Y-up coordinate system: UP increases Y, DOWN decreases Y
-        assert game.player1_position == (5, 6)  # UP from (5, 5)
-        assert game.player2_position == (5, 4)  # DOWN from (5, 5)
+        assert game.player1_position == Coordinates(5, 6)  # UP from (5, 5)
+        assert game.player2_position == Coordinates(5, 4)  # DOWN from (5, 5)
         assert game.turn == 1  # navigation unwinds to root then applies one move
-        assert fake_tree.simulator_node == b
+        assert open_tree.simulator_node == b
 
-    def test_refreshes_move_undo_on_reuse(self, fake_tree: MCTSTree) -> None:
+    def test_refreshes_move_undo_on_reuse(self, open_tree: MCTSTree) -> None:
         """Reusing an existing child should refresh its undo token."""
-        child, _ = fake_tree.make_move_from(fake_tree.root, 0, 0)
-        first_token = child.move_undo.token
+        child, _ = open_tree.make_move_from(open_tree.root, 0, 0)
+        first_undo = child.move_undo
 
         # Move somewhere else to force navigation back
-        fake_tree.make_move_from(fake_tree.root, 1, 1)
+        open_tree.make_move_from(open_tree.root, 1, 1)
 
         # Revisit the same child; its undo should be refreshed
-        fake_tree.make_move_from(fake_tree.root, 0, 0)
-        assert child.move_undo.token != first_token
+        open_tree.make_move_from(open_tree.root, 0, 0)
+        assert child.move_undo is not first_undo
 
-    def test_parent_action_required_for_navigation(self, fake_tree: MCTSTree) -> None:
+    def test_parent_action_required_for_navigation(self, open_tree: MCTSTree) -> None:
         """Missing parent_action should raise when navigating."""
-        child, _ = fake_tree.make_move_from(fake_tree.root, 0, 0)
+        child, _ = open_tree.make_move_from(open_tree.root, 0, 0)
         # Navigate away to a sibling
-        sibling, _ = fake_tree.make_move_from(fake_tree.root, 1, 1)
+        sibling, _ = open_tree.make_move_from(open_tree.root, 1, 1)
         # Now remove parent_action from first child
         child.parent_action = None
 
         # Try to navigate back to the first child - should fail
         with pytest.raises(RuntimeError):
-            fake_tree._navigate_to(child)
+            open_tree._navigate_to(child)
 
-    def test_mud_counters_propagated(self, fake_tree: MCTSTree) -> None:
+    def test_mud_counters_propagated(self) -> None:
         """Child nodes should capture mud counters from the engine."""
-        fake_tree.game.player1_mud_turns = 2  # type: ignore[misc]
-        fake_tree.game.player2_mud_turns = 1  # type: ignore[misc]
+        # Create game with mud between (5,5) and (5,6)
+        game = (
+            GameBuilder(11, 11)
+            .with_max_turns(300)
+            .with_custom_maze([], [Mud(Coordinates(5, 5), Coordinates(5, 6), 3)])
+            .with_custom_positions(Coordinates(5, 5), Coordinates(5, 5))
+            .with_custom_cheese([Coordinates(1, 1)])
+            .build()
+            .create()
+        )
 
-        child, _ = fake_tree.make_move_from(fake_tree.root, 4, 4)  # STAY/STAY
+        # P1 moves UP into mud (gets stuck, mud_turns=3), P2 stays
+        game.make_move(0, 4)
 
-        assert child.p1_mud_turns_remaining == 2
-        assert child.p2_mud_turns_remaining == 1
+        # Build tree from mud-stuck state
+        tree = MCTSTree(game=game, root=_make_root())
+
+        # Make a move — P1 still stuck (mud decrements), P2 free
+        child, _ = tree.make_move_from(tree.root, 4, 4)  # STAY/STAY
+
+        assert child.p1_mud_turns_remaining > 0
+        assert child.p2_mud_turns_remaining == 0
 
 
 class TestBackup:
@@ -642,83 +585,81 @@ class TestMultipleExpansions:
 class TestAdvanceRoot:
     """Tests for advance_root method."""
 
-    def test_advance_root_existing_child(self, fake_tree: MCTSTree) -> None:
+    def test_advance_root_existing_child(self, open_tree: MCTSTree) -> None:
         """Advance to a pre-existing child node."""
-        old_root = fake_tree.root
+        old_root = open_tree.root
 
         # Create a child first
-        child, _ = fake_tree.make_move_from(fake_tree.root, 1, 2)
+        child, _ = open_tree.make_move_from(open_tree.root, 1, 2)
 
         # Navigate back to root for the advance
-        fake_tree._sim_path = [old_root]
+        open_tree._sim_path = [old_root]
 
         # Advance root to that child
-        fake_tree.advance_root(1, 2)
+        open_tree.advance_root(1, 2)
 
         # New root should be the child we created
-        assert fake_tree.root == child
-        assert fake_tree._sim_path == [child]
+        assert open_tree.root == child
+        assert open_tree._sim_path == [child]
 
-    def test_advance_root_creates_child(self, fake_tree: MCTSTree) -> None:
+    def test_advance_root_creates_child(self, open_tree: MCTSTree) -> None:
         """Advance to a child that doesn't exist yet (creates it)."""
-        old_root = fake_tree.root
+        old_root = open_tree.root
 
         # No children exist yet
         assert len(old_root.children) == 0
 
         # Advance to non-existent child - should create it
-        fake_tree.advance_root(0, 1)
+        open_tree.advance_root(0, 1)
 
         # Child should now exist and be the new root
-        assert fake_tree.root != old_root
-        assert fake_tree.root.parent == old_root
+        assert open_tree.root != old_root
+        assert open_tree.root.parent == old_root
         assert len(old_root.children) == 1
 
-    def test_advance_root_keeps_parent_refs(self, fake_tree: MCTSTree) -> None:
+    def test_advance_root_keeps_parent_refs(self, open_tree: MCTSTree) -> None:
         """Verify new root keeps its parent reference (history preserved)."""
-        old_root = fake_tree.root
+        old_root = open_tree.root
 
         # Advance root
-        fake_tree.advance_root(2, 3)
+        open_tree.advance_root(2, 3)
 
         # New root should still have parent reference
-        assert fake_tree.root.parent == old_root
-        assert fake_tree.root.parent_action is not None
+        assert open_tree.root.parent == old_root
+        assert open_tree.root.parent_action is not None
 
-    def test_advance_root_resets_sim_path(self, fake_tree: MCTSTree) -> None:
+    def test_advance_root_resets_sim_path(self, open_tree: MCTSTree) -> None:
         """Verify simulator path is reset to start at new root."""
         # Create some tree structure
-        child1, _ = fake_tree.make_move_from(fake_tree.root, 0, 0)
-        grandchild, _ = fake_tree.make_move_from(child1, 1, 1)
+        child1, _ = open_tree.make_move_from(open_tree.root, 0, 0)
+        grandchild, _ = open_tree.make_move_from(child1, 1, 1)
 
         # Simulator is at grandchild
-        assert fake_tree.simulator_node == grandchild
-        assert len(fake_tree._sim_path) == 3
+        assert open_tree.simulator_node == grandchild
+        assert len(open_tree._sim_path) == 3
 
         # Navigate back and advance root to child1
-        fake_tree._navigate_to(fake_tree.root)
-        fake_tree.advance_root(0, 0)
+        open_tree._navigate_to(open_tree.root)
+        open_tree.advance_root(0, 0)
 
         # Simulator path should now start at new root
-        assert fake_tree._sim_path == [child1]
-        assert fake_tree.simulator_node == child1
+        assert open_tree._sim_path == [child1]
+        assert open_tree.simulator_node == child1
 
-    def test_advance_root_advances_game_when_at_root(
-        self, fake_game: FakeGame, fake_tree: MCTSTree
-    ) -> None:
+    def test_advance_root_advances_game_when_at_root(self, open_tree: MCTSTree) -> None:
         """When simulator is at root, advancing root should advance game state."""
         # Create a child first
-        child, _ = fake_tree.make_move_from(fake_tree.root, 1, 0)
+        child, _ = open_tree.make_move_from(open_tree.root, 1, 0)
 
         # Navigate back to root
-        fake_tree._navigate_to(fake_tree.root)
-        initial_pos = fake_game.player1_position
+        open_tree._navigate_to(open_tree.root)
+        initial_pos = open_tree.game.player1_position
 
         # Advance root - should also advance game since simulator is at root
-        fake_tree.advance_root(1, 0)
+        open_tree.advance_root(1, 0)
 
         # Game should have advanced (player moved RIGHT)
-        assert fake_game.player1_position != initial_pos
+        assert open_tree.game.player1_position != initial_pos
 
 
 class TestPredictionCache:
@@ -742,17 +683,11 @@ class TestPredictionCache:
 
     def test_cache_hit_same_state_via_transposition(self) -> None:
         """Two paths converging to the same state should call predict_fn once."""
-        game = FakeGame()
+        game = _open_game()
         call_count, predict_fn = self._counting_predict_fn()
 
-        root = MCTSNode(
-            game_state=None,
-            prior_policy_p1=np.ones(5) / 5,
-            prior_policy_p2=np.ones(5) / 5,
-            nn_value_p1=0.0,
-            nn_value_p2=0.0,
-        )
-        tree = MCTSTree(game=game, root=root, predict_fn=predict_fn)  # type: ignore[arg-type]
+        root = _make_root()
+        tree = MCTSTree(game=game, root=root, predict_fn=predict_fn)
 
         # Root init calls predict_fn once (state: P1=(5,5), P2=(5,5), turn=0)
         assert call_count[0] == 1
@@ -775,17 +710,11 @@ class TestPredictionCache:
 
     def test_cache_miss_different_states(self) -> None:
         """Different game states should each call predict_fn."""
-        game = FakeGame()
+        game = _open_game()
         call_count, predict_fn = self._counting_predict_fn()
 
-        root = MCTSNode(
-            game_state=None,
-            prior_policy_p1=np.ones(5) / 5,
-            prior_policy_p2=np.ones(5) / 5,
-            nn_value_p1=0.0,
-            nn_value_p2=0.0,
-        )
-        tree = MCTSTree(game=game, root=root, predict_fn=predict_fn)  # type: ignore[arg-type]
+        root = _make_root()
+        tree = MCTSTree(game=game, root=root, predict_fn=predict_fn)
         assert call_count[0] == 1  # Root init
 
         # Each child has a unique position → all misses
@@ -798,15 +727,9 @@ class TestPredictionCache:
 
     def test_no_caching_without_predict_fn(self) -> None:
         """With no predict_fn, cache should remain empty (smart uniform is cheap)."""
-        game = FakeGame()
-        root = MCTSNode(
-            game_state=None,
-            prior_policy_p1=np.ones(5) / 5,
-            prior_policy_p2=np.ones(5) / 5,
-            nn_value_p1=0.0,
-            nn_value_p2=0.0,
-        )
-        tree = MCTSTree(game=game, root=root)  # type: ignore[arg-type]
+        game = _open_game()
+        root = _make_root()
+        tree = MCTSTree(game=game, root=root)
 
         # Expand some children
         tree.make_move_from(tree.root, 0, 0)
@@ -817,17 +740,11 @@ class TestPredictionCache:
 
     def test_cached_arrays_are_independent_copies(self) -> None:
         """Mutating returned arrays should not corrupt the cache."""
-        game = FakeGame()
+        game = _open_game()
         call_count, predict_fn = self._counting_predict_fn()
 
-        root = MCTSNode(
-            game_state=None,
-            prior_policy_p1=np.ones(5) / 5,
-            prior_policy_p2=np.ones(5) / 5,
-            nn_value_p1=0.0,
-            nn_value_p2=0.0,
-        )
-        tree = MCTSTree(game=game, root=root, predict_fn=predict_fn)  # type: ignore[arg-type]
+        root = _make_root()
+        tree = MCTSTree(game=game, root=root, predict_fn=predict_fn)
 
         # Build a transposition: two paths to P1=(6,6), P2=(6,6), turn=2
         a, _ = tree.make_move_from(tree.root, 1, 0)
@@ -849,18 +766,12 @@ class TestTerminalNodes:
 
     def test_terminal_node_value_is_zero_at_creation(self) -> None:
         """Terminal children should have V=(0, 0) immediately after creation."""
-        game = FakeGame()
-        # Set turn to max_turns so next child hits terminal check
-        game.turn = game.max_turns - 1
+        # Create game with max_turns=2, advance 1 turn so next child is terminal
+        game = _open_game(max_turns=2)
+        game.make_move(4, 4)  # Advance to turn 1
 
-        root = MCTSNode(
-            game_state=None,
-            prior_policy_p1=np.ones(5) / 5,
-            prior_policy_p2=np.ones(5) / 5,
-            nn_value_p1=0.0,
-            nn_value_p2=0.0,
-        )
-        tree = MCTSTree(game=game, root=root)  # type: ignore[arg-type]
+        root = _make_root()
+        tree = MCTSTree(game=game, root=root)
 
         # Create a child — game.turn will be max_turns after make_move
         child, _ = tree.make_move_from(tree.root, 4, 4)  # STAY/STAY

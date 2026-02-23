@@ -18,7 +18,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from pyrat_engine.core import GameConfigBuilder
+from pyrat_engine.core import GameBuilder
 from pyrat_engine.core.types import Coordinates, Direction, Mud, Wall
 
 from alpharat.data.maze import build_maze_array
@@ -80,12 +80,13 @@ def scenario_open_5x5() -> dict:
     """Open 5x5, players at corners, one cheese at center."""
     cheese = [Coordinates(2, 2)]
     game = (
-        GameConfigBuilder(5, 5)
+        GameBuilder(5, 5)
         .with_max_turns(100)
-        .with_player1_pos(Coordinates(0, 0))
-        .with_player2_pos(Coordinates(4, 4))
-        .with_cheese(cheese)
+        .with_open_maze()
+        .with_custom_positions(Coordinates(0, 0), Coordinates(4, 4))
+        .with_custom_cheese(cheese)
         .build()
+        .create()
     )
     return make_fixture(
         "open_5x5",
@@ -104,13 +105,13 @@ def scenario_wall_5x5() -> dict:
     cheese = [Coordinates(0, 0)]
     wall = Wall(Coordinates(2, 2), Coordinates(2, 3))
     game = (
-        GameConfigBuilder(5, 5)
+        GameBuilder(5, 5)
         .with_max_turns(100)
-        .with_player1_pos(Coordinates(0, 0))
-        .with_player2_pos(Coordinates(4, 4))
-        .with_cheese(cheese)
-        .with_walls([wall])
+        .with_custom_maze([wall], [])
+        .with_custom_positions(Coordinates(0, 0), Coordinates(4, 4))
+        .with_custom_cheese(cheese)
         .build()
+        .create()
     )
     return make_fixture(
         "wall_5x5",
@@ -130,13 +131,13 @@ def scenario_mud_5x5() -> dict:
     cheese = [Coordinates(0, 0)]
     mud = Mud(Coordinates(2, 2), Coordinates(2, 3), value=3)
     game = (
-        GameConfigBuilder(5, 5)
+        GameBuilder(5, 5)
         .with_max_turns(100)
-        .with_player1_pos(Coordinates(0, 0))
-        .with_player2_pos(Coordinates(4, 4))
-        .with_cheese(cheese)
-        .with_mud([mud])
+        .with_custom_maze([], [mud])
+        .with_custom_positions(Coordinates(0, 0), Coordinates(4, 4))
+        .with_custom_cheese(cheese)
         .build()
+        .create()
     )
     return make_fixture(
         "mud_5x5",
@@ -156,13 +157,13 @@ def scenario_midgame_5x5() -> dict:
     cheese = [Coordinates(0, 0), Coordinates(4, 4)]
     mud = Mud(Coordinates(2, 2), Coordinates(2, 3), value=3)
     game = (
-        GameConfigBuilder(5, 5)
+        GameBuilder(5, 5)
         .with_max_turns(100)
-        .with_player1_pos(Coordinates(1, 0))
-        .with_player2_pos(Coordinates(3, 4))
-        .with_cheese(cheese)
-        .with_mud([mud])
+        .with_custom_maze([], [mud])
+        .with_custom_positions(Coordinates(1, 0), Coordinates(3, 4))
+        .with_custom_cheese(cheese)
         .build()
+        .create()
     )
     # P1 moves LEFT to (0,0) collecting cheese, P2 moves RIGHT to (4,4) collecting cheese
     game.make_move(Direction.LEFT, Direction.RIGHT)
@@ -245,14 +246,13 @@ def scenario_nonsquare_7x5() -> dict:
     wall = Wall(Coordinates(1, 1), Coordinates(1, 2))
     mud = Mud(Coordinates(4, 3), Coordinates(4, 4), value=2)
     game = (
-        GameConfigBuilder(7, 5)
+        GameBuilder(7, 5)
         .with_max_turns(80)
-        .with_player1_pos(Coordinates(0, 0))
-        .with_player2_pos(Coordinates(6, 4))
-        .with_cheese(cheese)
-        .with_walls([wall])
-        .with_mud([mud])
+        .with_custom_maze([wall], [mud])
+        .with_custom_positions(Coordinates(0, 0), Coordinates(6, 4))
+        .with_custom_cheese(cheese)
         .build()
+        .create()
     )
     return make_fixture(
         "nonsquare_7x5",

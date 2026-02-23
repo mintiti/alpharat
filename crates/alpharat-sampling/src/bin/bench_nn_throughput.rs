@@ -119,23 +119,19 @@ fn pre_encode_games(width: u8, height: u8, max_batch: usize) -> (Vec<f32>, usize
     eprintln!("Generating {} random games...", num_games);
     let games: Vec<GameState> = (0..num_games)
         .map(|i| {
-            let maze_config = MazeConfig {
-                width,
-                height,
-                target_density: 0.0,
-                connected: true,
-                symmetry: true,
-                mud_density: 0.0,
-                mud_range: 0,
-                seed: Some(i as u64),
-            };
-            let cheese_config = CheeseConfig {
-                count: cheese_count,
-                symmetry: true,
-            };
-            let mut g = GameState::new_random(width, height, maze_config, cheese_config);
-            g.max_turns = max_turns;
-            g
+            let config = GameBuilder::new(width, height)
+                .with_max_turns(max_turns)
+                .with_random_maze(MazeParams {
+                    wall_density: 0.0,
+                    mud_density: 0.0,
+                    mud_range: 2,
+                    connected: true,
+                    symmetric: true,
+                })
+                .with_corner_positions()
+                .with_random_cheese(cheese_count, true)
+                .build();
+            config.create(Some(i as u64)).unwrap()
         })
         .collect();
 

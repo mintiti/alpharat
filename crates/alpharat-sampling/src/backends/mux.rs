@@ -293,15 +293,19 @@ fn worker_loop(
 mod tests {
     use super::*;
     use alpharat_mcts::SmartUniformBackend;
-    use pyrat::game::types::MudMap;
-    use pyrat::{Coordinates, GameState};
-    use std::collections::HashMap;
+    use pyrat::{Coordinates, GameBuilder, GameState};
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
 
     fn open_5x5(p1: Coordinates, p2: Coordinates) -> GameState {
-        let cheese = [Coordinates::new(2, 2)];
-        GameState::new_with_config(5, 5, HashMap::new(), MudMap::new(), &cheese, p1, p2, 100)
+        GameBuilder::new(5, 5)
+            .with_open_maze()
+            .with_custom_positions(p1, p2)
+            .with_custom_cheese(vec![Coordinates::new(2, 2)])
+            .with_max_turns(100)
+            .build()
+            .create(None)
+            .unwrap()
     }
 
     // ---- SpyBackend: records call counts and batch sizes ----

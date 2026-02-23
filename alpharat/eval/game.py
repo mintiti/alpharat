@@ -5,9 +5,9 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
-from pyrat_engine.core.game import PyRat
-
 if TYPE_CHECKING:
+    from pyrat_engine.core.game import PyRat
+
     from alpharat.ai.base import Agent
 
 
@@ -82,22 +82,22 @@ def play_game(
     if game is None:
         import random
 
+        from pyrat_engine.core import GameBuilder
+
         actual_seed = seed if seed is not None else random.randint(0, 2**31)
 
-        # Build kwargs, only including density params if explicitly set
-        kwargs: dict[str, int | float] = {
-            "width": width,
-            "height": height,
-            "cheese_count": cheese_count,
-            "max_turns": max_turns,
-            "seed": actual_seed,
-        }
-        if wall_density is not None:
-            kwargs["wall_density"] = wall_density
-        if mud_density is not None:
-            kwargs["mud_density"] = mud_density
-
-        game = PyRat(**kwargs)  # type: ignore[arg-type]
+        builder = GameBuilder(width, height)
+        builder = builder.with_max_turns(max_turns)
+        if wall_density is not None or mud_density is not None:
+            builder = builder.with_random_maze(
+                wall_density=wall_density if wall_density is not None else 0.7,
+                mud_density=mud_density if mud_density is not None else 0.1,
+            )
+        else:
+            builder = builder.with_classic_maze()
+        builder = builder.with_corner_positions()
+        builder = builder.with_random_cheese(cheese_count)
+        game = builder.build().create(seed=actual_seed)
 
     # Game loop
     while not is_terminal(game):

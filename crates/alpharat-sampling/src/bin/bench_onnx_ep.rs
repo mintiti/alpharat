@@ -6,7 +6,7 @@
 fn main() {
     use alpharat_mcts::Backend;
     use alpharat_sampling::{FlatEncoder, OnnxBackend};
-    use pyrat::{CheeseConfig, GameState, MazeConfig};
+    use pyrat::{GameBuilder, GameState, MazeParams};
     use std::time::Instant;
 
     let args: Vec<String> = std::env::args().collect();
@@ -16,15 +16,20 @@ fn main() {
 
     // Create some test games
     let games: Vec<GameState> = (0..64)
-        .map(|_| {
-            let maze_config = MazeConfig {
-                width: 7, height: 7, target_density: 0.0,
-                connected: true, symmetry: true,
-                mud_density: 0.0, mud_range: 0, seed: None,
-            };
-            let mut g = GameState::new_random(7, 7, maze_config, CheeseConfig { count: 10, symmetry: true });
-            g.max_turns = 50;
-            g
+        .map(|i| {
+            let config = GameBuilder::new(7, 7)
+                .with_max_turns(50)
+                .with_random_maze(MazeParams {
+                    wall_density: 0.0,
+                    mud_density: 0.0,
+                    mud_range: 2,
+                    connected: true,
+                    symmetric: true,
+                })
+                .with_corner_positions()
+                .with_random_cheese(10, true)
+                .build();
+            config.create(Some(i as u64)).unwrap()
         })
         .collect();
 
