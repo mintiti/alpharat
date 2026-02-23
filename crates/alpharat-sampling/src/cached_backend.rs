@@ -4,7 +4,7 @@
 //! Thread-local caches: each self-play thread gets its own (no contention,
 //! no pollution from other games' positions).
 
-use alpharat_mcts::{Backend, EvalResult};
+use alpharat_mcts::{Backend, BackendError, EvalResult};
 use pyrat::{Coordinates, GameState};
 use std::cell::RefCell;
 use std::sync::atomic::{AtomicU64, Ordering::Relaxed};
@@ -64,13 +64,13 @@ impl CachedBackend {
 }
 
 impl Backend for CachedBackend {
-    fn evaluate(&self, game: &GameState) -> EvalResult {
-        self.evaluate_batch(&[game])[0]
+    fn evaluate(&self, game: &GameState) -> Result<EvalResult, BackendError> {
+        Ok(self.evaluate_batch(&[game])?.into_iter().next().unwrap())
     }
 
-    fn evaluate_batch(&self, games: &[&GameState]) -> Vec<EvalResult> {
+    fn evaluate_batch(&self, games: &[&GameState]) -> Result<Vec<EvalResult>, BackendError> {
         if games.is_empty() {
-            return Vec::new();
+            return Ok(Vec::new());
         }
 
         let capacity = self.capacity;
@@ -104,7 +104,7 @@ impl Backend for CachedBackend {
 
         // Phase 2: evaluate misses through the inner backend.
         if !miss_games.is_empty() {
-            let miss_results = self.inner.evaluate_batch(&miss_games);
+            let miss_results = self.inner.evaluate_batch(&miss_games)?;
 
             // Phase 3: cache results and place into output (reuse hashes from Phase 1).
             for (j, &orig_idx) in miss_indices.iter().enumerate() {
@@ -114,7 +114,7 @@ impl Backend for CachedBackend {
         }
 
         // Unwrap all — every slot should be filled.
-        results.into_iter().map(|r| r.unwrap()).collect()
+        Ok(results.into_iter().map(|r| r.unwrap()).collect())
     }
 }
 
@@ -215,8 +215,8 @@ mod tests {
             &[Coordinates::new(2, 2)],
         );
 
-        let r1 = backend.evaluate(&game);
-        let r2 = backend.evaluate(&game);
+        let r1 = backend.evaluate(&game).unwrap();
+        let r2 = backend.evaluate(&game).unwrap();
 
         assert_eq!(r1.policy_p1, r2.policy_p1);
         assert_eq!(r1.value_p1, r2.value_p1);
@@ -242,15 +242,15 @@ mod tests {
         );
 
         // Prime g1 into cache.
-        let _ = backend.evaluate(&g1);
+        let _ = backend.evaluate(&g1).unwrap();
 
         // Batch with g1 (hit) and g2 (miss).
-        let results = backend.evaluate_batch(&[&g1, &g2]);
+        let results = backend.evaluate_batch(&[&g1, &g2]).unwrap();
         assert_eq!(results.len(), 2);
 
         // Verify correctness against direct evaluation.
-        let direct1 = SmartUniformBackend.evaluate(&g1);
-        let direct2 = SmartUniformBackend.evaluate(&g2);
+        let direct1 = SmartUniformBackend.evaluate(&g1).unwrap();
+        let direct2 = SmartUniformBackend.evaluate(&g2).unwrap();
         assert_eq!(results[0].policy_p1, direct1.policy_p1);
         assert_eq!(results[1].policy_p1, direct2.policy_p1);
 
@@ -268,8 +268,8 @@ mod tests {
             &[Coordinates::new(2, 2)],
         );
 
-        let _ = backend.evaluate(&game);
-        let _ = backend.evaluate(&game);
+        let _ = backend.evaluate(&game).unwrap();
+        let _ = backend.evaluate(&game).unwrap();
 
         // All misses — cache is disabled.
         assert_eq!(backend.stats.hits.load(Ordering::Relaxed), 0);
@@ -297,7 +297,7 @@ mod tests {
                         &[Coordinates::new(2, 2)],
                     );
                     barrier.wait();
-                    let _ = backend.evaluate(&game);
+                    let _ = backend.evaluate(&game).unwrap();
                 })
             })
             .collect();
@@ -315,7 +315,7 @@ mod tests {
     #[test]
     fn empty_batch() {
         let backend = CachedBackend::new(Box::new(SmartUniformBackend), 64);
-        let results = backend.evaluate_batch(&[]);
+        let results = backend.evaluate_batch(&[]).unwrap();
         assert!(results.is_empty());
     }
 
