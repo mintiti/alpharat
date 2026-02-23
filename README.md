@@ -9,7 +9,7 @@ Still figuring out if it actually works.
 ## Getting started
 
 ```bash
-uv sync                # Requires Rust toolchain (builds the Rust crates)
+uv sync
 uv sync --extra train  # PyTorch: CUDA on Linux, CPU on macOS
 
 # CPU-only on Linux (if needed)
@@ -17,55 +17,56 @@ uv pip install torch --torch-backend=cpu --reinstall
 
 # Run tests
 uv run pytest
-```
 
-For GPU inference setup (CUDA, TensorRT, CoreML), see the [Inference Backends](CLAUDE.md#inference-backends) section in CLAUDE.md.
+# Generate training data
+alpharat-sample configs/sample.yaml
+```
 
 ## Self-play workflow
 
 The AlphaZero loop: sample games → train NN → use NN to sample better games → repeat.
 
-### Auto-iteration (recommended)
+### First iteration (no NN yet)
 
 ```bash
-# Run the full loop: sample → shard → train → benchmark → repeat
-alpharat-iterate configs/iterate.yaml --prefix sym_5x5
-
-# With GPU inference
-alpharat-iterate configs/iterate.yaml --prefix sym_5x5 --device cuda
-```
-
-### Manual steps
-
-```bash
-# 1. Sample games with Rust self-play (fast, supports GPU)
-alpharat-rust-sample configs/iterate.yaml --group iteration_0 --num-games 1000 --device cuda
+# 1. Sample games with pure MCTS (uniform priors)
+alpharat-sample configs/sample.yaml --group uniform_5x5
 
 # 2. Convert games to training shards
-alpharat-prepare-shards --architecture mlp --group iter0_shards --batches iteration_0
+alpharat-prepare-shards --group 5x5_v1 --batches uniform_5x5
 
-# 3. Train NN and benchmark against baselines
-alpharat-train-and-benchmark configs/train.yaml --name mlp_v1 --shards iter0_shards/UUID --games 50
-
-# 4. Next iteration — sample with the trained NN
-alpharat-rust-sample configs/iterate.yaml --group iteration_1 --num-games 1000 --device cuda \
-    --checkpoint experiments/runs/mlp_v1/checkpoints/best_model.pt
+# 3. Train NN and benchmark against baselines (Random, Greedy, MCTS)
+#    Edit configs/train.yaml: set name and data paths, then:
+alpharat-train-and-benchmark configs/train.yaml --name mlp_v1 --games 50
 ```
 
-Legacy Python sampling (`alpharat-sample`) is still available but slower.
+### Subsequent iterations (with NN)
+
+```bash
+# 1. Sample using trained NN as MCTS prior
+#    Edit configs/sample_with_nn.yaml: set checkpoint path, then:
+alpharat-sample configs/sample_with_nn.yaml --group nn_guided_v1
+
+# 2. Create shards from new games
+alpharat-prepare-shards --group 5x5_v2 --batches nn_guided_v1
+
+# 3. Train on new data (optionally resuming from previous checkpoint)
+alpharat-train configs/train.yaml --name mlp_v2
+
+# 4. Benchmark against previous iteration
+#    Edit tournament config to include previous checkpoint, then:
+alpharat-benchmark configs/tournament.yaml
+```
 
 ### CLI commands
 
 | Command | Purpose |
 |---------|---------|
-| `alpharat-iterate` | Auto-iteration loop: sample → shard → train → benchmark → repeat |
-| `alpharat-rust-sample` | Rust self-play sampling with GPU inference (`--device cuda/tensorrt/coreml`) |
-| `alpharat-sample` | Legacy Python self-play (slower, use `alpharat-rust-sample` instead) |
+| `alpharat-sample` | Generate self-play games with MCTS (with or without NN prior) |
 | `alpharat-prepare-shards` | Convert game batches to shuffled train/val shards |
 | `alpharat-train` | Train NN on shards |
 | `alpharat-benchmark` | Run tournament between agents (custom matchups) |
 | `alpharat-train-and-benchmark` | Convenience: train + auto-benchmark vs baselines |
-| `alpharat-export-onnx` | Export PyTorch checkpoint to ONNX for Rust inference |
 | `alpharat-manifest` | Query artifacts: list batches, shards, runs with lineage |
 
 ### Where things go

@@ -228,9 +228,6 @@ DOGFOOD.md
 # Git worktrees for parallel Claude agents
 .worktrees/
 
-# Cargo local config (machine-specific env vars)
-.cargo/
-
 # Local configs (only templates tracked)
 /configs/*
 !/configs/sample.yaml

@@ -58,7 +58,7 @@ def main() -> None:
         "--device",
         type=str,
         default="auto",
-        help="Inference backend (auto, cpu, cuda, coreml, mps, tensorrt)",
+        help="ONNX execution provider (auto, cpu, coreml, mps, cuda)",
     )
     parser.add_argument("--quiet", action="store_true", help="Suppress progress bar")
     args = parser.parse_args()

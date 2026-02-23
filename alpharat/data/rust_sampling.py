@@ -130,7 +130,7 @@ def run_rust_sampling(
         max_games_per_bundle: Max games per NPZ bundle file.
         mux_max_batch_size: Max batch size for ONNX mux backend.
         checkpoint: Path to .pt checkpoint for NN-guided sampling.
-        device: Execution provider — "auto", "cpu", "coreml", "mps", "cuda", "tensorrt".
+        device: ONNX execution provider — "auto", "cpu", "coreml", "mps", "cuda".
         experiments_dir: Experiments root directory.
         verbose: Show progress bar.
 
@@ -138,15 +138,6 @@ def run_rust_sampling(
         Tuple of (batch_dir, metrics).
     """
     from alpharat_sampling import SelfPlayProgress, rust_self_play
-
-    if device == "tensorrt":
-        from alpharat_sampling import preload_tensorrt_libs
-
-        preload_tensorrt_libs()
-    elif device != "cpu":
-        from alpharat_sampling import preload_cuda_libs
-
-        preload_cuda_libs()
 
     from alpharat.experiments import ExperimentManager
 
@@ -188,8 +179,8 @@ def run_rust_sampling(
         "output_dir": str(output_dir),
         "max_games_per_bundle": max_games_per_bundle,
         "onnx_model_path": onnx_path,
-        "mux_max_batch_size": mux_max_batch_size,
         "device": device,
+        "mux_max_batch_size": mux_max_batch_size,
     }
 
     if verbose:
