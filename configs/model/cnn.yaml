@@ -1,0 +1,15 @@
+# @package _global_
+# CNN model configuration (spatial inductive bias with structural P1/P2 symmetry)
+model:
+  architecture: cnn
+  hidden_channels: 64  # Width of ResNet trunk
+  num_blocks: 1        # Number of residual blocks
+  player_dim: 32       # Encoded player side vector dimension
+  hidden_dim: 64       # Per-player hidden state dimension
+  dropout: 0.1
+
+optim:
+  architecture: cnn
+  lr: 1e-3
+  policy_weight: 1.0
+  value_weight: 1.0

@@ -11,6 +11,7 @@ from typing import Any
 import pytest
 import torch
 
+from alpharat.nn.architectures.cnn import CNNModelConfig, CNNOptimConfig
 from alpharat.nn.architectures.local_value import LocalValueModelConfig, LocalValueOptimConfig
 from alpharat.nn.architectures.mlp import MLPModelConfig, MLPOptimConfig
 from alpharat.nn.architectures.symmetric import SymmetricModelConfig, SymmetricOptimConfig
@@ -40,8 +41,16 @@ def _make_local_value_config() -> LocalValueModelConfig:
     return config
 
 
-def _make_mlp_batch(batch_size: int = 4) -> dict[str, torch.Tensor]:
-    """Create a valid batch for MLP training."""
+def _make_cnn_config() -> CNNModelConfig:
+    """Create CNNModelConfig with dimensions set."""
+    config = CNNModelConfig(
+        width=5, height=5, hidden_channels=32, num_blocks=1, player_dim=16, hidden_dim=32
+    )
+    return config
+
+
+def _make_batch(batch_size: int = 4) -> dict[str, torch.Tensor]:
+    """Create a valid batch for training."""
     obs_dim = 181  # 5x5 maze
     return {
         "observation": torch.randn(batch_size, obs_dim),
@@ -49,14 +58,14 @@ def _make_mlp_batch(batch_size: int = 4) -> dict[str, torch.Tensor]:
         "policy_p2": torch.softmax(torch.randn(batch_size, 5), dim=-1),
         "action_p1": torch.randint(0, 5, (batch_size, 1)),
         "action_p2": torch.randint(0, 5, (batch_size, 1)),
-        "value_p1": torch.rand(batch_size, 1) * 5,
-        "value_p2": torch.rand(batch_size, 1) * 5,
+        "value_p1": torch.rand(batch_size) * 5,
+        "value_p2": torch.rand(batch_size) * 5,
     }
 
 
 def _make_local_value_batch(batch_size: int = 4) -> dict[str, torch.Tensor]:
     """Create a valid batch for LocalValue training (includes cheese_outcomes)."""
-    batch = _make_mlp_batch(batch_size)
+    batch = _make_batch(batch_size)
     # cheese_outcomes: -1 for inactive, 0-3 for outcome classes
     cheese_outcomes = torch.randint(-1, 4, (batch_size, 5, 5))
     batch["cheese_outcomes"] = cheese_outcomes
@@ -71,14 +80,14 @@ ARCHITECTURE_CONFIGS = [
         ArchitectureType.MLP,
         _make_mlp_config,
         MLPOptimConfig,
-        _make_mlp_batch,
+        _make_batch,
         id="mlp",
     ),
     pytest.param(
         ArchitectureType.SYMMETRIC,
         _make_symmetric_config,
         SymmetricOptimConfig,
-        _make_mlp_batch,  # Same batch format as MLP
+        _make_batch,
         id="symmetric",
     ),
     pytest.param(
@@ -87,6 +96,13 @@ ARCHITECTURE_CONFIGS = [
         LocalValueOptimConfig,
         _make_local_value_batch,  # Needs cheese_outcomes
         id="local_value",
+    ),
+    pytest.param(
+        ArchitectureType.CNN,
+        _make_cnn_config,
+        CNNOptimConfig,
+        _make_batch,
+        id="cnn",
     ),
 ]
 
@@ -262,7 +278,7 @@ class TestSelfConsistency:
         with torch.no_grad():
             output = model(batch["observation"])
 
-        # All models must have these core keys
+        # All models must have policy logits and value outputs
         required_keys = [
             ModelOutput.LOGITS_P1,
             ModelOutput.LOGITS_P2,
@@ -287,7 +303,7 @@ class TestSelfConsistency:
         with torch.no_grad():
             output = model.predict(batch["observation"])
 
-        # All models must have these core keys
+        # All models must have policy probs and value outputs
         required_keys = [
             ModelOutput.POLICY_P1,
             ModelOutput.POLICY_P2,
@@ -395,6 +411,63 @@ class TestArchitectureSpecificBehavior:
         losses = loss_fn(output, batch, optim_config)
 
         assert LossKey.OWNERSHIP in losses, "LocalValueMLP loss missing ownership component"
+
+    def test_cnn_no_augmentation_needed(self) -> None:
+        """PyRatCNN should not need augmentation (structural symmetry)."""
+        config = _make_cnn_config()
+        aug = config.build_augmentation()
+
+        assert not aug.needs_augmentation, "PyRatCNN should not need augmentation"
+
+    def test_cnn_symmetry(self) -> None:
+        """PyRatCNN should be symmetric: swap P1/P2 inputs -> swap outputs."""
+        from alpharat.nn.models.cnn import PyRatCNN
+
+        config = _make_cnn_config()
+        model = config.build_model()
+        assert isinstance(model, PyRatCNN)
+        model.eval()
+
+        spatial = 5 * 5
+        obs_dim = spatial * 7 + 6
+
+        # Create observation
+        obs = torch.zeros(1, obs_dim)
+        maze_end = spatial * 4
+        obs[:, :maze_end] = torch.randn(1, maze_end)
+
+        # P1 at flat idx 7, P2 at flat idx 19
+        p1_pos_end = maze_end + spatial
+        obs[:, maze_end + 7] = 1
+        p2_pos_end = p1_pos_end + spatial
+        obs[:, p1_pos_end + 19] = 1
+
+        # Cheese and scalars
+        cheese_end = p2_pos_end + spatial
+        obs[:, p2_pos_end:cheese_end] = (torch.rand(1, spatial) > 0.5).float()
+        obs[:, cheese_end:] = torch.tensor([[0.1, 0.5, 0.2, 0.3, 0.4, 0.5]])
+
+        # Create swapped observation
+        obs_swapped = obs.clone()
+        obs_swapped[:, maze_end:p1_pos_end] = obs[:, p1_pos_end:p2_pos_end]
+        obs_swapped[:, p1_pos_end:p2_pos_end] = obs[:, maze_end:p1_pos_end]
+        obs_swapped[:, cheese_end + 0] = -obs[:, cheese_end + 0]  # score_diff negated
+        obs_swapped[:, cheese_end + 2] = obs[:, cheese_end + 3]  # swap mud
+        obs_swapped[:, cheese_end + 3] = obs[:, cheese_end + 2]
+        obs_swapped[:, cheese_end + 4] = obs[:, cheese_end + 5]  # swap scores
+        obs_swapped[:, cheese_end + 5] = obs[:, cheese_end + 4]
+
+        with torch.no_grad():
+            out = model.predict(obs)
+            out_swapped = model.predict(obs_swapped)
+
+        # Swapped P1 output should equal original P2 output
+        assert torch.allclose(out["policy_p1"], out_swapped["policy_p2"], atol=1e-5)
+        assert torch.allclose(out["policy_p2"], out_swapped["policy_p1"], atol=1e-5)
+
+        # Value symmetry: swapping players swaps values
+        assert torch.allclose(out["pred_value_p1"], out_swapped["pred_value_p2"], atol=1e-5)
+        assert torch.allclose(out["pred_value_p2"], out_swapped["pred_value_p1"], atol=1e-5)
 
 
 class TestBuildObservationBuilder:
