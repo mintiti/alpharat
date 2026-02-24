@@ -1,10 +1,20 @@
-# CNN training config for 7x7 (standalone, no Hydra defaults)
-name: cnn_7x7
+# CNN training config for 7x7 — structural symmetry (no positions in trunk)
+name: 7x7_open_50k_cnn_iter0
 
 model:
   architecture: cnn
-  hidden_channels: 64
-  num_blocks: 1
+  trunk:
+    channels: 64
+    include_positions: false
+    blocks:
+      - type: res
+      - type: res
+      - type: gpool
+        gpool_channels: 32
+  policy_head:
+    type: mlp
+  value_head:
+    type: point
   player_dim: 32
   hidden_dim: 64
   dropout: 0.1

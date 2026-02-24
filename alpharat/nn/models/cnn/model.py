@@ -6,42 +6,8 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+from alpharat.nn.builders.flat import FlatObsLayout
 from alpharat.nn.training.keys import ModelOutput
-
-
-class ResBlock(nn.Module):
-    """Pre-activation residual block.
-
-    Architecture: BN -> ReLU -> Conv -> BN -> ReLU -> Conv + skip
-    """
-
-    def __init__(self, channels: int) -> None:
-        """Initialize residual block.
-
-        Args:
-            channels: Number of input and output channels.
-        """
-        super().__init__()
-        self.bn1 = nn.BatchNorm2d(channels)
-        self.conv1 = nn.Conv2d(channels, channels, kernel_size=3, padding=1, bias=False)
-        self.bn2 = nn.BatchNorm2d(channels)
-        self.conv2 = nn.Conv2d(channels, channels, kernel_size=3, padding=1, bias=False)
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        """Forward pass with residual connection.
-
-        Args:
-            x: Input tensor (batch, channels, H, W).
-
-        Returns:
-            Output tensor (batch, channels, H, W).
-        """
-        identity = x
-        out: torch.Tensor = F.relu(self.bn1(x))
-        out = self.conv1(out)
-        out = F.relu(self.bn2(out))
-        out = self.conv2(out)
-        return out + identity
 
 
 class PyRatCNN(nn.Module):
@@ -51,8 +17,8 @@ class PyRatCNN(nn.Module):
     spatial tensors for CNN processing.
 
     Architecture:
-        1. Parse flat obs -> spatial tensor (5, H, W) + side vectors (3,) each
-           - Spatial: maze adjacency (4 channels) + cheese (1 channel)
+        1. Parse flat obs -> spatial tensor (5 or 7, H, W) + side vectors (3,) each
+           - Spatial: maze adjacency (4ch) + cheese (1ch) [+ p1_pos + p2_pos if include_positions]
            - Player positions kept as one-hot masks for ONNX-safe extraction
         2. CNN trunk processes spatial tensor -> (C, H, W)
         3. Extract features at player positions via mask-multiply-sum (ONNX-safe)
@@ -60,49 +26,45 @@ class PyRatCNN(nn.Module):
         5. DeepSet combination: per-player hidden state + sum aggregation
         6. Shared policy and value heads for both players
 
-    Symmetry guarantee: swap P1/P2 inputs -> swap outputs exactly.
-    The CNN trunk sees position-agnostic features (maze + cheese), then we
-    extract features at each player's position. Weight sharing in the heads
+    Symmetry guarantee (when include_positions=False): swap P1/P2 inputs -> swap
+    outputs exactly. The CNN trunk sees position-agnostic features (maze + cheese),
+    then we extract features at each player's position. Weight sharing in the heads
     ensures swapping players swaps outputs.
+
+    When include_positions=True, symmetry relies on augmentation (player swap).
     """
 
     def __init__(
         self,
         width: int,
         height: int,
-        hidden_channels: int = 64,
-        num_blocks: int = 1,
+        stem: nn.Module,
+        blocks: nn.ModuleList,
+        policy_head: nn.Module,
+        value_head: nn.Module,
+        hidden_channels: int,
         player_dim: int = 32,
         hidden_dim: int = 64,
         dropout: float = 0.0,
+        include_positions: bool = False,
         num_actions: int = 5,
     ) -> None:
-        """Initialize CNN model.
-
-        Args:
-            width: Maze width.
-            height: Maze height.
-            hidden_channels: Width of ResNet trunk.
-            num_blocks: Number of residual blocks.
-            player_dim: Encoded player side vector dimension.
-            hidden_dim: Per-player hidden state dimension.
-            dropout: Dropout probability.
-            num_actions: Number of actions per player.
-        """
         super().__init__()
 
         self.width = width
         self.height = height
         self.hidden_channels = hidden_channels
         self.num_actions = num_actions
+        self.include_positions = include_positions
+        self._layout = FlatObsLayout(width, height)
 
-        # CNN trunk: stem + residual blocks
-        # Input: 5 channels (maze 4 + cheese 1)
-        # Player position channels are NOT included to preserve symmetry.
-        # Position info is used only for indexing spatial features, not as CNN input.
-        self.stem = nn.Conv2d(5, hidden_channels, kernel_size=3, padding=1, bias=False)
+        # CNN trunk: stem + residual blocks (built externally)
+        self.stem = stem
         self.stem_bn = nn.BatchNorm2d(hidden_channels)
-        self.blocks = nn.ModuleList([ResBlock(hidden_channels) for _ in range(num_blocks)])
+        self.blocks = blocks
+
+        # Value head may need spatial features
+        self._value_needs_spatial = getattr(value_head, "needs_spatial", False)
 
         # Shared player encoder: (3,) -> (player_dim,)
         # Input: [score, mud, progress]
@@ -120,9 +82,9 @@ class PyRatCNN(nn.Module):
             nn.Dropout(dropout),
         )
 
-        # Shared heads: input is (hidden_dim + hidden_dim) = per-player + aggregate
-        self.policy_head = nn.Linear(hidden_dim * 2, num_actions)
-        self.value_head = nn.Linear(hidden_dim * 2, 1)
+        # Shared heads (built externally)
+        self.policy_head = policy_head
+        self.value_head = value_head
 
         self._init_weights()
 
@@ -143,65 +105,72 @@ class PyRatCNN(nn.Module):
                         nn.init.zeros_(layer.bias)
 
         # Policy head: small init -> near-uniform softmax
-        nn.init.normal_(self.policy_head.weight, std=0.01)
-        nn.init.zeros_(self.policy_head.bias)
+        for layer in self.policy_head.modules():
+            if isinstance(layer, nn.Linear):
+                nn.init.normal_(layer.weight, std=0.01)
+                if layer.bias is not None:
+                    nn.init.zeros_(layer.bias)
 
         # Value head: small init -> near-zero predictions
-        nn.init.normal_(self.value_head.weight, std=0.01)
-        nn.init.zeros_(self.value_head.bias)
+        for layer in self.value_head.modules():
+            if isinstance(layer, nn.Linear):
+                nn.init.normal_(layer.weight, std=0.01)
+                if layer.bias is not None:
+                    nn.init.zeros_(layer.bias)
 
     def _parse_obs(
         self, obs: torch.Tensor
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         """Parse flat observation into spatial and side components.
 
-        Observation layout (same as FlatObservationBuilder):
-            [maze H*W*4] [p1_pos H*W] [p2_pos H*W] [cheese H*W]
-            [score_diff, progress, p1_mud, p2_mud, p1_score, p2_score]
-
         Returns:
             Tuple of:
-                - spatial: (batch, 5, H, W) tensor (maze + cheese, NO position channels)
+                - spatial: (batch, 5 or 7, H, W) tensor
                 - p1_side: (batch, 3) tensor [score, mud, progress]
                 - p2_side: (batch, 3) tensor [score, mud, progress]
                 - p1_mask: (batch, H*W) one-hot position mask for ONNX-safe extraction
                 - p2_mask: (batch, H*W) one-hot position mask for ONNX-safe extraction
         """
+        lo = self._layout
         batch_size = obs.shape[0]
         h, w = self.height, self.width
-        spatial_size = h * w
-
-        # Compute offsets
-        maze_end = spatial_size * 4
-        p1_pos_end = maze_end + spatial_size
-        p2_pos_end = p1_pos_end + spatial_size
-        cheese_end = p2_pos_end + spatial_size
+        s = lo.scalars_start
 
         # Extract flat components
-        maze_flat = obs[:, :maze_end]  # (batch, H*W*4)
-        p1_mask = obs[:, maze_end:p1_pos_end]  # (batch, H*W) one-hot
-        p2_mask = obs[:, p1_pos_end:p2_pos_end]  # (batch, H*W) one-hot
-        cheese_flat = obs[:, p2_pos_end:cheese_end]  # (batch, H*W)
-        scalars = obs[:, cheese_end:]  # (batch, 6)
+        maze_flat = obs[:, lo.maze]  # (batch, H*W*4)
+        p1_mask = obs[:, lo.p1_pos]  # (batch, H*W) one-hot
+        p2_mask = obs[:, lo.p2_pos]  # (batch, H*W) one-hot
+        cheese_flat = obs[:, lo.cheese]  # (batch, H*W)
 
-        # Build spatial tensor (batch, 5, H, W)
-        # Channel 0-3: maze adjacency
+        # Build spatial tensor
         maze = maze_flat.view(batch_size, h, w, 4).permute(0, 3, 1, 2)  # (batch, 4, H, W)
-        # Channel 4: cheese
         cheese_spatial = cheese_flat.view(batch_size, 1, h, w)  # (batch, 1, H, W)
 
-        spatial = torch.cat([maze, cheese_spatial], dim=1)
+        if self.include_positions:
+            p1_spatial = p1_mask.view(batch_size, 1, h, w)
+            p2_spatial = p2_mask.view(batch_size, 1, h, w)
+            spatial = torch.cat([maze, cheese_spatial, p1_spatial, p2_spatial], dim=1)
+        else:
+            spatial = torch.cat([maze, cheese_spatial], dim=1)
 
-        # Extract scalars
-        progress = scalars[:, 1:2]  # (batch, 1)
-        p1_mud = scalars[:, 2:3]  # (batch, 1)
-        p2_mud = scalars[:, 3:4]  # (batch, 1)
-        p1_score = scalars[:, 4:5]  # (batch, 1)
-        p2_score = scalars[:, 5:6]  # (batch, 1)
-
-        # Build side vectors: [score, mud, progress]
-        p1_side = torch.cat([p1_score, p1_mud, progress], dim=-1)  # (batch, 3)
-        p2_side = torch.cat([p2_score, p2_mud, progress], dim=-1)  # (batch, 3)
+        # Extract scalars and build side vectors: [score, mud, progress]
+        progress = obs[:, s + lo.PROGRESS : s + lo.PROGRESS + 1]
+        p1_side = torch.cat(
+            [
+                obs[:, s + lo.P1_SCORE : s + lo.P1_SCORE + 1],
+                obs[:, s + lo.P1_MUD : s + lo.P1_MUD + 1],
+                progress,
+            ],
+            dim=-1,
+        )
+        p2_side = torch.cat(
+            [
+                obs[:, s + lo.P2_SCORE : s + lo.P2_SCORE + 1],
+                obs[:, s + lo.P2_MUD : s + lo.P2_MUD + 1],
+                progress,
+            ],
+            dim=-1,
+        )
 
         return spatial, p1_side, p2_side, p1_mask, p2_mask
 
@@ -213,17 +182,13 @@ class PyRatCNN(nn.Module):
             **kwargs: Ignored (for protocol compatibility).
 
         Returns:
-            Dict with:
-                - ModelOutput.LOGITS_P1: Raw logits for P1, shape (batch, 5).
-                - ModelOutput.LOGITS_P2: Raw logits for P2, shape (batch, 5).
-                - ModelOutput.VALUE_P1: Predicted value for P1, shape (batch,).
-                - ModelOutput.VALUE_P2: Predicted value for P2, shape (batch,).
+            Dict with LOGITS_P1, LOGITS_P2, VALUE_P1, VALUE_P2.
         """
         # Parse flat observation into components
         spatial, p1_side, p2_side, p1_mask, p2_mask = self._parse_obs(x)
         batch_size = spatial.shape[0]
 
-        # CNN trunk: (batch, 5, H, W) -> (batch, C, H, W)
+        # CNN trunk: (batch, in_ch, H, W) -> (batch, C, H, W)
         features = F.relu(self.stem_bn(self.stem(spatial)))
         for block in self.blocks:
             features = block(features)
@@ -246,13 +211,16 @@ class PyRatCNN(nn.Module):
         agg = h1 + h2  # (batch, hidden_dim)
 
         # Policy head (shared)
-        logits_p1 = self.policy_head(torch.cat([h1, agg], dim=-1))
-        logits_p2 = self.policy_head(torch.cat([h2, agg], dim=-1))  # Same head!
+        logits_p1 = self.policy_head(h1, agg)
+        logits_p2 = self.policy_head(h2, agg)  # Same head!
 
         # Value head (shared)
-        # softplus ensures non-negative outputs (cheese count can't be negative)
-        value_p1 = F.softplus(self.value_head(torch.cat([h1, agg], dim=-1))).squeeze(-1)
-        value_p2 = F.softplus(self.value_head(torch.cat([h2, agg], dim=-1))).squeeze(-1)
+        if self._value_needs_spatial:
+            value_p1 = self.value_head(h1, agg, features)
+            value_p2 = self.value_head(h2, agg, features)
+        else:
+            value_p1 = self.value_head(h1, agg)
+            value_p2 = self.value_head(h2, agg)
 
         return {
             ModelOutput.LOGITS_P1: logits_p1,
@@ -262,19 +230,7 @@ class PyRatCNN(nn.Module):
         }
 
     def predict(self, x: torch.Tensor, **kwargs: object) -> dict[str, torch.Tensor]:
-        """Inference pass with softmax probabilities.
-
-        Args:
-            x: Flat observation tensor (batch, obs_dim).
-            **kwargs: Ignored (for protocol compatibility).
-
-        Returns:
-            Dict with:
-                - ModelOutput.POLICY_P1: Probabilities for P1, shape (batch, 5).
-                - ModelOutput.POLICY_P2: Probabilities for P2, shape (batch, 5).
-                - ModelOutput.VALUE_P1: Predicted value for P1, shape (batch,).
-                - ModelOutput.VALUE_P2: Predicted value for P2, shape (batch,).
-        """
+        """Inference pass with softmax probabilities."""
         output = self.forward(x)
         return {
             ModelOutput.POLICY_P1: F.softmax(output[ModelOutput.LOGITS_P1], dim=-1),

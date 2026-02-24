@@ -24,7 +24,7 @@ from pathlib import Path
 
 from alpharat.config.display import format_config_summary
 from alpharat.config.game import GameConfig
-from alpharat.config.loader import load_config, split_config_path
+from alpharat.config.loader import load_config, load_raw_config, split_config_path
 from alpharat.eval.benchmark import (
     BenchmarkConfig,
     build_benchmark_tournament,
@@ -32,7 +32,7 @@ from alpharat.eval.benchmark import (
 )
 from alpharat.eval.tournament import run_tournament
 from alpharat.experiments import ExperimentManager
-from alpharat.mcts.config import PythonMCTSConfig
+from alpharat.mcts.config import MCTSConfig, PythonMCTSConfig, RustMCTSConfig
 from alpharat.nn.config import TrainConfig
 from alpharat.nn.training import run_training
 
@@ -213,7 +213,12 @@ def main() -> None:
     logger.info("")
 
     # Load MCTS and game configs from Hydra sub-configs
-    mcts_config = load_config(PythonMCTSConfig, "configs/mcts", args.mcts)
+    from pydantic import TypeAdapter
+
+    mcts_dict = load_raw_config("configs/mcts", args.mcts)
+    mcts_config: PythonMCTSConfig | RustMCTSConfig = TypeAdapter(MCTSConfig).validate_python(
+        mcts_dict
+    )
     game_config = load_config(GameConfig, "configs/game", args.game)
 
     benchmark_config = BenchmarkConfig(

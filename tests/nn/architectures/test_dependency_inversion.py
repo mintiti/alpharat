@@ -43,8 +43,14 @@ def _make_local_value_config() -> LocalValueModelConfig:
 
 def _make_cnn_config() -> CNNModelConfig:
     """Create CNNModelConfig with dimensions set."""
+    from alpharat.nn.architectures.cnn.blocks import ResBlockConfig, TrunkConfig
+
     config = CNNModelConfig(
-        width=5, height=5, hidden_channels=32, num_blocks=1, player_dim=16, hidden_dim=32
+        width=5,
+        height=5,
+        trunk=TrunkConfig(channels=32, blocks=[ResBlockConfig()]),
+        player_dim=16,
+        hidden_dim=32,
     )
     return config
 
