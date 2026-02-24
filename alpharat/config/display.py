@@ -27,7 +27,7 @@ def format_config_summary(*sections: tuple[str, BaseModel | None]) -> str:
           simulations: 200, c_puct: 1.5, force_k: 2.0, fpu_reduction: 0.2
         Model: cnn
           player_dim: 32, hidden_dim: 64, dropout: 0.1
-          trunk: channels: 64, include_positions: false, blocks: [res, res, gpool]
+          trunk: channels: 64, blocks: [res, res, gpool]
           value_head: point
     """
     lines: list[str] = []

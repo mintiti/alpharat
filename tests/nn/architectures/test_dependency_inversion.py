@@ -11,7 +11,12 @@ from typing import Any
 import pytest
 import torch
 
-from alpharat.nn.architectures.cnn import CNNModelConfig, CNNOptimConfig
+from alpharat.nn.architectures.cnn import (
+    CNNModelConfig,
+    CNNOptimConfig,
+    KataGoCNNModelConfig,
+    KataGoCNNOptimConfig,
+)
 from alpharat.nn.architectures.local_value import LocalValueModelConfig, LocalValueOptimConfig
 from alpharat.nn.architectures.mlp import MLPModelConfig, MLPOptimConfig
 from alpharat.nn.architectures.symmetric import SymmetricModelConfig, SymmetricOptimConfig
@@ -50,6 +55,19 @@ def _make_cnn_config() -> CNNModelConfig:
         height=5,
         trunk=TrunkConfig(channels=32, blocks=[ResBlockConfig()]),
         player_dim=16,
+        hidden_dim=32,
+    )
+    return config
+
+
+def _make_katago_cnn_config() -> KataGoCNNModelConfig:
+    """Create KataGoCNNModelConfig with dimensions set."""
+    from alpharat.nn.architectures.cnn.blocks import ResBlockConfig, TrunkConfig
+
+    config = KataGoCNNModelConfig(
+        width=5,
+        height=5,
+        trunk=TrunkConfig(channels=32, blocks=[ResBlockConfig()]),
         hidden_dim=32,
     )
     return config
@@ -109,6 +127,13 @@ ARCHITECTURE_CONFIGS = [
         CNNOptimConfig,
         _make_batch,
         id="cnn",
+    ),
+    pytest.param(
+        ArchitectureType.CNN_KATAGO,
+        _make_katago_cnn_config,
+        KataGoCNNOptimConfig,
+        _make_batch,
+        id="cnn_katago",
     ),
 ]
 
@@ -419,11 +444,18 @@ class TestArchitectureSpecificBehavior:
         assert LossKey.OWNERSHIP in losses, "LocalValueMLP loss missing ownership component"
 
     def test_cnn_no_augmentation_needed(self) -> None:
-        """PyRatCNN should not need augmentation (structural symmetry)."""
+        """DeepSet CNN should not need augmentation (structural symmetry)."""
         config = _make_cnn_config()
         aug = config.build_augmentation()
 
-        assert not aug.needs_augmentation, "PyRatCNN should not need augmentation"
+        assert not aug.needs_augmentation, "DeepSet CNN should not need augmentation"
+
+    def test_katago_cnn_needs_augmentation(self) -> None:
+        """KataGoCNN should need augmentation (no structural symmetry)."""
+        config = _make_katago_cnn_config()
+        aug = config.build_augmentation()
+
+        assert aug.needs_augmentation, "KataGoCNN should need augmentation"
 
     def test_cnn_symmetry(self) -> None:
         """PyRatCNN should be symmetric: swap P1/P2 inputs -> swap outputs."""

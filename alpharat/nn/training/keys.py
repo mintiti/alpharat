@@ -85,3 +85,4 @@ class ArchitectureType(StrEnum):
     SYMMETRIC = "symmetric"
     LOCAL_VALUE = "local_value"
     CNN = "cnn"
+    CNN_KATAGO = "cnn_katago"

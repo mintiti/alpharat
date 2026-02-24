@@ -17,8 +17,8 @@ class PyRatCNN(nn.Module):
     spatial tensors for CNN processing.
 
     Architecture:
-        1. Parse flat obs -> spatial tensor (5 or 7, H, W) + side vectors (3,) each
-           - Spatial: maze adjacency (4ch) + cheese (1ch) [+ p1_pos + p2_pos if include_positions]
+        1. Parse flat obs -> spatial tensor (5, H, W) + side vectors (3,) each
+           - Spatial: maze adjacency (4ch) + cheese (1ch)
            - Player positions kept as one-hot masks for ONNX-safe extraction
         2. CNN trunk processes spatial tensor -> (C, H, W)
         3. Extract features at player positions via mask-multiply-sum (ONNX-safe)
@@ -26,12 +26,10 @@ class PyRatCNN(nn.Module):
         5. DeepSet combination: per-player hidden state + sum aggregation
         6. Shared policy and value heads for both players
 
-    Symmetry guarantee (when include_positions=False): swap P1/P2 inputs -> swap
-    outputs exactly. The CNN trunk sees position-agnostic features (maze + cheese),
-    then we extract features at each player's position. Weight sharing in the heads
-    ensures swapping players swaps outputs.
-
-    When include_positions=True, symmetry relies on augmentation (player swap).
+    Symmetry guarantee: swap P1/P2 inputs -> swap outputs exactly. The CNN trunk
+    sees position-agnostic features (maze + cheese), then we extract features at
+    each player's position. Weight sharing in the heads ensures swapping players
+    swaps outputs.
     """
 
     def __init__(
@@ -46,7 +44,6 @@ class PyRatCNN(nn.Module):
         player_dim: int = 32,
         hidden_dim: int = 64,
         dropout: float = 0.0,
-        include_positions: bool = False,
         num_actions: int = 5,
     ) -> None:
         super().__init__()
@@ -55,7 +52,6 @@ class PyRatCNN(nn.Module):
         self.height = height
         self.hidden_channels = hidden_channels
         self.num_actions = num_actions
-        self.include_positions = include_positions
         self._layout = FlatObsLayout(width, height)
 
         # CNN trunk: stem + residual blocks (built externally)
@@ -125,7 +121,7 @@ class PyRatCNN(nn.Module):
 
         Returns:
             Tuple of:
-                - spatial: (batch, 5 or 7, H, W) tensor
+                - spatial: (batch, 5, H, W) tensor — maze (4ch) + cheese (1ch)
                 - p1_side: (batch, 3) tensor [score, mud, progress]
                 - p2_side: (batch, 3) tensor [score, mud, progress]
                 - p1_mask: (batch, H*W) one-hot position mask for ONNX-safe extraction
@@ -142,16 +138,10 @@ class PyRatCNN(nn.Module):
         p2_mask = obs[:, lo.p2_pos]  # (batch, H*W) one-hot
         cheese_flat = obs[:, lo.cheese]  # (batch, H*W)
 
-        # Build spatial tensor
+        # Build spatial tensor: maze (4ch) + cheese (1ch) = 5ch
         maze = maze_flat.view(batch_size, h, w, 4).permute(0, 3, 1, 2)  # (batch, 4, H, W)
         cheese_spatial = cheese_flat.view(batch_size, 1, h, w)  # (batch, 1, H, W)
-
-        if self.include_positions:
-            p1_spatial = p1_mask.view(batch_size, 1, h, w)
-            p2_spatial = p2_mask.view(batch_size, 1, h, w)
-            spatial = torch.cat([maze, cheese_spatial, p1_spatial, p2_spatial], dim=1)
-        else:
-            spatial = torch.cat([maze, cheese_spatial], dim=1)
+        spatial = torch.cat([maze, cheese_spatial], dim=1)
 
         # Extract scalars and build side vectors: [score, mud, progress]
         progress = obs[:, s + lo.PROGRESS : s + lo.PROGRESS + 1]

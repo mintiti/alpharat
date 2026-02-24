@@ -1,11 +1,14 @@
 # @package _global_
-# CNN model configuration (spatial inductive bias with structural P1/P2 symmetry)
+# CNN with 3-block trunk: 2 res + 1 gpool
 model:
   architecture: cnn
   trunk:
     channels: 64
     blocks:
       - type: res
+      - type: res
+      - type: gpool
+        gpool_channels: 32
   policy_head:
     type: mlp
   value_head:

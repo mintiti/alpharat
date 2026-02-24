@@ -10,24 +10,23 @@ import torch.nn.functional as F
 from alpharat.nn.training.keys import BatchKey, LossKey, ModelOutput
 
 if TYPE_CHECKING:
-    from alpharat.nn.architectures.cnn.config import CNNOptimConfig
+    from alpharat.nn.training.base import BaseOptimConfig
 
 
 def compute_cnn_losses(
     model_output: dict[str, torch.Tensor],
     batch: dict[str, torch.Tensor],
-    config: CNNOptimConfig,
+    config: BaseOptimConfig,
 ) -> dict[str, torch.Tensor]:
-    """Compute losses for PyRatCNN.
+    """Compute losses for CNN architectures (DeepSet and KataGo).
 
-    Same loss structure as SymmetricMLP: cross-entropy for policies,
-    MSE for scalar values.
+    Cross-entropy for policies, MSE for scalar values.
 
     Args:
         model_output: Dict from model.forward() with LOGITS_P1, LOGITS_P2,
             VALUE_P1, VALUE_P2.
         batch: Training batch with policy_p1, policy_p2, value_p1, value_p2.
-        config: CNNOptimConfig with loss weights.
+        config: Optim config with policy_weight and value_weight.
 
     Returns:
         Dict with LossKey.TOTAL and individual loss components.

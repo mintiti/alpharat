@@ -78,23 +78,23 @@ class TrunkConfig(StrictBaseModel):
     """Trunk configuration: stem + sequence of blocks.
 
     `channels` is trunk-wide — all blocks share the same channel count.
-    `include_positions` controls whether player position channels are added
-    to the spatial input (5ch vs 7ch).
+    The caller decides `in_channels` (e.g. 5 for DeepSet, 7 for KataGo).
     """
 
     channels: int = 64
-    include_positions: bool = False
     blocks: list[BlockConfig] = Field(default_factory=_default_blocks)
 
-    def build(self) -> tuple[nn.Module, nn.ModuleList]:
+    def build(self, in_channels: int) -> tuple[nn.Module, nn.ModuleList]:
         """Build stem conv and block modules.
+
+        Args:
+            in_channels: Number of input channels for the stem conv.
 
         Returns:
             (stem, blocks) where stem is Conv2d and blocks is ModuleList.
         """
         import torch.nn as nn_mod
 
-        in_channels = 7 if self.include_positions else 5
         stem = nn_mod.Conv2d(in_channels, self.channels, kernel_size=3, padding=1, bias=False)
         modules: list[nn.Module] = []
         for block_cfg in self.blocks:

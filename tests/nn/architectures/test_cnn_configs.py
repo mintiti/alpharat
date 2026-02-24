@@ -10,7 +10,7 @@ from alpharat.nn.architectures.cnn.blocks import (
     ResBlockConfig,
     TrunkConfig,
 )
-from alpharat.nn.architectures.cnn.config import CNNModelConfig
+from alpharat.nn.architectures.cnn.config import CNNModelConfig, KataGoCNNModelConfig
 from alpharat.nn.architectures.cnn.heads import (
     PooledValueHeadConfig,
 )
@@ -67,24 +67,24 @@ class TestBlockConfigSerialization:
 class TestTrunkConfigBuild:
     """Tests for TrunkConfig.build()."""
 
-    def test_stem_in_channels_without_positions(self) -> None:
-        cfg = TrunkConfig(channels=32, include_positions=False)
-        stem, _ = cfg.build()
+    def test_stem_in_channels(self) -> None:
+        cfg = TrunkConfig(channels=32)
+        stem, _ = cfg.build(in_channels=5)
         assert stem.in_channels == 5
 
-    def test_stem_in_channels_with_positions(self) -> None:
-        cfg = TrunkConfig(channels=32, include_positions=True)
-        stem, _ = cfg.build()
+    def test_stem_in_channels_7(self) -> None:
+        cfg = TrunkConfig(channels=32)
+        stem, _ = cfg.build(in_channels=7)
         assert stem.in_channels == 7
 
     def test_builds_correct_number_of_blocks(self) -> None:
         cfg = TrunkConfig(channels=32, blocks=[ResBlockConfig(), ResBlockConfig()])
-        _, blocks = cfg.build()
+        _, blocks = cfg.build(in_channels=5)
         assert len(blocks) == 2
 
     def test_default_single_res_block(self) -> None:
         cfg = TrunkConfig()
-        _, blocks = cfg.build()
+        _, blocks = cfg.build(in_channels=5)
         assert len(blocks) == 1
         assert isinstance(blocks[0], ResBlock)
 
@@ -192,41 +192,9 @@ class TestEndToEnd:
         # Softplus ensures non-negative
         assert (out["pred_value_p1"] >= 0).all()
 
-    def test_include_positions_true(self) -> None:
-        cfg = CNNModelConfig(
-            width=5,
-            height=5,
-            trunk=TrunkConfig(channels=32, include_positions=True, blocks=[ResBlockConfig()]),
-            player_dim=16,
-            hidden_dim=32,
-        )
-        model: torch.nn.Module = cfg.build_model()  # type: ignore[assignment]
-        model.eval()
-
-        obs_dim = 5 * 5 * 7 + 6
-        x = torch.randn(2, obs_dim)
-        with torch.no_grad():
-            out = model(x)
-
-        assert out["logits_p1"].shape == (2, 5)
-
-    def test_include_positions_augmentation(self) -> None:
-        """include_positions=True should need augmentation."""
-        cfg = CNNModelConfig(
-            width=5,
-            height=5,
-            trunk=TrunkConfig(include_positions=True),
-        )
-        aug = cfg.build_augmentation()
-        assert aug.needs_augmentation
-
-    def test_no_positions_no_augmentation(self) -> None:
-        """include_positions=False should not need augmentation."""
-        cfg = CNNModelConfig(
-            width=5,
-            height=5,
-            trunk=TrunkConfig(include_positions=False),
-        )
+    def test_cnn_no_augmentation(self) -> None:
+        """DeepSet CNN should not need augmentation (structural symmetry)."""
+        cfg = CNNModelConfig(width=5, height=5)
         aug = cfg.build_augmentation()
         assert not aug.needs_augmentation
 
@@ -248,3 +216,45 @@ class TestEndToEnd:
 
         assert out["logits_p1"].shape == (2, 5)
         assert out["pred_value_p1"].shape == (2,)
+
+
+class TestKataGoCNNConfig:
+    """Tests for KataGoCNNModelConfig."""
+
+    def test_round_trip(self) -> None:
+        cfg = KataGoCNNModelConfig(
+            width=5,
+            height=5,
+            trunk=TrunkConfig(channels=32),
+            hidden_dim=64,
+        )
+        data = cfg.model_dump()
+        restored = KataGoCNNModelConfig(**data)
+        assert restored.architecture == "cnn_katago"
+        assert restored.trunk.channels == 32
+
+    def test_forward(self) -> None:
+        cfg = KataGoCNNModelConfig(
+            width=5,
+            height=5,
+            trunk=TrunkConfig(channels=32, blocks=[ResBlockConfig()]),
+            hidden_dim=32,
+        )
+        model: torch.nn.Module = cfg.build_model()  # type: ignore[assignment]
+        model.eval()
+
+        obs_dim = 5 * 5 * 7 + 6
+        x = torch.randn(2, obs_dim)
+        with torch.no_grad():
+            out = model(x)
+
+        assert out["logits_p1"].shape == (2, 5)
+        assert out["logits_p2"].shape == (2, 5)
+        assert out["pred_value_p1"].shape == (2,)
+        assert out["pred_value_p2"].shape == (2,)
+
+    def test_needs_augmentation(self) -> None:
+        """KataGoCNN should need augmentation (no structural symmetry)."""
+        cfg = KataGoCNNModelConfig(width=5, height=5)
+        aug = cfg.build_augmentation()
+        assert aug.needs_augmentation

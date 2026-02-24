@@ -1,8 +1,8 @@
-# CNN training config for 7x7 — structural symmetry (no positions in trunk)
-name: 7x7_open_50k_cnn_iter0
+# KataGo CNN training config for 7x7 — positions in trunk (7ch, needs augmentation)
+name: 7x7_open_50k_cnn_katago_iter0
 
 model:
-  architecture: cnn
+  architecture: cnn_katago
   trunk:
     channels: 64
     blocks:
@@ -10,16 +10,11 @@ model:
       - type: res
       - type: gpool
         gpool_channels: 32
-  policy_head:
-    type: mlp
-  value_head:
-    type: point
-  player_dim: 32
   hidden_dim: 64
   dropout: 0.1
 
 optim:
-  architecture: cnn
+  architecture: cnn_katago
   lr: 1e-3
   policy_weight: 1.0
   value_weight: 1.0

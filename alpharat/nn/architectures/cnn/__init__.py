@@ -7,7 +7,12 @@ from alpharat.nn.architectures.cnn.blocks import (
     ResBlockConfig,
     TrunkConfig,
 )
-from alpharat.nn.architectures.cnn.config import CNNModelConfig, CNNOptimConfig
+from alpharat.nn.architectures.cnn.config import (
+    CNNModelConfig,
+    CNNOptimConfig,
+    KataGoCNNModelConfig,
+    KataGoCNNOptimConfig,
+)
 from alpharat.nn.architectures.cnn.heads import (
     MLPPolicyHeadConfig,
     PointValueHeadConfig,
@@ -22,6 +27,8 @@ __all__ = [
     "CNNOptimConfig",
     "GPoolBlockConfig",
     "InterleavedBlockConfig",
+    "KataGoCNNModelConfig",
+    "KataGoCNNOptimConfig",
     "MLPPolicyHeadConfig",
     "PointValueHeadConfig",
     "PolicyHeadConfig",
