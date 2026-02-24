@@ -51,7 +51,7 @@ Named after the game config they use. All use the same MCTS params (`7x7_scalar_
 
 ### Model configs
 
-Named after architecture: `mlp.yaml`, `symmetric.yaml`
+Named after architecture: `mlp.yaml`, `symmetric.yaml`, `cnn.yaml`, `cnn_gpool.yaml`
 
 ## What Belongs Here
 
