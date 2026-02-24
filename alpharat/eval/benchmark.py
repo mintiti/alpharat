@@ -64,14 +64,14 @@ def get_game_config_from_checkpoint(checkpoint_path: Path) -> GameConfig:
     width = checkpoint.get("width", 5)
     height = checkpoint.get("height", 5)
 
+    from alpharat.config.game import CheeseConfig
+
     # Use defaults for other params, matching training data
     return GameConfig(
         width=width,
         height=height,
         max_turns=30,
-        cheese_count=5,
-        wall_density=0.0,
-        mud_density=0.0,
+        cheese=CheeseConfig(count=5),
     )
 
 

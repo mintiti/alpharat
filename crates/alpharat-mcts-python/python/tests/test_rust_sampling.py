@@ -340,7 +340,7 @@ class TestEdgeCases:
             simulations=10,
             batch_size=1,
             num_threads=1,
-            symmetric=False,
+            cheese_symmetric=False,
             output_dir=str(output_dir),
         )
         assert stats.total_games == 5

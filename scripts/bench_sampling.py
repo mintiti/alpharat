@@ -12,7 +12,7 @@ from typing import TYPE_CHECKING
 
 import numpy as np
 
-from alpharat.config.game import GameConfig
+from alpharat.config.game import CheeseConfig, GameConfig
 from alpharat.data.loader import load_game_bundle
 from alpharat.mcts.config import RustMCTSConfig
 
@@ -25,10 +25,7 @@ GAME = GameConfig(
     width=7,
     height=7,
     max_turns=50,
-    cheese_count=10,
-    wall_density=0.0,
-    mud_density=0.0,
-    symmetric=True,
+    cheese=CheeseConfig(count=10),
 )
 
 MCTS = RustMCTSConfig(
@@ -80,7 +77,7 @@ def summarize_games(games: list[GameData], label: str) -> dict[str, float]:
     p2_sums = np.array(all_p2_sums)
 
     cheese_collected = sum(g.final_p1_score + g.final_p2_score for g in games)
-    cheese_available = n_games * GAME.cheese_count
+    cheese_available = n_games * GAME.cheese.count
 
     print(f"\n  [{label}] Loaded game data:")
     print(f"    Games: {n_games}, Positions: {n_positions}, Avg turns: {avg_turns:.1f}")
@@ -190,7 +187,7 @@ def bench_python_rust(tmp_dir: Path) -> dict[str, float]:
 def main() -> None:
     print("Sampling Pipeline Benchmark")
     g = GAME
-    print(f"  Game: {g.width}x{g.height}, {g.cheese_count} cheese, {g.max_turns} max turns")
+    print(f"  Game: {g.width}x{g.height}, {g.cheese.count} cheese, {g.max_turns} max turns")
     print(f"  MCTS: {MCTS.simulations} sims, batch={MCTS.batch_size}")
     print(f"  Games: {NUM_GAMES}")
     print(f"  Checkpoint: {CHECKPOINT}")

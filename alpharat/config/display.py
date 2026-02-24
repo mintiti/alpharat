@@ -21,7 +21,7 @@ def format_config_summary(*sections: tuple[str, BaseModel | None]) -> str:
 
     Example output:
         Game: 5x5
-          cheese_count: 5, wall_density: 0.0, max_turns: 30, symmetric: True
+          max_turns: 30, positions: corners
         MCTS:
           simulations: 200, c_puct: 1.5, force_k: 2.0, fpu_reduction: 0.2
     """

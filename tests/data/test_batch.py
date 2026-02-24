@@ -11,7 +11,7 @@ import numpy as np
 import pytest
 from pydantic import ValidationError
 
-from alpharat.config.game import GameConfig
+from alpharat.config.game import CheeseConfig, GameConfig
 from alpharat.data.batch import (
     BatchMetadata,
     BatchMetadataError,
@@ -50,7 +50,12 @@ class TestMCTSConfig:
             "created_at": "2024-01-01T00:00:00Z",
             "checkpoint_path": "/path/to/model.pt",
             "mcts_config": {"backend": "python", "simulations": 400, "c_puct": 2.5},
-            "game": {"width": 10, "height": 10, "max_turns": 200, "cheese_count": 21},
+            "game": {
+                "width": 10,
+                "height": 10,
+                "max_turns": 200,
+                "cheese": {"count": 21},
+            },
         }
         metadata = BatchMetadata.model_validate(data)
 
@@ -68,7 +73,7 @@ class TestBatchMetadata:
             created_at=datetime.now(UTC),
             checkpoint_path=None,
             mcts_config=PythonMCTSConfig(simulations=100),
-            game=GameConfig(width=10, height=10, max_turns=200, cheese_count=21),
+            game=GameConfig(width=10, height=10, max_turns=200, cheese=CheeseConfig(count=21)),
         )
 
         assert metadata.checkpoint_path is None
@@ -80,7 +85,7 @@ class TestBatchMetadata:
             created_at=datetime.now(UTC),
             checkpoint_path="/models/checkpoint_100.pt",
             mcts_config=PythonMCTSConfig(simulations=100),
-            game=GameConfig(width=10, height=10, max_turns=200, cheese_count=21),
+            game=GameConfig(width=10, height=10, max_turns=200, cheese=CheeseConfig(count=21)),
         )
 
         assert metadata.checkpoint_path == "/models/checkpoint_100.pt"
@@ -96,7 +101,7 @@ class TestCreateBatch:
                 parent_dir=tmpdir,
                 checkpoint_path=None,
                 mcts_config=PythonMCTSConfig(simulations=100),
-                game=GameConfig(width=10, height=10, max_turns=200, cheese_count=21),
+                game=GameConfig(width=10, height=10, max_turns=200, cheese=CheeseConfig(count=21)),
             )
 
             assert batch_dir.exists()
@@ -110,7 +115,7 @@ class TestCreateBatch:
                 parent_dir=tmpdir,
                 checkpoint_path="/test/checkpoint.pt",
                 mcts_config=PythonMCTSConfig(simulations=400, c_puct=2.0),
-                game=GameConfig(width=15, height=12, max_turns=300, cheese_count=21),
+                game=GameConfig(width=15, height=12, max_turns=300, cheese=CheeseConfig(count=21)),
             )
 
             metadata = load_batch_metadata(batch_dir)
@@ -130,7 +135,7 @@ class TestCreateBatch:
                 parent_dir=tmpdir,
                 checkpoint_path=None,
                 mcts_config=PythonMCTSConfig(simulations=100),
-                game=GameConfig(width=10, height=10, max_turns=200, cheese_count=21),
+                game=GameConfig(width=10, height=10, max_turns=200, cheese=CheeseConfig(count=21)),
             )
 
             metadata = load_batch_metadata(batch_dir)
@@ -151,7 +156,7 @@ class TestCreateBatch:
                 parent_dir=tmpdir,
                 checkpoint_path=None,
                 mcts_config=PythonMCTSConfig(simulations=100),
-                game=GameConfig(width=10, height=10, max_turns=200, cheese_count=21),
+                game=GameConfig(width=10, height=10, max_turns=200, cheese=CheeseConfig(count=21)),
             )
 
             assert batch_dir.parent == Path(tmpdir)
@@ -173,7 +178,7 @@ class TestSaveLoadRoundtrip:
                 created_at=datetime(2024, 6, 15, 12, 30, 0, tzinfo=UTC),
                 checkpoint_path="/models/best.pt",
                 mcts_config=PythonMCTSConfig(simulations=400, c_puct=2.5),
-                game=GameConfig(width=10, height=10, max_turns=200, cheese_count=21),
+                game=GameConfig(width=10, height=10, max_turns=200, cheese=CheeseConfig(count=21)),
             )
 
             save_batch_metadata(batch_dir, original)
@@ -251,10 +256,9 @@ class TestBatchMetadataError:
         "width": 5,
         "height": 5,
         "max_turns": 30,
-        "cheese_count": 5,
-        "wall_density": None,
-        "mud_density": None,
-        "symmetric": True,
+        "maze": {"type": "open"},
+        "positions": "corners",
+        "cheese": {"count": 5, "symmetric": True},
     }
 
     def test_extra_mcts_config_field(self) -> None:
@@ -350,7 +354,7 @@ class TestBatchMetadataError:
         """Value errors (valid keys, invalid values) chain the original ValidationError."""
         with tempfile.TemporaryDirectory() as tmpdir:
             batch_dir = Path(tmpdir)
-            game = {**self._VALID_GAME, "cheese_count": 9999}  # fails check_cheese_fits
+            game = {**self._VALID_GAME, "cheese": {"count": 9999}}  # fails check_cheese_fits
             self._write_metadata(
                 batch_dir,
                 {

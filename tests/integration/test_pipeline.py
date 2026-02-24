@@ -12,7 +12,7 @@ import numpy as np
 import pytest
 from pyrat_engine.core.types import Direction
 
-from alpharat.config.game import GameConfig
+from alpharat.config.game import CheeseConfig, GameConfig
 from alpharat.data.loader import is_bundle_file, iter_games_from_bundle, load_game_data
 from alpharat.data.sampling import SamplingConfig, SamplingParams, run_sampling
 from alpharat.data.sharding import load_training_set_manifest, prepare_training_set
@@ -239,8 +239,8 @@ class TestPipelineIntegrity:
             game=GameConfig(
                 width=width,
                 height=height,
-                cheese_count=5,
                 max_turns=50,
+                cheese=CheeseConfig(count=5),
             ),
             sampling=SamplingParams(num_games=1, workers=1),
             group="test_group",
@@ -305,8 +305,8 @@ class TestPipelineIntegrity:
             game=GameConfig(
                 width=width,
                 height=height,
-                cheese_count=3,
                 max_turns=30,
+                cheese=CheeseConfig(count=3),
             ),
             sampling=SamplingParams(num_games=1, workers=1),
             group="test_topology",
@@ -350,8 +350,8 @@ class TestPipelineIntegrity:
             game=GameConfig(
                 width=width,
                 height=height,
-                cheese_count=3,
                 max_turns=25,
+                cheese=CheeseConfig(count=3),
             ),
             sampling=SamplingParams(num_games=1, workers=1),
             group="test_policies",

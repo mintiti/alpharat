@@ -16,7 +16,7 @@ import tempfile
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from alpharat.config.game import GameConfig
+from alpharat.config.game import CheeseConfig, GameConfig
 from alpharat.data.sampling import (
     SamplingConfig,
     SamplingParams,
@@ -56,10 +56,7 @@ def main() -> None:
             width=7,
             height=7,
             max_turns=50,
-            cheese_count=10,
-            wall_density=0.0,
-            mud_density=0.0,
-            symmetric=True,
+            cheese=CheeseConfig(count=10),
         ),
         sampling=SamplingParams(num_games=10, workers=1),
         group="profiling",

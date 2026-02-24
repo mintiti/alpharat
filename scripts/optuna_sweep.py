@@ -17,7 +17,7 @@ import optuna
 import pandas as pd
 
 from alpharat.ai import GreedyAgent
-from alpharat.config.game import GameConfig
+from alpharat.config.game import CheeseConfig, GameConfig
 from alpharat.eval.game import play_game
 from alpharat.mcts.config import RustMCTSConfig
 
@@ -61,11 +61,8 @@ SEED_CONFIGS = [
 _ENGINE_CFG = GameConfig(
     width=WIDTH,
     height=HEIGHT,
-    cheese_count=CHEESE_COUNT,
     max_turns=MAX_TURNS,
-    wall_density=WALL_DENSITY,
-    mud_density=MUD_DENSITY,
-    symmetric=True,
+    cheese=CheeseConfig(count=CHEESE_COUNT),
 ).to_engine_config()
 
 

@@ -2,52 +2,51 @@
 
 from __future__ import annotations
 
-from alpharat.config.game import GameConfig
+from alpharat.config.game import CheeseConfig, ClassicMaze, GameConfig, OpenMaze
 from alpharat.data.sampling import create_game
 
 
 class TestCreateGame:
     """Tests for create_game function."""
 
-    def test_respects_wall_density_zero(self) -> None:
-        """Verify wall_density=0.0 creates game with no walls."""
+    def test_open_maze_no_walls(self) -> None:
+        """Verify open maze creates game with no walls."""
         params = GameConfig(
             width=5,
             height=5,
             max_turns=30,
-            cheese_count=3,
-            wall_density=0.0,
+            maze=OpenMaze(),
+            cheese=CheeseConfig(count=3),
         )
         game = create_game(params)
 
         assert len(game.wall_entries()) == 0
 
-    def test_respects_mud_density_zero(self) -> None:
-        """Verify mud_density=0.0 creates game with no mud."""
+    def test_open_maze_no_mud(self) -> None:
+        """Verify open maze creates game with no mud."""
         params = GameConfig(
             width=5,
             height=5,
             max_turns=30,
-            cheese_count=3,
-            mud_density=0.0,
+            maze=OpenMaze(),
+            cheese=CheeseConfig(count=3),
         )
         game = create_game(params)
 
         assert len(game.mud_entries()) == 0
 
-    def test_none_density_uses_pyrat_defaults(self) -> None:
-        """Verify None density uses PyRat defaults (non-zero walls/mud).
+    def test_classic_maze_has_walls_and_mud(self) -> None:
+        """Verify classic maze uses PyRat defaults (non-zero walls/mud).
 
-        Uses a larger grid because 5x5 with 0.1 mud density can produce
-        0 mud entries depending on seed (~15% of the time).
+        Uses a larger grid because small grids can have 0 mud entries
+        depending on seed.
         """
         params = GameConfig(
             width=15,
             height=11,
             max_turns=100,
-            cheese_count=10,
-            wall_density=None,
-            mud_density=None,
+            maze=ClassicMaze(),
+            cheese=CheeseConfig(count=10),
         )
         game = create_game(params)
 
@@ -61,7 +60,7 @@ class TestCreateGame:
             width=7,
             height=9,
             max_turns=50,
-            cheese_count=5,
+            cheese=CheeseConfig(count=5),
         )
         game = create_game(params)
 

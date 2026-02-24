@@ -227,7 +227,7 @@ class TestLoadModelInference:
 
     def test_builder_works_with_model(self, mlp_checkpoint: Path) -> None:
         """Builder output is compatible with model."""
-        from alpharat.config.game import GameConfig
+        from alpharat.config.game import CheeseConfig, GameConfig
         from alpharat.data.maze import build_maze_array
         from alpharat.nn.extraction import from_pyrat_game
 
@@ -240,9 +240,7 @@ class TestLoadModelInference:
             width=width,
             height=height,
             max_turns=30,
-            cheese_count=5,
-            wall_density=0.0,
-            mud_density=0.0,
+            cheese=CheeseConfig(count=5),
         )
         game = game_config.build(seed=42)
         maze = build_maze_array(game, width, height)

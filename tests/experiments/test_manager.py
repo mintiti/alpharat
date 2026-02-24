@@ -8,7 +8,7 @@ from pathlib import Path
 import pytest
 import yaml
 
-from alpharat.config.game import GameConfig
+from alpharat.config.game import CheeseConfig, GameConfig
 from alpharat.experiments import ExperimentManager
 from alpharat.experiments.paths import (
     BATCHES_DIR,
@@ -98,7 +98,7 @@ class TestBatchOperations:
             batch_dir = exp.create_batch(
                 group="test_group",
                 mcts_config=PythonMCTSConfig(simulations=100),
-                game=GameConfig(width=5, height=5, max_turns=30, cheese_count=5),
+                game=GameConfig(width=5, height=5, max_turns=30, cheese=CheeseConfig(count=5)),
             )
 
             assert batch_dir.exists()
@@ -112,7 +112,7 @@ class TestBatchOperations:
             batch_dir = exp.create_batch(
                 group="test_group",
                 mcts_config=PythonMCTSConfig(simulations=100),
-                game=GameConfig(width=5, height=5, max_turns=30, cheese_count=5),
+                game=GameConfig(width=5, height=5, max_turns=30, cheese=CheeseConfig(count=5)),
             )
 
             manifest = exp.load_manifest()
@@ -130,7 +130,7 @@ class TestBatchOperations:
             exp.create_batch(
                 group="nn_guided",
                 mcts_config=PythonMCTSConfig(simulations=200, c_puct=2.0),
-                game=GameConfig(width=5, height=5, max_turns=30, cheese_count=5),
+                game=GameConfig(width=5, height=5, max_turns=30, cheese=CheeseConfig(count=5)),
                 checkpoint_path="/path/to/model.pt",
             )
 
@@ -142,7 +142,7 @@ class TestBatchOperations:
         """list_batches returns all batch IDs."""
         with tempfile.TemporaryDirectory() as tmpdir:
             exp = ExperimentManager(tmpdir)
-            game = GameConfig(width=5, height=5, max_turns=30, cheese_count=5)
+            game = GameConfig(width=5, height=5, max_turns=30, cheese=CheeseConfig(count=5))
             mcts_config = PythonMCTSConfig(simulations=100)
 
             exp.create_batch(group="group_a", mcts_config=mcts_config, game=game)
@@ -160,7 +160,7 @@ class TestBatchOperations:
             batch_dir = exp.create_batch(
                 group="test_group",
                 mcts_config=PythonMCTSConfig(simulations=100),
-                game=GameConfig(width=5, height=5, max_turns=30, cheese_count=5),
+                game=GameConfig(width=5, height=5, max_turns=30, cheese=CheeseConfig(count=5)),
             )
 
             batch_id = f"test_group/{batch_dir.name}"
@@ -522,7 +522,7 @@ class TestDeferredRegistration:
             batch_dir, batch_uuid = exp.prepare_batch(
                 group="test_group",
                 mcts_config=PythonMCTSConfig(simulations=100),
-                game=GameConfig(width=5, height=5, max_turns=30, cheese_count=5),
+                game=GameConfig(width=5, height=5, max_turns=30, cheese=CheeseConfig(count=5)),
             )
 
             assert batch_dir.exists()
@@ -536,7 +536,7 @@ class TestDeferredRegistration:
         with tempfile.TemporaryDirectory() as tmpdir:
             exp = ExperimentManager(tmpdir)
             mcts = PythonMCTSConfig(simulations=100)
-            game = GameConfig(width=5, height=5, max_turns=30, cheese_count=5)
+            game = GameConfig(width=5, height=5, max_turns=30, cheese=CheeseConfig(count=5))
 
             batch_dir, batch_uuid = exp.prepare_batch(
                 group="test_group", mcts_config=mcts, game=game
@@ -554,7 +554,7 @@ class TestDeferredRegistration:
         with tempfile.TemporaryDirectory() as tmpdir:
             exp = ExperimentManager(tmpdir)
             mcts = PythonMCTSConfig(simulations=100)
-            game = GameConfig(width=5, height=5, max_turns=30, cheese_count=5)
+            game = GameConfig(width=5, height=5, max_turns=30, cheese=CheeseConfig(count=5))
 
             # Simulate a crash: prepare but don't register
             batch_dir1, _ = exp.prepare_batch(group="g", mcts_config=mcts, game=game)
@@ -702,7 +702,7 @@ class TestDeferredRegistration:
             batch_dir = exp.create_batch(
                 group="wrapper_test",
                 mcts_config=PythonMCTSConfig(simulations=100),
-                game=GameConfig(width=5, height=5, max_turns=30, cheese_count=5),
+                game=GameConfig(width=5, height=5, max_turns=30, cheese=CheeseConfig(count=5)),
             )
 
             assert batch_dir.exists()
@@ -731,7 +731,7 @@ class TestManifestPersistence:
             exp1.create_batch(
                 group="group1",
                 mcts_config=PythonMCTSConfig(simulations=100),
-                game=GameConfig(width=5, height=5, max_turns=30, cheese_count=5),
+                game=GameConfig(width=5, height=5, max_turns=30, cheese=CheeseConfig(count=5)),
             )
             exp1.create_run(name="run1", config={"lr": 0.001}, source_shards="s1")
 

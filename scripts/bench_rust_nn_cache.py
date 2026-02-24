@@ -24,9 +24,9 @@ GAME_CONFIG: dict[str, Any] = {
     "height": 7,
     "max_turns": 50,
     "cheese_count": 10,
-    "wall_density": 0.0,
-    "mud_density": 0.0,
-    "symmetric": True,
+    "maze_type": "open",
+    "positions": "corners",
+    "cheese_symmetric": True,
 }
 
 MCTS_CONFIG: dict[str, Any] = {

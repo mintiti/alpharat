@@ -28,18 +28,21 @@ configs/
 
 ### Game configs: `{size}_{topology}[_asymmetric]`
 
-**Topology:**
-- `open` — no walls, no mud (`wall_density=0, mud_density=0`)
-- `walls` — pyrat defaults (walls + mud)
+**Topology (maze type):**
+- `open` — no walls, no mud
+- `classic` — pyrat-engine default wall/mud generation
+- `random` — configurable wall_density, mud_density, maze symmetry
 
 **Cheese placement:**
 - (default) — symmetric cheese (fair game, theoretical draw under perfect play)
 - `_asymmetric` — random cheese placement (may favor one player)
 
+**Positions:** Configured inside the YAML (`positions: corners` or `positions: random`), not in the filename.
+
 Examples:
-- `5x5_open.yaml` — 5×5, no walls/mud, symmetric cheese
+- `5x5_open.yaml` — 5×5, no walls/mud, symmetric cheese, corner positions
 - `5x5_open_asymmetric.yaml` — 5×5, no walls/mud, random cheese
-- `5x5_walls.yaml` — 5×5, walls+mud, symmetric cheese
+- `5x5_classic.yaml` — 5×5, classic walls+mud, symmetric cheese
 - `7x7_open.yaml` — 7×7, no walls/mud, symmetric cheese
 
 ### Sample configs

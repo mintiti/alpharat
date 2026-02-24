@@ -201,15 +201,26 @@ def run_rust_sampling(
     if checkpoint is not None:
         onnx_path = _ensure_onnx(checkpoint)
 
+    # Translate nested GameConfig to flat Rust kwargs
+    from alpharat.config.game import RandomMaze
+
+    maze_kwargs: dict[str, object] = {
+        "maze_type": game.maze.type,
+        "cheese_symmetric": game.cheese.symmetric,
+        "positions": game.positions,
+    }
+    if isinstance(game.maze, RandomMaze):
+        maze_kwargs["wall_density"] = game.maze.wall_density
+        maze_kwargs["mud_density"] = game.maze.mud_density
+        maze_kwargs["maze_symmetric"] = game.maze.symmetric
+
     kwargs = {
         "width": game.width,
         "height": game.height,
-        "cheese_count": game.cheese_count,
+        "cheese_count": game.cheese.count,
         "max_turns": game.max_turns,
         "num_games": num_games,
-        "symmetric": game.symmetric,
-        "wall_density": game.wall_density,
-        "mud_density": game.mud_density,
+        **maze_kwargs,
         "simulations": mcts.simulations,
         "batch_size": mcts.batch_size,
         "c_puct": mcts.c_puct,
