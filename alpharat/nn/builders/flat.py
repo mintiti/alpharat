@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -22,9 +23,67 @@ __all__ = [
     "MAX_MUD_COST",
     "MAX_MUD_TURNS",
     "MAX_SCORE",
+    "FlatObsLayout",
     "FlatObservationBuilder",
     "FlatDataset",
 ]
+
+
+@dataclass(frozen=True)
+class FlatObsLayout:
+    """Layout of flat observation vector.
+
+    [maze H*W*4][p1_pos H*W][p2_pos H*W][cheese H*W][6 scalars]
+
+    Scalar order: score_diff(0), progress(1), p1_mud(2), p2_mud(3), p1_score(4), p2_score(5)
+    """
+
+    width: int
+    height: int
+
+    # Scalar sub-indices (relative to scalars_start)
+    SCORE_DIFF = 0
+    PROGRESS = 1
+    P1_MUD = 2
+    P2_MUD = 3
+    P1_SCORE = 4
+    P2_SCORE = 5
+
+    @property
+    def spatial(self) -> int:
+        return self.width * self.height
+
+    @property
+    def maze(self) -> slice:
+        return slice(0, self.spatial * 4)
+
+    @property
+    def p1_pos(self) -> slice:
+        s = self.spatial
+        return slice(s * 4, s * 5)
+
+    @property
+    def p2_pos(self) -> slice:
+        s = self.spatial
+        return slice(s * 5, s * 6)
+
+    @property
+    def cheese(self) -> slice:
+        s = self.spatial
+        return slice(s * 6, s * 7)
+
+    @property
+    def scalars(self) -> slice:
+        s = self.spatial
+        return slice(s * 7, s * 7 + 6)
+
+    @property
+    def scalars_start(self) -> int:
+        return self.spatial * 7
+
+    @property
+    def obs_dim(self) -> int:
+        return self.spatial * 7 + 6
 
 
 class FlatObservationBuilder:
@@ -53,9 +112,7 @@ class FlatObservationBuilder:
         """
         self._width = width
         self._height = height
-        self._spatial_size = width * height
-        # maze(H*W*4) + p1_pos(H*W) + p2_pos(H*W) + cheese(H*W) + 6 scalars
-        self._obs_dim = self._spatial_size * 7 + 6
+        self._layout = FlatObsLayout(width, height)
 
     @property
     def version(self) -> str:
@@ -63,9 +120,14 @@ class FlatObservationBuilder:
         return "flat_v2"
 
     @property
+    def layout(self) -> FlatObsLayout:
+        """Layout descriptor for this builder's observation format."""
+        return self._layout
+
+    @property
     def obs_shape(self) -> tuple[int, ...]:
         """Shape of observation tensor."""
-        return (self._obs_dim,)
+        return (self._layout.obs_dim,)
 
     @property
     def width(self) -> int:

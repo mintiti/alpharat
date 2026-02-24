@@ -1,0 +1,32 @@
+# CNN training config for 7x7 — structural symmetry (no positions in trunk)
+name: 7x7_open_50k_cnn_iter0
+
+model:
+  architecture: cnn
+  trunk:
+    channels: 64
+    blocks:
+      - type: res
+      - type: res
+      - type: gpool
+        gpool_channels: 32
+  policy_head:
+    type: mlp
+  value_head:
+    type: point
+  player_dim: 32
+  hidden_dim: 64
+  dropout: 0.1
+
+optim:
+  architecture: cnn
+  lr: 1e-3
+  policy_weight: 1.0
+  value_weight: 1.0
+  batch_size: 4096
+
+data:
+  train_dir: experiments/shards/GROUP/UUID/train
+  val_dir: experiments/shards/GROUP/UUID/val
+
+seed: 42

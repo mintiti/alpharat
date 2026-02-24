@@ -17,6 +17,12 @@ from pydantic import Discriminator, model_validator
 
 from alpharat.config.base import StrictBaseModel
 from alpharat.config.game import GameConfig  # noqa: TC001
+from alpharat.nn.architectures.cnn.config import (
+    CNNModelConfig,
+    CNNOptimConfig,
+    KataGoCNNModelConfig,
+    KataGoCNNOptimConfig,
+)
 from alpharat.nn.architectures.local_value.config import (
     LocalValueModelConfig,
     LocalValueOptimConfig,
@@ -32,17 +38,25 @@ __all__ = ["TrainConfig", "ModelConfig", "OptimConfig", "ARCHITECTURES"]
 
 # Valid architecture names — single source of truth for CLI validation etc.
 # Must match the Literal discriminator values in the configs below.
-ARCHITECTURES: list[str] = ["mlp", "symmetric", "local_value"]
+ARCHITECTURES: list[str] = ["mlp", "symmetric", "local_value", "cnn", "cnn_katago"]
 
 # Discriminated unions — Pydantic auto-dispatches based on 'architecture' field
 
 ModelConfig = Annotated[
-    MLPModelConfig | SymmetricModelConfig | LocalValueModelConfig,
+    MLPModelConfig
+    | SymmetricModelConfig
+    | LocalValueModelConfig
+    | CNNModelConfig
+    | KataGoCNNModelConfig,
     Discriminator("architecture"),
 ]
 
 OptimConfig = Annotated[
-    MLPOptimConfig | SymmetricOptimConfig | LocalValueOptimConfig,
+    MLPOptimConfig
+    | SymmetricOptimConfig
+    | LocalValueOptimConfig
+    | CNNOptimConfig
+    | KataGoCNNOptimConfig,
     Discriminator("architecture"),
 ]
 

@@ -109,7 +109,7 @@ experiments/        # Data folder (NOT in git): batches, shards, runs, benchmark
 | `protocols.py` | `TrainableModel`, `LossFunction`, `AugmentationStrategy` protocols |
 | `keys.py` | `ModelOutput`, `LossKey`, `BatchKey` — type-safe dict keys |
 
-**Architectures (`architectures/{mlp,symmetric,local_value}/`):**
+**Architectures (`architectures/{mlp,symmetric,local_value,cnn}/`):**
 
 Each architecture folder contains `config.py` (ModelConfig, OptimConfig) and `loss.py`.
 
@@ -118,10 +118,12 @@ Each architecture folder contains `config.py` (ModelConfig, OptimConfig) and `lo
 | `mlp` | Flat observation → shared trunk → policy/value heads |
 | `symmetric` | Structural P1/P2 symmetry, no augmentation needed |
 | `local_value` | Per-cell ownership values + scalar value heads |
+| `cnn` | DeepSet CNN — 5ch spatial trunk, position extraction, structural symmetry |
+| `cnn_katago` | KataGo CNN — 7ch spatial trunk with positions, global pool heads |
 
-**Models (`models/`):** `PyRatMLP`, `SymmetricMLP`, `LocalValueMLP`
+**Models (`models/`):** `PyRatMLP`, `SymmetricMLP`, `LocalValueMLP`, `PyRatCNN`, `KataGoCNN`
 
-**Builders (`builders/`):** `FlatObservationBuilder` — 1D encoding for MLPs
+**Builders (`builders/`):** `FlatObservationBuilder` — 1D encoding, used by all architectures
 
 ### alpharat/ai/
 

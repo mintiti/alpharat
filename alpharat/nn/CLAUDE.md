@@ -18,7 +18,7 @@ All architectures use the same YAML schema. Pydantic discriminated unions auto-d
 
 ```yaml
 model:
-  architecture: mlp  # or "symmetric" or "local_value"
+  architecture: mlp  # or "symmetric", "local_value", "cnn", "cnn_katago"
   hidden_dim: 256
   dropout: 0.0
   p_augment: 0.5     # mlp/local_value only
@@ -47,6 +47,8 @@ resume_from: null  # or path to checkpoint
 | `mlp` | Flat observation, shared trunk, separate policy/value heads | Player swap |
 | `symmetric` | Structural P1/P2 symmetry in network design | None needed |
 | `local_value` | Per-cell ownership logits + scalar value heads | Player swap |
+| `cnn` | DeepSet CNN — 5ch spatial trunk, extract at positions, shared heads | None needed |
+| `cnn_katago` | KataGo CNN — 7ch spatial (positions in trunk), global pool heads | Player swap |
 
 ## Module Structure
 
@@ -67,14 +69,24 @@ nn/
 │   ├── symmetric/
 │   │   ├── config.py  # SymmetricModelConfig, SymmetricOptimConfig
 │   │   └── loss.py    # compute_symmetric_losses()
-│   └── local_value/
-│       ├── config.py  # LocalValueModelConfig, LocalValueOptimConfig
-│       └── loss.py    # compute_local_value_losses()
+│   ├── local_value/
+│   │   ├── config.py  # LocalValueModelConfig, LocalValueOptimConfig
+│   │   └── loss.py    # compute_local_value_losses()
+│   └── cnn/
+│       ├── config.py  # CNNModelConfig, KataGoCNNModelConfig, OptimConfigs
+│       ├── blocks.py  # TrunkConfig, ResBlockConfig, GPoolBlockConfig
+│       ├── heads.py   # PolicyHeadConfig, ValueHeadConfig variants
+│       └── loss.py    # compute_cnn_losses() (shared by both CNN variants)
 │
 ├── models/            # nn.Module implementations
 │   ├── mlp.py         # PyRatMLP
 │   ├── symmetric.py   # SymmetricMLP
-│   └── local_value.py # LocalValueMLP
+│   ├── local_value.py # LocalValueMLP
+│   └── cnn/           # CNN model package
+│       ├── model.py   # PyRatCNN (DeepSet variant)
+│       ├── katago.py  # KataGoCNN (global pool variant)
+│       ├── blocks.py  # ResBlock, GPoolResBlock
+│       └── heads.py   # MLPPolicyHead, PointValueHead, PooledValueHead
 │
 ├── losses/            # Shared loss utilities (imported via __init__)
 │   └── ownership.py         # compute_ownership_loss()
@@ -98,13 +110,12 @@ The data pipeline has two stages:
 [maze H×W×4] [p1_pos H×W] [p2_pos H×W] [cheese H×W] [score_diff, progress, p1_mud, p2_mud, p1_score, p2_score]
 ```
 
-All current architectures (MLP, Symmetric, LocalValue) consume this flat format. The model parses the flat vector internally.
+All current architectures (MLP, Symmetric, LocalValue, CNN, KataGo CNN) consume this flat format. CNN architectures reshape the flat vector into spatial tensors internally.
 
 **When you need a new observation builder:**
 
 - **GNN architecture** — needs graph structure (adjacency, node features), not flat vectors
 - **Transformer** — might want sequence tokenization or different spatial encoding
-- **CNN** — needs 2D/3D tensor layout `[C, H, W]` instead of flat
 
 If your architecture can parse a flat vector, use `FlatObservationBuilder`. If it needs fundamentally different input structure, create a new builder in `builders/` and a corresponding sharding pipeline.
 

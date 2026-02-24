@@ -84,3 +84,5 @@ class ArchitectureType(StrEnum):
     MLP = "mlp"
     SYMMETRIC = "symmetric"
     LOCAL_VALUE = "local_value"
+    CNN = "cnn"
+    CNN_KATAGO = "cnn_katago"

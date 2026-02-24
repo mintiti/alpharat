@@ -1,0 +1,21 @@
+# @package _global_
+# CNN model configuration (spatial inductive bias with structural P1/P2 symmetry)
+model:
+  architecture: cnn
+  trunk:
+    channels: 64
+    blocks:
+      - type: res
+  policy_head:
+    type: mlp
+  value_head:
+    type: point
+  player_dim: 32
+  hidden_dim: 64
+  dropout: 0.1
+
+optim:
+  architecture: cnn
+  lr: 1e-3
+  policy_weight: 1.0
+  value_weight: 1.0

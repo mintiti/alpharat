@@ -1,0 +1,27 @@
+# KataGo CNN training config for 7x7 — positions in trunk (7ch, needs augmentation)
+name: 7x7_open_50k_cnn_katago_iter0
+
+model:
+  architecture: cnn_katago
+  trunk:
+    channels: 64
+    blocks:
+      - type: res
+      - type: res
+      - type: gpool
+        gpool_channels: 32
+  hidden_dim: 64
+  dropout: 0.1
+
+optim:
+  architecture: cnn_katago
+  lr: 1e-3
+  policy_weight: 1.0
+  value_weight: 1.0
+  batch_size: 4096
+
+data:
+  train_dir: experiments/shards/GROUP/UUID/train
+  val_dir: experiments/shards/GROUP/UUID/val
+
+seed: 42

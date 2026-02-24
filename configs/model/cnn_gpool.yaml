@@ -1,0 +1,24 @@
+# @package _global_
+# CNN with 3-block trunk: 2 res + 1 gpool
+model:
+  architecture: cnn
+  trunk:
+    channels: 64
+    blocks:
+      - type: res
+      - type: res
+      - type: gpool
+        gpool_channels: 32
+  policy_head:
+    type: mlp
+  value_head:
+    type: point
+  player_dim: 32
+  hidden_dim: 64
+  dropout: 0.1
+
+optim:
+  architecture: cnn
+  lr: 1e-3
+  policy_weight: 1.0
+  value_weight: 1.0
