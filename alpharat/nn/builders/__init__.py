@@ -4,8 +4,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any, Protocol
 
-from alpharat.nn.builders.flat import FlatDataset, FlatObservationBuilder
-from alpharat.nn.builders.spatial import SpatialDataset, SpatialObservationBuilder
+from alpharat.nn.builders.flat import FlatDataset, FlatObservationBuilder, FlatObsLayout
 
 if TYPE_CHECKING:
     import numpy as np
@@ -55,8 +54,7 @@ class ObservationBuilder(Protocol):
 
 __all__ = [
     "ObservationBuilder",
+    "FlatObsLayout",
     "FlatObservationBuilder",
     "FlatDataset",
-    "SpatialObservationBuilder",
-    "SpatialDataset",
 ]

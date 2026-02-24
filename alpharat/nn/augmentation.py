@@ -5,6 +5,7 @@ from __future__ import annotations
 import numpy as np  # noqa: TC002 - needed at runtime
 import torch
 
+from alpharat.nn.builders.flat import FlatObsLayout
 from alpharat.nn.training.keys import BatchKey
 
 
@@ -24,10 +25,6 @@ def swap_player_perspective(
     Transforms the game state to view it from P2's perspective instead of P1's.
     This is an involution: applying it twice returns the original.
 
-    Observation layout (FlatObservationBuilder):
-        [maze (H×W×4)] [p1_pos (H×W)] [p2_pos (H×W)] [cheese (H×W)]
-        [score_diff, progress, p1_mud, p2_mud, p1_score, p2_score]
-
     Args:
         observation: Flat observation tensor from FlatObservationBuilder.
         policy_p1: P1 policy, shape (5,).
@@ -42,34 +39,26 @@ def swap_player_perspective(
     Returns:
         Tuple of transformed tensors in same order as inputs.
     """
-    spatial = width * height
-
-    # Compute offsets
-    maze_end = spatial * 4
-    p1_pos_start = maze_end
-    p1_pos_end = maze_end + spatial
-    p2_pos_start = p1_pos_end
-    p2_pos_end = p2_pos_start + spatial
-    # cheese is from p2_pos_end to p2_pos_end + spatial (preserved)
-    scalars_start = spatial * 7  # After maze + p1_pos + p2_pos + cheese
+    lo = FlatObsLayout(width, height)
+    s = lo.scalars_start
 
     # Transform observation
     new_obs = observation.copy()
 
     # Swap p1_pos and p2_pos segments
-    new_obs[p1_pos_start:p1_pos_end] = observation[p2_pos_start:p2_pos_end]
-    new_obs[p2_pos_start:p2_pos_end] = observation[p1_pos_start:p1_pos_end]
+    new_obs[lo.p1_pos] = observation[lo.p2_pos]
+    new_obs[lo.p2_pos] = observation[lo.p1_pos]
 
-    # Negate score_diff (index 0 of scalars)
-    new_obs[scalars_start] = -observation[scalars_start]
+    # Negate score_diff
+    new_obs[s + lo.SCORE_DIFF] = -observation[s + lo.SCORE_DIFF]
 
-    # Swap p1_mud and p2_mud (indices 2 and 3 of scalars)
-    new_obs[scalars_start + 2] = observation[scalars_start + 3]
-    new_obs[scalars_start + 3] = observation[scalars_start + 2]
+    # Swap p1_mud and p2_mud
+    new_obs[s + lo.P1_MUD] = observation[s + lo.P2_MUD]
+    new_obs[s + lo.P2_MUD] = observation[s + lo.P1_MUD]
 
-    # Swap p1_score and p2_score (indices 4 and 5 of scalars)
-    new_obs[scalars_start + 4] = observation[scalars_start + 5]
-    new_obs[scalars_start + 5] = observation[scalars_start + 4]
+    # Swap p1_score and p2_score
+    new_obs[s + lo.P1_SCORE] = observation[s + lo.P2_SCORE]
+    new_obs[s + lo.P2_SCORE] = observation[s + lo.P1_SCORE]
 
     # Transform targets
     new_policy_p1 = policy_p2.copy()
@@ -131,14 +120,8 @@ def swap_player_perspective_batch(
     mask_2d = mask.unsqueeze(-1)
     mask_3d = mask_2d.unsqueeze(-1)
 
-    spatial = width * height
-
-    # Compute offsets into flat observation
-    p1_pos_start = spatial * 4
-    p1_pos_end = spatial * 5
-    p2_pos_start = spatial * 5
-    p2_pos_end = spatial * 6
-    scalars_start = spatial * 7
+    lo = FlatObsLayout(width, height)
+    s = lo.scalars_start
 
     # === Observation ===
     # Build fully-swapped observation, then select with torch.where
@@ -146,19 +129,19 @@ def swap_player_perspective_batch(
     swapped_obs = obs.clone()
 
     # Swap p1_pos and p2_pos (copy from original to avoid read-after-write issues)
-    swapped_obs[:, p1_pos_start:p1_pos_end] = obs[:, p2_pos_start:p2_pos_end]
-    swapped_obs[:, p2_pos_start:p2_pos_end] = obs[:, p1_pos_start:p1_pos_end]
+    swapped_obs[:, lo.p1_pos] = obs[:, lo.p2_pos]
+    swapped_obs[:, lo.p2_pos] = obs[:, lo.p1_pos]
 
     # Negate score_diff
-    swapped_obs[:, scalars_start] = -obs[:, scalars_start]
+    swapped_obs[:, s + lo.SCORE_DIFF] = -obs[:, s + lo.SCORE_DIFF]
 
-    # Swap mud counters (indices 2, 3 of scalars)
-    swapped_obs[:, scalars_start + 2] = obs[:, scalars_start + 3]
-    swapped_obs[:, scalars_start + 3] = obs[:, scalars_start + 2]
+    # Swap mud counters
+    swapped_obs[:, s + lo.P1_MUD] = obs[:, s + lo.P2_MUD]
+    swapped_obs[:, s + lo.P2_MUD] = obs[:, s + lo.P1_MUD]
 
-    # Swap scores (indices 4, 5 of scalars)
-    swapped_obs[:, scalars_start + 4] = obs[:, scalars_start + 5]
-    swapped_obs[:, scalars_start + 5] = obs[:, scalars_start + 4]
+    # Swap scores
+    swapped_obs[:, s + lo.P1_SCORE] = obs[:, s + lo.P2_SCORE]
+    swapped_obs[:, s + lo.P2_SCORE] = obs[:, s + lo.P1_SCORE]
 
     batch[BatchKey.OBSERVATION] = torch.where(mask_2d, swapped_obs, obs)
 

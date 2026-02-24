@@ -6,6 +6,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+from alpharat.nn.builders.flat import FlatObsLayout
 from alpharat.nn.training.keys import ModelOutput
 
 
@@ -58,8 +59,9 @@ class SymmetricMLP(nn.Module):
         self.height = height
         self.hidden_dim = hidden_dim
         self.num_actions = num_actions
+        self._layout = FlatObsLayout(width, height)
 
-        spatial = width * height
+        spatial = self._layout.spatial
 
         # Encoding dimensions
         maze_dim = spatial * 4  # 100 for 5x5
@@ -122,43 +124,42 @@ class SymmetricMLP(nn.Module):
     def _parse_obs(self, obs: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """Parse flat observation into shared, p1, p2 components.
 
-        Observation layout (5x5 = 181 floats):
-            [maze H*W*4=100] [p1_pos H*W=25] [p2_pos H*W=25] [cheese H*W=25]
-            [score_diff=1, progress=1, p1_mud=1, p2_mud=1, p1_score=1, p2_score=1]
-
         Args:
             obs: Flat observation, shape (batch, obs_dim).
 
         Returns:
             Tuple of (shared_raw, p1_raw, p2_raw) tensors.
         """
-        spatial = self.width * self.height
-
-        # Offsets
-        maze_end = spatial * 4
-        p1_pos_end = maze_end + spatial
-        p2_pos_end = p1_pos_end + spatial
-        cheese_end = p2_pos_end + spatial
+        lo = self._layout
+        s = lo.scalars_start
 
         # Extract components
-        maze = obs[:, :maze_end]
-        p1_pos = obs[:, maze_end:p1_pos_end]
-        p2_pos = obs[:, p1_pos_end:p2_pos_end]
-        cheese = obs[:, p2_pos_end:cheese_end]
-        scalars = obs[:, cheese_end:]  # [score_diff, progress, p1_mud, p2_mud, p1_score, p2_score]
+        maze = obs[:, lo.maze]
+        p1_pos = obs[:, lo.p1_pos]
+        p2_pos = obs[:, lo.p2_pos]
+        cheese = obs[:, lo.cheese]
 
         # Build shared (maze, cheese, progress)
-        progress = scalars[:, 1:2]
+        progress = obs[:, s + lo.PROGRESS : s + lo.PROGRESS + 1]
         shared_raw = torch.cat([maze, cheese, progress], dim=-1)
 
         # Build player features (pos, mud, score)
-        p1_mud = scalars[:, 2:3]
-        p1_score = scalars[:, 4:5]
-        p1_raw = torch.cat([p1_pos, p1_mud, p1_score], dim=-1)
-
-        p2_mud = scalars[:, 3:4]
-        p2_score = scalars[:, 5:6]
-        p2_raw = torch.cat([p2_pos, p2_mud, p2_score], dim=-1)
+        p1_raw = torch.cat(
+            [
+                p1_pos,
+                obs[:, s + lo.P1_MUD : s + lo.P1_MUD + 1],
+                obs[:, s + lo.P1_SCORE : s + lo.P1_SCORE + 1],
+            ],
+            dim=-1,
+        )
+        p2_raw = torch.cat(
+            [
+                p2_pos,
+                obs[:, s + lo.P2_MUD : s + lo.P2_MUD + 1],
+                obs[:, s + lo.P2_SCORE : s + lo.P2_SCORE + 1],
+            ],
+            dim=-1,
+        )
 
         return shared_raw, p1_raw, p2_raw
 
