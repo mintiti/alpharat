@@ -185,7 +185,7 @@ batch_dir = exp.create_batch(
 
 # Training
 run_dir = exp.create_run(
-    name="bimatrix_mlp_v1",
+    name="mlp_v1",
     config=train_config.model_dump(),
     source_shards="shard_uuid",
 )
@@ -193,7 +193,7 @@ run_dir = exp.create_run(
 # Query
 exp.list_batches()
 exp.list_runs()
-exp.get_run_path("bimatrix_mlp_v1")
+exp.get_run_path("mlp_v1")
 ```
 
 ### Querying Artifacts
@@ -222,7 +222,7 @@ This is the most non-trivial aspect of the codebase. Multiple actions can lead t
 
 ### The Problem
 
-In PyRat, if a player tries to move UP but there's a wall, they stay in place. So UP and STAY produce identical game states. If we treat them as different actions, MCTS explores redundant branches and Nash equilibrium computation becomes degenerate (multiple equivalent equilibria).
+In PyRat, if a player tries to move UP but there's a wall, they stay in place. So UP and STAY produce identical game states. If we treat them as different actions, MCTS explores redundant branches and wastes search budget on moves that lead to the same outcome.
 
 ### How It's Handled: Outcome-Indexed Architecture
 
@@ -324,7 +324,7 @@ Even if the NN makes mistakes on blocked actions, the tree's child sharing and s
 
 ### Scalar Value Heads
 
-Each node stores scalar value estimates `v1, v2` representing expected remaining cheese for each player. This is simpler than bimatrix approaches and follows modern AlphaZero-style implementations (LC0, KataGo).
+Each node stores scalar value estimates `v1, v2` representing expected remaining cheese for each player, following modern AlphaZero-style implementations (LC0, KataGo).
 
 ### make_move / unmake_move
 
@@ -334,13 +334,15 @@ Nodes don't store full game states. The tree owns one PyRat simulator and naviga
 
 The search uses decoupled PUCT (`decoupled_puct.py`): each player selects actions independently via the PUCT formula, maximizing Q + exploration bonus. The final policy is visit-proportional (actions selected proportional to visit counts).
 
+This is theoretically justified because PyRat is approximately constant-sum. In constant-sum games, all Nash equilibria are interchangeable — any combination of equilibrium strategies is also an equilibrium. This means independent per-player optimization (decoupled PUCT) converges to the same solution as joint optimization, without the cost of computing full Nash equilibria.
+
 ### Value Formulation
 
 Values store **expected remaining cheese** for each player:
 - `v1` = expected cheese P1 will collect from this position
 - `v2` = expected cheese P2 will collect from this position
 
-PyRat is approximately **constant-sum** (not zero-sum): P1 + P2 ≈ remaining_cheese. Exact under infinite horizon; approximate under turn limits (wasted moves reduce total collection).
+PyRat is approximately **constant-sum** (not zero-sum): P1 + P2 ≈ remaining_cheese. Exact under infinite horizon; approximate under turn limits (wasted moves reduce total collection). This constant-sum property is what justifies the decoupled PUCT approach — see above.
 
 ---
 
@@ -354,7 +356,7 @@ from typing import Any
 import numpy as np
 
 # Arrays - no shape annotations needed
-def compute_nash(payout: np.ndarray) -> tuple[np.ndarray, np.ndarray]: ...
+def reduce_prior(prior: np.ndarray, effective: bytes) -> np.ndarray: ...
 
 # Unions with |
 parent: MCTSNode | None = None
@@ -732,8 +734,7 @@ When scaling to larger grids, maintain consistent cheese density (~20%, or 1 che
 
 ## Design Docs
 
-The `.mt/` folder contains detailed design documentation:
-- `project-architecture.md` — three-script philosophy
-- `mcts-implementation.md` — node design decisions
-- `game-specification.md` — PyRat rules
-- `design-exploration.md` — alternatives considered
+The `.mt/` folder contains project memory — design docs, experiment history, and reference material. See `.mt/CLAUDE.md` for structure. Key locations:
+- `.mt/briefs/` — focused design docs for active/recent work (inference backends, CNN architecture, Rust MCTS)
+- `.mt/experiment-log.md`, `.mt/experiment-log-7x7.md` — chronological experiment records
+- `.mt/ideas.md` — unstructured idea parking lot
