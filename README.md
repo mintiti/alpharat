@@ -1,10 +1,10 @@
 # alpharat
 
-Experimental AlphaZero-style MCTS for simultaneous two-player games.
+AlphaZero-style MCTS for simultaneous two-player games.
 
-Standard MCTS assumes players take turns. PyRat (the target game here) has both players moving at the same time, which breaks that assumption. This project uses scalar value heads (like LC0/KataGo) with decoupled PUCT selection and visit-proportional policies.
+Standard MCTS assumes players take turns. PyRat (the target game here) has both players moving at the same time, which breaks that assumption. This project uses decoupled PUCT selection with scalar value heads and visit-proportional policies.
 
-Still figuring out if it actually works.
+PyRat is approximately constant-sum (total cheese collected is roughly fixed), which means Nash equilibria are interchangeable — each player can optimize independently without coordination. That's what makes decoupled PUCT work: independent per-player action selection converges to the same result as joint optimization.
 
 ## Getting started
 
@@ -18,8 +18,6 @@ uv pip install torch --torch-backend=cpu --reinstall
 # Run tests
 uv run pytest
 ```
-
-For GPU inference setup (CUDA, TensorRT, CoreML), see the [Inference Backends](CLAUDE.md#inference-backends) section in CLAUDE.md.
 
 ## Self-play workflow
 
@@ -89,11 +87,12 @@ alpharat-manifest runs     # See training runs + which shards they used
 
 ## What's here
 
-- `alpharat/mcts/` — Tree search with scalar value heads, handles action equivalence, visit-proportional policies
+- `alpharat/mcts/` — Tree search with scalar value heads, action equivalence handling, visit-proportional policies
 - `alpharat/data/` — Self-play sampling, game recording, training set sharding
-- `alpharat/nn/` — Observation encoding, training targets, MLP model
+- `alpharat/nn/` — Observation encoding, training targets, architectures (MLP, Symmetric MLP, CNN with global pooling)
 - `alpharat/ai/` — Agents (MCTS, random, greedy baselines)
 - `alpharat/eval/` — Running games and tournaments
+- `crates/` — Rust MCTS backend and self-play pipeline (ONNX/TensorRT/CoreML inference)
 
 ## Rust MCTS backend
 
@@ -142,7 +141,7 @@ alpharat-rust-sample configs/iterate.yaml --group test --num-games 1000 --device
 alpharat-iterate configs/iterate.yaml --prefix sym_5x5 --device cuda
 ```
 
-`auto` picks CoreML on macOS, CPU elsewhere. See [CLAUDE.md](CLAUDE.md#inference-backends) for the full list.
+Available devices: `auto` (CoreML on macOS, CUDA on Linux, else CPU), `cpu`, `cuda`, `coreml`/`mps`, `tensorrt`.
 
 ## The approach
 
@@ -150,23 +149,20 @@ When both players move at once, you can't just maximize — the opponent is choo
 
 There's also a subtlety where multiple actions can be equivalent (hitting a wall = staying put). The tree shares branches for those and reduces the visit/Q matrices accordingly.
 
-See [CLAUDE.md](CLAUDE.md) for implementation details.
-
 ## Status
 
-**5×5 validation complete.** Self-play loop works — each iteration produces a stronger model.
+**5×5 validated, 7×7 active.** Self-play loop works — each iteration produces stronger models.
 
 | Milestone | Status |
 |-----------|--------|
-| MCTS beats Random/Greedy | ✅ |
-| NN learns from MCTS | ✅ |
-| MCTS+NN beats pure MCTS | ✅ |
-| Self-play iteration improves models | ✅ |
-| Walls / mud / larger grids | Not yet tested |
+| MCTS beats Random/Greedy | Done |
+| NN learns from MCTS | Done |
+| MCTS+NN beats pure MCTS | Done |
+| Self-play iteration improves models | Done |
+| 7×7 grid scaling | Active — MLP, Symmetric, CNN architectures compared |
+| Walls / mud | Not yet tested |
 
-Current best: 1106 Elo (MCTS+NN after 2 iterations), undefeated in 300 games.
-
-See [experiments/LOG.md](experiments/LOG.md) for full results and roadmap.
+See [experiments/LOG.md](experiments/LOG.md) and [experiments/LOG-7x7.md](experiments/LOG-7x7.md) for full results.
 
 ## License
 

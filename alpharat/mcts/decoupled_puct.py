@@ -1,7 +1,8 @@
 """Decoupled PUCT search for simultaneous-move MCTS.
 
 Each player independently selects actions via PUCT formula with marginal
-Q-values. Returns visit-proportional policies instead of Nash equilibrium.
+Q-values. Returns visit-proportional policies. Theoretically justified for
+constant-sum games where Nash equilibria are interchangeable.
 """
 
 from __future__ import annotations
