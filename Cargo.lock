@@ -806,7 +806,7 @@ dependencies = [
 [[package]]
 name = "pyrat-rust"
 version = "0.2.0"
-source = "git+https://github.com/mintiti/pyrat-rust?branch=main#64603425d025d844f2c0948405ef7161dd8e03e5"
+source = "git+https://github.com/mintiti/pyrat-rust?branch=main#b46aa213196df6f502d2521712c697e496ec30dd"
 dependencies = [
  "ndarray 0.16.1",
  "numpy",

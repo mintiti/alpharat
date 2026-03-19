@@ -8,7 +8,7 @@
 //! Generate fixtures first: `uv run python scripts/generate_encoder_fixtures.py`
 
 use alpharat_sampling::{FlatEncoder, ObservationEncoder};
-use pyrat::game::types::MudMap;
+use pyrat::MudMap;
 use pyrat::{Coordinates, Direction, GameBuilder, GameState};
 use serde::Deserialize;
 use std::collections::HashMap;
