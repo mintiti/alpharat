@@ -157,6 +157,12 @@ pub struct SelfPlayStats {
     pub cache_misses: u64,
 }
 
+impl Default for SelfPlayStats {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl SelfPlayStats {
     /// Create empty stats for incremental accumulation.
     pub fn new() -> Self {
@@ -366,31 +372,19 @@ impl Default for SelfPlayProgress {
 ///
 /// Values: -1 = wall/boundary, 1 = normal passage, >=2 = mud cost.
 pub fn build_maze_array(game: &GameState) -> Vec<i8> {
-    let w = game.width as u8;
-    let h = game.height as u8;
-    let directions = [
-        Direction::Up,
-        Direction::Right,
-        Direction::Down,
-        Direction::Left,
-    ];
-
-    let mut maze = vec![0i8; h as usize * w as usize * 4];
-    let mut i = 0;
+    let w = game.width as usize;
+    let h = game.height as usize;
+    let mut maze = vec![-1i8; h * w * 4];
     for y in 0..h {
         for x in 0..w {
-            let pos = Coordinates::new(x, y);
-            for &dir in &directions {
-                if !game.move_table.is_move_valid(pos, dir) {
-                    maze[i] = -1;
-                } else {
-                    let neighbor = dir.apply_to(pos);
-                    match game.mud.get(pos, neighbor) {
-                        Some(cost) => maze[i] = cost as i8,
-                        None => maze[i] = 1,
-                    }
-                }
-                i += 1;
+            let pos = Coordinates::new(x as u8, y as u8);
+            let base = (y * w + x) * 4;
+            for dir in game.move_table.valid_directions(pos) {
+                let neighbor = dir.apply_to(pos);
+                maze[base + dir as usize] = match game.mud.get(pos, neighbor) {
+                    Some(cost) => cost as i8,
+                    None => 1,
+                };
             }
         }
     }
@@ -399,8 +393,8 @@ pub fn build_maze_array(game: &GameState) -> Vec<i8> {
 
 /// Build u8[H*W] cheese mask, y-major (idx = y*w + x).
 pub fn build_cheese_mask(game: &GameState) -> Vec<u8> {
-    let w = game.width as u8;
-    let h = game.height as u8;
+    let w = game.width;
+    let h = game.height;
     let mut mask = vec![0u8; h as usize * w as usize];
     for y in 0..h {
         for x in 0..w {
@@ -500,9 +494,9 @@ fn record_position(
         p2_pos: [game.player2.current_pos.x, game.player2.current_pos.y],
         p1_score: game.player1.score,
         p2_score: game.player2.score,
-        p1_mud: game.player1.mud_timer as u8,
-        p2_mud: game.player2.mud_timer as u8,
-        turn: game.turn as u16,
+        p1_mud: game.player1.mud_timer,
+        p2_mud: game.player2.mud_timer,
+        turn: game.turn,
         cheese_mask: build_cheese_mask(game),
         value_p1: result.value_p1,
         value_p2: result.value_p2,
@@ -526,12 +520,12 @@ pub fn play_game(
     rng: &mut impl rand::Rng,
     game_index: u32,
 ) -> Result<GameRecord, BackendError> {
-    let w = game.width as u8;
-    let h = game.height as u8;
+    let w = game.width;
+    let h = game.height;
 
     let maze = build_maze_array(&game);
     let initial_cheese = build_cheese_mask(&game);
-    let cheese_available = game.cheese.remaining_cheese() as u16;
+    let cheese_available = game.cheese.remaining_cheese();
 
     let mut tree = MCTSTree::new(&game);
     let mut positions = Vec::with_capacity(game.max_turns as usize);
@@ -586,7 +580,7 @@ pub fn play_game(
     Ok(GameRecord {
         width: w,
         height: h,
-        max_turns: game.max_turns as u16,
+        max_turns: game.max_turns,
         maze,
         initial_cheese,
         positions,
@@ -741,8 +735,8 @@ pub fn run_self_play_to_disk(
     }
 
     let start = Instant::now();
-    let width = games[0].width as u8;
-    let height = games[0].height as u8;
+    let width = games[0].width;
+    let height = games[0].height;
 
     // Channel for game results (unbounded).
     let (tx, rx) = std::sync::mpsc::channel::<GameRecord>();
@@ -821,7 +815,7 @@ pub fn run_self_play_to_disk(
 mod tests {
     use super::*;
     use alpharat_mcts::SmartUniformBackend;
-    use pyrat::game::types::MudMap;
+    use pyrat::MudMap;
     use pyrat::GameBuilder;
     use std::collections::HashMap;
 

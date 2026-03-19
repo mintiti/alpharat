@@ -44,7 +44,7 @@ fn make_games(n: usize, width: u8, height: u8, cheese: u16, max_turns: u16) -> V
 }
 
 fn print_header(label: &str) {
-    println!("\n{}", label);
+    println!("\n{label}");
     println!("{:-<140}", "");
     println!(
         "{:>8} {:>6} {:>7} {:>6} {:>11} {:>11} {:>5} {:>10} {:>9} {:>8} {:>9} {:>8} {:>7} {:>8} {:>8}",
@@ -211,7 +211,7 @@ fn run_bench_onnx(
                 let result =
                     run_self_play(&games[..num_games], backend.as_ref(), search_config, &config, None)
                         .expect("ONNX self-play failed");
-                let mux_label = format!("{}", mux_max);
+                let mux_label = format!("{mux_max}");
                 print_row(
                     num_threads,
                     batch_size,
@@ -258,8 +258,7 @@ fn main() {
     // --- SmartUniform baseline (no NN) ---
     run_bench_uniform(
         &format!(
-            "7x7 open, 1897 sims, {}g/thread — SmartUniform (no NN)",
-            GAMES_PER_THREAD
+            "7x7 open, 1897 sims, {GAMES_PER_THREAD}g/thread — SmartUniform (no NN)",
         ),
         &search_7x7,
         1897,
@@ -273,8 +272,7 @@ fn main() {
     if let Some(model_path) = onnx_model {
         run_bench_onnx(
             &format!(
-                "7x7 open, 1897 sims, {}g/thread — ONNX (batch × mux × threads)",
-                GAMES_PER_THREAD
+                "7x7 open, 1897 sims, {GAMES_PER_THREAD}g/thread — ONNX (batch × mux × threads)",
             ),
             &search_7x7,
             1897,

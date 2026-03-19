@@ -40,7 +40,7 @@ pub fn write_bundle(games: &[GameRecord], path: &Path) -> io::Result<()> {
         if g.positions.is_empty() {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
-                format!("game {} has no positions", i),
+                format!("game {i} has no positions"),
             ));
         }
     }
@@ -240,11 +240,11 @@ mod tests {
 
         let mut maze = vec![1i8; hw * 4];
         // Block DOWN and LEFT at (0,0)
-        maze[0 * 4 + 2] = -1; // (0,0) DOWN
-        maze[0 * 4 + 3] = -1; // (0,0) LEFT
+        maze[2] = -1; // (0,0) DOWN
+        maze[3] = -1; // (0,0) LEFT
 
         let mut initial_cheese = vec![0u8; hw];
-        initial_cheese[1 * 3 + 1] = 1; // cheese at (1,1)
+        initial_cheese[4] = 1; // cheese at (1,1)
 
         let positions: Vec<PositionRecord> = (0..num_positions)
             .map(|t| PositionRecord {

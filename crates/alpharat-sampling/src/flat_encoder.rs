@@ -1,18 +1,10 @@
 use crate::encoder::ObservationEncoder;
-use pyrat::{Coordinates, Direction, GameState};
+use pyrat::{Coordinates, GameState};
 
 /// Normalization constants matching Python's `FlatObservationBuilder`.
 const MAX_MUD_COST: f32 = 10.0;
 const MAX_MUD_TURNS: f32 = 10.0;
 const MAX_SCORE: f32 = 10.0;
-
-/// Directions to iterate for the maze layer (excludes STAY).
-const DIRECTIONS: [Direction; 4] = [
-    Direction::Up,
-    Direction::Right,
-    Direction::Down,
-    Direction::Left,
-];
 
 /// Flat observation encoder matching Python's `FlatObservationBuilder.build()`.
 ///
@@ -64,24 +56,21 @@ impl ObservationEncoder for FlatEncoder {
         let out = &mut buf[offset..offset + self.obs_dim];
 
         // --- Maze layer: H*W*4 floats ---
-        // Iterate y (row) then x (col) then direction — C-order for (H, W, 4)
-        let mut i = 0;
+        for v in out[0..spatial * 4].iter_mut() {
+            *v = -1.0;
+        }
+        let mut base = 0;
         for y in 0..h {
             for x in 0..w {
                 let pos = Coordinates::new(x, y);
-                for &dir in &DIRECTIONS {
-                    if !game.move_table.is_move_valid(pos, dir) {
-                        // Wall or boundary
-                        out[i] = -1.0;
-                    } else {
-                        let neighbor = dir.apply_to(pos);
-                        match game.mud.get(pos, neighbor) {
-                            Some(cost) => out[i] = cost as f32 / MAX_MUD_COST,
-                            None => out[i] = 1.0 / MAX_MUD_COST, // Normal passage: cost 1
-                        }
-                    }
-                    i += 1;
+                for dir in game.move_table.valid_directions(pos) {
+                    let neighbor = dir.apply_to(pos);
+                    out[base + dir as usize] = match game.mud.get(pos, neighbor) {
+                        Some(cost) => cost as f32 / MAX_MUD_COST,
+                        None => 1.0 / MAX_MUD_COST,
+                    };
                 }
+                base += 4;
             }
         }
 
@@ -138,8 +127,8 @@ impl ObservationEncoder for FlatEncoder {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use pyrat::game::types::MudMap;
-    use pyrat::GameBuilder;
+    use pyrat::MudMap;
+    use pyrat::{Direction, GameBuilder};
     use std::collections::HashMap;
 
     fn open_5x5(p1: Coordinates, p2: Coordinates, cheese: &[Coordinates]) -> GameState {

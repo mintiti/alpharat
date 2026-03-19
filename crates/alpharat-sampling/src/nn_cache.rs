@@ -126,6 +126,11 @@ impl NNCache {
         self.size
     }
 
+    /// Returns `true` if the cache contains no entries.
+    pub fn is_empty(&self) -> bool {
+        self.size == 0
+    }
+
     /// Evict the oldest entry (front of insertion_order).
     ///
     /// After clearing the slot, performs Robin Hood rehashing: walks the probe

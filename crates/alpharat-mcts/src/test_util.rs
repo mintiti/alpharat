@@ -1,4 +1,4 @@
-use pyrat::game::types::MudMap;
+use pyrat::MudMap;
 use pyrat::{Coordinates, Direction, GameBuilder, GameState};
 use std::collections::HashMap;
 

@@ -18,12 +18,18 @@ pub struct CacheStats {
     pub misses: AtomicU64,
 }
 
-impl CacheStats {
-    pub fn new() -> Self {
+impl Default for CacheStats {
+    fn default() -> Self {
         Self {
             hits: AtomicU64::new(0),
             misses: AtomicU64::new(0),
         }
+    }
+}
+
+impl CacheStats {
+    pub fn new() -> Self {
+        Self::default()
     }
 
     pub fn hit_rate(&self) -> f64 {
@@ -198,7 +204,7 @@ fn position_hash(game: &GameState) -> u64 {
 mod tests {
     use super::*;
     use alpharat_mcts::SmartUniformBackend;
-    use pyrat::game::types::MudMap;
+    use pyrat::MudMap;
     use pyrat::GameBuilder;
     use std::collections::HashMap;
     use std::sync::atomic::Ordering;

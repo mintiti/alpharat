@@ -388,8 +388,8 @@ fn apply_dirichlet_noise(half: &mut HalfNode, epsilon: f32, concentration: f32, 
     }
 
     // Blend: prior = (1 - eps) * prior + eps * normalized_noise
-    for i in 0..n {
-        half.set_prior_at(i, half.prior(i) * (1.0 - epsilon) + epsilon * noise[i] / total);
+    for (i, &noise_val) in noise.iter().enumerate().take(n) {
+        half.set_prior_at(i, half.prior(i) * (1.0 - epsilon) + epsilon * noise_val / total);
     }
 }
 
