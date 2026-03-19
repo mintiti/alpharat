@@ -30,20 +30,20 @@ fn make_game_0() -> GameRecord {
     // Fill with 1 (open), then set boundary blocks.
     let mut maze = vec![1i8; hw * 4];
     // (0,0): DOWN=-1, LEFT=-1
-    maze[0 * 4 + 2] = -1;
-    maze[0 * 4 + 3] = -1;
+    maze[2] = -1;
+    maze[3] = -1;
     // (2,0): DOWN=-1, RIGHT=-1
-    maze[2 * 4 + 1] = -1;
-    maze[2 * 4 + 2] = -1;
+    maze[9] = -1;
+    maze[10] = -1;
     // (0,2): UP=-1, LEFT=-1
-    maze[(2 * 3 + 0) * 4 + 0] = -1;
-    maze[(2 * 3 + 0) * 4 + 3] = -1;
+    maze[24] = -1;
+    maze[27] = -1;
     // (2,2): UP=-1, RIGHT=-1
-    maze[(2 * 3 + 2) * 4 + 0] = -1;
-    maze[(2 * 3 + 2) * 4 + 1] = -1;
+    maze[32] = -1;
+    maze[33] = -1;
 
     let mut initial_cheese = vec![0u8; hw];
-    initial_cheese[1 * 3 + 1] = 1; // cheese at (1,1)
+    initial_cheese[4] = 1; // cheese at (1,1)
 
     let positions = vec![
         PositionRecord {
@@ -89,7 +89,7 @@ fn make_game_0() -> GameRecord {
     ];
 
     let mut cheese_outcomes = vec![CheeseOutcome::Uncollected as u8; hw];
-    cheese_outcomes[1 * 3 + 1] = CheeseOutcome::Simultaneous as u8; // both arrived at (1,1)
+    cheese_outcomes[4] = CheeseOutcome::Simultaneous as u8; // both arrived at (1,1)
 
     GameRecord {
         width: w,
@@ -121,8 +121,8 @@ fn make_game_1() -> GameRecord {
     let maze = vec![1i8; hw * 4]; // all open (simplified)
 
     let mut initial_cheese = vec![0u8; hw];
-    initial_cheese[0 * 3 + 0] = 1; // (0,0)
-    initial_cheese[2 * 3 + 2] = 1; // (2,2)
+    initial_cheese[0] = 1; // (0,0)
+    initial_cheese[8] = 1; // (2,2)
 
     let positions = vec![PositionRecord {
         p1_pos: [1, 0],

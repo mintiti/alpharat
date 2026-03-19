@@ -22,7 +22,7 @@ use std::time::Instant;
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
-    let model_path = args
+    let _model_path = args
         .get(1)
         .expect("usage: bench_nn_throughput <model.onnx> [--device cpu|cuda|tensorrt] [--width W] [--height H]");
 
@@ -54,11 +54,10 @@ fn main() {
     }
 
     // --- Pre-encode games ---
-    let (encoded_buf, obs_dim) = pre_encode_games(width, height, max_batch);
+    let (_encoded_buf, obs_dim) = pre_encode_games(width, height, max_batch);
 
     println!(
-        "NN Inference Throughput — {}x{}, obs_dim={}, device={}",
-        width, height, obs_dim, device
+        "NN Inference Throughput — {width}x{height}, obs_dim={obs_dim}, device={device}",
     );
 
     let mut batch_sizes: Vec<usize> = vec![
@@ -75,13 +74,13 @@ fn main() {
 
     match device {
         #[cfg(feature = "onnx")]
-        "cpu" => run_ort_benchmark(model_path, &encoded_buf, obs_dim, &batch_sizes, "cpu"),
+        "cpu" => run_ort_benchmark(_model_path, &_encoded_buf, obs_dim, &batch_sizes, "cpu"),
         #[cfg(feature = "onnx-cuda")]
-        "cuda" => run_ort_benchmark(model_path, &encoded_buf, obs_dim, &batch_sizes, "cuda"),
+        "cuda" => run_ort_benchmark(_model_path, &_encoded_buf, obs_dim, &batch_sizes, "cuda"),
         #[cfg(feature = "onnx-coreml")]
-        "coreml" => run_ort_benchmark(model_path, &encoded_buf, obs_dim, &batch_sizes, "coreml"),
+        "coreml" => run_ort_benchmark(_model_path, &_encoded_buf, obs_dim, &batch_sizes, "coreml"),
         #[cfg(feature = "tensorrt")]
-        "tensorrt" => run_trt_benchmark(model_path, &encoded_buf, obs_dim, &batch_sizes, max_batch, width, height),
+        "tensorrt" => run_trt_benchmark(_model_path, &_encoded_buf, obs_dim, &batch_sizes, max_batch, width, height),
         other => {
             let mut supported = vec![];
             if cfg!(feature = "onnx") {
@@ -97,8 +96,7 @@ fn main() {
                 supported.push("tensorrt");
             }
             eprintln!(
-                "Device '{}' not available. Compiled with support for: {:?}",
-                other, supported
+                "Device '{other}' not available. Compiled with support for: {supported:?}",
             );
             std::process::exit(1);
         }
@@ -116,7 +114,7 @@ fn pre_encode_games(width: u8, height: u8, max_batch: usize) -> (Vec<f32>, usize
     let max_turns: u16 = if width <= 5 { 30 } else { 50 };
 
     let num_games: usize = max_batch;
-    eprintln!("Generating {} random games...", num_games);
+    eprintln!("Generating {num_games} random games...");
     let games: Vec<GameState> = (0..num_games)
         .map(|i| {
             let config = GameBuilder::new(width, height)
@@ -135,7 +133,7 @@ fn pre_encode_games(width: u8, height: u8, max_batch: usize) -> (Vec<f32>, usize
         })
         .collect();
 
-    eprintln!("Pre-encoding {} games...", num_games);
+    eprintln!("Pre-encoding {num_games} games...");
     let mut buf = vec![0.0f32; num_games * obs_dim];
     let t0 = Instant::now();
     for (i, game) in games.iter().enumerate() {
@@ -143,8 +141,7 @@ fn pre_encode_games(width: u8, height: u8, max_batch: usize) -> (Vec<f32>, usize
     }
     let encode_us = t0.elapsed().as_micros();
     println!(
-        "Pre-encoded {} games in {:.1}ms ({:.0}ns/pos)\n",
-        num_games,
+        "Pre-encoded {num_games} games in {:.1}ms ({:.0}ns/pos)\n",
         encode_us as f64 / 1000.0,
         (encode_us as f64 * 1000.0) / num_games as f64,
     );
@@ -152,16 +149,18 @@ fn pre_encode_games(width: u8, height: u8, max_batch: usize) -> (Vec<f32>, usize
     (buf, obs_dim)
 }
 
+#[allow(dead_code)]
 fn format_throughput(pos_per_sec: f64) -> String {
     if pos_per_sec >= 1_000_000.0 {
         format!("{:.2}M", pos_per_sec / 1_000_000.0)
     } else if pos_per_sec >= 1_000.0 {
         format!("{:.1}k", pos_per_sec / 1_000.0)
     } else {
-        format!("{:.0}", pos_per_sec)
+        format!("{pos_per_sec:.0}")
     }
 }
 
+#[allow(dead_code)]
 fn print_header() {
     println!(
         "  {:>6} {:>10} {:>10} {:>10} {:>10} {:>12} {:>10}",
@@ -170,6 +169,7 @@ fn print_header() {
     println!("  {:-<90}", "");
 }
 
+#[allow(dead_code)]
 fn print_footer(peak_pos_s: f64) {
     println!(
         "\n  Peak throughput: {} pos/s\n",

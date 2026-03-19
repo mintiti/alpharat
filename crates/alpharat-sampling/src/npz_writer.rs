@@ -126,8 +126,7 @@ const NPY_HEADER_SIZE: usize = 256;
 fn build_npy_header(descr: &str, shape: &[usize]) -> [u8; NPY_HEADER_SIZE] {
     let shape_str = format_shape(shape);
     let dict = format!(
-        "{{'descr':'{}','fortran_order':False,'shape':{}}}",
-        descr, shape_str
+        "{{'descr':'{descr}','fortran_order':False,'shape':{shape_str}}}",
     );
 
     // 10 bytes: magic(6) + version(2) + header_len(2)
@@ -300,7 +299,7 @@ mod tests {
             assert!(header_str.contains("'shape':(4,)"));
 
             assert_eq!(buf.len(), 256 + 4);
-            assert_eq!(&buf[256..], &[10u8 as u8, 20, 30, 40]);
+            assert_eq!(&buf[256..], &[10_u8, 20, 30, 40]);
         }
 
         // Check bool array
