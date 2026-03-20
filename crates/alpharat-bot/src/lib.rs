@@ -9,14 +9,14 @@ use pyrat_sdk::{
 use rand::rngs::SmallRng;
 use rand::{Rng, SeedableRng};
 
-use pv::extract_pvs;
+use pv::{best_outcome_idx, extract_pvs};
 
 const MAX_PV_LINES: usize = 3;
 const MAX_PV_DEPTH: usize = 16;
 
 /// Minimum interval between info updates (milliseconds).
-/// lc0 uses 5000ms; we use 200ms since game GUIs benefit from faster feedback.
-const INFO_MIN_INTERVAL_MS: u128 = 200;
+/// Matches lc0's cadence — updates also fire immediately when the best move changes.
+const INFO_MIN_INTERVAL_MS: u128 = 5000;
 
 #[derive(DeriveOptions)]
 pub struct MctsBot {
@@ -87,9 +87,10 @@ impl MctsBot {
         let min_sims = if is_preprocess { 0 } else { batch_size };
 
         loop {
-            // --- exit check (immutable borrow only) ---
+            // --- exit check + run one batch ---
             {
-                let tree = self.tree.as_ref().expect("tree not initialized");
+                let tree = self.tree.as_mut().expect("tree not initialized");
+                let sim = self.sim.as_ref().expect("sim not initialized");
                 let visits = tree.arena()[tree.root()].total_visits();
                 if visits >= n_sims && visits >= min_sims {
                     break;
@@ -97,13 +98,6 @@ impl MctsBot {
                 if visits >= min_sims && ctx.should_stop() {
                     break;
                 }
-            }
-
-            // --- run one batch (mutable borrow of tree + rng) ---
-            {
-                let tree = self.tree.as_mut().expect("tree not initialized");
-                let sim = self.sim.as_ref().expect("sim not initialized");
-                let visits = tree.arena()[tree.root()].total_visits();
                 let remaining = n_sims.saturating_sub(visits);
                 let actual = remaining.min(batch_size);
                 if actual == 0 {
@@ -135,7 +129,7 @@ impl MctsBot {
                 } else {
                     &root_node.p2
                 };
-                (root_node.total_visits(), best_visited_outcome(half))
+                (root_node.total_visits(), best_outcome_idx(half))
             };
 
             let best_changed = last_info_best != Some(current_best);
@@ -207,8 +201,8 @@ impl MctsBot {
         };
 
         if self.argmax {
-            // Deterministic: pick the outcome with most visits.
-            let best_idx = best_visited_outcome(half);
+            // Deterministic: most-visited outcome, tiebreak by Q then prior.
+            let best_idx = best_outcome_idx(half);
             let action = half.outcome_action(best_idx as usize);
             Direction::try_from(action).expect("invalid direction from outcome_action")
         } else {
@@ -275,21 +269,6 @@ fn compute_nps(total_visits: u32, nps_start: Option<Instant>, now: Instant) -> u
             0
         }
     })
-}
-
-/// Best root outcome index by visit count.
-fn best_visited_outcome(half: &alpharat_mcts::HalfNode) -> u8 {
-    let n = half.n_outcomes();
-    let mut best = 0u8;
-    let mut best_v = 0u32;
-    for i in 0..n {
-        let v = half.edge(i).visits;
-        if v > best_v {
-            best_v = v;
-            best = i as u8;
-        }
-    }
-    best
 }
 
 /// Weighted random sample from a probability distribution.
