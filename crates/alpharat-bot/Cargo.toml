@@ -1,0 +1,14 @@
+[package]
+name = "alpharat-bot"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[[bin]]
+name = "alpharat-bot"
+path = "src/main.rs"
+
+[dependencies]
+alpharat-mcts = { path = "../alpharat-mcts" }
+pyrat-sdk = { git = "https://github.com/mintiti/pyrat-rust", branch = "main" }
+rand = "0.8"

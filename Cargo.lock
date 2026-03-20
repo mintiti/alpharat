@@ -9,6 +9,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "320119579fcad9c21884f5c4861d16174d0e06250625266f50fe6898340abefa"
 
 [[package]]
+name = "alpharat-bot"
+version = "0.1.0"
+dependencies = [
+ "alpharat-mcts",
+ "pyrat-sdk",
+ "rand 0.8.5",
+]
+
+[[package]]
 name = "alpharat-mcts"
 version = "0.1.0"
 dependencies = [
@@ -272,6 +281,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "5baebc0774151f905a1a2cc41989300b1e6fbb29aff0ceffa1064fdd3088d582"
 
 [[package]]
+name = "flatbuffers"
+version = "25.12.19"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "35f6839d7b3b98adde531effaf34f0c2badc6f4735d26fe74709d8e513a96ef3"
+dependencies = [
+ "bitflags",
+ "rustc_version",
+]
+
+[[package]]
 name = "flate2"
 version = "1.1.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -504,6 +523,17 @@ checksum = "1fa76a2c86f704bdb222d66965fb3d63269ce38518b83cb0575fca855ebb6316"
 dependencies = [
  "adler2",
  "simd-adler32",
+]
+
+[[package]]
+name = "mio"
+version = "1.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a69bcab0ad47271a0234d9422b131806bf3968021e5dc9328caf2d4cd58557fc"
+dependencies = [
+ "libc",
+ "wasi",
+ "windows-sys",
 ]
 
 [[package]]
@@ -804,15 +834,56 @@ dependencies = [
 ]
 
 [[package]]
+name = "pyrat-engine-interface"
+version = "0.1.0"
+source = "git+https://github.com/mintiti/pyrat-rust?branch=main#5fb8d83ba0cfec39a951c6e6e0ee70a41b7ccefe"
+dependencies = [
+ "pyrat-rust",
+]
+
+[[package]]
 name = "pyrat-rust"
 version = "0.2.0"
-source = "git+https://github.com/mintiti/pyrat-rust?branch=main#b46aa213196df6f502d2521712c697e496ec30dd"
+source = "git+https://github.com/mintiti/pyrat-rust?branch=main#5fb8d83ba0cfec39a951c6e6e0ee70a41b7ccefe"
 dependencies = [
  "ndarray 0.16.1",
  "numpy",
  "pyo3",
  "rand 0.10.0",
  "serde",
+]
+
+[[package]]
+name = "pyrat-sdk"
+version = "0.1.0"
+source = "git+https://github.com/mintiti/pyrat-rust?branch=main#5fb8d83ba0cfec39a951c6e6e0ee70a41b7ccefe"
+dependencies = [
+ "flatbuffers",
+ "pyrat-engine-interface",
+ "pyrat-rust",
+ "pyrat-sdk-derive",
+ "pyrat-wire",
+ "tokio",
+]
+
+[[package]]
+name = "pyrat-sdk-derive"
+version = "0.1.0"
+source = "git+https://github.com/mintiti/pyrat-rust?branch=main#5fb8d83ba0cfec39a951c6e6e0ee70a41b7ccefe"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn",
+]
+
+[[package]]
+name = "pyrat-wire"
+version = "0.1.0"
+source = "git+https://github.com/mintiti/pyrat-rust?branch=main#5fb8d83ba0cfec39a951c6e6e0ee70a41b7ccefe"
+dependencies = [
+ "flatbuffers",
+ "thiserror",
+ "tokio",
 ]
 
 [[package]]
@@ -898,6 +969,15 @@ name = "rustc-hash"
 version = "2.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "357703d41365b4b27c590e3ed91eabb1b663f07c4c084095e60cbed4362dff0d"
+
+[[package]]
+name = "rustc_version"
+version = "0.4.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "cfcb3a22ef46e85b45de6ee7e79d063319ebb6594faafcf1c225ea92ab6e9b92"
+dependencies = [
+ "semver",
+]
 
 [[package]]
 name = "rustix"
@@ -1038,6 +1118,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "67b1b7a3b5fe4f1376887184045fcf45c69e92af734b7aaddc05fb777b6fbd03"
 
 [[package]]
+name = "socket2"
+version = "0.6.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3a766e1110788c36f4fa1c2b71b387a7815aa65f88ce0229841826633d93723e"
+dependencies = [
+ "libc",
+ "windows-sys",
+]
+
+[[package]]
 name = "socks"
 version = "0.3.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1105,6 +1195,32 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f60246a4944f24f6e018aa17cdeffb7818b76356965d03b07d6a9886e8962185"
 dependencies = [
  "cfg-if",
+]
+
+[[package]]
+name = "tokio"
+version = "1.50.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "27ad5e34374e03cfffefc301becb44e9dc3c17584f414349ebe29ed26661822d"
+dependencies = [
+ "bytes",
+ "libc",
+ "mio",
+ "pin-project-lite",
+ "socket2",
+ "tokio-macros",
+ "windows-sys",
+]
+
+[[package]]
+name = "tokio-macros"
+version = "2.6.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5c55a2eff8b69ce66c84f85e1da1c233edc36ceb85a2058d11b0d6a3c7e7569c"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn",
 ]
 
 [[package]]
