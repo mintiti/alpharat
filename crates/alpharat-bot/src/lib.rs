@@ -12,7 +12,6 @@ use rand::{Rng, SeedableRng};
 use pv::{best_outcome_idx, extract_pvs};
 
 const MAX_PV_LINES: usize = 3;
-const MAX_PV_DEPTH: usize = 16;
 
 /// Minimum interval between info updates (milliseconds).
 /// Matches lc0's cadence — updates also fire immediately when the best move changes.
@@ -167,7 +166,7 @@ impl MctsBot {
             } else {
                 sim.player2_score()
             };
-            let pvs = extract_pvs(tree, sim, is_p1, MAX_PV_LINES, MAX_PV_DEPTH);
+            let pvs = extract_pvs(tree, sim, is_p1, MAX_PV_LINES);
 
             for (rank, pv) in pvs.iter().enumerate() {
                 let msg = if rank == 0 {

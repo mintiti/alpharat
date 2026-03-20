@@ -1,5 +1,5 @@
 use alpharat_mcts::{find_child, HalfNode, MCTSTree};
-use pyrat_sdk::{Direction, GameSim};
+use pyrat_sdk::{Coordinates, Direction, GameSim};
 
 /// A single principal variation line rooted at one of the top root moves.
 pub struct PvLine {
@@ -13,7 +13,7 @@ pub struct PvLine {
 
 /// Extract multi-PV lines for one player from the current tree.
 ///
-/// Returns up to `max_lines` PV lines, each up to `max_depth` moves deep.
+/// Returns up to `max_lines` PV lines, walking until the tree runs out.
 /// Lines are sorted by root edge visit count (most-visited first),
 /// with Q then prior as tiebreakers (lc0-style).
 pub fn extract_pvs(
@@ -21,7 +21,6 @@ pub fn extract_pvs(
     sim: &GameSim,
     is_player1: bool,
     max_lines: usize,
-    max_depth: usize,
 ) -> Vec<PvLine> {
     let arena = tree.arena();
     let root = tree.root();
@@ -43,6 +42,13 @@ pub fn extract_pvs(
     indices.truncate(max_lines);
     indices.retain(|&i| half.edge(i).visits > 0);
 
+    // Subject player's starting position.
+    let start_pos = if is_player1 {
+        sim.player1_position()
+    } else {
+        sim.player2_position()
+    };
+
     indices
         .into_iter()
         .map(|root_outcome_idx| {
@@ -53,6 +59,7 @@ pub fn extract_pvs(
 
             let mut moves = vec![root_dir];
             let mut target = None;
+            let mut pos = root_dir.apply_to(start_pos);
 
             // Opponent's best root action (most-visited, with tiebreaking).
             let opp_best_idx = best_outcome_idx(opponent_half);
@@ -64,23 +71,14 @@ pub fn extract_pvs(
                 (opp_best_idx, root_outcome_idx as u8)
             };
 
-            // Clone sim to track positions and cheese collection.
-            let mut sim_copy = sim.clone();
-
-            // Make the root move.
-            let p1_dir = dir_from_half(&root_node.p1, p1_idx);
-            let p2_dir = dir_from_half(&root_node.p2, p2_idx);
-            let prev = subject_score(&sim_copy, is_player1);
-            sim_copy.make_move(p1_dir, p2_dir);
-            check_cheese(&sim_copy, is_player1, prev, &mut target);
+            // Check edge reward on root's child for cheese collection.
+            let mut current = find_child(arena, root, p1_idx, p2_idx);
+            if let Some(child_idx) = current {
+                check_edge_reward(&arena[child_idx], is_player1, pos, &mut target);
+            }
 
             // Walk deeper into the tree.
-            let mut current = find_child(arena, root, p1_idx, p2_idx);
-
             while let Some(node_idx) = current {
-                if moves.len() >= max_depth {
-                    break;
-                }
                 let node = &arena[node_idx];
                 if node.is_terminal() || node.total_visits() == 0 {
                     break;
@@ -99,26 +97,23 @@ pub fn extract_pvs(
                 let subj_idx = best_outcome_idx(subj_half);
                 let opp_idx = best_outcome_idx(opp_half);
 
-                moves.push(
+                let subj_dir =
                     Direction::try_from(subj_half.outcome_action(subj_idx as usize))
-                        .unwrap_or(Direction::Stay),
-                );
+                        .unwrap_or(Direction::Stay);
+                moves.push(subj_dir);
+                pos = subj_dir.apply_to(pos);
 
-                // Map back to (p1_idx, p2_idx) for child lookup and sim advance.
+                // Map back to (p1_idx, p2_idx) for child lookup.
                 let (ci, cj) = if is_player1 {
                     (subj_idx, opp_idx)
                 } else {
                     (opp_idx, subj_idx)
                 };
 
-                let p1_d = dir_from_half(&node.p1, ci);
-                let p2_d = dir_from_half(&node.p2, cj);
-
-                let prev = subject_score(&sim_copy, is_player1);
-                sim_copy.make_move(p1_d, p2_d);
-                check_cheese(&sim_copy, is_player1, prev, &mut target);
-
                 current = find_child(arena, node_idx, ci, cj);
+                if let Some(child_idx) = current {
+                    check_edge_reward(&arena[child_idx], is_player1, pos, &mut target);
+                }
             }
 
             PvLine {
@@ -155,30 +150,22 @@ pub(crate) fn best_outcome_idx(half: &HalfNode) -> u8 {
     best
 }
 
-fn dir_from_half(half: &HalfNode, outcome_idx: u8) -> Direction {
-    Direction::try_from(half.outcome_action(outcome_idx as usize)).unwrap_or(Direction::Stay)
-}
-
-fn subject_score(sim: &GameSim, is_player1: bool) -> f32 {
-    if is_player1 {
-        sim.player1_score()
-    } else {
-        sim.player2_score()
-    }
-}
-
-/// If subject's score increased, record the current position as the target cheese.
-fn check_cheese(sim: &GameSim, is_player1: bool, prev_score: f32, target: &mut Option<(u8, u8)>) {
+/// If the edge reward is positive, record the position as the target cheese (first only).
+fn check_edge_reward(
+    node: &alpharat_mcts::Node,
+    is_player1: bool,
+    pos: Coordinates,
+    target: &mut Option<(u8, u8)>,
+) {
     if target.is_some() {
         return;
     }
-    let cur = subject_score(sim, is_player1);
-    if cur > prev_score {
-        let pos = if is_player1 {
-            sim.player1_position()
-        } else {
-            sim.player2_position()
-        };
+    let reward = if is_player1 {
+        node.edge_r1()
+    } else {
+        node.edge_r2()
+    };
+    if reward > 0.0 {
         *target = Some((pos.x, pos.y));
     }
 }
