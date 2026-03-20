@@ -1,0 +1,10 @@
+[settings]
+name = "AlphaRat"
+agent_id = "alpharat/mcts"
+run_command = "cargo run --release"
+
+[details]
+description = "MCTS with decoupled PUCT search, configurable simulation budget and exploration"
+developer = "mintiti"
+language = "Rust"
+tags = ["mcts", "tree-search", "alphazero", "reinforcement-learning"]
