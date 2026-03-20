@@ -135,13 +135,13 @@ pub fn extract_pvs(
 // ---------------------------------------------------------------------------
 
 /// Ranking key for sorting outcomes: (visits, Q, prior). All descending.
-fn rank_key(half: &HalfNode, idx: usize) -> (u32, f32, f32) {
+pub(crate) fn rank_key(half: &HalfNode, idx: usize) -> (u32, f32, f32) {
     let e = half.edge(idx);
     (e.visits, e.q, half.prior(idx))
 }
 
 /// Return the outcome index with the best ranking (visits → Q → prior).
-fn best_outcome_idx(half: &HalfNode) -> u8 {
+pub(crate) fn best_outcome_idx(half: &HalfNode) -> u8 {
     let n = half.n_outcomes();
     let mut best = 0u8;
     let mut best_key = rank_key(half, 0);
