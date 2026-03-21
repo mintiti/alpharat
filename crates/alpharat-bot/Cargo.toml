@@ -10,5 +10,12 @@ path = "src/main.rs"
 
 [dependencies]
 alpharat-mcts = { path = "../alpharat-mcts" }
+alpharat-sampling = { path = "../alpharat-sampling", optional = true, default-features = false }
 pyrat-sdk = { git = "https://github.com/mintiti/pyrat-rust", branch = "main" }
 rand = "0.8"
+
+[features]
+default = []
+onnx = ["alpharat-sampling/onnx"]
+onnx-coreml = ["onnx", "alpharat-sampling/onnx-coreml"]
+onnx-cuda = ["onnx", "alpharat-sampling/onnx-cuda"]

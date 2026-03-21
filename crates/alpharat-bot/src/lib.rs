@@ -2,12 +2,15 @@ mod pv;
 
 use std::time::Instant;
 
-use alpharat_mcts::{run_search, MCTSTree, SearchConfig, SmartUniformBackend};
+use alpharat_mcts::{run_search, Backend, MCTSTree, SearchConfig, SmartUniformBackend};
 use pyrat_sdk::{
     Bot, Context, DeriveOptions, Direction, GameResult, GameSim, GameState, InfoParams, Player,
 };
 use rand::rngs::SmallRng;
 use rand::{Rng, SeedableRng};
+
+#[cfg(feature = "onnx")]
+use alpharat_sampling::{CachedBackend, ExecutionProvider, FlatEncoder, OnnxBackend};
 
 use pv::{best_outcome_idx, extract_pvs};
 
@@ -19,8 +22,6 @@ const INFO_MIN_INTERVAL_MS: u128 = 5000;
 
 #[derive(DeriveOptions)]
 pub struct MctsBot {
-    #[spin(default = 10000, min = 1, max = 2000000000)]
-    n_sims: i32,
     #[spin(default = 1500, min = 100, max = 10000)]
     c_puct_milli: i32,
     #[spin(default = 8, min = 1, max = 2000000000)]
@@ -30,9 +31,20 @@ pub struct MctsBot {
     #[check(default = true)]
     argmax: bool,
 
+    #[cfg(feature = "onnx")]
+    #[str_opt(default = "")]
+    model: String,
+    #[cfg(feature = "onnx")]
+    #[combo(default = "cpu", choices = ["cpu", "coreml", "cuda"])]
+    device: String,
+    #[cfg(feature = "onnx")]
+    #[spin(default = 8192, min = 0, max = 1000000)]
+    cache_size: i32,
+
     // Internal state (unannotated — DeriveOptions ignores these).
     tree: Option<MCTSTree>,
     sim: Option<GameSim>,
+    backend: Option<Box<dyn Backend>>,
     rng: SmallRng,
     is_player1: bool,
 }
@@ -46,16 +58,41 @@ impl Default for MctsBot {
 impl MctsBot {
     pub fn new() -> Self {
         Self {
-            n_sims: 10000,
             c_puct_milli: 1500,
             batch_size: 8,
             noise: false,
             argmax: true,
+            #[cfg(feature = "onnx")]
+            model: String::new(),
+            #[cfg(feature = "onnx")]
+            device: "cpu".to_string(),
+            #[cfg(feature = "onnx")]
+            cache_size: 8192,
             tree: None,
             sim: None,
+            backend: None,
             rng: SmallRng::from_entropy(),
             is_player1: true,
         }
+    }
+
+    /// Build the inference backend from the current options.
+    fn build_backend(&self, state: &GameState) -> Box<dyn Backend> {
+        #[cfg(feature = "onnx")]
+        if !self.model.is_empty() {
+            let encoder = FlatEncoder::new(state.width(), state.height());
+            let provider = ExecutionProvider::try_from(self.device.as_str())
+                .unwrap_or_else(|e| panic!("invalid device: {e}"));
+            let onnx: Box<dyn Backend> =
+                Box::new(OnnxBackend::with_provider(&self.model, encoder, provider)
+                    .unwrap_or_else(|e| panic!("failed to load ONNX model '{}': {e}", self.model)));
+            if self.cache_size > 0 {
+                return Box::new(CachedBackend::new(onnx, self.cache_size as usize));
+            }
+            return onnx;
+        }
+        let _ = state;
+        Box::new(SmartUniformBackend)
     }
 
     fn search_config(&self) -> SearchConfig {
@@ -66,15 +103,14 @@ impl MctsBot {
         }
     }
 
-    /// Incremental search loop. Runs batches until `ctx.should_stop()` or
-    /// `n_sims` reached. Sends info on the lc0 cadence: when the best move
-    /// changes, or at least every INFO_MIN_INTERVAL_MS.
+    /// Incremental search loop. Runs batches until `ctx.should_stop()`.
+    /// Sends info on the lc0 cadence: when the best move changes, or at
+    /// least every INFO_MIN_INTERVAL_MS.
     fn search_loop(&mut self, ctx: &Context, is_preprocess: bool) {
         // Snapshot all config from self before entering the loop so we don't
         // need to borrow &self while &mut self.tree is live.
         let config = self.search_config();
         let batch_size = self.batch_size as u32;
-        let n_sims = self.n_sims as u32;
         let is_player1 = self.is_player1;
 
         let mut nps_start: Option<Instant> = None;
@@ -91,24 +127,17 @@ impl MctsBot {
                 let tree = self.tree.as_mut().expect("tree not initialized");
                 let sim = self.sim.as_ref().expect("sim not initialized");
                 let visits = tree.arena()[tree.root()].total_visits();
-                if visits >= n_sims && visits >= min_sims {
-                    break;
-                }
                 if visits >= min_sims && ctx.should_stop() {
                     break;
                 }
-                let remaining = n_sims.saturating_sub(visits);
-                let actual = remaining.min(batch_size);
-                if actual == 0 {
-                    break;
-                }
+                let backend = self.backend.as_deref().expect("backend not initialized");
                 let _ = run_search(
                     tree,
                     sim,
-                    &SmartUniformBackend,
+                    backend,
                     &config,
-                    actual,
-                    actual,
+                    batch_size,
+                    batch_size,
                     &mut self.rng,
                 );
             }
@@ -224,6 +253,7 @@ impl MctsBot {
 impl Bot for MctsBot {
     fn preprocess(&mut self, state: &GameState, ctx: &Context) {
         self.is_player1 = state.my_player() == Player::Player1;
+        self.backend = Some(self.build_backend(state));
         let sim = state.to_sim();
         self.tree = Some(MCTSTree::new(&sim));
         self.sim = Some(sim);
@@ -252,6 +282,7 @@ impl Bot for MctsBot {
     fn on_game_over(&mut self, _result: GameResult, _scores: (f32, f32)) {
         self.tree = None;
         self.sim = None;
+        self.backend = None;
     }
 }
 
