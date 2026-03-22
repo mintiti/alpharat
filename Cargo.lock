@@ -28,6 +28,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "alpharat-mcgs"
+version = "0.1.0"
+dependencies = [
+ "pyrat-rust",
+ "rand 0.8.5",
+ "rand_distr",
+]
+
+[[package]]
 name = "alpharat-mcts"
 version = "0.1.0"
 dependencies = [
