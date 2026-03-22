@@ -15,14 +15,14 @@ Example YAML:
       mcts_baseline:
         variant: mcts
         mcts:
-          backend: python
+          backend: rust
           simulations: 200
           c_puct: 4.73
           force_k: 0.0
       mcts_with_nn:
         variant: mcts
         mcts:
-          backend: python
+          backend: rust
           simulations: 200
         checkpoint: checkpoints/best_model.pt
 """
@@ -35,7 +35,7 @@ from typing import TYPE_CHECKING, Annotated, Literal
 from pydantic import Field
 
 from alpharat.config.base import StrictBaseModel
-from alpharat.mcts.config import MCTSConfig, PythonMCTSConfig  # noqa: TC001
+from alpharat.mcts.config import MCTSConfig, RustMCTSConfig  # noqa: TC001
 
 if TYPE_CHECKING:
     from alpharat.ai.base import Agent
@@ -98,7 +98,7 @@ class NNAgentConfig(AgentConfigBase):
 
     def build(self, device: str = "cpu") -> Agent:
         """Build an agent with simulations=0 (pure NN mode)."""
-        config = PythonMCTSConfig(simulations=0)
+        config = RustMCTSConfig(simulations=0)
         return config.build_agent(
             checkpoint=self.checkpoint,
             temperature=self.temperature,

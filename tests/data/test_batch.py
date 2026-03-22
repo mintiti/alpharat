@@ -20,36 +20,36 @@ from alpharat.data.batch import (
     load_batch_metadata,
     save_batch_metadata,
 )
-from alpharat.mcts import PythonMCTSConfig
+from alpharat.mcts import RustMCTSConfig
 
 
 class TestMCTSConfig:
     """Tests for MCTS config."""
 
-    def test_decoupled_puct_from_dict(self) -> None:
-        """PythonMCTSConfig parses from dict."""
+    def test_rust_mcts_from_dict(self) -> None:
+        """RustMCTSConfig parses from dict."""
         data = {
             "simulations": 400,
             "c_puct": 2.0,
         }
-        config = PythonMCTSConfig.model_validate(data)
+        config = RustMCTSConfig.model_validate(data)
 
         assert config.simulations == 400
         assert config.c_puct == 2.0
 
-    def test_decoupled_puct_defaults(self) -> None:
-        """PythonMCTSConfig uses default c_puct."""
-        config = PythonMCTSConfig(simulations=100)
+    def test_rust_mcts_defaults(self) -> None:
+        """RustMCTSConfig uses default c_puct."""
+        config = RustMCTSConfig(simulations=100)
 
         assert config.c_puct == 1.5
 
     def test_batch_metadata_parses_config(self) -> None:
-        """BatchMetadata parses decoupled_puct config."""
+        """BatchMetadata parses RustMCTSConfig."""
         data = {
             "batch_id": "test-id",
             "created_at": "2024-01-01T00:00:00Z",
             "checkpoint_path": "/path/to/model.pt",
-            "mcts_config": {"backend": "python", "simulations": 400, "c_puct": 2.5},
+            "mcts_config": {"backend": "rust", "simulations": 400, "c_puct": 2.5},
             "game": {
                 "width": 10,
                 "height": 10,
@@ -59,7 +59,7 @@ class TestMCTSConfig:
         }
         metadata = BatchMetadata.model_validate(data)
 
-        assert isinstance(metadata.mcts_config, PythonMCTSConfig)
+        assert isinstance(metadata.mcts_config, RustMCTSConfig)
         assert metadata.mcts_config.c_puct == 2.5
 
 
@@ -72,7 +72,7 @@ class TestBatchMetadata:
             batch_id="test",
             created_at=datetime.now(UTC),
             checkpoint_path=None,
-            mcts_config=PythonMCTSConfig(simulations=100),
+            mcts_config=RustMCTSConfig(simulations=100),
             game=GameConfig(width=10, height=10, max_turns=200, cheese=CheeseConfig(count=21)),
         )
 
@@ -84,7 +84,7 @@ class TestBatchMetadata:
             batch_id="test",
             created_at=datetime.now(UTC),
             checkpoint_path="/models/checkpoint_100.pt",
-            mcts_config=PythonMCTSConfig(simulations=100),
+            mcts_config=RustMCTSConfig(simulations=100),
             game=GameConfig(width=10, height=10, max_turns=200, cheese=CheeseConfig(count=21)),
         )
 
@@ -100,7 +100,7 @@ class TestCreateBatch:
             batch_dir = create_batch(
                 parent_dir=tmpdir,
                 checkpoint_path=None,
-                mcts_config=PythonMCTSConfig(simulations=100),
+                mcts_config=RustMCTSConfig(simulations=100),
                 game=GameConfig(width=10, height=10, max_turns=200, cheese=CheeseConfig(count=21)),
             )
 
@@ -114,14 +114,14 @@ class TestCreateBatch:
             batch_dir = create_batch(
                 parent_dir=tmpdir,
                 checkpoint_path="/test/checkpoint.pt",
-                mcts_config=PythonMCTSConfig(simulations=400, c_puct=2.0),
+                mcts_config=RustMCTSConfig(simulations=400, c_puct=2.0),
                 game=GameConfig(width=15, height=12, max_turns=300, cheese=CheeseConfig(count=21)),
             )
 
             metadata = load_batch_metadata(batch_dir)
 
             assert metadata.checkpoint_path == "/test/checkpoint.pt"
-            assert isinstance(metadata.mcts_config, PythonMCTSConfig)
+            assert isinstance(metadata.mcts_config, RustMCTSConfig)
             assert metadata.mcts_config.simulations == 400
             assert metadata.mcts_config.c_puct == 2.0
             assert metadata.game.width == 15
@@ -134,7 +134,7 @@ class TestCreateBatch:
             batch_dir = create_batch(
                 parent_dir=tmpdir,
                 checkpoint_path=None,
-                mcts_config=PythonMCTSConfig(simulations=100),
+                mcts_config=RustMCTSConfig(simulations=100),
                 game=GameConfig(width=10, height=10, max_turns=200, cheese=CheeseConfig(count=21)),
             )
 
@@ -155,7 +155,7 @@ class TestCreateBatch:
             batch_dir = create_batch(
                 parent_dir=tmpdir,
                 checkpoint_path=None,
-                mcts_config=PythonMCTSConfig(simulations=100),
+                mcts_config=RustMCTSConfig(simulations=100),
                 game=GameConfig(width=10, height=10, max_turns=200, cheese=CheeseConfig(count=21)),
             )
 
@@ -168,7 +168,7 @@ class TestSaveLoadRoundtrip:
     """Tests for save/load metadata roundtrip."""
 
     def test_roundtrip_decoupled_puct(self) -> None:
-        """Metadata with PythonMCTSConfig survives roundtrip."""
+        """Metadata with RustMCTSConfig survives roundtrip."""
         with tempfile.TemporaryDirectory() as tmpdir:
             batch_dir = Path(tmpdir) / "test-batch"
             batch_dir.mkdir()
@@ -177,7 +177,7 @@ class TestSaveLoadRoundtrip:
                 batch_id="test-batch",
                 created_at=datetime(2024, 6, 15, 12, 30, 0, tzinfo=UTC),
                 checkpoint_path="/models/best.pt",
-                mcts_config=PythonMCTSConfig(simulations=400, c_puct=2.5),
+                mcts_config=RustMCTSConfig(simulations=400, c_puct=2.5),
                 game=GameConfig(width=10, height=10, max_turns=200, cheese=CheeseConfig(count=21)),
             )
 
@@ -185,7 +185,7 @@ class TestSaveLoadRoundtrip:
             loaded = load_batch_metadata(batch_dir)
 
             assert loaded.checkpoint_path == "/models/best.pt"
-            assert isinstance(loaded.mcts_config, PythonMCTSConfig)
+            assert isinstance(loaded.mcts_config, RustMCTSConfig)
             assert loaded.mcts_config.simulations == 400
             assert loaded.mcts_config.c_puct == 2.5
             assert loaded.game.width == 10
@@ -246,11 +246,15 @@ class TestBatchMetadataError:
 
     # All fields for each config, so _field_diff reports "OK" when section is clean.
     _VALID_MCTS = {
-        "backend": "python",
+        "backend": "rust",
         "simulations": 100,
         "c_puct": 1.5,
         "force_k": 2.0,
         "fpu_reduction": 0.2,
+        "batch_size": 8,
+        "noise_epsilon": 0.0,
+        "noise_concentration": 10.83,
+        "max_collisions": 0,
     }
     _VALID_GAME = {
         "width": 5,

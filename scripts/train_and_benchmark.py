@@ -32,7 +32,7 @@ from alpharat.eval.benchmark import (
 )
 from alpharat.eval.tournament import run_tournament
 from alpharat.experiments import ExperimentManager
-from alpharat.mcts.config import MCTSConfig, PythonMCTSConfig, RustMCTSConfig
+from alpharat.mcts.config import RustMCTSConfig
 from alpharat.nn.config import TrainConfig
 from alpharat.nn.training import run_training
 
@@ -213,12 +213,8 @@ def main() -> None:
     logger.info("")
 
     # Load MCTS and game configs from Hydra sub-configs
-    from pydantic import TypeAdapter
-
     mcts_dict = load_raw_config("configs/mcts", args.mcts)
-    mcts_config: PythonMCTSConfig | RustMCTSConfig = TypeAdapter(MCTSConfig).validate_python(
-        mcts_dict
-    )
+    mcts_config = RustMCTSConfig.model_validate(mcts_dict)
     game_config = load_config(GameConfig, "configs/game", args.game)
 
     benchmark_config = BenchmarkConfig(

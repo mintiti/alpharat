@@ -5,7 +5,6 @@ import subprocess
 import pytest
 
 COMMANDS = [
-    "alpharat-sample",
     "alpharat-train",
     "alpharat-manifest",
     "alpharat-benchmark",

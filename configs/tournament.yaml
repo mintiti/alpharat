@@ -17,14 +17,14 @@ agents:
   mcts_100:
     variant: mcts
     mcts:
-      backend: python
+      backend: rust
       simulations: 100
       c_puct: 1.5
 
   mcts_500:
     variant: mcts
     mcts:
-      backend: python
+      backend: rust
       simulations: 500
       c_puct: 1.5
 

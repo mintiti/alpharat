@@ -1,12 +1,11 @@
-"""Searcher interface — abstracts Python and Rust MCTS backends.
+"""Searcher interface — abstracts MCTS backends.
 
-Both backends implement the same protocol: take a game, return a SearchResult.
+The Rust backend implements the Searcher protocol: take a game, return a SearchResult.
 Consumers never touch search internals.
 """
 
 from __future__ import annotations
 
-import copy
 from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 
 import numpy as np
@@ -21,85 +20,9 @@ if TYPE_CHECKING:
 
 @runtime_checkable
 class Searcher(Protocol):
-    """Protocol for MCTS search backends.
-
-    Both Python and Rust MCTS implement this interface.
-    """
+    """Protocol for MCTS search backends."""
 
     def search(self, game: PyRat) -> SearchResult: ...
-
-
-class PythonSearcher:
-    """Wraps Python MCTS — builds tree, runs search, packages canonical result.
-
-    Encapsulates the tree-building complexity that was previously inline in
-    the sampling loop.
-
-    Args:
-        simulations: Number of MCTS simulations.
-        c_puct: Exploration constant.
-        force_k: Forced playout coefficient.
-        fpu_reduction: First-play urgency penalty.
-        nn_ctx: Optional NN context for guided search.
-    """
-
-    def __init__(
-        self,
-        simulations: int,
-        c_puct: float,
-        force_k: float,
-        fpu_reduction: float,
-        nn_ctx: Any | None = None,
-    ) -> None:
-        from alpharat.mcts.decoupled_puct import DecoupledPUCTConfig
-
-        self._config = DecoupledPUCTConfig(
-            simulations=simulations,
-            c_puct=c_puct,
-            force_k=force_k,
-            fpu_reduction=fpu_reduction,
-        )
-        self._nn_ctx = nn_ctx
-
-    def search(self, game: PyRat) -> SearchResult:
-        """Run Python MCTS search on the given game state."""
-        from alpharat.config.checkpoint import make_predict_fn
-        from alpharat.mcts.node import MCTSNode
-        from alpharat.mcts.tree import MCTSTree
-
-        simulator = copy.deepcopy(game)
-
-        predict_fn = None
-        if self._nn_ctx is not None:
-            predict_fn = make_predict_fn(
-                self._nn_ctx.model,
-                self._nn_ctx.builder,
-                simulator,
-                self._nn_ctx.width,
-                self._nn_ctx.height,
-                self._nn_ctx.device,
-            )
-
-        dummy = np.ones(5) / 5
-        root = MCTSNode(
-            game_state=None,
-            prior_policy_p1=dummy,
-            prior_policy_p2=dummy,
-            nn_value_p1=0.0,
-            nn_value_p2=0.0,
-            parent=None,
-            p1_mud_turns_remaining=simulator.player1_mud_turns,
-            p2_mud_turns_remaining=simulator.player2_mud_turns,
-        )
-
-        tree = MCTSTree(
-            game=simulator,
-            root=root,
-            predict_fn=predict_fn,
-        )
-
-        search = self._config.build(tree)
-        return search.search()
 
 
 class RustSearcher:
