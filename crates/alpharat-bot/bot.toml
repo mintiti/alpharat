@@ -1,7 +1,7 @@
 [settings]
 name = "AlphaRat"
 agent_id = "alpharat/mcts"
-run_command = "cargo run --release"
+run_command = "cargo run --release --features onnx-coreml"
 
 [details]
 description = "MCTS with decoupled PUCT search, configurable simulation budget and exploration"
