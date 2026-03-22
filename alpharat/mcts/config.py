@@ -1,16 +1,13 @@
-"""MCTSConfig — discriminated union over Python and Rust MCTS backends.
+"""MCTSConfig — Rust MCTS backend configuration.
 
-Follows the same pattern as AgentConfig in alpharat/ai/config.py.
-Each variant implements build_searcher() and build_agent() so consumers
-never need to know which backend they're using.
+Provides MCTSConfigBase (abstract) and RustMCTSConfig (concrete).
+MCTSConfig is an alias for RustMCTSConfig.
 """
 
 from __future__ import annotations
 
 from abc import abstractmethod
-from typing import TYPE_CHECKING, Annotated, Any, Literal, Self
-
-from pydantic import Field
+from typing import TYPE_CHECKING, Literal, Self
 
 from alpharat.config.base import StrictBaseModel
 
@@ -67,63 +64,6 @@ class MCTSConfigBase(StrictBaseModel):
             Configured Agent instance.
         """
         ...
-
-
-class PythonMCTSConfig(MCTSConfigBase):
-    """Configuration for the Python MCTS backend."""
-
-    backend: Literal["python"] = "python"
-    simulations: int = 100
-    c_puct: float = 1.5
-    force_k: float = 2.0
-    fpu_reduction: float = 0.2
-
-    def build_searcher(
-        self,
-        checkpoint: str | None = None,
-        device: str = "cpu",
-    ) -> Searcher:
-        from alpharat.data.sampling import NNContext, load_nn_context
-        from alpharat.mcts.searcher import PythonSearcher
-
-        nn_ctx: NNContext | None = None
-        if checkpoint is not None:
-            nn_ctx = load_nn_context(checkpoint, device=device)
-
-        return PythonSearcher(
-            simulations=self.simulations,
-            c_puct=self.c_puct,
-            force_k=self.force_k,
-            fpu_reduction=self.fpu_reduction,
-            nn_ctx=nn_ctx,
-        )
-
-    def build_agent(
-        self,
-        checkpoint: str | None = None,
-        temperature: float = 1.0,
-        device: str = "cpu",
-    ) -> Agent:
-        from alpharat.ai.searcher_agent import SearcherAgent
-
-        searcher = self.build_searcher(checkpoint=checkpoint, device=device)
-        return SearcherAgent(
-            searcher=searcher,
-            temperature=temperature,
-            simulations=self.simulations,
-            checkpoint=checkpoint,
-        )
-
-    def to_decoupled_puct_config(self) -> Any:
-        """Convert to DecoupledPUCTConfig for backward compatibility."""
-        from alpharat.mcts.decoupled_puct import DecoupledPUCTConfig
-
-        return DecoupledPUCTConfig(
-            simulations=self.simulations,
-            c_puct=self.c_puct,
-            force_k=self.force_k,
-            fpu_reduction=self.fpu_reduction,
-        )
 
 
 class RustMCTSConfig(MCTSConfigBase):
@@ -187,8 +127,4 @@ class RustMCTSConfig(MCTSConfigBase):
         )
 
 
-# Discriminated union using Pydantic's Annotated + Field(discriminator=...)
-MCTSConfig = Annotated[
-    PythonMCTSConfig | RustMCTSConfig,
-    Field(discriminator="backend"),
-]
+MCTSConfig = RustMCTSConfig

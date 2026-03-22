@@ -3,7 +3,6 @@
 Beyond "does it load", verify configs actually work end-to-end:
 - Game configs build playable games
 - Tournament configs build agents that can play
-- Sample configs can run MCTS simulations
 - Train configs build models that forward
 """
 
@@ -11,22 +10,13 @@ from __future__ import annotations
 
 import subprocess
 from pathlib import Path
-from typing import TYPE_CHECKING
 
-import numpy as np
 import pytest
 import torch
 
-if TYPE_CHECKING:
-    from pyrat_engine.core.game import PyRat
-
 from alpharat.config.game import GameConfig
 from alpharat.config.loader import load_config
-from alpharat.data.sampling import SamplingConfig
 from alpharat.eval.tournament import TournamentConfig
-from alpharat.mcts import PythonMCTSConfig
-from alpharat.mcts.node import MCTSNode
-from alpharat.mcts.tree import MCTSTree
 from alpharat.nn.config import TrainConfig
 
 PROJECT_ROOT = Path(__file__).parent.parent.parent
@@ -96,71 +86,6 @@ class TestTournamentConfigIntegration:
             assert move in range(5), f"Agent {name} returned invalid move {move}"
 
 
-# --- Sampling Config Integration ---
-
-
-def _create_mcts_tree(game: PyRat, mcts_config: PythonMCTSConfig) -> MCTSTree:
-    """Helper to create MCTS tree from game and config."""
-    # Create root with dummy priors (tree will reinitialize with smart uniform)
-    dummy = np.ones(5) / 5
-    root = MCTSNode(
-        game_state=None,
-        prior_policy_p1=dummy,
-        prior_policy_p2=dummy,
-        nn_value_p1=0.0,
-        nn_value_p2=0.0,
-        parent=None,
-        p1_mud_turns_remaining=game.player1_mud_turns,
-        p2_mud_turns_remaining=game.player2_mud_turns,
-    )
-    return MCTSTree(game=game, root=root)
-
-
-class TestSamplingConfigIntegration:
-    """Sampling configs can initialize and run MCTS."""
-
-    def test_can_run_mcts_simulation(self) -> None:
-        """Sampling config can initialize MCTS and run simulations."""
-        config = load_config(SamplingConfig, CONFIGS, "sample")
-        game = config.game.build(seed=42)
-        assert isinstance(config.mcts, PythonMCTSConfig)
-
-        # Build MCTS tree and run search
-        tree = _create_mcts_tree(game, config.mcts)
-        puct_config = config.mcts.to_decoupled_puct_config()
-        search = puct_config.build(tree)
-
-        # Run search (returns SearchResult with policies)
-        result = search.search()
-
-        # Policies should sum to ~1
-        assert abs(result.policy_p1.sum() - 1.0) < 0.01
-        assert abs(result.policy_p2.sum() - 1.0) < 0.01
-
-    @pytest.fixture(params=get_tracked_configs("sample"))
-    def sample_config_name(self, request: pytest.FixtureRequest) -> str:
-        return str(request.param)
-
-    def test_sample_subconfigs_run_mcts(self, sample_config_name: str) -> None:
-        """All sample sub-configs can run MCTS simulations."""
-        # Load from configs root with sample/ prefix (Hydra resolves defaults)
-        config = load_config(SamplingConfig, CONFIGS, f"sample/{sample_config_name}")
-        game = config.game.build(seed=42)
-        assert isinstance(config.mcts, PythonMCTSConfig)
-
-        # Build MCTS tree and search
-        tree = _create_mcts_tree(game, config.mcts)
-        puct_config = config.mcts.to_decoupled_puct_config()
-        search = puct_config.build(tree)
-
-        # Run search (returns SearchResult with policies)
-        result = search.search()
-
-        # Policies should sum to ~1
-        assert result.policy_p1.sum() > 0.99
-        assert result.policy_p2.sum() > 0.99
-
-
 # --- Train Config Integration ---
 
 
@@ -203,20 +128,6 @@ class TestTrainConfigIntegration:
 
 class TestCompositionSemantics:
     """Verify Hydra composition works correctly."""
-
-    def test_sample_yaml_uses_default_game(self) -> None:
-        """Main sample.yaml uses 5x5_open game by default."""
-        config = load_config(SamplingConfig, CONFIGS, "sample")
-        # 5x5_open has width=5, height=5
-        assert config.game.width == 5
-        assert config.game.height == 5
-
-    def test_sample_yaml_uses_default_mcts(self) -> None:
-        """Main sample.yaml uses 7x7_scalar_tuned MCTS by default."""
-        config = load_config(SamplingConfig, CONFIGS, "sample")
-        mcts_config = load_config(PythonMCTSConfig, CONFIGS / "mcts", "7x7_scalar_tuned")
-        assert config.mcts.simulations == mcts_config.simulations
-        assert config.mcts.c_puct == mcts_config.c_puct
 
     def test_tournament_yaml_uses_default_game(self) -> None:
         """Main tournament.yaml uses 5x5_open game by default."""

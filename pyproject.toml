@@ -10,7 +10,7 @@ authors = [
 ]
 dependencies = [
     "numpy>=1.24.0",
-    "numba>=0.60.0",
+
     "pydantic>=2.0",
     "pyyaml>=6.0",
     "alpharat-mcts",
@@ -42,7 +42,7 @@ train = [
 ]
 
 [project.scripts]
-alpharat-sample = "scripts.sample:main"
+
 alpharat-train = "scripts.train:main"
 alpharat-train-and-benchmark = "scripts.train_and_benchmark:main"
 alpharat-prepare-shards = "scripts.prepare_shards:main"

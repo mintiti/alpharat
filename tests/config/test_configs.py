@@ -13,10 +13,8 @@ import pytest
 
 from alpharat.config.game import GameConfig
 from alpharat.config.loader import load_config, load_raw_config
-from alpharat.data.sampling import SamplingConfig
 from alpharat.eval.tournament import TournamentConfig
-from alpharat.mcts import MCTSConfigBase, PythonMCTSConfig, RustMCTSConfig
-from alpharat.mcts.config import MCTSConfig
+from alpharat.mcts import RustMCTSConfig
 from alpharat.nn.config import TrainConfig
 
 PROJECT_ROOT = Path(__file__).parent.parent.parent
@@ -61,45 +59,19 @@ class TestGameConfigs:
 
 
 class TestMCTSConfigs:
-    """All MCTS sub-configs resolve to valid MCTSConfig."""
+    """All MCTS sub-configs resolve to valid RustMCTSConfig."""
 
     @pytest.fixture(params=get_tracked_configs("mcts"))
     def config_name(self, request: pytest.FixtureRequest) -> str:
         return str(request.param)
 
     def test_resolves_to_mcts_config(self, config_name: str) -> None:
-        """MCTS config loads and validates via discriminated union."""
-        from pydantic import TypeAdapter
-
+        """MCTS config loads and validates."""
         raw = load_raw_config(CONFIGS / "mcts", config_name)
-        adapter: TypeAdapter[PythonMCTSConfig | RustMCTSConfig] = TypeAdapter(MCTSConfig)
-        config = adapter.validate_python(raw)
-        assert isinstance(config, (PythonMCTSConfig, RustMCTSConfig))
+        config = RustMCTSConfig.model_validate(raw)
+        assert isinstance(config, RustMCTSConfig)
         assert config.simulations > 0
         assert config.c_puct > 0
-
-
-# --- Sample Sub-Configs ---
-
-
-class TestSampleConfigs:
-    """All sample sub-configs resolve to valid SamplingConfig.
-
-    Sample sub-configs use @package _global_ and reference /mcts, /game defaults,
-    so they must be loaded from the configs root (not configs/sample).
-    """
-
-    @pytest.fixture(params=get_tracked_configs("sample"))
-    def config_name(self, request: pytest.FixtureRequest) -> str:
-        return str(request.param)
-
-    def test_resolves_to_sampling_config(self, config_name: str) -> None:
-        """Sample sub-config loads with composed game/mcts."""
-        # Load from configs root with sample/ prefix (Hydra resolves defaults)
-        config = load_config(SamplingConfig, CONFIGS, f"sample/{config_name}")
-        assert isinstance(config.game, GameConfig)
-        assert isinstance(config.mcts, MCTSConfigBase)
-        assert config.sampling.num_games > 0
 
 
 # --- Model Configs (Special Case) ---
@@ -127,13 +99,7 @@ class TestModelConfigs:
 
 
 class TestEntryPointConfigs:
-    """Main entry point configs (sample.yaml, train.yaml, tournament.yaml)."""
-
-    def test_sample_yaml(self) -> None:
-        """Main sample.yaml composes into valid SamplingConfig."""
-        config = load_config(SamplingConfig, CONFIGS, "sample")
-        assert isinstance(config.game, GameConfig)
-        assert isinstance(config.mcts, MCTSConfigBase)
+    """Main entry point configs (train.yaml, tournament.yaml)."""
 
     def test_train_yaml(self) -> None:
         """Main train.yaml composes into valid TrainConfig."""
