@@ -33,7 +33,7 @@ MATURIN_PEP517_ARGS="--features=cuda,tensorrt" uv sync --extra dev --extra train
 
 # Testing
 uv run pytest                        # All tests with coverage
-uv run pytest tests/mcts/test_node.py  # Specific file
+uv run pytest tests/config/test_game.py  # Specific file
 uv run pytest --no-cov               # Skip coverage
 
 # Code quality
@@ -47,18 +47,20 @@ uv run pre-commit run --all-files    # All hooks
 
 ```
 alpharat/
-├── mcts/           # Core MCTS: nodes, tree, search, value backup
-├── data/           # Data pipeline: sampling, recording, sharding
+├── mcts/           # MCTS: Rust backend config, Searcher protocol, SearchResult
+├── config/         # Configuration: Hydra loading, game config, checkpoint utils
+├── data/           # Data pipeline: recording, sharding, maze arrays
 ├── nn/             # Neural network: observation builders, targets, models
-├── ai/             # Agents: MCTS, random, greedy
+├── ai/             # Agents: searcher, random, greedy, config dispatch
 ├── eval/           # Evaluation: game execution, tournaments
 └── experiments/    # Experiment management: ExperimentManager, manifest
 
 crates/
 ├── alpharat-mcts/          # Rust MCTS: Backend trait, tree, search
 ├── alpharat-sampling/      # Self-play pipeline: ONNX/TRT backends, encoder, mux, NPZ writer
-└── alpharat-mcts-python/   # PyO3 bindings (cdylib), alpharat_sampling Python package
-scripts/            # Entry points: sample.py, rust_sample.py, train.py, iterate.py, benchmark.py, manifest.py
+├── alpharat-mcts-python/   # PyO3 bindings (cdylib), alpharat_sampling Python package
+└── alpharat-bot/           # Standalone PyRat bot (pyrat-sdk, ONNX inference)
+scripts/            # Entry points: rust_sample.py, train.py, iterate.py, benchmark.py, export_onnx.py
 configs/            # YAML config templates for sampling, training, evaluation
 tests/              # Mirrors alpharat/ structure
 experiments/        # Data folder (NOT in git): batches, shards, runs, benchmarks
@@ -68,12 +70,9 @@ experiments/        # Data folder (NOT in git): batches, shards, runs, benchmark
 
 | File | Purpose |
 |------|---------|
-| `node.py` | `MCTSNode` — outcome-indexed storage for O(1) backup |
-| `tree.py` | `MCTSTree` — efficient navigation via `make_move/unmake_move` |
-| `decoupled_puct.py` | `DecoupledPUCTSearch` — each player picks via PUCT formula, returns visit-proportional policy |
-| `reduction.py` | Boundary translation between 5-action and outcome-indexed space |
-| `numba_ops.py` | JIT-compiled hot paths: backup, PUCT scores, marginal Q |
-| `config.py` | `MCTSConfig` — discriminated union of `PythonMCTSConfig \| RustMCTSConfig`, each with `build_searcher()` and `build_agent()` |
+| `config.py` | `MCTSConfigBase`, `RustMCTSConfig` with `build_searcher()` / `build_agent()` |
+| `searcher.py` | `Searcher` protocol, `RustSearcher` wrapping the Rust MCTS binding |
+| `result.py` | `SearchResult` — policies, values, visit counts, priors (all 5-action arrays) |
 
 ### alpharat/data/
 
@@ -81,11 +80,11 @@ experiments/        # Data folder (NOT in git): batches, shards, runs, benchmark
 |------|---------|
 | `types.py` | `PositionData`, `GameData` — data structures for recorded games |
 | `recorder.py` | `GameRecorder` — saves games as .npz during self-play |
-| `sampling.py` | `run_sampling()` — multi-worker Python self-play with MCTS agents |
 | `rust_sampling.py` | `run_rust_sampling()` — Rust self-play pipeline wrapper (ONNX auto-export, progress, ExperimentManager) |
 | `batch.py` | Batch organization and metadata |
 | `sharding.py` | `prepare_training_set()` — loads batches, shuffles globally, writes shards |
 | `loader.py` | `load_game_data()` — reconstruct GameData from .npz |
+| `maze.py` | `build_maze_array()` — dense adjacency matrix from PyRat game walls/mud |
 
 ### alpharat/nn/
 
@@ -125,15 +124,27 @@ Each architecture folder contains `config.py` (ModelConfig, OptimConfig) and `lo
 
 **Builders (`builders/`):** `FlatObservationBuilder` — 1D encoding, used by all architectures
 
+### alpharat/config/
+
+| File | Purpose |
+|------|---------|
+| `base.py` | `StrictBaseModel` — Pydantic base with `extra='forbid'` for typo detection |
+| `game.py` | `GameConfig` — maze/positions/cheese axes, builds pyrat-engine `GameConfig` |
+| `checkpoint.py` | `load_model_from_checkpoint()` — auto-dispatch via `ModelConfig` discriminated union |
+| `display.py` | `format_config_summary()` — readable multi-line config display |
+| `loader.py` | `load_config()` — Hydra-based config loading with Pydantic validation |
+
 ### alpharat/ai/
 
 | File | Purpose |
 |------|---------|
 | `base.py` | `Agent` ABC — `get_move(game, player) -> int` |
-| `mcts_agent.py` | `MCTSAgent` — Python MCTS search, samples from visit-proportional policy |
-| `rust_mcts_agent.py` | `RustMCTSAgent` — Rust MCTS backend, same interface as `MCTSAgent` |
+| `config.py` | `AgentConfig` — discriminated union: random, greedy, nn, mcts variants |
+| `searcher_agent.py` | `SearcherAgent` — delegates to any `Searcher` for move selection |
 | `random_agent.py` | `RandomAgent` — baseline |
 | `greedy_agent.py` | `GreedyAgent` — moves toward closest cheese |
+| `predict_batch.py` | `make_batched_predict_fn()` — adapts NN checkpoint into Rust MCTS predict callback |
+| `utils.py` | `select_action_from_strategy()` — temperature-controlled action sampling |
 
 ### alpharat/eval/
 
@@ -241,38 +252,33 @@ p1_effective = [4, 1, 2, 3, 4]  # UP(0) blocked → STAY(4)
 p1_outcomes = [1, 2, 3, 4]      # 4 unique outcomes (action 0 collapsed into 4)
 ```
 
-**2. Reduced Storage (`node.py`)**
+**2. Reduced Storage (`crates/alpharat-mcts/src/node.rs: HalfNode`)**
 
-Nodes store statistics in outcome-indexed space:
-- `prior_p1_reduced[n1]`, `prior_p2_reduced[n2]` — priors over unique outcomes
-- `_v1`, `_v2` — scalar value estimates (running averages)
-- `_visits[n1, n2]` — visit counts per action pair
-- Children keyed by outcome index pairs `(i, j)`, not action pairs
+Each player's side of a node is a `HalfNode` storing statistics in outcome-indexed space:
+- `prior[5]` — reduced priors over unique outcomes
+- `edges[5]` — `HalfEdge` per outcome (Q value + visit count)
+- `outcomes[5]` — maps outcome index → canonical action
+- `action_to_idx[5]` — maps raw action → outcome index
+- `n_outcomes` — count of unique outcomes (≤5)
 
-```python
-# With 4 unique outcomes for P1 and 5 for P2, visit matrix is [4, 5] not [5, 5]
+```rust
+// With 4 unique outcomes for P1, only 4 HalfEdges track stats (not 5)
 ```
 
-**3. O(1) Backup (`numba_ops.py:backup_node`)**
+**3. O(1) Backup (`HalfEdge::update()`)**
 
-Backup directly indexes the reduced matrix — no need to update multiple equivalent pairs:
+Each `HalfEdge` maintains a Welford running average. Backup indexes directly via the outcome index:
 
-```python
-idx1 = node._p1_action_to_idx[action_p1]  # Action → outcome index
-idx2 = node._p2_action_to_idx[action_p2]
-# Single update at [idx1, idx2]
+```rust
+// HalfEdge::update(): q ← q + (value - q) / visits
+// Single update per outcome — no redundant equivalent-action updates
 ```
 
-**4. Boundary Translation (`reduction.py`)**
+**4. Boundary Translation (`HalfNode::new()` and `expand_visits()`)**
 
 The algorithm operates in outcome space. Boundaries handle translation:
-- **Input**: NN predictions `[5]`, `[5]` → reduced `[n1]`, `[n2]`
-- **Output**: Visit-proportional strategies `[n1]`, `[n2]` → expanded `[5]`, `[5]`
-
-```python
-# reduce_prior(): sums probabilities of equivalent actions
-# expand_prior(): copies outcome probs to canonical actions only (blocked → 0)
-```
+- **Input**: `HalfNode::new(prior_5, effective)` — sums probabilities of actions sharing the same outcome
+- **Output**: `expand_visits()` — maps outcome visit counts back to 5-action space (blocked actions get 0)
 
 ### Flow Through Training
 
@@ -300,7 +306,7 @@ This isn't hard-masked; it's learned behavior. The NN must infer from the observ
 
 ### At Inference (Without NN)
 
-When `predict_fn` is None, MCTS uses "smart uniform" priors (`tree.py:_smart_uniform_prior`):
+When no NN is provided, the Rust MCTS uses `SmartUniformBackend` (`crates/alpharat-mcts/src/backend.rs`):
 
 ```python
 # Only assign probability to unique effective actions
@@ -332,7 +338,7 @@ Nodes don't store full game states. The tree owns one PyRat simulator and naviga
 
 ### Decoupled PUCT Selection
 
-The search uses decoupled PUCT (`decoupled_puct.py`): each player selects actions independently via the PUCT formula, maximizing Q + exploration bonus. The final policy is visit-proportional (actions selected proportional to visit counts).
+The search uses decoupled PUCT (`crates/alpharat-mcts/src/search.rs`): each player selects actions independently via the PUCT formula, maximizing Q + exploration bonus. The final policy is visit-proportional (actions selected proportional to visit counts).
 
 This is theoretically justified because PyRat is approximately constant-sum. In constant-sum games, all Nash equilibria are interchangeable — any combination of equilibrium strategies is also an equilibrium. This means independent per-player optimization (decoupled PUCT) converges to the same solution as joint optimization, without the cost of computing full Nash equilibria.
 
@@ -356,10 +362,10 @@ from typing import Any
 import numpy as np
 
 # Arrays - no shape annotations needed
-def reduce_prior(prior: np.ndarray, effective: bytes) -> np.ndarray: ...
+def build_maze_array(game: Any, width: int, height: int) -> np.ndarray: ...
 
 # Unions with |
-parent: MCTSNode | None = None
+checkpoint: str | None = None
 
 # Any for external types
 game_state: Any
@@ -372,7 +378,7 @@ Line length 100. Enabled: pycodestyle, pyflakes, isort, pep8-naming, pyupgrade, 
 
 ## Dependencies
 
-**Core:** numpy, numba, pydantic, pyyaml, pyrat-engine (Rust-backed)
+**Core:** numpy, pydantic, pyyaml, hydra-core, omegaconf, pyrat-engine (Rust-backed)
 
 **Rust sampling:** alpharat-sampling (ONNX + multi-threaded self-play, exposed via `alpharat_sampling` Python package)
 
@@ -605,9 +611,9 @@ has_cheese = obs.cheese_matrix[x, y] == 1
 
 ## Development Tips
 
-1. **Equivalence is handled at boundaries** — the core algorithm works in outcome-indexed space. `reduction.py` handles translation to/from 5-action space. You rarely need to think about equivalence directly.
+1. **Equivalence is handled in Rust** — the Rust MCTS crate handles outcome-indexed storage internally (`HalfNode`). Python consumers see 5-action arrays via `SearchResult`. You rarely need to think about equivalence directly.
 
-2. **Node statistics are reduced** — visit matrix is `[n1, n2]` where n = unique outcomes. Use `node.action_visits` if you need the expanded `[5, 5]` view. Values `v1, v2` are scalar running averages.
+2. **SearchResult returns 5-action arrays** — policies, visit counts, and priors are all `[5]` arrays in canonical action space. Blocked actions have 0. No need to manually expand/reduce.
 
 3. **Don't copy game state** — use `make_move/unmake_move` pattern.
 
@@ -692,7 +698,8 @@ alpharat-benchmark configs/tournament.yaml
 **Scripts:**
 - `iterate.py` — full auto-iteration loop using Rust sampling (recommended)
 - `rust_sample.py` — standalone Rust self-play CLI (`alpharat-rust-sample`)
-- `sample.py` — legacy Python self-play CLI (`alpharat-sample`)
+- `export_onnx.py` — convert PyTorch checkpoint to ONNX (`alpharat-export-onnx`)
+- `prepare_shards.py` — convert batches to training shards (`alpharat-prepare-shards`)
 - `train_and_benchmark.py` — single iteration: trains then auto-benchmarks
 - `train.py` + `benchmark.py` — separate scripts for fine-grained control
 
@@ -734,7 +741,7 @@ When scaling to larger grids, maintain consistent cheese density (~20%, or 1 che
 
 ## Design Docs
 
-The `.mt/` folder contains project memory — design docs, experiment history, and reference material. See `.mt/CLAUDE.md` for structure. Key locations:
+The `.mt/` folder contains project memory — design docs and reference material. See `.mt/CLAUDE.md` for structure. Key locations:
 - `.mt/briefs/` — focused design docs for active/recent work (inference backends, CNN architecture, Rust MCTS)
-- `.mt/experiment-log.md`, `.mt/experiment-log-7x7.md` — chronological experiment records
-- `.mt/ideas.md` — unstructured idea parking lot
+- `experiments/LOG*.md` — experiment logs split by topic (e.g. `LOG-7x7.md`, `LOG-scalar-mcts.md`)
+- `experiments/IDEAS.md` — unstructured idea parking lot
