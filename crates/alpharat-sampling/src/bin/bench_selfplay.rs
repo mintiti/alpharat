@@ -19,9 +19,7 @@ use alpharat_mcts::Backend;
 #[cfg(feature = "onnx")]
 use alpharat_sampling::{MuxBackend, MuxConfig};
 #[cfg(feature = "onnx")]
-use alpharat_sampling::FlatEncoder;
-#[cfg(feature = "onnx")]
-use alpharat_sampling::OnnxBackend;
+use alpharat_sampling::{ExecutionProvider, FlatEncoder, OnnxBackend};
 
 fn make_games(n: usize, width: u8, height: u8, cheese: u16, max_turns: u16) -> Vec<GameState> {
     (0..n)
@@ -132,22 +130,8 @@ fn run_bench_uniform(
 #[cfg(feature = "onnx")]
 fn make_onnx_backend(model_path: &str, width: u8, height: u8) -> OnnxBackend<FlatEncoder> {
     let encoder = FlatEncoder::new(width, height);
-
-    #[cfg(feature = "onnx-coreml")]
-    let onnx_backend = OnnxBackend::with_coreml(model_path, encoder)
-        .expect("failed to create CoreML ONNX backend");
-    #[cfg(all(feature = "onnx-cuda", not(feature = "onnx-coreml")))]
-    let onnx_backend = OnnxBackend::with_cuda(model_path, encoder)
-        .expect("failed to create CUDA ONNX backend");
-    #[cfg(all(
-        feature = "onnx",
-        not(feature = "onnx-coreml"),
-        not(feature = "onnx-cuda")
-    ))]
-    let onnx_backend = OnnxBackend::new(model_path, encoder)
-        .expect("failed to create CPU ONNX backend");
-
-    onnx_backend
+    OnnxBackend::with_provider(model_path, encoder, ExecutionProvider::auto())
+        .expect("failed to create ONNX backend")
 }
 
 #[cfg(feature = "onnx")]

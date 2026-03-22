@@ -5,7 +5,7 @@
 #[cfg(feature = "onnx")]
 fn main() {
     use alpharat_mcts::Backend;
-    use alpharat_sampling::{FlatEncoder, OnnxBackend};
+    use alpharat_sampling::{ExecutionProvider, FlatEncoder, OnnxBackend};
     use pyrat::{GameBuilder, GameState, MazeParams};
     use std::time::Instant;
 
@@ -39,8 +39,9 @@ fn main() {
         let batch = &game_refs[..batch_size];
 
         // CPU backend
-        let cpu_backend = OnnxBackend::new(model_path, FlatEncoder::new(7, 7))
-            .expect("failed to create CPU ONNX backend");
+        let cpu_backend =
+            OnnxBackend::with_provider(model_path, FlatEncoder::new(7, 7), ExecutionProvider::Cpu)
+                .expect("failed to create CPU ONNX backend");
         // Warmup
         for _ in 0..5 { cpu_backend.evaluate_batch(batch).unwrap(); }
         let start = Instant::now();
@@ -51,8 +52,12 @@ fn main() {
         // CoreML backend
         #[cfg(feature = "onnx-coreml")]
         {
-            let coreml_backend = OnnxBackend::with_coreml(model_path, FlatEncoder::new(7, 7))
-                .expect("failed to create CoreML ONNX backend");
+            let coreml_backend = OnnxBackend::with_provider(
+                model_path,
+                FlatEncoder::new(7, 7),
+                ExecutionProvider::CoreMl,
+            )
+            .expect("failed to create CoreML ONNX backend");
             // Warmup
             for _ in 0..5 { coreml_backend.evaluate_batch(batch).unwrap(); }
             let start = Instant::now();

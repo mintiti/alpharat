@@ -17,6 +17,18 @@ mod inner {
         CoreMl,
     }
 
+    impl ExecutionProvider {
+        /// Best available provider based on compiled features.
+        pub fn auto() -> Self {
+            #[cfg(feature = "onnx-coreml")]
+            return Self::CoreMl;
+            #[cfg(all(feature = "onnx-cuda", not(feature = "onnx-coreml")))]
+            return Self::Cuda;
+            #[cfg(all(not(feature = "onnx-coreml"), not(feature = "onnx-cuda")))]
+            return Self::Cpu;
+        }
+    }
+
     impl TryFrom<&str> for ExecutionProvider {
         type Error = String;
 
@@ -26,14 +38,15 @@ mod inner {
                 #[cfg(feature = "onnx-cuda")]
                 "cuda" => Ok(Self::Cuda),
                 #[cfg(feature = "onnx-coreml")]
-                "coreml" => Ok(Self::CoreMl),
+                "coreml" | "mps" => Ok(Self::CoreMl),
+                "auto" => Ok(Self::auto()),
                 other => {
                     #[allow(unused_mut)]
-                    let mut supported = vec!["cpu"];
+                    let mut supported = vec!["cpu", "auto"];
                     #[cfg(feature = "onnx-cuda")]
                     supported.push("cuda");
                     #[cfg(feature = "onnx-coreml")]
-                    supported.push("coreml");
+                    supported.extend(["coreml", "mps"]);
                     Err(format!(
                         "unknown execution provider '{other}', supported: {supported:?}"
                     ))
@@ -58,7 +71,7 @@ mod inner {
 
     impl<E: ObservationEncoder> OnnxBackend<E> {
         /// Create an ONNX backend with CPU execution provider.
-        pub fn new(
+        fn new(
             model_path: impl AsRef<std::path::Path>,
             encoder: E,
         ) -> Result<Self, BackendError> {
@@ -73,7 +86,7 @@ mod inner {
 
         /// Create an ONNX backend with CoreML execution provider (macOS).
         #[cfg(feature = "onnx-coreml")]
-        pub fn with_coreml(
+        fn with_coreml(
             model_path: impl AsRef<std::path::Path>,
             encoder: E,
         ) -> Result<Self, BackendError> {
@@ -95,7 +108,7 @@ mod inner {
 
         /// Create an ONNX backend with CUDA execution provider (Linux).
         #[cfg(feature = "onnx-cuda")]
-        pub fn with_cuda(
+        fn with_cuda(
             model_path: impl AsRef<std::path::Path>,
             encoder: E,
         ) -> Result<Self, BackendError> {
