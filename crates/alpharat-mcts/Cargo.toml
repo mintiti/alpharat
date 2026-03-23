@@ -8,6 +8,7 @@ name = "alpharat_mcts"
 # rlib only (default) — the cdylib lives in alpharat-mcts-python
 
 [dependencies]
+alpharat-eval-core = { path = "../alpharat-eval-core" }
 pyrat = { package = "pyrat-rust", git = "https://github.com/mintiti/pyrat-rust", branch = "main", default-features = false }
 rand = { version = "0.8", features = ["small_rng"] }
 rand_distr = "0.4"

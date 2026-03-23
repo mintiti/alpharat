@@ -3,6 +3,7 @@ use std::sync::{mpsc, Mutex, OnceLock};
 use std::thread;
 
 use crate::{EvalResult, HalfNode, Node, NodePtr};
+pub use alpharat_eval_core::smart_uniform_prior;
 use pyrat::GameState;
 
 // ---------------------------------------------------------------------------
@@ -60,27 +61,6 @@ pub fn find_child(parent: NodePtr, i: u8, j: u8) -> Option<NodePtr> {
         cur = node.next_sibling();
     }
     None
-}
-
-/// Uniform prior over unique effective actions only.
-///
-/// Each unique outcome action gets `1/n_unique`; all others get 0.
-/// Same semantics as Python's `_smart_uniform_prior`.
-pub fn smart_uniform_prior(effective: &[u8; 5]) -> [f32; 5] {
-    let mut seen = [false; 5];
-    let mut count = 0u8;
-    for &e in effective {
-        if !seen[e as usize] {
-            seen[e as usize] = true;
-            count += 1;
-        }
-    }
-    let p = 1.0 / count as f32;
-    let mut prior = [0.0f32; 5];
-    for &e in effective {
-        prior[e as usize] = p;
-    }
-    prior
 }
 
 /// Score diffs after advancing game state.

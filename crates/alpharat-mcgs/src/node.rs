@@ -85,24 +85,6 @@ fn compute_outcomes(effective: [u8; 5]) -> ([u8; 5], u8, [u8; 5]) {
     (unique, n, action_to_idx)
 }
 
-/// Uniform prior over unique effective actions only.
-pub fn smart_uniform_prior(effective: &[u8; 5]) -> [f32; 5] {
-    let mut seen = [false; 5];
-    let mut count = 0u8;
-    for &e in effective {
-        if !seen[e as usize] {
-            seen[e as usize] = true;
-            count += 1;
-        }
-    }
-    let p = 1.0 / count as f32;
-    let mut prior = [0.0f32; 5];
-    for &e in effective {
-        prior[e as usize] = p;
-    }
-    prior
-}
-
 // ---------------------------------------------------------------------------
 // LowNode — shared per-position data (lc0 pattern)
 // ---------------------------------------------------------------------------

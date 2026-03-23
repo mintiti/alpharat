@@ -1,10 +1,9 @@
-pub mod node;
+mod backend;
 
 #[cfg(test)]
-pub(crate) mod test_util;
+mod test_util;
 
-pub use alpharat_eval_core::{
+pub use backend::{
     smart_uniform_prior, Backend, BackendError, ConstantValueBackend, EvalResult,
     SmartUniformBackend,
 };
-pub use node::{Edge, HalfEdge, LowNode};
