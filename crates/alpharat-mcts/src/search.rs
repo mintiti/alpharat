@@ -528,10 +528,14 @@ fn descend(
     let mut game = game.clone();
 
     loop {
-        let node = unsafe { current.as_ref() };
+        // Read phase: copy scalars, drop &Node before any mutation.
+        let (visits, terminal) = unsafe {
+            let node = current.as_ref();
+            (node.total_visits(), node.is_terminal())
+        };
 
         // Unvisited leaf — try to claim it.
-        if node.total_visits() == 0 && !node.is_terminal() {
+        if visits == 0 && !terminal {
             if !unsafe { current.as_mut() }.try_start_score_update() {
                 return DescentOutcome::Collision { path };
             }
@@ -551,7 +555,7 @@ fn descend(
         }
 
         // Revisited terminal — no claim needed.
-        if node.is_terminal() {
+        if terminal {
             return DescentOutcome::Terminal {
                 path,
                 leaf: current,
@@ -560,21 +564,24 @@ fn descend(
         }
 
         // Interior node: select actions via PUCT.
-        let is_root = current == root;
-        let (idx1, idx2) = select_actions(node, config, is_root, rng);
+        let (idx1, idx2) = unsafe {
+            let node = current.as_ref();
+            let is_root = current == root;
+            select_actions(node, config, is_root, rng)
+        };
 
-        // Add virtual loss on selected edges.
-        let node_mut = unsafe { current.as_mut() };
-        node_mut.p1.edge_mut(idx1 as usize).add_virtual_loss();
-        node_mut.p2.edge_mut(idx2 as usize).add_virtual_loss();
+        // Add virtual loss on selected edges (no &Node alive).
+        unsafe { current.as_mut() }.p1.edge_mut(idx1 as usize).add_virtual_loss();
+        unsafe { current.as_mut() }.p2.edge_mut(idx2 as usize).add_virtual_loss();
 
         // Record path step.
         path.push((current, idx1, idx2));
 
-        // Convert outcome indices to actions.
-        let node = unsafe { current.as_ref() };
-        let a1 = node.p1.outcome_action(idx1 as usize);
-        let a2 = node.p2.outcome_action(idx2 as usize);
+        // Convert outcome indices to actions (no &mut Node alive).
+        let (a1, a2) = unsafe {
+            let node = current.as_ref();
+            (node.p1.outcome_action(idx1 as usize), node.p2.outcome_action(idx2 as usize))
+        };
 
         // Advance game state.
         let scores_before = (game.player1_score(), game.player2_score());

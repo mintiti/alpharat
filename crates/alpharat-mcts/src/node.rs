@@ -22,7 +22,6 @@ pub struct NodePtr(NonNull<Node>);
 // Box<Node> is sent to the GC thread, but NodePtr itself is never
 // dereferenced across threads.
 unsafe impl Send for NodePtr {}
-unsafe impl Sync for NodePtr {}
 
 impl NodePtr {
     /// Create a NodePtr from a reference to a Node.
@@ -333,14 +332,10 @@ impl Node {
         self.edge_r2
     }
     pub fn first_child(&self) -> Option<NodePtr> {
-        self.first_child
-            .as_ref()
-            .map(|b| NodePtr(NonNull::from(b.as_ref())))
+        self.first_child.as_ref().map(|b| NodePtr::from_ref(b))
     }
     pub fn next_sibling(&self) -> Option<NodePtr> {
-        self.next_sibling
-            .as_ref()
-            .map(|b| NodePtr(NonNull::from(b.as_ref())))
+        self.next_sibling.as_ref().map(|b| NodePtr::from_ref(b))
     }
     pub fn parent(&self) -> Option<NodePtr> {
         self.parent

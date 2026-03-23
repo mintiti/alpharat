@@ -110,21 +110,24 @@ pub fn extend_node(
     outcome_p2: u8,
     game: &GameState,
 ) -> NodePtr {
-    let parent_ref = unsafe { parent.as_ref() };
-    debug_assert!(
-        (outcome_p1 as usize) < parent_ref.p1.n_outcomes(),
-        "extend_node: outcome_p1={outcome_p1} out of bounds (n_outcomes={})",
-        parent_ref.p1.n_outcomes()
-    );
-    debug_assert!(
-        (outcome_p2 as usize) < parent_ref.p2.n_outcomes(),
-        "extend_node: outcome_p2={outcome_p2} out of bounds (n_outcomes={})",
-        parent_ref.p2.n_outcomes()
-    );
-    debug_assert!(
-        find_child(parent, outcome_p1, outcome_p2).is_none(),
-        "extend_node: child already exists at outcome ({outcome_p1}, {outcome_p2})"
-    );
+    #[cfg(debug_assertions)]
+    unsafe {
+        let parent_ref = parent.as_ref();
+        debug_assert!(
+            (outcome_p1 as usize) < parent_ref.p1.n_outcomes(),
+            "extend_node: outcome_p1={outcome_p1} out of bounds (n_outcomes={})",
+            parent_ref.p1.n_outcomes()
+        );
+        debug_assert!(
+            (outcome_p2 as usize) < parent_ref.p2.n_outcomes(),
+            "extend_node: outcome_p2={outcome_p2} out of bounds (n_outcomes={})",
+            parent_ref.p2.n_outcomes()
+        );
+        debug_assert!(
+            find_child(parent, outcome_p1, outcome_p2).is_none(),
+            "extend_node: child already exists at outcome ({outcome_p1}, {outcome_p2})"
+        );
+    }
 
     let p1_shell = HalfNode::new_shell(game.effective_actions_p1());
     let p2_shell = HalfNode::new_shell(game.effective_actions_p2());
@@ -563,6 +566,34 @@ mod tests {
 
         assert!(!tree.advance_root(0, 0));
         assert_eq!(tree.root(), root);
+    }
+
+    #[test]
+    fn advance_root_non_first_child() {
+        let cheese = [Coordinates::new(1, 1)];
+        let mut game =
+            test_util::open_5x5_game(Coordinates::new(2, 2), Coordinates::new(2, 2), &cheese);
+        let mut tree = MCTSTree::new(&game);
+
+        let i1 = tree.root_node().p1.action_to_outcome_idx(0);
+        let j1 = tree.root_node().p2.action_to_outcome_idx(1);
+        let i2 = tree.root_node().p1.action_to_outcome_idx(2);
+        let j2 = tree.root_node().p2.action_to_outcome_idx(3);
+
+        // Create c1 at (UP, RIGHT).
+        let undo = game.make_move(pyrat::Direction::Up, pyrat::Direction::Right);
+        let c1_ptr = extend_node(tree.root(), i1, j1, &game);
+        game.unmake_move(undo);
+
+        // Create c2 at (DOWN, LEFT) — prepend makes c2 first_child.
+        let undo = game.make_move(pyrat::Direction::Down, pyrat::Direction::Left);
+        let _c2_ptr = extend_node(tree.root(), i2, j2, &game);
+        game.unmake_move(undo);
+
+        // advance_root with c1's actions — must walk past c2 to find c1.
+        assert!(tree.advance_root(0, 1));
+        assert_eq!(tree.root(), c1_ptr);
+        assert!(tree.root_node().parent().is_none());
     }
 
     // ---- extend_node ----
