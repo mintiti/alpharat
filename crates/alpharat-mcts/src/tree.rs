@@ -1,8 +1,47 @@
-use std::sync::mpsc;
-use std::thread::{self, JoinHandle};
+use std::mem::ManuallyDrop;
+use std::sync::{mpsc, Mutex, OnceLock};
+use std::thread;
 
 use crate::{EvalResult, HalfNode, Node, NodePtr};
 use pyrat::GameState;
+
+// ---------------------------------------------------------------------------
+// Global NodeGc — process-wide async subtree deallocation
+// ---------------------------------------------------------------------------
+
+static NODE_GC: OnceLock<NodeGc> = OnceLock::new();
+
+struct NodeGc {
+    sender: Mutex<mpsc::Sender<Box<Node>>>,
+}
+
+impl NodeGc {
+    fn init() -> Self {
+        let (sender, receiver) = mpsc::channel();
+        thread::Builder::new()
+            .name("alpharat-node-gc".into())
+            .spawn(move || {
+                while let Ok(subtree) = receiver.recv() {
+                    drop(subtree);
+                }
+            })
+            .expect("failed to spawn node-gc thread");
+        Self {
+            sender: Mutex::new(sender),
+        }
+    }
+
+    fn send(&self, node: Box<Node>) {
+        if let Ok(sender) = self.sender.lock() {
+            let _ = sender.send(node);
+        }
+        // Mutex poisoned or send failed: node drops locally (safe fallback)
+    }
+}
+
+fn node_gc() -> &'static NodeGc {
+    NODE_GC.get_or_init(NodeGc::init)
+}
 
 // ---------------------------------------------------------------------------
 // Utilities
@@ -159,52 +198,6 @@ pub fn find_or_extend_child(
 }
 
 // ---------------------------------------------------------------------------
-// NodeGarbageCollector — async subtree deallocation
-// ---------------------------------------------------------------------------
-
-/// Background thread for dropping orphaned subtrees after advance_root.
-///
-/// Per-tree (not global). The GC thread blocks on the channel, dropping
-/// received Box<Node> subtrees iteratively via Node's custom Drop.
-struct NodeGarbageCollector {
-    sender: Option<mpsc::Sender<Box<Node>>>,
-    handle: Option<JoinHandle<()>>,
-}
-
-impl NodeGarbageCollector {
-    fn new() -> Self {
-        let (sender, receiver) = mpsc::channel::<Box<Node>>();
-        let handle = thread::spawn(move || {
-            while let Ok(subtree) = receiver.recv() {
-                drop(subtree);
-            }
-        });
-        Self {
-            sender: Some(sender),
-            handle: Some(handle),
-        }
-    }
-
-    fn send(&self, subtree: Box<Node>) {
-        if let Some(ref sender) = self.sender {
-            // If send fails (GC thread exited), subtree drops locally.
-            let _ = sender.send(subtree);
-        }
-    }
-}
-
-impl Drop for NodeGarbageCollector {
-    fn drop(&mut self) {
-        // Close channel first so the GC thread can exit.
-        self.sender.take();
-        // Wait for remaining items to be processed.
-        if let Some(handle) = self.handle.take() {
-            let _ = handle.join();
-        }
-    }
-}
-
-// ---------------------------------------------------------------------------
 // MCTSTree
 // ---------------------------------------------------------------------------
 
@@ -212,11 +205,11 @@ impl Drop for NodeGarbageCollector {
 ///
 /// Owns the root via Box<Node>. Child nodes are owned via the linked-list
 /// structure (Box<Node> in first_child / next_sibling). Orphaned subtrees
-/// from advance_root are sent to the GC thread for async deallocation.
+/// from advance_root / reinit / drop are sent to the global GC thread for
+/// async deallocation.
 pub struct MCTSTree {
-    root_box: Box<Node>,
+    root_box: ManuallyDrop<Box<Node>>,
     root: NodePtr,
-    gc: NodeGarbageCollector,
 }
 
 impl MCTSTree {
@@ -225,11 +218,12 @@ impl MCTSTree {
     /// Root gets smart uniform priors and `value_scale = max(remaining_cheese, 1)`.
     /// Starts unevaluated (v1=v2=0, total_visits=0) — LC0 style.
     pub fn new(game: &GameState) -> Self {
+        // Ensure the global GC thread is running.
+        node_gc();
         let (root_box, root) = alloc_root(game);
         Self {
-            root_box,
+            root_box: ManuallyDrop::new(root_box),
             root,
-            gc: NodeGarbageCollector::new(),
         }
     }
 
@@ -255,9 +249,9 @@ impl MCTSTree {
         let j = root_ref.p2.action_to_outcome_idx(p2_action);
 
         if let Some(child_box) = self.detach_child(i, j) {
-            let old_root = std::mem::replace(&mut self.root_box, child_box);
+            let old_root = std::mem::replace(&mut *self.root_box, child_box);
             self.root = NodePtr::from_ref(&self.root_box);
-            self.gc.send(old_root);
+            node_gc().send(old_root);
             true
         } else {
             false
@@ -267,9 +261,9 @@ impl MCTSTree {
     /// Clear the tree and create a fresh root from `game`.
     pub fn reinit(&mut self, game: &GameState) {
         let (new_root_box, new_root) = alloc_root(game);
-        let old_root = std::mem::replace(&mut self.root_box, new_root_box);
+        let old_root = std::mem::replace(&mut *self.root_box, new_root_box);
         self.root = new_root;
-        self.gc.send(old_root);
+        node_gc().send(old_root);
     }
 
     /// Detach the child matching outcome `(i, j)` from root's linked list.
@@ -305,6 +299,14 @@ impl MCTSTree {
         }
 
         None
+    }
+}
+
+impl Drop for MCTSTree {
+    fn drop(&mut self) {
+        // SAFETY: drop runs exactly once; root_box is not accessed after.
+        let root = unsafe { ManuallyDrop::take(&mut self.root_box) };
+        node_gc().send(root);
     }
 }
 
