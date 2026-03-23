@@ -22,9 +22,8 @@ pub fn extract_pvs(
     is_player1: bool,
     max_lines: usize,
 ) -> Vec<PvLine> {
-    let arena = tree.arena();
-    let root = tree.root();
-    let root_node = &arena[root];
+    let root_ptr = tree.root();
+    let root_node = tree.root_node();
 
     let (half, opponent_half) = if is_player1 {
         (&root_node.p1, &root_node.p2)
@@ -72,14 +71,14 @@ pub fn extract_pvs(
             };
 
             // Check edge reward on root's child for cheese collection.
-            let mut current = find_child(arena, root, p1_idx, p2_idx);
-            if let Some(child_idx) = current {
-                check_edge_reward(&arena[child_idx], is_player1, pos, &mut target);
+            let mut current = find_child(root_ptr, p1_idx, p2_idx);
+            if let Some(child_ptr) = current {
+                check_edge_reward(unsafe { child_ptr.as_ref() }, is_player1, pos, &mut target);
             }
 
             // Walk deeper into the tree.
-            while let Some(node_idx) = current {
-                let node = &arena[node_idx];
+            while let Some(node_ptr) = current {
+                let node = unsafe { node_ptr.as_ref() };
                 if node.is_terminal() || node.total_visits() == 0 {
                     break;
                 }
@@ -110,9 +109,9 @@ pub fn extract_pvs(
                     (opp_idx, subj_idx)
                 };
 
-                current = find_child(arena, node_idx, ci, cj);
-                if let Some(child_idx) = current {
-                    check_edge_reward(&arena[child_idx], is_player1, pos, &mut target);
+                current = find_child(node_ptr, ci, cj);
+                if let Some(child_ptr) = current {
+                    check_edge_reward(unsafe { child_ptr.as_ref() }, is_player1, pos, &mut target);
                 }
             }
 

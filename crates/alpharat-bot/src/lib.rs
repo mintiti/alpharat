@@ -126,7 +126,7 @@ impl MctsBot {
             {
                 let tree = self.tree.as_mut().expect("tree not initialized");
                 let sim = self.sim.as_ref().expect("sim not initialized");
-                let visits = tree.arena()[tree.root()].total_visits();
+                let visits = tree.root_node().total_visits();
                 if visits >= min_sims && ctx.should_stop() {
                     break;
                 }
@@ -151,7 +151,7 @@ impl MctsBot {
             let now = Instant::now();
             let (total, current_best, best_direction) = {
                 let tree = self.tree.as_ref().expect("tree not initialized");
-                let root_node = &tree.arena()[tree.root()];
+                let root_node = tree.root_node();
                 let half = if is_player1 {
                     &root_node.p1
                 } else {
@@ -183,7 +183,7 @@ impl MctsBot {
         let now = Instant::now();
         let total = {
             let tree = self.tree.as_ref().expect("tree not initialized");
-            tree.arena()[tree.root()].total_visits()
+            tree.root_node().total_visits()
         };
         let nps = compute_nps(total, nps_start, now);
         self.send_info(ctx, total, nps);
@@ -228,7 +228,7 @@ impl MctsBot {
     /// Extract the best move from the current tree.
     fn pick_move(&mut self) -> Direction {
         let tree = self.tree.as_ref().expect("tree not initialized");
-        let root_node = &tree.arena()[tree.root()];
+        let root_node = tree.root_node();
         let half = if self.is_player1 {
             &root_node.p1
         } else {
@@ -268,22 +268,29 @@ impl Bot for MctsBot {
     }
 
     fn think(&mut self, state: &GameState, ctx: &Context) -> Direction {
-        // Turn 0 with existing tree from preprocess: continue searching.
-        // Otherwise: fresh tree from current state.
-        if self.tree.is_none() || state.turn() > 0 {
-            let sim = state.to_sim();
-            self.tree = Some(MCTSTree::new(&sim));
-            self.sim = Some(sim);
+        // Always rebuild sim from authoritative server state.
+        let sim = state.to_sim();
+        self.sim = Some(sim);
+
+        if state.turn() == 0 {
+            // Turn 0: keep tree from preprocess, or create if preprocess didn't run.
+            if self.tree.is_none() {
+                self.tree = Some(MCTSTree::new(self.sim.as_ref().unwrap()));
+            }
+        } else if let Some(tree) = self.tree.as_mut() {
+            // Tree reuse: advance to child matching last turn's moves.
+            let p1 = state.player1_last_move() as u8;
+            let p2 = state.player2_last_move() as u8;
+            if !tree.advance_root(p1, p2) {
+                tree.reinit(self.sim.as_ref().unwrap());
+            }
+        } else {
+            // Defensive: no tree (shouldn't happen in normal flow).
+            self.tree = Some(MCTSTree::new(self.sim.as_ref().unwrap()));
         }
 
         self.search_loop(ctx, false);
-        let dir = self.pick_move();
-
-        // No tree reuse across turns for now.
-        self.tree = None;
-        self.sim = None;
-
-        dir
+        self.pick_move()
     }
 
     fn on_game_over(&mut self, _result: GameResult, _scores: (f32, f32)) {

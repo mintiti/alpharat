@@ -1,20 +1,51 @@
-use std::ops::{Index, IndexMut};
+use std::ptr::NonNull;
 
 // ---------------------------------------------------------------------------
-// NodeIndex — typed arena index
+// NodePtr — typed heap pointer (replaces NodeIndex)
 // ---------------------------------------------------------------------------
 
+/// Non-owning pointer to a heap-allocated Node.
+///
+/// Ownership lives in `Box<Node>` (via the tree's linked-list structure).
+/// NodePtr is a copyable handle for traversal and mutation during search.
+///
+/// # Safety
+///
+/// All dereferences are unsafe. Soundness relies on:
+/// - Single-threaded search (no data races)
+/// - Tree-structured ownership (no aliasing — each node is a distinct allocation)
+/// - Pointers only used while the owning Box is alive
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub struct NodeIndex(u32);
+pub struct NodePtr(NonNull<Node>);
 
-impl NodeIndex {
-    #[cfg(test)]
-    pub(crate) fn from_raw(v: u32) -> Self {
-        Self(v)
+// SAFETY: NodePtr is only dereferenced within single-threaded search.
+// Box<Node> is sent to the GC thread, but NodePtr itself is never
+// dereferenced across threads.
+unsafe impl Send for NodePtr {}
+
+impl NodePtr {
+    /// Create a NodePtr from a reference to a Node.
+    ///
+    /// Typically used on a `&*box_node` or `box_node.as_ref()`.
+    /// The pointer is valid as long as the owning Box is alive.
+    pub fn from_ref(node: &Node) -> Self {
+        Self(NonNull::from(node))
     }
 
-    fn as_usize(self) -> usize {
-        self.0 as usize
+    /// # Safety
+    ///
+    /// The pointed-to Node must be alive and no mutable reference to it
+    /// may exist simultaneously.
+    pub unsafe fn as_ref<'a>(self) -> &'a Node {
+        self.0.as_ref()
+    }
+
+    /// # Safety
+    ///
+    /// The pointed-to Node must be alive and no other reference to it
+    /// (mutable or immutable) may exist simultaneously.
+    pub unsafe fn as_mut<'a>(mut self) -> &'a mut Node {
+        self.0.as_mut()
     }
 }
 
@@ -217,8 +248,7 @@ fn compute_outcomes(effective: [u8; 5]) -> ([u8; 5], u8, [u8; 5]) {
     for action in 0..5 {
         let outcome = effective[action];
         // Binary search in the sorted unique array.
-        let idx = unique[..n as usize]
-            .partition_point(|&v| v < outcome);
+        let idx = unique[..n as usize].partition_point(|&v| v < outcome);
         debug_assert!(idx < n as usize && unique[idx] == outcome);
         action_to_idx[action] = idx as u8;
     }
@@ -247,12 +277,12 @@ pub struct Node {
     edge_r1: f32,
     edge_r2: f32,
 
-    // Linked-list children
-    first_child: Option<NodeIndex>,
-    next_sibling: Option<NodeIndex>,
+    // Linked-list children (owned)
+    pub(crate) first_child: Option<Box<Node>>,
+    pub(crate) next_sibling: Option<Box<Node>>,
 
-    // Parent link
-    parent: Option<NodeIndex>,
+    // Parent link (non-owning)
+    pub(crate) parent: Option<NodePtr>,
     parent_outcome: (u8, u8),
 
     is_terminal: bool,
@@ -301,13 +331,13 @@ impl Node {
     pub fn edge_r2(&self) -> f32 {
         self.edge_r2
     }
-    pub fn first_child(&self) -> Option<NodeIndex> {
-        self.first_child
+    pub fn first_child(&self) -> Option<NodePtr> {
+        self.first_child.as_ref().map(|b| NodePtr::from_ref(b))
     }
-    pub fn next_sibling(&self) -> Option<NodeIndex> {
-        self.next_sibling
+    pub fn next_sibling(&self) -> Option<NodePtr> {
+        self.next_sibling.as_ref().map(|b| NodePtr::from_ref(b))
     }
-    pub fn parent(&self) -> Option<NodeIndex> {
+    pub fn parent(&self) -> Option<NodePtr> {
         self.parent
     }
     pub fn parent_outcome(&self) -> (u8, u8) {
@@ -351,16 +381,8 @@ impl Node {
         self.edge_r2 = r2;
     }
 
-    pub fn set_first_child(&mut self, idx: Option<NodeIndex>) {
-        self.first_child = idx;
-    }
-
-    pub fn set_next_sibling(&mut self, idx: Option<NodeIndex>) {
-        self.next_sibling = idx;
-    }
-
-    pub fn set_parent(&mut self, idx: Option<NodeIndex>, outcome: (u8, u8)) {
-        self.parent = idx;
+    pub fn set_parent(&mut self, ptr: Option<NodePtr>, outcome: (u8, u8)) {
+        self.parent = ptr;
         self.parent_outcome = outcome;
     }
 
@@ -376,67 +398,28 @@ impl Node {
 }
 
 // ---------------------------------------------------------------------------
-// NodeArena — arena allocator
+// Drop — iterative to avoid stack overflow on deep trees
 // ---------------------------------------------------------------------------
 
-pub struct NodeArena {
-    nodes: Vec<Node>,
-}
-
-impl NodeArena {
-    pub fn new() -> Self {
-        Self { nodes: Vec::new() }
-    }
-
-    pub fn with_capacity(cap: usize) -> Self {
-        Self {
-            nodes: Vec::with_capacity(cap),
+impl Drop for Node {
+    fn drop(&mut self) {
+        let mut stack = Vec::new();
+        if let Some(c) = self.first_child.take() {
+            stack.push(c);
         }
-    }
-
-    pub fn alloc(&mut self, node: Node) -> NodeIndex {
-        let idx = NodeIndex(self.nodes.len() as u32);
-        self.nodes.push(node);
-        idx
-    }
-
-    pub fn get(&self, idx: NodeIndex) -> &Node {
-        &self.nodes[idx.as_usize()]
-    }
-
-    pub fn get_mut(&mut self, idx: NodeIndex) -> &mut Node {
-        &mut self.nodes[idx.as_usize()]
-    }
-
-    pub fn clear(&mut self) {
-        self.nodes.clear();
-    }
-
-    pub fn len(&self) -> usize {
-        self.nodes.len()
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.nodes.is_empty()
-    }
-}
-
-impl Default for NodeArena {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl Index<NodeIndex> for NodeArena {
-    type Output = Node;
-    fn index(&self, idx: NodeIndex) -> &Self::Output {
-        self.get(idx)
-    }
-}
-
-impl IndexMut<NodeIndex> for NodeArena {
-    fn index_mut(&mut self, idx: NodeIndex) -> &mut Self::Output {
-        self.get_mut(idx)
+        if let Some(s) = self.next_sibling.take() {
+            stack.push(s);
+        }
+        while let Some(mut node) = stack.pop() {
+            if let Some(c) = node.first_child.take() {
+                stack.push(c);
+            }
+            if let Some(s) = node.next_sibling.take() {
+                stack.push(s);
+            }
+            // node drops here with first_child=None, next_sibling=None
+            // so its Drop doesn't recurse
+        }
     }
 }
 
@@ -828,76 +811,42 @@ mod tests {
         }
     }
 
-    // ---- NodeArena ----
-
-    #[test]
-    fn arena_alloc_and_get() {
-        let mut arena = NodeArena::new();
-        assert!(arena.is_empty());
-
-        let h = HalfNode::new([0.2; 5], [0, 1, 2, 3, 4]);
-        let idx0 = arena.alloc(Node::new(h, h));
-        let idx1 = arena.alloc(Node::new(h, h));
-
-        // Distinguish nodes via update_value.
-        arena[idx0].update_value(1.0, 2.0);
-        arena[idx1].update_value(3.0, 4.0);
-
-        assert_eq!(arena.len(), 2);
-        assert!((arena[idx0].v1() - 1.0).abs() < 1e-6);
-        assert!((arena[idx1].v1() - 3.0).abs() < 1e-6);
-    }
-
-    #[test]
-    fn arena_index_mut() {
-        let mut arena = NodeArena::new();
-        let h = HalfNode::new([0.2; 5], [0, 1, 2, 3, 4]);
-        let idx = arena.alloc(Node::new(h, h));
-
-        arena[idx].update_value(5.0, 10.0);
-        assert!((arena[idx].v1() - 5.0).abs() < 1e-6);
-    }
-
-    #[test]
-    fn arena_with_capacity() {
-        let arena = NodeArena::with_capacity(1000);
-        assert!(arena.is_empty());
-        assert_eq!(arena.len(), 0);
-    }
-
     // ---- Linked list wiring ----
 
     #[test]
     fn linked_list_wiring() {
-        let mut arena = NodeArena::new();
         let h = HalfNode::new([0.2; 5], [0, 1, 2, 3, 4]);
 
-        let parent_idx = arena.alloc(Node::new(h, h));
-        let child0_idx = arena.alloc(Node::new(h, h));
-        let child1_idx = arena.alloc(Node::new(h, h));
+        // Create parent first so we can capture its pointer.
+        let mut parent = Box::new(Node::new(h, h));
+        let parent_ptr = NodePtr::from_ref(&parent);
 
-        // Give children distinct values (NN eval).
-        arena[child0_idx].update_value(1.0, 0.0);
-        arena[child1_idx].update_value(2.0, 0.0);
+        // Build children bottom-up: child1 first (it becomes the tail).
+        let mut child1 = Box::new(Node::new(h, h));
+        let child1_ptr = NodePtr::from_ref(&child1);
+        child1.update_value(2.0, 0.0);
+        child1.set_parent(Some(parent_ptr), (2, 3));
 
-        // Wire: parent → child0 → child1
-        arena[parent_idx].set_first_child(Some(child0_idx));
-        arena[child0_idx].set_next_sibling(Some(child1_idx));
-        arena[child0_idx].set_parent(Some(parent_idx), (0, 1));
-        arena[child1_idx].set_parent(Some(parent_idx), (2, 3));
+        let mut child0 = Box::new(Node::new(h, h));
+        let child0_ptr = NodePtr::from_ref(&child0);
+        child0.update_value(1.0, 0.0);
+        child0.set_parent(Some(parent_ptr), (0, 1));
+        child0.next_sibling = Some(child1);
+
+        parent.first_child = Some(child0);
 
         // Walk the list.
-        let first = arena[parent_idx].first_child().unwrap();
-        assert_eq!(first, child0_idx);
-        assert!((arena[first].v1() - 1.0).abs() < 1e-6);
-        assert_eq!(arena[first].parent_outcome(), (0, 1));
+        let first = parent.first_child().unwrap();
+        assert_eq!(first, child0_ptr);
+        assert!((unsafe { first.as_ref() }.v1() - 1.0).abs() < 1e-6);
+        assert_eq!(unsafe { first.as_ref() }.parent_outcome(), (0, 1));
 
-        let second = arena[first].next_sibling().unwrap();
-        assert_eq!(second, child1_idx);
-        assert!((arena[second].v1() - 2.0).abs() < 1e-6);
-        assert_eq!(arena[second].parent_outcome(), (2, 3));
+        let second = unsafe { first.as_ref() }.next_sibling().unwrap();
+        assert_eq!(second, child1_ptr);
+        assert!((unsafe { second.as_ref() }.v1() - 2.0).abs() < 1e-6);
+        assert_eq!(unsafe { second.as_ref() }.parent_outcome(), (2, 3));
 
-        assert!(arena[second].next_sibling().is_none());
+        assert!(unsafe { second.as_ref() }.next_sibling().is_none());
     }
 
     // ---- Virtual loss: Node ----
@@ -999,5 +948,22 @@ mod tests {
     fn half_edge_revert_at_zero_panics() {
         let mut edge = HalfEdge::default();
         edge.revert_virtual_loss();
+    }
+
+    // ---- Custom Drop: iterative ----
+
+    #[test]
+    fn drop_deep_tree_no_stack_overflow() {
+        // Build a chain of 10_000 nodes as first_child links.
+        // Without iterative drop, this would overflow the call stack.
+        let h = HalfNode::new([0.2; 5], [0, 1, 2, 3, 4]);
+        let mut chain: Option<Box<Node>> = None;
+        for _ in 0..10_000 {
+            let mut node = Box::new(Node::new(h, h));
+            node.first_child = chain.take();
+            chain = Some(node);
+        }
+        // Dropping `chain` here exercises the iterative Drop.
+        drop(chain);
     }
 }
