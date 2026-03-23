@@ -1,8 +1,5 @@
 pub mod node;
 
-#[cfg(test)]
-pub(crate) mod test_util;
-
 pub use alpharat_eval_core::{
     smart_uniform_prior, Backend, BackendError, ConstantValueBackend, EvalResult,
     SmartUniformBackend,

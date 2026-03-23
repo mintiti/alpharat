@@ -30,8 +30,7 @@ pub fn smart_uniform_prior(effective: &[u8; 5]) -> [f32; 5] {
 /// Returns `(outcomes, n_outcomes, action_to_idx)` where:
 /// - `outcomes[0..n]` are the sorted unique outcome actions
 /// - `action_to_idx[a]` maps raw action `a` to its index in `outcomes`
-#[cfg(test)]
-fn compute_outcomes(effective: [u8; 5]) -> ([u8; 5], u8, [u8; 5]) {
+pub fn compute_outcomes(effective: [u8; 5]) -> ([u8; 5], u8, [u8; 5]) {
     let mut unique = [0u8; 5];
     let mut n = 0u8;
 

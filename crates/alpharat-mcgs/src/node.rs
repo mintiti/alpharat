@@ -1,3 +1,4 @@
+use alpharat_eval_core::compute_outcomes;
 use std::sync::atomic::{AtomicU16, Ordering};
 use std::sync::Arc;
 
@@ -47,42 +48,6 @@ impl HalfEdge {
         );
         self.n_in_flight -= 1;
     }
-}
-
-// ---------------------------------------------------------------------------
-// compute_outcomes — effective actions -> deduplicated outcome mapping
-// ---------------------------------------------------------------------------
-//
-// Copied from alpharat-mcts. Given effective[a] = outcome action for action a,
-// produces sorted unique outcomes and the reverse mapping.
-
-fn compute_outcomes(effective: [u8; 5]) -> ([u8; 5], u8, [u8; 5]) {
-    let mut unique = [0u8; 5];
-    let mut n = 0u8;
-
-    for &val in &effective {
-        let pos = unique[..n as usize].partition_point(|&v| v < val);
-        if pos < n as usize && unique[pos] == val {
-            continue;
-        }
-        let mut i = n as usize;
-        while i > pos {
-            unique[i] = unique[i - 1];
-            i -= 1;
-        }
-        unique[pos] = val;
-        n += 1;
-    }
-
-    let mut action_to_idx = [0u8; 5];
-    for action in 0..5 {
-        let outcome = effective[action];
-        let idx = unique[..n as usize].partition_point(|&v| v < outcome);
-        debug_assert!(idx < n as usize && unique[idx] == outcome);
-        action_to_idx[action] = idx as u8;
-    }
-
-    (unique, n, action_to_idx)
 }
 
 // ---------------------------------------------------------------------------
@@ -591,50 +556,6 @@ impl Drop for Edge {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    // ---- compute_outcomes ----
-
-    #[test]
-    fn outcomes_open_position() {
-        let effective = [0, 1, 2, 3, 4];
-        let (outcomes, n, a2i) = compute_outcomes(effective);
-        assert_eq!(n, 5);
-        assert_eq!(&outcomes[..5], &[0, 1, 2, 3, 4]);
-        for a in 0..5 {
-            assert_eq!(a2i[a], a as u8);
-        }
-    }
-
-    #[test]
-    fn outcomes_one_wall() {
-        let effective = [4, 1, 2, 3, 4];
-        let (outcomes, n, a2i) = compute_outcomes(effective);
-        assert_eq!(n, 4);
-        assert_eq!(&outcomes[..4], &[1, 2, 3, 4]);
-        assert_eq!(a2i[0], a2i[4]);
-        assert_eq!(outcomes[a2i[0] as usize], 4);
-    }
-
-    #[test]
-    fn outcomes_corner() {
-        let effective = [4, 1, 2, 4, 4];
-        let (outcomes, n, a2i) = compute_outcomes(effective);
-        assert_eq!(n, 3);
-        assert_eq!(&outcomes[..3], &[1, 2, 4]);
-        assert_eq!(a2i[0], a2i[3]);
-        assert_eq!(a2i[0], a2i[4]);
-    }
-
-    #[test]
-    fn outcomes_mud() {
-        let effective = [4, 4, 4, 4, 4];
-        let (outcomes, n, a2i) = compute_outcomes(effective);
-        assert_eq!(n, 1);
-        assert_eq!(outcomes[0], 4);
-        for a in 0..5 {
-            assert_eq!(a2i[a], 0);
-        }
-    }
 
     // ---- LowNode: creation and outcome mapping ----
 
