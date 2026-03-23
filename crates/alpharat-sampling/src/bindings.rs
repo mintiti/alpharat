@@ -16,7 +16,7 @@ use crate::backends::mux::{MuxBackend, MuxConfig};
 #[cfg(any(feature = "onnx", feature = "tensorrt"))]
 use crate::FlatEncoder;
 #[cfg(feature = "onnx")]
-use crate::OnnxBackend;
+use crate::{ExecutionProvider, OnnxBackend};
 #[cfg(feature = "tensorrt")]
 use crate::{TensorrtBackend, TensorrtConfig};
 
@@ -248,33 +248,10 @@ fn create_onnx_backend(
     num_threads: u32,
 ) -> Result<Box<dyn Backend>, SelfPlayError> {
     let encoder = FlatEncoder::new(width, height);
-    let onnx = match device {
-        "cpu" => OnnxBackend::new(model_path, encoder),
-        #[cfg(feature = "onnx-coreml")]
-        "coreml" | "mps" => OnnxBackend::with_coreml(model_path, encoder),
-        #[cfg(feature = "onnx-cuda")]
-        "cuda" => OnnxBackend::with_cuda(model_path, encoder),
-        "auto" => {
-            #[cfg(feature = "onnx-coreml")]
-            {
-                OnnxBackend::with_coreml(model_path, encoder)
-            }
-            #[cfg(all(feature = "onnx-cuda", not(feature = "onnx-coreml")))]
-            {
-                OnnxBackend::with_cuda(model_path, encoder)
-            }
-            #[cfg(all(not(feature = "onnx-coreml"), not(feature = "onnx-cuda")))]
-            {
-                OnnxBackend::new(model_path, encoder)
-            }
-        }
-        other => {
-            return Err(SelfPlayError::Backend(
-                alpharat_mcts::BackendError::msg(format!("unknown device: {other}")),
-            ))
-        }
-    }
-    .map_err(SelfPlayError::Backend)?;
+    let provider = ExecutionProvider::try_from(device)
+        .map_err(|e| SelfPlayError::Backend(alpharat_mcts::BackendError::msg(e)))?;
+    let onnx =
+        OnnxBackend::with_provider(model_path, encoder, provider).map_err(SelfPlayError::Backend)?;
     Ok(maybe_mux(onnx, max_batch_size, num_threads))
 }
 
