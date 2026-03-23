@@ -435,10 +435,12 @@ mod tests {
 
     #[test]
     fn outcomes_open_position() {
+        // No walls: every action maps to itself.
         let effective = [0, 1, 2, 3, 4];
         let (outcomes, n, a2i) = compute_outcomes(effective);
         assert_eq!(n, 5);
         assert_eq!(&outcomes[..5], &[0, 1, 2, 3, 4]);
+        // Identity mapping.
         for a in 0..5 {
             assert_eq!(a2i[a], a as u8);
         }
@@ -446,16 +448,20 @@ mod tests {
 
     #[test]
     fn outcomes_one_wall() {
+        // UP blocked → maps to STAY.
         let effective = [4, 1, 2, 3, 4];
         let (outcomes, n, a2i) = compute_outcomes(effective);
         assert_eq!(n, 4);
         assert_eq!(&outcomes[..4], &[1, 2, 3, 4]);
+        // action 0 and action 4 share the same outcome index.
         assert_eq!(a2i[0], a2i[4]);
+        // That index points to outcome 4 (STAY).
         assert_eq!(outcomes[a2i[0] as usize], 4);
     }
 
     #[test]
     fn outcomes_corner() {
+        // UP and LEFT blocked → both map to STAY.
         let effective = [4, 1, 2, 4, 4];
         let (outcomes, n, a2i) = compute_outcomes(effective);
         assert_eq!(n, 3);
@@ -466,6 +472,7 @@ mod tests {
 
     #[test]
     fn outcomes_mud() {
+        // All actions → STAY.
         let effective = [4, 4, 4, 4, 4];
         let (outcomes, n, a2i) = compute_outcomes(effective);
         assert_eq!(n, 1);
@@ -480,13 +487,15 @@ mod tests {
     #[test]
     fn prior_reduction_uniform_one_wall() {
         let prior_5 = [0.2; 5];
-        let effective = [4, 1, 2, 3, 4];
+        let effective = [4, 1, 2, 3, 4]; // UP blocked
         let half = HalfNode::new(prior_5, effective);
 
         assert_eq!(half.n_outcomes(), 4);
+        // STAY outcome should have merged prior: 0.2 (action 0) + 0.2 (action 4) = 0.4
         let stay_idx = half.action_to_outcome_idx(4);
         assert!((half.prior(stay_idx as usize) - 0.4).abs() < 1e-6);
 
+        // Total prior should sum to 1.0.
         let total: f32 = (0..half.n_outcomes()).map(|i| half.prior(i)).sum();
         assert!((total - 1.0).abs() < 1e-6);
     }
@@ -494,11 +503,12 @@ mod tests {
     #[test]
     fn prior_reduction_nonuniform() {
         let prior_5 = [0.1, 0.3, 0.2, 0.15, 0.25];
-        let effective = [4, 1, 2, 3, 4];
+        let effective = [4, 1, 2, 3, 4]; // UP blocked
         let half = HalfNode::new(prior_5, effective);
 
         assert_eq!(half.n_outcomes(), 4);
         let stay_idx = half.action_to_outcome_idx(4) as usize;
+        // action 0 (0.1) + action 4 (0.25) = 0.35
         assert!((half.prior(stay_idx) - 0.35).abs() < 1e-6);
 
         let total: f32 = (0..half.n_outcomes()).map(|i| half.prior(i)).sum();
@@ -520,15 +530,19 @@ mod tests {
     #[test]
     fn expand_visits_basic() {
         let prior_5 = [0.2; 5];
-        let effective = [4, 1, 2, 3, 4];
+        let effective = [4, 1, 2, 3, 4]; // UP blocked → 4 outcomes: [1,2,3,4]
         let mut half = HalfNode::new(prior_5, effective);
 
+        // Give some visits to outcome index 0 (action 1) and index 3 (action 4/STAY).
         half.edges[0].visits = 10;
         half.edges[3].visits = 7;
 
         let expanded = half.expand_visits();
+        // outcome 0 → action 1
         assert_eq!(expanded[1], 10.0);
+        // outcome 3 → action 4 (STAY)
         assert_eq!(expanded[4], 7.0);
+        // Blocked action 0 gets nothing (it's not a canonical outcome).
         assert_eq!(expanded[0], 0.0);
     }
 
@@ -562,9 +576,11 @@ mod tests {
 
     #[test]
     fn nn_eval_counts_as_first_visit() {
+        // LC0 pattern: NN evaluation goes through update_value, counts as visit 1.
         let h = HalfNode::new([0.2; 5], [0, 1, 2, 3, 4]);
         let mut node = Node::new(h, h);
 
+        // NN predicts v1=3.0, v2=5.0
         node.update_value(3.0, 5.0);
         assert_eq!(node.total_visits(), 1);
         assert!((node.v1() - 3.0).abs() < 1e-6);
@@ -573,14 +589,20 @@ mod tests {
 
     #[test]
     fn backup_averages_with_nn_value() {
+        // The NN value is the first data point, not a seed that gets replaced.
+        // Backup values average with it.
         let h = HalfNode::new([0.2; 5], [0, 1, 2, 3, 4]);
         let mut node = Node::new(h, h);
 
+        // Visit 1: NN evaluation
         node.update_value(5.0, 3.0);
+        // Visit 2: backup from subtree
         node.update_value(3.0, 7.0);
 
         assert_eq!(node.total_visits(), 2);
+        // Mean of [5, 3] = 4.0 — NN value contributes equally
         assert!((node.v1() - 4.0).abs() < 1e-6);
+        // Mean of [3, 7] = 5.0
         assert!((node.v2() - 5.0).abs() < 1e-6);
     }
 
@@ -595,7 +617,9 @@ mod tests {
         }
 
         assert_eq!(node.total_visits(), 4);
+        // Mean of [2,4,6,8] = 5.0
         assert!((node.v1() - 5.0).abs() < 1e-5);
+        // Mean of [1,3,5,7] = 4.0
         assert!((node.v2() - 4.0).abs() < 1e-5);
     }
 
@@ -614,14 +638,27 @@ mod tests {
 
     #[test]
     fn edge_marginal_q_across_opponent_actions() {
+        // HalfEdge[i] accumulates the marginal Q for P1's outcome i,
+        // averaged across different P2 actions (different children).
+        //
+        // Scenario: P1 outcome i leads to two children depending on P2:
+        //   child (i, j=0): edge_r=1.0, child_v=4.0 → Q = 1.0 + 4.0 = 5.0
+        //   child (i, j=1): edge_r=0.5, child_v=4.0 → Q = 0.5 + 4.0 = 4.5
+        //     (0.5 because cheese was split with P2)
+        //
+        // After 3 visits: 2× to (i,0) and 1× to (i,1)
         let mut edge = HalfEdge::default();
         let gamma = 1.0;
 
+        // Visit child (i, 0): Q = r + gamma * v = 1.0 + 4.0
         edge.update(1.0 + gamma * 4.0);
+        // Visit child (i, 1): Q = 0.5 + 4.0 (cheese split)
         edge.update(0.5 + gamma * 4.0);
+        // Visit child (i, 0) again: same Q
         edge.update(1.0 + gamma * 4.0);
 
         assert_eq!(edge.visits, 3);
+        // Marginal Q = (5.0 + 4.5 + 5.0) / 3 = 14.5 / 3
         let expected = (5.0 + 4.5 + 5.0) / 3.0;
         assert!((edge.q - expected).abs() < 1e-5);
     }
@@ -630,15 +667,20 @@ mod tests {
 
     #[test]
     fn expand_prior_one_wall() {
+        // Non-uniform prior, UP blocked → reduce then expand should preserve
+        // canonical action probs and zero blocked actions.
         let prior_5 = [0.1, 0.3, 0.2, 0.15, 0.25];
-        let effective = [4, 1, 2, 3, 4];
+        let effective = [4, 1, 2, 3, 4]; // UP blocked
         let half = HalfNode::new(prior_5, effective);
 
         let expanded = half.expand_prior();
+        // Action 0 (UP) is blocked → 0
         assert_eq!(expanded[0], 0.0);
+        // Actions 1, 2, 3 keep their original priors
         assert!((expanded[1] - 0.3).abs() < 1e-6);
         assert!((expanded[2] - 0.2).abs() < 1e-6);
         assert!((expanded[3] - 0.15).abs() < 1e-6);
+        // Action 4 (STAY) gets merged prior: 0.1 + 0.25 = 0.35
         assert!((expanded[4] - 0.35).abs() < 1e-6);
 
         let total: f32 = expanded.iter().sum();
@@ -647,6 +689,7 @@ mod tests {
 
     #[test]
     fn expand_prior_open_identity() {
+        // No walls: reduce then expand is identity.
         let prior_5 = [0.2; 5];
         let effective = [0, 1, 2, 3, 4];
         let half = HalfNode::new(prior_5, effective);
@@ -659,6 +702,7 @@ mod tests {
 
     #[test]
     fn expand_prior_mud() {
+        // All actions → STAY: all mass on action 4, zeros elsewhere.
         let prior_5 = [0.1, 0.2, 0.3, 0.15, 0.25];
         let effective = [4, 4, 4, 4, 4];
         let half = HalfNode::new(prior_5, effective);
@@ -674,6 +718,7 @@ mod tests {
 
     #[test]
     fn expand_visits_mud() {
+        // All actions → STAY (mud): single outcome, only action 4 gets visits.
         let prior_5 = [0.2; 5];
         let effective = [4, 4, 4, 4, 4];
         let mut half = HalfNode::new(prior_5, effective);
@@ -691,10 +736,12 @@ mod tests {
 
     #[test]
     fn outcomes_corridor() {
+        // UP, DOWN, and STAY all collapse to STAY.
         let effective = [4, 1, 4, 3, 4];
         let (outcomes, n, a2i) = compute_outcomes(effective);
         assert_eq!(n, 3);
         assert_eq!(&outcomes[..3], &[1, 3, 4]);
+        // Actions 0, 2, 4 all map to same index (for outcome 4).
         assert_eq!(a2i[0], a2i[2]);
         assert_eq!(a2i[0], a2i[4]);
     }
@@ -706,11 +753,13 @@ mod tests {
         let effective = [0, 1, 2, 3, 4];
         let shell = HalfNode::new_shell(effective);
 
+        // Shell: 5 outcomes, all priors zero
         assert_eq!(shell.n_outcomes(), 5);
         for i in 0..5 {
             assert_eq!(shell.prior(i), 0.0);
         }
 
+        // Set uniform prior
         let mut half = shell;
         half.set_prior([0.2; 5]);
         for i in 0..5 {
@@ -720,11 +769,13 @@ mod tests {
 
     #[test]
     fn shell_then_set_prior_one_wall() {
+        // UP blocked → maps to STAY
         let effective = [4, 1, 2, 3, 4];
         let mut shell = HalfNode::new_shell(effective);
         assert_eq!(shell.n_outcomes(), 4);
 
         shell.set_prior([0.2; 5]);
+        // STAY gets 0.2 (action 0) + 0.2 (action 4) = 0.4
         let stay_idx = shell.action_to_outcome_idx(4) as usize;
         assert!((shell.prior(stay_idx) - 0.4).abs() < 1e-6);
 
@@ -734,6 +785,7 @@ mod tests {
 
     #[test]
     fn shell_set_prior_matches_new() {
+        // new_shell + set_prior ≡ new() for non-uniform prior with wall
         let prior_5 = [0.1, 0.3, 0.2, 0.15, 0.25];
         let effective = [4, 1, 2, 3, 4];
 
@@ -814,6 +866,7 @@ mod tests {
         let mut node = Node::new(h, h);
 
         assert!(node.try_start_score_update());
+        // Second claim on unvisited node should fail.
         assert!(!node.try_start_score_update());
         assert_eq!(node.n_in_flight(), 1);
     }
@@ -835,9 +888,11 @@ mod tests {
         let h = HalfNode::new([0.2; 5], [0, 1, 2, 3, 4]);
         let mut node = Node::new(h, h);
 
+        // Claim then visit — simulates: descend, then backup arrives.
         assert!(node.try_start_score_update());
         node.update_value(1.0, 1.0);
 
+        // Now visited with 1 in-flight. New claim should still work.
         assert!(node.try_start_score_update());
         assert_eq!(node.n_in_flight(), 2);
     }
@@ -853,6 +908,7 @@ mod tests {
 
         node.cancel_score_update();
         assert_eq!(node.n_in_flight(), 0);
+        // Values untouched.
         assert!((node.v1() - 1.0).abs() < 1e-6);
         assert!((node.v2() - 2.0).abs() < 1e-6);
     }
@@ -876,6 +932,7 @@ mod tests {
         edge.add_virtual_loss();
         edge.add_virtual_loss();
         assert_eq!(edge.n_in_flight(), 2);
+        // q and visits untouched.
         assert!((edge.q - 5.0).abs() < 1e-6);
         assert_eq!(edge.visits, 1);
 

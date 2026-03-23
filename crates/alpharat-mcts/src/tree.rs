@@ -401,9 +401,10 @@ mod tests {
 
     #[test]
     fn smart_uniform_one_wall() {
+        // UP blocked → maps to STAY
         let effective = [4, 1, 2, 3, 4];
         let prior = smart_uniform_prior(&effective);
-        assert_eq!(prior[0], 0.0);
+        assert_eq!(prior[0], 0.0); // action 0 not a unique outcome
         assert!((prior[1] - 0.25).abs() < 1e-6);
         assert!((prior[2] - 0.25).abs() < 1e-6);
         assert!((prior[3] - 0.25).abs() < 1e-6);
@@ -436,14 +437,19 @@ mod tests {
         let tree = MCTSTree::new(&game);
         let root = tree.root_node();
 
+        // Center of open 5×5: 5 unique outcomes per player
         assert_eq!(root.p1.n_outcomes(), 5);
+        // P2 at (4,4) — top-right corner, UP and RIGHT are board edges
+        // → blocked → map to STAY → 3 unique outcomes
         assert_eq!(root.p2.n_outcomes(), 3);
 
+        // P1 priors: uniform over 5
         let p1_prior = root.p1.expand_prior();
         for p in &p1_prior {
             assert!((*p - 0.2).abs() < 1e-6);
         }
 
+        // Unevaluated
         assert_eq!(root.total_visits(), 0);
         assert_eq!(root.v1(), 0.0);
         assert_eq!(root.v2(), 0.0);
@@ -457,25 +463,29 @@ mod tests {
         let tree = MCTSTree::new(&game);
         let root = tree.root_node();
 
+        // P1 at (0,0): DOWN and LEFT are board edges → blocked
+        // effective = [0, 1, 4, 4, 4] → outcomes = [0, 1, 4] → 3 unique
         assert_eq!(root.p1.n_outcomes(), 3);
 
         let p1_prior = root.p1.expand_prior();
         let third = 1.0 / 3.0;
-        assert!((p1_prior[0] - third).abs() < 1e-6);
-        assert!((p1_prior[1] - third).abs() < 1e-6);
-        assert_eq!(p1_prior[2], 0.0);
-        assert_eq!(p1_prior[3], 0.0);
-        assert!((p1_prior[4] - third).abs() < 1e-6);
+        assert!((p1_prior[0] - third).abs() < 1e-6); // UP
+        assert!((p1_prior[1] - third).abs() < 1e-6); // RIGHT
+        assert_eq!(p1_prior[2], 0.0); // DOWN blocked
+        assert_eq!(p1_prior[3], 0.0); // LEFT blocked
+        assert!((p1_prior[4] - third).abs() < 1e-6); // STAY
     }
 
     #[test]
     fn root_init_value_scale() {
+        // 5 cheese → value_scale = 5
         let cheese: Vec<_> = (0..5).map(|i| Coordinates::new(i, 0)).collect();
         let game =
             test_util::open_5x5_game(Coordinates::new(2, 2), Coordinates::new(4, 4), &cheese);
         let tree = MCTSTree::new(&game);
         assert!((tree.root_node().value_scale() - 5.0).abs() < 1e-6);
 
+        // 0 cheese → value_scale = 1 (clamped)
         let game_no_cheese =
             test_util::open_5x5_game(Coordinates::new(2, 2), Coordinates::new(4, 4), &[]);
         let tree_no_cheese = MCTSTree::new(&game_no_cheese);
@@ -488,6 +498,7 @@ mod tests {
         let tree = MCTSTree::new(&game);
         let root = tree.root_node();
 
+        // All actions → STAY when in mud
         assert_eq!(root.p1.n_outcomes(), 1);
         let p1_prior = root.p1.expand_prior();
         assert!((p1_prior[4] - 1.0).abs() < 1e-6);
@@ -505,6 +516,7 @@ mod tests {
             test_util::open_5x5_game(Coordinates::new(2, 2), Coordinates::new(4, 4), &cheese);
         let mut tree = MCTSTree::new(&game1);
 
+        // Verify initial state
         assert!((tree.root_node().value_scale() - 2.0).abs() < 1e-6);
 
         // Reinit with different game state (1 cheese → value_scale = 1)
@@ -540,6 +552,9 @@ mod tests {
 
     #[test]
     fn advance_root_blocked_action_resolves_via_equivalence() {
+        // P1 at (0,0): DOWN(2) and LEFT(3) are board edges → map to STAY(4).
+        // Wire a child at the STAY outcome, then advance with DOWN.
+        // Should resolve to the same child through action_to_outcome_idx.
         let cheese = [Coordinates::new(2, 2)];
         let mut game =
             test_util::open_5x5_game(Coordinates::new(0, 0), Coordinates::new(4, 4), &cheese);
@@ -564,6 +579,7 @@ mod tests {
         let mut tree = MCTSTree::new(&game);
         let root = tree.root();
 
+        // No children → advance should fail
         assert!(!tree.advance_root(0, 0));
         assert_eq!(tree.root(), root);
     }
@@ -600,6 +616,8 @@ mod tests {
 
     #[test]
     fn extend_node_shell_properties() {
+        // P1 center (2,2): 5 outcomes. P2 corner (4,4): 3 outcomes.
+        // Extend with P1=UP, P2=DOWN → child at new positions.
         let cheese = [Coordinates::new(0, 0), Coordinates::new(1, 1)];
         let mut game =
             test_util::open_5x5_game(Coordinates::new(2, 2), Coordinates::new(4, 4), &cheese);
@@ -608,18 +626,23 @@ mod tests {
         let i = tree.root_node().p1.action_to_outcome_idx(0); // UP
         let j = tree.root_node().p2.action_to_outcome_idx(2); // DOWN
 
+        // Advance game to child position
         let _undo = game.make_move(pyrat::Direction::Up, pyrat::Direction::Down);
         let child_ptr = extend_node(tree.root(), i, j, &game);
         let child = unsafe { child_ptr.as_ref() };
 
+        // Shell properties
         assert_eq!(child.total_visits(), 0);
         assert_eq!(child.v1(), 0.0);
         assert_eq!(child.v2(), 0.0);
         assert!(!child.is_terminal());
         assert_eq!(child.edge_r1(), 0.0);
         assert_eq!(child.edge_r2(), 0.0);
+        // Effective actions from game at child position
+        // P1 now at (2,3): open interior → 5 outcomes
         assert_eq!(child.p1.n_outcomes(), 5);
 
+        // Priors are zero (shell)
         for idx in 0..child.p1.n_outcomes() {
             assert_eq!(child.p1.prior(idx), 0.0);
         }
@@ -729,6 +752,7 @@ mod tests {
         populate_node(node_ptr, Some(&eval));
         let node = unsafe { node_ptr.as_ref() };
 
+        // Open position: 5 outcomes, no merging — reduced priors = input priors
         let expected_p1 = [0.1, 0.2, 0.3, 0.25, 0.15];
         for i in 0..node.p1.n_outcomes() {
             assert!(
@@ -739,11 +763,13 @@ mod tests {
             );
         }
 
+        // Priors sum to 1
         let sum_p1: f32 = (0..node.p1.n_outcomes()).map(|i| node.p1.prior(i)).sum();
         let sum_p2: f32 = (0..node.p2.n_outcomes()).map(|i| node.p2.prior(i)).sum();
         assert!((sum_p1 - 1.0).abs() < 1e-6);
         assert!((sum_p2 - 1.0).abs() < 1e-6);
 
+        // Still unvisited — value not set by populate
         assert_eq!(node.total_visits(), 0);
         assert!(!node.is_terminal());
     }
@@ -764,6 +790,7 @@ mod tests {
 
         assert!(node.is_terminal());
         assert_eq!(node.total_visits(), 0);
+        // Priors stay zero
         for i in 0..node.p1.n_outcomes() {
             assert_eq!(node.p1.prior(i), 0.0);
         }
@@ -771,6 +798,7 @@ mod tests {
 
     #[test]
     fn populate_node_wall_topology() {
+        // P1 at corner (0,0): DOWN and LEFT blocked → 3 outcomes
         let cheese = [Coordinates::new(2, 2)];
         let game =
             test_util::open_5x5_game(Coordinates::new(0, 0), Coordinates::new(2, 2), &cheese);
@@ -792,12 +820,15 @@ mod tests {
         populate_node(node_ptr, Some(&eval));
         let node = unsafe { node_ptr.as_ref() };
 
+        // P1: actions 2,3 blocked → merge into STAY
+        // STAY outcome gets: 0.2 (DOWN) + 0.15 (LEFT) + 0.25 (STAY) = 0.6
         let stay_idx = node.p1.action_to_outcome_idx(4) as usize;
         assert!((node.p1.prior(stay_idx) - 0.6).abs() < 1e-6);
 
+        // Expand and verify blocked actions get 0
         let expanded = node.p1.expand_prior();
-        assert_eq!(expanded[2], 0.0);
-        assert_eq!(expanded[3], 0.0);
+        assert_eq!(expanded[2], 0.0); // DOWN blocked
+        assert_eq!(expanded[3], 0.0); // LEFT blocked
 
         let sum: f32 = (0..node.p1.n_outcomes()).map(|i| node.p1.prior(i)).sum();
         assert!((sum - 1.0).abs() < 1e-6);
@@ -820,19 +851,23 @@ mod tests {
 
         let child_ptr = extend_node(tree.root(), i, j, &game);
 
+        // Shell: priors zero, visits 0
         assert_eq!(unsafe { child_ptr.as_ref() }.total_visits(), 0);
         for idx in 0..unsafe { child_ptr.as_ref() }.p1.n_outcomes() {
             assert_eq!(unsafe { child_ptr.as_ref() }.p1.prior(idx), 0.0);
         }
 
+        // Populate with SmartUniformBackend
         let backend = SmartUniformBackend;
         let eval = backend.evaluate(&game).unwrap();
         populate_node(child_ptr, Some(&eval));
 
+        // Verify: expand_prior matches backend output
         let child = unsafe { child_ptr.as_ref() };
         let expanded_p1 = child.p1.expand_prior();
         let expanded_p2 = child.p2.expand_prior();
 
+        // Smart uniform: each unique outcome gets equal weight
         let expected_p1 = smart_uniform_prior(&game.effective_actions_p1());
         let expected_p2 = smart_uniform_prior(&game.effective_actions_p2());
 
@@ -851,6 +886,7 @@ mod tests {
             );
         }
 
+        // Still unvisited
         assert_eq!(child.total_visits(), 0);
     }
 
