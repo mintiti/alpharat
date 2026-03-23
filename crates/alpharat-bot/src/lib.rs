@@ -149,7 +149,7 @@ impl MctsBot {
 
             // --- throttled info (all mutable borrows dropped) ---
             let now = Instant::now();
-            let (total, current_best) = {
+            let (total, current_best, best_direction) = {
                 let tree = self.tree.as_ref().expect("tree not initialized");
                 let root_node = &tree.arena()[tree.root()];
                 let half = if is_player1 {
@@ -157,10 +157,17 @@ impl MctsBot {
                 } else {
                     &root_node.p2
                 };
-                (root_node.total_visits(), best_outcome_idx(half))
+                let best = best_outcome_idx(half);
+                let action = half.outcome_action(best as usize);
+                let dir = Direction::try_from(action).unwrap_or(Direction::Stay);
+                (root_node.total_visits(), best, dir)
             };
 
             let best_changed = last_info_best != Some(current_best);
+
+            if best_changed {
+                ctx.send_provisional(best_direction);
+            }
             let interval_elapsed =
                 now.duration_since(last_info_time).as_millis() >= INFO_MIN_INTERVAL_MS;
 
