@@ -126,7 +126,7 @@ impl MctsBot {
             {
                 let tree = self.tree.as_mut().expect("tree not initialized");
                 let sim = self.sim.as_ref().expect("sim not initialized");
-                let visits = tree.arena()[tree.root()].total_visits();
+                let visits = tree.root_node().total_visits();
                 if visits >= min_sims && ctx.should_stop() {
                     break;
                 }
@@ -151,7 +151,7 @@ impl MctsBot {
             let now = Instant::now();
             let (total, current_best, best_direction) = {
                 let tree = self.tree.as_ref().expect("tree not initialized");
-                let root_node = &tree.arena()[tree.root()];
+                let root_node = tree.root_node();
                 let half = if is_player1 {
                     &root_node.p1
                 } else {
@@ -183,7 +183,7 @@ impl MctsBot {
         let now = Instant::now();
         let total = {
             let tree = self.tree.as_ref().expect("tree not initialized");
-            tree.arena()[tree.root()].total_visits()
+            tree.root_node().total_visits()
         };
         let nps = compute_nps(total, nps_start, now);
         self.send_info(ctx, total, nps);
@@ -228,7 +228,7 @@ impl MctsBot {
     /// Extract the best move from the current tree.
     fn pick_move(&mut self) -> Direction {
         let tree = self.tree.as_ref().expect("tree not initialized");
-        let root_node = &tree.arena()[tree.root()];
+        let root_node = tree.root_node();
         let half = if self.is_player1 {
             &root_node.p1
         } else {

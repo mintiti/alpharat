@@ -7,48 +7,30 @@ use pyrat::{Coordinates, GameBuilder, GameState};
 use rand::rngs::SmallRng;
 use rand::SeedableRng;
 
-fn open_game(width: u8, height: u8, cheese: &[Coordinates]) -> GameState {
+fn open_game(width: u8, height: u8, n_cheese: u8, max_turns: u16) -> GameState {
+    // Scatter cheese deterministically across the grid.
+    let mut cheese = Vec::new();
+    let mut placed = 0u8;
+    'outer: for y in 0..height {
+        for x in 0..width {
+            if (x + y) % 2 == 1 && (x, y) != (0, 0) && (x, y) != (width - 1, height - 1) {
+                cheese.push(Coordinates::new(x, y));
+                placed += 1;
+                if placed >= n_cheese {
+                    break 'outer;
+                }
+            }
+        }
+    }
+
     GameBuilder::new(width, height)
         .with_open_maze()
         .with_custom_positions(Coordinates::new(0, 0), Coordinates::new(width - 1, height - 1))
-        .with_custom_cheese(cheese.to_vec())
-        .with_max_turns(100)
+        .with_custom_cheese(cheese)
+        .with_max_turns(max_turns)
         .build()
         .create(None)
         .unwrap()
-}
-
-fn open_5x5_game() -> GameState {
-    let cheese: Vec<_> = [
-        (1, 1),
-        (2, 3),
-        (3, 0),
-        (0, 4),
-        (4, 2),
-    ]
-    .iter()
-    .map(|&(x, y)| Coordinates::new(x, y))
-    .collect();
-    open_game(5, 5, &cheese)
-}
-
-fn open_7x7_game() -> GameState {
-    let cheese: Vec<_> = [
-        (1, 1),
-        (2, 5),
-        (3, 0),
-        (0, 6),
-        (5, 2),
-        (6, 4),
-        (4, 3),
-        (1, 5),
-        (3, 6),
-        (5, 0),
-    ]
-    .iter()
-    .map(|&(x, y)| Coordinates::new(x, y))
-    .collect();
-    open_game(7, 7, &cheese)
 }
 
 fn bench_search(c: &mut Criterion) {
@@ -56,10 +38,18 @@ fn bench_search(c: &mut Criterion) {
     let config = SearchConfig::default();
     let batch_size = 64u32;
 
-    let fixtures: Vec<(&str, GameState)> = vec![
-        ("5x5", open_5x5_game()),
-        ("7x7", open_7x7_game()),
+    // (label, width, height, cheese count, max turns)
+    let specs: Vec<(&str, u8, u8, u8, u16)> = vec![
+        ("5x5", 5, 5, 5, 30),
+        ("7x7", 7, 7, 10, 50),
+        ("11x11", 11, 11, 24, 80),
+        ("15x15", 15, 15, 45, 120),
     ];
+
+    let fixtures: Vec<(&str, GameState)> = specs
+        .iter()
+        .map(|&(label, w, h, nc, mt)| (label, open_game(w, h, nc, mt)))
+        .collect();
 
     for &sims in &[500u32, 2_000, 8_000, 50_000, 200_000] {
         let mut group = c.benchmark_group(format!("search/{sims}_sims"));
@@ -67,6 +57,11 @@ fn bench_search(c: &mut Criterion) {
         group.sample_size(if sims >= 50_000 { 20 } else { 50 });
 
         for (name, game) in &fixtures {
+            // Skip small grids at high sim counts (saturated, not interesting).
+            if sims >= 50_000 && (*name == "5x5") {
+                continue;
+            }
+
             group.throughput(Throughput::Elements(sims as u64));
             group.bench_with_input(BenchmarkId::from_parameter(name), game, |b, game| {
                 b.iter(|| {

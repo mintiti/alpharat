@@ -9,7 +9,7 @@ pub mod tree;
 pub(crate) mod test_util;
 
 pub use backend::{Backend, BackendError, EvalResult, SmartUniformBackend};
-pub use node::{HalfEdge, HalfNode, Node, NodeArena, NodeIndex};
+pub use node::{HalfEdge, HalfNode, Node, NodePtr};
 pub use search::{
     backup, compute_pruned_visits, run_search, select_actions, SearchConfig, SearchPath,
     SearchResult,

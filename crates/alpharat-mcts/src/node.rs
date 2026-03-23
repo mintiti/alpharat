@@ -1,20 +1,52 @@
-use std::ops::{Index, IndexMut};
+use std::ptr::NonNull;
 
 // ---------------------------------------------------------------------------
-// NodeIndex — typed arena index
+// NodePtr — typed heap pointer (replaces NodeIndex)
 // ---------------------------------------------------------------------------
 
+/// Non-owning pointer to a heap-allocated Node.
+///
+/// Ownership lives in `Box<Node>` (via the tree's linked-list structure).
+/// NodePtr is a copyable handle for traversal and mutation during search.
+///
+/// # Safety
+///
+/// All dereferences are unsafe. Soundness relies on:
+/// - Single-threaded search (no data races)
+/// - Tree-structured ownership (no aliasing — each node is a distinct allocation)
+/// - Pointers only used while the owning Box is alive
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub struct NodeIndex(u32);
+pub struct NodePtr(NonNull<Node>);
 
-impl NodeIndex {
-    #[cfg(test)]
-    pub(crate) fn from_raw(v: u32) -> Self {
-        Self(v)
+// SAFETY: NodePtr is only dereferenced within single-threaded search.
+// Box<Node> is sent to the GC thread, but NodePtr itself is never
+// dereferenced across threads.
+unsafe impl Send for NodePtr {}
+unsafe impl Sync for NodePtr {}
+
+impl NodePtr {
+    /// Create a NodePtr from a reference to a Node.
+    ///
+    /// Typically used on a `&*box_node` or `box_node.as_ref()`.
+    /// The pointer is valid as long as the owning Box is alive.
+    pub fn from_ref(node: &Node) -> Self {
+        Self(NonNull::from(node))
     }
 
-    fn as_usize(self) -> usize {
-        self.0 as usize
+    /// # Safety
+    ///
+    /// The pointed-to Node must be alive and no mutable reference to it
+    /// may exist simultaneously.
+    pub unsafe fn as_ref<'a>(self) -> &'a Node {
+        self.0.as_ref()
+    }
+
+    /// # Safety
+    ///
+    /// The pointed-to Node must be alive and no other reference to it
+    /// (mutable or immutable) may exist simultaneously.
+    pub unsafe fn as_mut<'a>(mut self) -> &'a mut Node {
+        self.0.as_mut()
     }
 }
 
@@ -217,8 +249,7 @@ fn compute_outcomes(effective: [u8; 5]) -> ([u8; 5], u8, [u8; 5]) {
     for action in 0..5 {
         let outcome = effective[action];
         // Binary search in the sorted unique array.
-        let idx = unique[..n as usize]
-            .partition_point(|&v| v < outcome);
+        let idx = unique[..n as usize].partition_point(|&v| v < outcome);
         debug_assert!(idx < n as usize && unique[idx] == outcome);
         action_to_idx[action] = idx as u8;
     }
@@ -247,12 +278,12 @@ pub struct Node {
     edge_r1: f32,
     edge_r2: f32,
 
-    // Linked-list children
-    first_child: Option<NodeIndex>,
-    next_sibling: Option<NodeIndex>,
+    // Linked-list children (owned)
+    pub(crate) first_child: Option<Box<Node>>,
+    pub(crate) next_sibling: Option<Box<Node>>,
 
-    // Parent link
-    parent: Option<NodeIndex>,
+    // Parent link (non-owning)
+    pub(crate) parent: Option<NodePtr>,
     parent_outcome: (u8, u8),
 
     is_terminal: bool,
@@ -301,13 +332,17 @@ impl Node {
     pub fn edge_r2(&self) -> f32 {
         self.edge_r2
     }
-    pub fn first_child(&self) -> Option<NodeIndex> {
+    pub fn first_child(&self) -> Option<NodePtr> {
         self.first_child
+            .as_ref()
+            .map(|b| NodePtr(NonNull::from(b.as_ref())))
     }
-    pub fn next_sibling(&self) -> Option<NodeIndex> {
+    pub fn next_sibling(&self) -> Option<NodePtr> {
         self.next_sibling
+            .as_ref()
+            .map(|b| NodePtr(NonNull::from(b.as_ref())))
     }
-    pub fn parent(&self) -> Option<NodeIndex> {
+    pub fn parent(&self) -> Option<NodePtr> {
         self.parent
     }
     pub fn parent_outcome(&self) -> (u8, u8) {
@@ -351,16 +386,8 @@ impl Node {
         self.edge_r2 = r2;
     }
 
-    pub fn set_first_child(&mut self, idx: Option<NodeIndex>) {
-        self.first_child = idx;
-    }
-
-    pub fn set_next_sibling(&mut self, idx: Option<NodeIndex>) {
-        self.next_sibling = idx;
-    }
-
-    pub fn set_parent(&mut self, idx: Option<NodeIndex>, outcome: (u8, u8)) {
-        self.parent = idx;
+    pub fn set_parent(&mut self, ptr: Option<NodePtr>, outcome: (u8, u8)) {
+        self.parent = ptr;
         self.parent_outcome = outcome;
     }
 
@@ -376,67 +403,28 @@ impl Node {
 }
 
 // ---------------------------------------------------------------------------
-// NodeArena — arena allocator
+// Drop — iterative to avoid stack overflow on deep trees
 // ---------------------------------------------------------------------------
 
-pub struct NodeArena {
-    nodes: Vec<Node>,
-}
-
-impl NodeArena {
-    pub fn new() -> Self {
-        Self { nodes: Vec::new() }
-    }
-
-    pub fn with_capacity(cap: usize) -> Self {
-        Self {
-            nodes: Vec::with_capacity(cap),
+impl Drop for Node {
+    fn drop(&mut self) {
+        let mut stack = Vec::new();
+        if let Some(c) = self.first_child.take() {
+            stack.push(c);
         }
-    }
-
-    pub fn alloc(&mut self, node: Node) -> NodeIndex {
-        let idx = NodeIndex(self.nodes.len() as u32);
-        self.nodes.push(node);
-        idx
-    }
-
-    pub fn get(&self, idx: NodeIndex) -> &Node {
-        &self.nodes[idx.as_usize()]
-    }
-
-    pub fn get_mut(&mut self, idx: NodeIndex) -> &mut Node {
-        &mut self.nodes[idx.as_usize()]
-    }
-
-    pub fn clear(&mut self) {
-        self.nodes.clear();
-    }
-
-    pub fn len(&self) -> usize {
-        self.nodes.len()
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.nodes.is_empty()
-    }
-}
-
-impl Default for NodeArena {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl Index<NodeIndex> for NodeArena {
-    type Output = Node;
-    fn index(&self, idx: NodeIndex) -> &Self::Output {
-        self.get(idx)
-    }
-}
-
-impl IndexMut<NodeIndex> for NodeArena {
-    fn index_mut(&mut self, idx: NodeIndex) -> &mut Self::Output {
-        self.get_mut(idx)
+        if let Some(s) = self.next_sibling.take() {
+            stack.push(s);
+        }
+        while let Some(mut node) = stack.pop() {
+            if let Some(c) = node.first_child.take() {
+                stack.push(c);
+            }
+            if let Some(s) = node.next_sibling.take() {
+                stack.push(s);
+            }
+            // node drops here with first_child=None, next_sibling=None
+            // so its Drop doesn't recurse
+        }
     }
 }
 
@@ -452,12 +440,10 @@ mod tests {
 
     #[test]
     fn outcomes_open_position() {
-        // No walls: every action maps to itself.
         let effective = [0, 1, 2, 3, 4];
         let (outcomes, n, a2i) = compute_outcomes(effective);
         assert_eq!(n, 5);
         assert_eq!(&outcomes[..5], &[0, 1, 2, 3, 4]);
-        // Identity mapping.
         for a in 0..5 {
             assert_eq!(a2i[a], a as u8);
         }
@@ -465,20 +451,16 @@ mod tests {
 
     #[test]
     fn outcomes_one_wall() {
-        // UP blocked → maps to STAY.
         let effective = [4, 1, 2, 3, 4];
         let (outcomes, n, a2i) = compute_outcomes(effective);
         assert_eq!(n, 4);
         assert_eq!(&outcomes[..4], &[1, 2, 3, 4]);
-        // action 0 and action 4 share the same outcome index.
         assert_eq!(a2i[0], a2i[4]);
-        // That index points to outcome 4 (STAY).
         assert_eq!(outcomes[a2i[0] as usize], 4);
     }
 
     #[test]
     fn outcomes_corner() {
-        // UP and LEFT blocked → both map to STAY.
         let effective = [4, 1, 2, 4, 4];
         let (outcomes, n, a2i) = compute_outcomes(effective);
         assert_eq!(n, 3);
@@ -489,7 +471,6 @@ mod tests {
 
     #[test]
     fn outcomes_mud() {
-        // All actions → STAY.
         let effective = [4, 4, 4, 4, 4];
         let (outcomes, n, a2i) = compute_outcomes(effective);
         assert_eq!(n, 1);
@@ -504,15 +485,13 @@ mod tests {
     #[test]
     fn prior_reduction_uniform_one_wall() {
         let prior_5 = [0.2; 5];
-        let effective = [4, 1, 2, 3, 4]; // UP blocked
+        let effective = [4, 1, 2, 3, 4];
         let half = HalfNode::new(prior_5, effective);
 
         assert_eq!(half.n_outcomes(), 4);
-        // STAY outcome should have merged prior: 0.2 (action 0) + 0.2 (action 4) = 0.4
         let stay_idx = half.action_to_outcome_idx(4);
         assert!((half.prior(stay_idx as usize) - 0.4).abs() < 1e-6);
 
-        // Total prior should sum to 1.0.
         let total: f32 = (0..half.n_outcomes()).map(|i| half.prior(i)).sum();
         assert!((total - 1.0).abs() < 1e-6);
     }
@@ -520,12 +499,11 @@ mod tests {
     #[test]
     fn prior_reduction_nonuniform() {
         let prior_5 = [0.1, 0.3, 0.2, 0.15, 0.25];
-        let effective = [4, 1, 2, 3, 4]; // UP blocked
+        let effective = [4, 1, 2, 3, 4];
         let half = HalfNode::new(prior_5, effective);
 
         assert_eq!(half.n_outcomes(), 4);
         let stay_idx = half.action_to_outcome_idx(4) as usize;
-        // action 0 (0.1) + action 4 (0.25) = 0.35
         assert!((half.prior(stay_idx) - 0.35).abs() < 1e-6);
 
         let total: f32 = (0..half.n_outcomes()).map(|i| half.prior(i)).sum();
@@ -547,19 +525,15 @@ mod tests {
     #[test]
     fn expand_visits_basic() {
         let prior_5 = [0.2; 5];
-        let effective = [4, 1, 2, 3, 4]; // UP blocked → 4 outcomes: [1,2,3,4]
+        let effective = [4, 1, 2, 3, 4];
         let mut half = HalfNode::new(prior_5, effective);
 
-        // Give some visits to outcome index 0 (action 1) and index 3 (action 4/STAY).
         half.edges[0].visits = 10;
         half.edges[3].visits = 7;
 
         let expanded = half.expand_visits();
-        // outcome 0 → action 1
         assert_eq!(expanded[1], 10.0);
-        // outcome 3 → action 4 (STAY)
         assert_eq!(expanded[4], 7.0);
-        // Blocked action 0 gets nothing (it's not a canonical outcome).
         assert_eq!(expanded[0], 0.0);
     }
 
@@ -593,11 +567,9 @@ mod tests {
 
     #[test]
     fn nn_eval_counts_as_first_visit() {
-        // LC0 pattern: NN evaluation goes through update_value, counts as visit 1.
         let h = HalfNode::new([0.2; 5], [0, 1, 2, 3, 4]);
         let mut node = Node::new(h, h);
 
-        // NN predicts v1=3.0, v2=5.0
         node.update_value(3.0, 5.0);
         assert_eq!(node.total_visits(), 1);
         assert!((node.v1() - 3.0).abs() < 1e-6);
@@ -606,20 +578,14 @@ mod tests {
 
     #[test]
     fn backup_averages_with_nn_value() {
-        // The NN value is the first data point, not a seed that gets replaced.
-        // Backup values average with it.
         let h = HalfNode::new([0.2; 5], [0, 1, 2, 3, 4]);
         let mut node = Node::new(h, h);
 
-        // Visit 1: NN evaluation
         node.update_value(5.0, 3.0);
-        // Visit 2: backup from subtree
         node.update_value(3.0, 7.0);
 
         assert_eq!(node.total_visits(), 2);
-        // Mean of [5, 3] = 4.0 — NN value contributes equally
         assert!((node.v1() - 4.0).abs() < 1e-6);
-        // Mean of [3, 7] = 5.0
         assert!((node.v2() - 5.0).abs() < 1e-6);
     }
 
@@ -634,9 +600,7 @@ mod tests {
         }
 
         assert_eq!(node.total_visits(), 4);
-        // Mean of [2,4,6,8] = 5.0
         assert!((node.v1() - 5.0).abs() < 1e-5);
-        // Mean of [1,3,5,7] = 4.0
         assert!((node.v2() - 4.0).abs() < 1e-5);
     }
 
@@ -655,27 +619,14 @@ mod tests {
 
     #[test]
     fn edge_marginal_q_across_opponent_actions() {
-        // HalfEdge[i] accumulates the marginal Q for P1's outcome i,
-        // averaged across different P2 actions (different children).
-        //
-        // Scenario: P1 outcome i leads to two children depending on P2:
-        //   child (i, j=0): edge_r=1.0, child_v=4.0 → Q = 1.0 + 4.0 = 5.0
-        //   child (i, j=1): edge_r=0.5, child_v=4.0 → Q = 0.5 + 4.0 = 4.5
-        //     (0.5 because cheese was split with P2)
-        //
-        // After 3 visits: 2× to (i,0) and 1× to (i,1)
         let mut edge = HalfEdge::default();
         let gamma = 1.0;
 
-        // Visit child (i, 0): Q = r + gamma * v = 1.0 + 4.0
         edge.update(1.0 + gamma * 4.0);
-        // Visit child (i, 1): Q = 0.5 + 4.0 (cheese split)
         edge.update(0.5 + gamma * 4.0);
-        // Visit child (i, 0) again: same Q
         edge.update(1.0 + gamma * 4.0);
 
         assert_eq!(edge.visits, 3);
-        // Marginal Q = (5.0 + 4.5 + 5.0) / 3 = 14.5 / 3
         let expected = (5.0 + 4.5 + 5.0) / 3.0;
         assert!((edge.q - expected).abs() < 1e-5);
     }
@@ -684,20 +635,15 @@ mod tests {
 
     #[test]
     fn expand_prior_one_wall() {
-        // Non-uniform prior, UP blocked → reduce then expand should preserve
-        // canonical action probs and zero blocked actions.
         let prior_5 = [0.1, 0.3, 0.2, 0.15, 0.25];
-        let effective = [4, 1, 2, 3, 4]; // UP blocked
+        let effective = [4, 1, 2, 3, 4];
         let half = HalfNode::new(prior_5, effective);
 
         let expanded = half.expand_prior();
-        // Action 0 (UP) is blocked → 0
         assert_eq!(expanded[0], 0.0);
-        // Actions 1, 2, 3 keep their original priors
         assert!((expanded[1] - 0.3).abs() < 1e-6);
         assert!((expanded[2] - 0.2).abs() < 1e-6);
         assert!((expanded[3] - 0.15).abs() < 1e-6);
-        // Action 4 (STAY) gets merged prior: 0.1 + 0.25 = 0.35
         assert!((expanded[4] - 0.35).abs() < 1e-6);
 
         let total: f32 = expanded.iter().sum();
@@ -706,7 +652,6 @@ mod tests {
 
     #[test]
     fn expand_prior_open_identity() {
-        // No walls: reduce then expand is identity.
         let prior_5 = [0.2; 5];
         let effective = [0, 1, 2, 3, 4];
         let half = HalfNode::new(prior_5, effective);
@@ -719,7 +664,6 @@ mod tests {
 
     #[test]
     fn expand_prior_mud() {
-        // All actions → STAY: all mass on action 4, zeros elsewhere.
         let prior_5 = [0.1, 0.2, 0.3, 0.15, 0.25];
         let effective = [4, 4, 4, 4, 4];
         let half = HalfNode::new(prior_5, effective);
@@ -735,7 +679,6 @@ mod tests {
 
     #[test]
     fn expand_visits_mud() {
-        // All actions → STAY (mud): single outcome, only action 4 gets visits.
         let prior_5 = [0.2; 5];
         let effective = [4, 4, 4, 4, 4];
         let mut half = HalfNode::new(prior_5, effective);
@@ -753,12 +696,10 @@ mod tests {
 
     #[test]
     fn outcomes_corridor() {
-        // UP, DOWN, and STAY all collapse to STAY.
         let effective = [4, 1, 4, 3, 4];
         let (outcomes, n, a2i) = compute_outcomes(effective);
         assert_eq!(n, 3);
         assert_eq!(&outcomes[..3], &[1, 3, 4]);
-        // Actions 0, 2, 4 all map to same index (for outcome 4).
         assert_eq!(a2i[0], a2i[2]);
         assert_eq!(a2i[0], a2i[4]);
     }
@@ -770,13 +711,11 @@ mod tests {
         let effective = [0, 1, 2, 3, 4];
         let shell = HalfNode::new_shell(effective);
 
-        // Shell: 5 outcomes, all priors zero
         assert_eq!(shell.n_outcomes(), 5);
         for i in 0..5 {
             assert_eq!(shell.prior(i), 0.0);
         }
 
-        // Set uniform prior
         let mut half = shell;
         half.set_prior([0.2; 5]);
         for i in 0..5 {
@@ -786,13 +725,11 @@ mod tests {
 
     #[test]
     fn shell_then_set_prior_one_wall() {
-        // UP blocked → maps to STAY
         let effective = [4, 1, 2, 3, 4];
         let mut shell = HalfNode::new_shell(effective);
         assert_eq!(shell.n_outcomes(), 4);
 
         shell.set_prior([0.2; 5]);
-        // STAY gets 0.2 (action 0) + 0.2 (action 4) = 0.4
         let stay_idx = shell.action_to_outcome_idx(4) as usize;
         assert!((shell.prior(stay_idx) - 0.4).abs() < 1e-6);
 
@@ -802,7 +739,6 @@ mod tests {
 
     #[test]
     fn shell_set_prior_matches_new() {
-        // new_shell + set_prior ≡ new() for non-uniform prior with wall
         let prior_5 = [0.1, 0.3, 0.2, 0.15, 0.25];
         let effective = [4, 1, 2, 3, 4];
 
@@ -828,76 +764,42 @@ mod tests {
         }
     }
 
-    // ---- NodeArena ----
-
-    #[test]
-    fn arena_alloc_and_get() {
-        let mut arena = NodeArena::new();
-        assert!(arena.is_empty());
-
-        let h = HalfNode::new([0.2; 5], [0, 1, 2, 3, 4]);
-        let idx0 = arena.alloc(Node::new(h, h));
-        let idx1 = arena.alloc(Node::new(h, h));
-
-        // Distinguish nodes via update_value.
-        arena[idx0].update_value(1.0, 2.0);
-        arena[idx1].update_value(3.0, 4.0);
-
-        assert_eq!(arena.len(), 2);
-        assert!((arena[idx0].v1() - 1.0).abs() < 1e-6);
-        assert!((arena[idx1].v1() - 3.0).abs() < 1e-6);
-    }
-
-    #[test]
-    fn arena_index_mut() {
-        let mut arena = NodeArena::new();
-        let h = HalfNode::new([0.2; 5], [0, 1, 2, 3, 4]);
-        let idx = arena.alloc(Node::new(h, h));
-
-        arena[idx].update_value(5.0, 10.0);
-        assert!((arena[idx].v1() - 5.0).abs() < 1e-6);
-    }
-
-    #[test]
-    fn arena_with_capacity() {
-        let arena = NodeArena::with_capacity(1000);
-        assert!(arena.is_empty());
-        assert_eq!(arena.len(), 0);
-    }
-
     // ---- Linked list wiring ----
 
     #[test]
     fn linked_list_wiring() {
-        let mut arena = NodeArena::new();
         let h = HalfNode::new([0.2; 5], [0, 1, 2, 3, 4]);
 
-        let parent_idx = arena.alloc(Node::new(h, h));
-        let child0_idx = arena.alloc(Node::new(h, h));
-        let child1_idx = arena.alloc(Node::new(h, h));
+        // Create parent first so we can capture its pointer.
+        let mut parent = Box::new(Node::new(h, h));
+        let parent_ptr = NodePtr::from_ref(&parent);
 
-        // Give children distinct values (NN eval).
-        arena[child0_idx].update_value(1.0, 0.0);
-        arena[child1_idx].update_value(2.0, 0.0);
+        // Build children bottom-up: child1 first (it becomes the tail).
+        let mut child1 = Box::new(Node::new(h, h));
+        let child1_ptr = NodePtr::from_ref(&child1);
+        child1.update_value(2.0, 0.0);
+        child1.set_parent(Some(parent_ptr), (2, 3));
 
-        // Wire: parent → child0 → child1
-        arena[parent_idx].set_first_child(Some(child0_idx));
-        arena[child0_idx].set_next_sibling(Some(child1_idx));
-        arena[child0_idx].set_parent(Some(parent_idx), (0, 1));
-        arena[child1_idx].set_parent(Some(parent_idx), (2, 3));
+        let mut child0 = Box::new(Node::new(h, h));
+        let child0_ptr = NodePtr::from_ref(&child0);
+        child0.update_value(1.0, 0.0);
+        child0.set_parent(Some(parent_ptr), (0, 1));
+        child0.next_sibling = Some(child1);
+
+        parent.first_child = Some(child0);
 
         // Walk the list.
-        let first = arena[parent_idx].first_child().unwrap();
-        assert_eq!(first, child0_idx);
-        assert!((arena[first].v1() - 1.0).abs() < 1e-6);
-        assert_eq!(arena[first].parent_outcome(), (0, 1));
+        let first = parent.first_child().unwrap();
+        assert_eq!(first, child0_ptr);
+        assert!((unsafe { first.as_ref() }.v1() - 1.0).abs() < 1e-6);
+        assert_eq!(unsafe { first.as_ref() }.parent_outcome(), (0, 1));
 
-        let second = arena[first].next_sibling().unwrap();
-        assert_eq!(second, child1_idx);
-        assert!((arena[second].v1() - 2.0).abs() < 1e-6);
-        assert_eq!(arena[second].parent_outcome(), (2, 3));
+        let second = unsafe { first.as_ref() }.next_sibling().unwrap();
+        assert_eq!(second, child1_ptr);
+        assert!((unsafe { second.as_ref() }.v1() - 2.0).abs() < 1e-6);
+        assert_eq!(unsafe { second.as_ref() }.parent_outcome(), (2, 3));
 
-        assert!(arena[second].next_sibling().is_none());
+        assert!(unsafe { second.as_ref() }.next_sibling().is_none());
     }
 
     // ---- Virtual loss: Node ----
@@ -917,7 +819,6 @@ mod tests {
         let mut node = Node::new(h, h);
 
         assert!(node.try_start_score_update());
-        // Second claim on unvisited node should fail.
         assert!(!node.try_start_score_update());
         assert_eq!(node.n_in_flight(), 1);
     }
@@ -939,11 +840,9 @@ mod tests {
         let h = HalfNode::new([0.2; 5], [0, 1, 2, 3, 4]);
         let mut node = Node::new(h, h);
 
-        // Claim then visit — simulates: descend, then backup arrives.
         assert!(node.try_start_score_update());
         node.update_value(1.0, 1.0);
 
-        // Now visited with 1 in-flight. New claim should still work.
         assert!(node.try_start_score_update());
         assert_eq!(node.n_in_flight(), 2);
     }
@@ -959,7 +858,6 @@ mod tests {
 
         node.cancel_score_update();
         assert_eq!(node.n_in_flight(), 0);
-        // Values untouched.
         assert!((node.v1() - 1.0).abs() < 1e-6);
         assert!((node.v2() - 2.0).abs() < 1e-6);
     }
@@ -983,7 +881,6 @@ mod tests {
         edge.add_virtual_loss();
         edge.add_virtual_loss();
         assert_eq!(edge.n_in_flight(), 2);
-        // q and visits untouched.
         assert!((edge.q - 5.0).abs() < 1e-6);
         assert_eq!(edge.visits, 1);
 
@@ -999,5 +896,22 @@ mod tests {
     fn half_edge_revert_at_zero_panics() {
         let mut edge = HalfEdge::default();
         edge.revert_virtual_loss();
+    }
+
+    // ---- Custom Drop: iterative ----
+
+    #[test]
+    fn drop_deep_tree_no_stack_overflow() {
+        // Build a chain of 10_000 nodes as first_child links.
+        // Without iterative drop, this would overflow the call stack.
+        let h = HalfNode::new([0.2; 5], [0, 1, 2, 3, 4]);
+        let mut chain: Option<Box<Node>> = None;
+        for _ in 0..10_000 {
+            let mut node = Box::new(Node::new(h, h));
+            node.first_child = chain.take();
+            chain = Some(node);
+        }
+        // Dropping `chain` here exercises the iterative Drop.
+        drop(chain);
     }
 }
