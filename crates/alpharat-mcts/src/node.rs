@@ -19,7 +19,7 @@ impl NodeIndex {
 }
 
 // ---------------------------------------------------------------------------
-// HalfEdge — per-outcome stats (8 bytes)
+// HalfEdge — per-outcome stats (12 bytes)
 // ---------------------------------------------------------------------------
 
 #[derive(Clone, Copy, Debug)]
