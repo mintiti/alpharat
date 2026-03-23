@@ -133,11 +133,113 @@ This means:
 
 The output of this phase is a self-contained algorithm description that we're confident in. No code yet — just the math and the logic. If something doesn't work out during formalization, we find out here rather than after writing 500 lines.
 
+## Phase 2.5: Data Structure Design (2026-03-22)
+
+The algorithm is formalized. Before implementing, we need to settle the node data structure, because it determines the hot-path cost of PUCT selection and backup. These run millions of times during live play (no NN, pure CPU search), so constant factors matter.
+
+### The core tension
+
+In our current tree MCTS, `HalfEdge` stores a Welford running-average Q per player outcome. This gives O(1) marginal Q reads during PUCT: the running average implicitly computes the visit-weighted marginal over opponent responses. Each backup contributes one sample to HalfEdge[i], and the Welford average naturally accumulates Option D weighting (conditional visit proportions) as a side effect.
+
+In MCGS, this breaks. A child's Q can change from a transposing parent's backup, making the Welford samples stale. The running average accumulated old child Q values that are no longer correct. This is the fundamental issue.
+
+lc0 and KataGo handle this differently:
+
+**lc0**: keeps per-edge Welford Q (like our HalfEdge). When staleness detected (`Edge.N < LowNode.N`), applies delta correction: `Edge.Q += (LowNode.Q - Edge.Q)`. Propagates delta to ancestors. Complex but preserves O(1) backup.
+
+**KataGo**: idempotent Q recomputation. On each visit, Q is recomputed from scratch: `Q(n) = (U(n) + Σ edgeVisits(a) * Q(child(a))) / N(n)`. No per-edge Q storage. Stale values tolerated between visits (PUCT guarantees revisits, formula self-corrects). Simpler, requires iterating children during backup.
+
+KataGo's GraphSearch.md makes the case that lc0's delta correction is a "performance hack/optimization", not a correctness requirement. Both converge to the same result. The delta correction is approximate (drops the U(n) term, asymptotically equivalent). The load-bearing correctness requirement is separating edge visits from child visits, which both do.
+
+### Adaptation to simultaneous moves
+
+In alternating-move games, one action = one child, so `Q(n,a) = Q(child(a))`. One pointer dereference.
+
+In our simultaneous-move setting, one player's marginal Q requires iterating over opponent responses:
+```
+marginal_Q_p1[i] = Σ_j weight[j] * (r_p1[i,j] + child(i,j).Q_p1)
+```
+
+This makes the lc0-style delta correction harder: each marginal aggregates multiple children, any of which could go stale independently. And it makes KataGo-style iteration more natural: you're iterating over the opponent dimension anyway.
+
+### Three candidate data structures
+
+We identified three approaches, ordered from most to least complex:
+
+**Approach A: lc0-style (incremental + delta correction)**
+
+Keep HalfEdge with Welford running average Q per outcome. Edge/LowNode type split: Edge stores per-parent Q + rewards, LowNode stores shared position data. When transpositions cause staleness, detect and propagate deltas.
+
+| Operation | Cost per node |
+|-----------|--------------|
+| Selection | O(n_outcomes) per player. Reads HalfEdge.q directly. |
+| Backup | O(1) per node on path. Single Welford update. |
+| Staleness | O(1) per ancestor. Delta propagation when detected. |
+
+Complexity: high. Separate Edge type, delta propagation machinery, per-edge Q tracking for multiple children per marginal.
+
+**Approach B: Pure idempotent (KataGo-style)**
+
+No per-edge Q cache. On each visit, recompute Q from the full `[n1, n2]` matrix. During PUCT selection, also compute marginal Q on-the-fly by iterating the matrix.
+
+| Operation | Cost per node |
+|-----------|--------------|
+| Selection | O(n1 × n2) per player. Iterates matrix + pointer chases. |
+| Backup | O(n1 × n2) per node on path. Iterates matrix for Q recomputation. |
+
+Complexity: low. One node type, one formula. Simplest to implement and reason about.
+
+**Approach C: Idempotent + cached marginals**
+
+Same idempotent Q recomputation during backup. But also cache `marginal_q[i]` and `marginal_visits[i]` per player on the node, computed as a side effect of the matrix iteration. Selection reads the cached values.
+
+| Operation | Cost per node |
+|-----------|--------------|
+| Selection | O(n_outcomes) per player. Reads cached marginals. |
+| Backup | O(n1 × n2) per node on path. Iterates matrix, refreshes marginal cache. |
+
+Complexity: medium. One node type, caching logic during backup. Selection code looks almost identical to current HalfEdge-based PUCT.
+
+Staleness of cached marginals: same guarantee as node-level Q. Correct at time of last backup to this node. Between backups, children may change from transposing paths. Self-corrects on next visit. KataGo's convergence argument applies.
+
+### What to measure
+
+**Measurable now (microbenchmark, no MCGS needed):**
+- Backup cost: O(n1 × n2) matrix iteration with pointer chases vs. O(1) Welford update.
+- At production scale (millions of sims), does the matrix iteration per backup become a bottleneck, or are pointer chases to children the dominant cost regardless?
+- Benchmark standalone PUCT + backup functions with representative node sizes (n1, n2 = 3..5).
+
+**Needs full implementation or theoretical work:**
+- Search quality under staleness. How much do stale marginal Q values affect PUCT exploration? Does delta correction (approach A) produce measurably better play than tolerated staleness (approaches B/C)?
+- Could be explored analytically on a small game (3×3 grid, enumerate state graph, compute exact Q vs. stale Q under different regimes).
+
+### Decision: Approach A (lc0-style), refined with joint matrix on LowNode
+
+**Resolved 2026-03-22, refined 2026-03-23.** The initial plan put per-outcome HalfEdge arrays (`[HalfEdge; 5]`) on Edge for marginal Q caching. Design review revealed these are on the wrong struct: an Edge represents a single (i,j) action pair, so it can't accumulate marginal Q across opponent responses. The HalfEdge arrays were dead weight.
+
+**The fix:** Welford Q accumulators in a joint `[n1, n2]` matrix on LowNode. Three arrays:
+- `edge_q_p1[i][j]`, `edge_q_p2[i][j]` — per-(i,j) Welford running average Q
+- `edge_visits[i][j]` — visit count per (i,j)
+
+This lives on LowNode because the exploration policy from a position is position-intrinsic (same reasoning KataGo uses for shared edge visits).
+
+**Selection:** marginal Q for decoupled PUCT is computed at selection time by summing the j dimension: `marginal_Q_p1[i] = Σ_j weight[j] * edge_q_p1[i][j]`. O(n2) per outcome.
+
+**Backup:** Welford update on `edge_q_p1[i][j]` and `edge_q_p2[i][j]`. O(1) per (i,j) pair, same as lc0.
+
+**Delta correction:** operates at the node level (v1, v2). `delta = child.Q - edge_q[i][j]` is a scalar, same structure as lc0. Staleness between visits is tolerated, self-corrects on revisit.
+
+**Two search regimes motivate this choice:** self-play uses ~2000 sims (NN-bottlenecked, backup cost irrelevant). Live analysis without NN could use millions of sims (pure CPU, backup cost matters). The Welford approach keeps backup O(1) for both regimes, vs O(n1*n2) for pure idempotent recomputation.
+
+Edge is now leaner: just per-parent rewards, virtual loss, aggregate values for delta detection, and `Arc<LowNode>`.
+
+Approaches B and C remain viable as modifications. See `.mt/briefs/mcgs.md` for the full type mapping.
+
 ## Phase 3: Implement
 
-Build a separate `alpharat/mcgs/` module. Completely independent from the current `alpharat/mcts/` — both usable interchangeably through the same `Agent` interface.
+Build as a new Rust crate (`alpharat-mcgs`), independent from `alpharat-mcts`. Same Backend trait, same pipeline integration, head-to-head comparison.
 
-The decoupled PUCT logic (PUCT formula, marginal Q computation) should be shared or kept identical. The difference is in node creation, backup, and navigation.
+Implementation order: data structures first (node, transposition table, state hashing), then search loop, then pipeline integration. See `.mt/briefs/mcgs.md` for the detailed Rust-specific breakdown.
 
 ## Phase 4: Validate
 

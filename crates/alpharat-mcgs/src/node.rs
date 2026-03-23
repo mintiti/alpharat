@@ -2,12 +2,11 @@ use std::sync::atomic::{AtomicU16, Ordering};
 use std::sync::Arc;
 
 // ---------------------------------------------------------------------------
-// HalfEdge — per-outcome stats (8 bytes)
+// HalfEdge — per-outcome stats (12 bytes)
 // ---------------------------------------------------------------------------
 //
-// Copied from alpharat-mcts. Accumulates marginal Q for one player's outcome
-// via Welford running average. In MCGS, these live on Edge (per-parent),
-// not on LowNode (shared).
+// Copied from alpharat-mcts. Welford running-average Q for one player's
+// outcome. Used for virtual loss tracking and future search loop needs.
 
 #[derive(Clone, Copy, Debug)]
 pub struct HalfEdge {
@@ -128,6 +127,12 @@ pub struct LowNode {
     v2: f32,
     total_visits: u32,
 
+    // Per-(i,j) Welford Q for computing marginal Q during selection.
+    // Only [0..n1][0..n2] entries are valid.
+    edge_q_p1: [[f32; 5]; 5],
+    edge_q_p2: [[f32; 5]; 5],
+    edge_visits: [[u32; 5]; 5],
+
     // Children: head of Edge linked list
     first_child: Option<Box<Edge>>,
 
@@ -176,6 +181,9 @@ impl LowNode {
             v1: 0.0,
             v2: 0.0,
             total_visits: 0,
+            edge_q_p1: [[0.0; 5]; 5],
+            edge_q_p2: [[0.0; 5]; 5],
+            edge_visits: [[0; 5]; 5],
             first_child: None,
             value_scale: 0.0,
             is_terminal: false,
@@ -212,6 +220,87 @@ impl LowNode {
         let n = self.total_visits as f32;
         self.v1 += (q1 - self.v1) / n;
         self.v2 += (q2 - self.v2) / n;
+    }
+
+    // --- Per-(i,j) edge matrix ---
+
+    /// Welford running-average update on the (i, j) entry of the joint matrix.
+    pub fn update_edge(&mut self, i: usize, j: usize, q1: f32, q2: f32) {
+        debug_assert!(i < self.n1());
+        debug_assert!(j < self.n2());
+        self.edge_visits[i][j] += 1;
+        let n = self.edge_visits[i][j] as f32;
+        self.edge_q_p1[i][j] += (q1 - self.edge_q_p1[i][j]) / n;
+        self.edge_q_p2[i][j] += (q2 - self.edge_q_p2[i][j]) / n;
+    }
+
+    pub fn edge_q_p1(&self, i: usize, j: usize) -> f32 {
+        debug_assert!(i < self.n1());
+        debug_assert!(j < self.n2());
+        self.edge_q_p1[i][j]
+    }
+
+    pub fn edge_q_p2(&self, i: usize, j: usize) -> f32 {
+        debug_assert!(i < self.n1());
+        debug_assert!(j < self.n2());
+        self.edge_q_p2[i][j]
+    }
+
+    pub fn edge_visits(&self, i: usize, j: usize) -> u32 {
+        debug_assert!(i < self.n1());
+        debug_assert!(j < self.n2());
+        self.edge_visits[i][j]
+    }
+
+    /// Sum edge_visits[i][j] over all j (marginal visits for p1 outcome i).
+    pub fn marginal_visits_p1(&self, i: usize) -> u32 {
+        debug_assert!(i < self.n1());
+        let mut sum = 0u32;
+        for j in 0..self.n2() {
+            sum += self.edge_visits[i][j];
+        }
+        sum
+    }
+
+    /// Sum edge_visits[i][j] over all i (marginal visits for p2 outcome j).
+    pub fn marginal_visits_p2(&self, j: usize) -> u32 {
+        debug_assert!(j < self.n2());
+        let mut sum = 0u32;
+        for i in 0..self.n1() {
+            sum += self.edge_visits[i][j];
+        }
+        sum
+    }
+
+    /// Sum over all valid (i, j) entries.
+    pub fn total_edge_visits(&self) -> u32 {
+        let mut sum = 0u32;
+        for i in 0..self.n1() {
+            for j in 0..self.n2() {
+                sum += self.edge_visits[i][j];
+            }
+        }
+        sum
+    }
+
+    /// Marginal p1 visits mapped to 5-action space. Blocked actions get 0.
+    pub fn expand_p1_visits(&self) -> [f32; 5] {
+        let mut out = [0.0f32; 5];
+        for idx in 0..self.n1() {
+            let action = self.p1_outcomes[idx] as usize;
+            out[action] = self.marginal_visits_p1(idx) as f32;
+        }
+        out
+    }
+
+    /// Marginal p2 visits mapped to 5-action space. Blocked actions get 0.
+    pub fn expand_p2_visits(&self) -> [f32; 5] {
+        let mut out = [0.0f32; 5];
+        for idx in 0..self.n2() {
+            let action = self.p2_outcomes[idx] as usize;
+            out[action] = self.marginal_visits_p2(idx) as f32;
+        }
+        out
     }
 
     // --- Getters ---
@@ -362,15 +451,13 @@ impl LowNode {
 // Edge — per-parent link (lc0 Node equivalent)
 // ---------------------------------------------------------------------------
 //
-// One Edge per (parent LowNode, outcome pair) visited. Carries per-parent
-// marginal Q stats (HalfEdge arrays) and the transition reward. Points to
-// the shared LowNode for the child position via Arc.
+// One Edge per (parent LowNode, outcome pair) visited. Carries the transition
+// reward and per-edge aggregate values for delta detection. Points to the
+// shared LowNode for the child position via Arc.
+//
+// Per-(i,j) Q accumulators live on LowNode (joint matrix), not here.
 
 pub struct Edge {
-    // Per-parent marginal Q stats (outcome-indexed, only n1/n2 valid)
-    p1_edges: [HalfEdge; 5],
-    p2_edges: [HalfEdge; 5],
-
     // Per-edge aggregate values (for delta detection during backup)
     v1: f32,
     v2: f32,
@@ -421,8 +508,6 @@ impl Edge {
     ) -> Self {
         low_node.add_parent();
         Self {
-            p1_edges: [HalfEdge::default(); 5],
-            p2_edges: [HalfEdge::default(); 5],
             v1: 0.0,
             v2: 0.0,
             total_visits: 0,
@@ -433,28 +518,6 @@ impl Edge {
             next_sibling: None,
             low_node,
         }
-    }
-
-    // --- HalfEdge access ---
-
-    pub fn p1_edge(&self, idx: usize) -> &HalfEdge {
-        debug_assert!(idx < self.low_node.n1());
-        &self.p1_edges[idx]
-    }
-
-    pub fn p1_edge_mut(&mut self, idx: usize) -> &mut HalfEdge {
-        debug_assert!(idx < self.low_node.n1());
-        &mut self.p1_edges[idx]
-    }
-
-    pub fn p2_edge(&self, idx: usize) -> &HalfEdge {
-        debug_assert!(idx < self.low_node.n2());
-        &self.p2_edges[idx]
-    }
-
-    pub fn p2_edge_mut(&mut self, idx: usize) -> &mut HalfEdge {
-        debug_assert!(idx < self.low_node.n2());
-        &mut self.p2_edges[idx]
     }
 
     // --- Aggregate value ---
@@ -531,25 +594,6 @@ impl Edge {
         self.next_sibling.as_deref_mut()
     }
 
-    /// Expand p1 edge visits back to 5-action space.
-    pub fn expand_p1_visits(&self) -> [f32; 5] {
-        let mut out = [0.0f32; 5];
-        for idx in 0..self.low_node.n1() {
-            let action = self.low_node.p1_outcome_action(idx) as usize;
-            out[action] = self.p1_edges[idx].visits as f32;
-        }
-        out
-    }
-
-    /// Expand p2 edge visits back to 5-action space.
-    pub fn expand_p2_visits(&self) -> [f32; 5] {
-        let mut out = [0.0f32; 5];
-        for idx in 0..self.low_node.n2() {
-            let action = self.low_node.p2_outcome_action(idx) as usize;
-            out[action] = self.p2_edges[idx].visits as f32;
-        }
-        out
-    }
 }
 
 impl Drop for Edge {
@@ -880,45 +924,93 @@ mod tests {
         edge.cancel_score_update();
     }
 
-    // ---- Edge: HalfEdge access ----
+    // ---- LowNode: per-(i,j) edge matrix ----
 
     #[test]
-    fn edge_half_edge_update() {
-        let low = Arc::new(LowNode::new_shell([4, 1, 2, 3, 4], [0, 1, 2, 3, 4]));
-        let mut edge = Edge::new(Arc::clone(&low), (0, 0), 0.0, 0.0);
+    fn low_node_edge_welford() {
+        let mut low = LowNode::new_shell([0, 1, 2, 3, 4], [0, 1, 2, 3, 4]);
 
-        // P1 has 4 outcomes. Update outcome 0.
-        edge.p1_edge_mut(0).update(5.0);
-        edge.p1_edge_mut(0).update(3.0);
-        assert_eq!(edge.p1_edge(0).visits, 2);
-        assert!((edge.p1_edge(0).q - 4.0).abs() < 1e-5);
+        low.update_edge(0, 0, 5.0, 2.0);
+        low.update_edge(0, 0, 3.0, 4.0);
+        assert_eq!(low.edge_visits(0, 0), 2);
+        assert!((low.edge_q_p1(0, 0) - 4.0).abs() < 1e-5);
+        assert!((low.edge_q_p2(0, 0) - 3.0).abs() < 1e-5);
 
-        // P2 has 5 outcomes.
-        edge.p2_edge_mut(3).update(10.0);
-        assert_eq!(edge.p2_edge(3).visits, 1);
-        assert!((edge.p2_edge(3).q - 10.0).abs() < 1e-5);
+        // Other entries untouched
+        assert_eq!(low.edge_visits(1, 0), 0);
+        assert_eq!(low.edge_q_p1(1, 0), 0.0);
     }
 
     #[test]
-    fn edge_expand_visits() {
-        let low = Arc::new(LowNode::new_shell([4, 1, 2, 3, 4], [0, 1, 2, 3, 4]));
-        let mut edge = Edge::new(Arc::clone(&low), (0, 0), 0.0, 0.0);
+    fn low_node_edge_update_multiple_j() {
+        // Different j values for the same i accumulate independently
+        let mut low = LowNode::new_shell([0, 1, 2, 3, 4], [0, 1, 2, 3, 4]);
 
-        // P1 outcomes: [1, 2, 3, 4] (4 outcomes)
-        // Give visits to outcome 0 (action 1) and outcome 3 (action 4)
-        for _ in 0..10 {
-            edge.p1_edge_mut(0).update(1.0);
+        low.update_edge(2, 0, 10.0, 1.0);
+        low.update_edge(2, 1, 20.0, 2.0);
+        low.update_edge(2, 0, 12.0, 3.0);
+
+        assert_eq!(low.edge_visits(2, 0), 2);
+        assert!((low.edge_q_p1(2, 0) - 11.0).abs() < 1e-5);
+
+        assert_eq!(low.edge_visits(2, 1), 1);
+        assert!((low.edge_q_p1(2, 1) - 20.0).abs() < 1e-5);
+    }
+
+    #[test]
+    fn low_node_marginal_visits() {
+        let mut low = LowNode::new_shell([0, 1, 2, 3, 4], [0, 1, 2, 3, 4]);
+
+        low.update_edge(1, 0, 1.0, 1.0);
+        low.update_edge(1, 0, 1.0, 1.0);
+        low.update_edge(1, 2, 1.0, 1.0);
+        low.update_edge(3, 2, 1.0, 1.0);
+
+        // P1 marginal: i=1 visited with j=0 (2x) and j=2 (1x)
+        assert_eq!(low.marginal_visits_p1(1), 3);
+        assert_eq!(low.marginal_visits_p1(3), 1);
+        assert_eq!(low.marginal_visits_p1(0), 0);
+
+        // P2 marginal: j=0 visited from i=1 (2x), j=2 from i=1 (1x) + i=3 (1x)
+        assert_eq!(low.marginal_visits_p2(0), 2);
+        assert_eq!(low.marginal_visits_p2(2), 2);
+        assert_eq!(low.marginal_visits_p2(1), 0);
+    }
+
+    #[test]
+    fn low_node_total_edge_visits() {
+        let mut low = LowNode::new_shell([0, 1, 2, 3, 4], [0, 1, 2, 3, 4]);
+        assert_eq!(low.total_edge_visits(), 0);
+
+        low.update_edge(0, 0, 1.0, 1.0);
+        low.update_edge(0, 0, 1.0, 1.0);
+        low.update_edge(2, 3, 1.0, 1.0);
+        assert_eq!(low.total_edge_visits(), 3);
+    }
+
+    #[test]
+    fn low_node_expand_visits() {
+        // P1: UP blocked -> 4 outcomes [1, 2, 3, 4]
+        // P2: open -> 5 outcomes
+        let mut low = LowNode::new_shell([4, 1, 2, 3, 4], [0, 1, 2, 3, 4]);
+
+        // P1 outcome 0 maps to action 1, outcome 3 maps to action 4
+        // Give visits to outcome 0 with various j
+        for j in 0..5 {
+            low.update_edge(0, j, 1.0, 1.0);
+            low.update_edge(0, j, 1.0, 1.0); // 2 visits per j = 10 total for i=0
         }
+        // Give visits to outcome 3 (action 4)
         for _ in 0..7 {
-            edge.p1_edge_mut(3).update(1.0);
+            low.update_edge(3, 0, 1.0, 1.0);
         }
 
-        let expanded = edge.expand_p1_visits();
+        let expanded = low.expand_p1_visits();
         assert_eq!(expanded[0], 0.0); // blocked
-        assert_eq!(expanded[1], 10.0);
+        assert_eq!(expanded[1], 10.0); // outcome 0 -> action 1
         assert_eq!(expanded[2], 0.0);
         assert_eq!(expanded[3], 0.0);
-        assert_eq!(expanded[4], 7.0);
+        assert_eq!(expanded[4], 7.0); // outcome 3 -> action 4
     }
 
     // ---- Child linked list ----

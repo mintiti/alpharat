@@ -487,6 +487,8 @@ This works because:
 
 4. **Staleness propagation** — Currently only update nodes on playout path. Other parents of updated children keep stale Q until revisited. KataGo confirms this is fine: PUCT guarantees eventual revisits, and idempotent Q self-corrects on next visit.
 
+5. **Backup/selection cost tradeoff** — See `mcgs-brief.md` Phase 2.5. Three data structure approaches (lc0-style incremental, pure idempotent, idempotent + cached marginals) with different cost profiles. The key unknown: does O(n1 × n2) backup per node matter at millions of sims, or are pointer chases to children the dominant cost? Needs microbenchmark before committing to an approach.
+
 ---
 
 ## Differences from KataGo
@@ -505,6 +507,18 @@ This works because:
 | Cycle detection | Yes (Go ko/superko) | No (turn in hash, always increases) |
 | Final policy | Visit distribution | Visit distribution (same) |
 
+### Differences from lc0
+
+| Aspect | lc0 | Ours |
+|--------|-----|------|
+| Q update | Welford incremental + delta correction for staleness | Welford per-(i,j) on LowNode, delta correction at node level |
+| Node split | Node (per-edge Q) + LowNode (shared position) | Edge (per-parent rewards, virtual loss, delta detection) + LowNode (shared position + joint Q matrix) |
+| Per-edge Q | Stored on Node, corrected via delta propagation | Per-(i,j) Welford Q on LowNode's joint `[n1, n2]` matrix. Marginal Q computed at selection time. |
+| Marginal Q | N/A (one child per action in alternating games) | `marginal_Q_p1[i] = Σ_j weight[j] * edge_q_p1[i][j]`, summed from the joint matrix |
+| Ownership | `shared_ptr<LowNode>` on Edge, `weak_ptr` in TT | `Arc<LowNode>` on Edge, `Weak` in TT |
+
+The Edge/LowNode split follows lc0's pattern but adapted: Edge carries per-parent rewards, virtual loss, and aggregate values for delta detection. LowNode carries the shared position data plus the joint `[n1, n2]` Welford Q matrix. This gives O(1) Welford backup per (i,j) pair and O(n) marginal Q during selection (sum over the j dimension).
+
 ---
 
 ## Next Steps
@@ -512,4 +526,5 @@ This works because:
 1. Walk through a concrete example (3×3 grid, few cheese) by hand
 2. Verify the formulas produce sensible values
 3. Identify edge cases (terminal states, no valid moves, etc.)
-4. Implement in `alpharat/mcgs/`
+4. Microbenchmark: matrix iteration cost vs. Welford at production scale
+5. Implement in `crates/alpharat-mcgs/`
