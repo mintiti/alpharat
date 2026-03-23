@@ -268,22 +268,29 @@ impl Bot for MctsBot {
     }
 
     fn think(&mut self, state: &GameState, ctx: &Context) -> Direction {
-        // Turn 0 with existing tree from preprocess: continue searching.
-        // Otherwise: fresh tree from current state.
-        if self.tree.is_none() || state.turn() > 0 {
-            let sim = state.to_sim();
-            self.tree = Some(MCTSTree::new(&sim));
-            self.sim = Some(sim);
+        // Always rebuild sim from authoritative server state.
+        let sim = state.to_sim();
+        self.sim = Some(sim);
+
+        if state.turn() == 0 {
+            // Turn 0: keep tree from preprocess, or create if preprocess didn't run.
+            if self.tree.is_none() {
+                self.tree = Some(MCTSTree::new(self.sim.as_ref().unwrap()));
+            }
+        } else if let Some(tree) = self.tree.as_mut() {
+            // Tree reuse: advance to child matching last turn's moves.
+            let p1 = state.player1_last_move() as u8;
+            let p2 = state.player2_last_move() as u8;
+            if !tree.advance_root(p1, p2) {
+                tree.reinit(self.sim.as_ref().unwrap());
+            }
+        } else {
+            // Defensive: no tree (shouldn't happen in normal flow).
+            self.tree = Some(MCTSTree::new(self.sim.as_ref().unwrap()));
         }
 
         self.search_loop(ctx, false);
-        let dir = self.pick_move();
-
-        // No tree reuse across turns for now.
-        self.tree = None;
-        self.sim = None;
-
-        dir
+        self.pick_move()
     }
 
     fn on_game_over(&mut self, _result: GameResult, _scores: (f32, f32)) {

@@ -209,7 +209,6 @@ pub fn find_or_extend_child(
 /// async deallocation.
 pub struct MCTSTree {
     root_box: ManuallyDrop<Box<Node>>,
-    root: NodePtr,
 }
 
 impl MCTSTree {
@@ -220,15 +219,13 @@ impl MCTSTree {
     pub fn new(game: &GameState) -> Self {
         // Ensure the global GC thread is running.
         node_gc();
-        let (root_box, root) = alloc_root(game);
         Self {
-            root_box: ManuallyDrop::new(root_box),
-            root,
+            root_box: ManuallyDrop::new(alloc_root(game)),
         }
     }
 
     pub fn root(&self) -> NodePtr {
-        self.root
+        NodePtr::from_ref(&self.root_box)
     }
 
     /// Immutable reference to the root node.
@@ -244,13 +241,11 @@ impl MCTSTree {
     /// Orphaned subtree (old root + remaining siblings) is sent to the
     /// GC thread for async deallocation.
     pub fn advance_root(&mut self, p1_action: u8, p2_action: u8) -> bool {
-        let root_ref = unsafe { self.root.as_ref() };
-        let i = root_ref.p1.action_to_outcome_idx(p1_action);
-        let j = root_ref.p2.action_to_outcome_idx(p2_action);
+        let i = self.root_box.p1.action_to_outcome_idx(p1_action);
+        let j = self.root_box.p2.action_to_outcome_idx(p2_action);
 
         if let Some(child_box) = self.detach_child(i, j) {
             let old_root = std::mem::replace(&mut *self.root_box, child_box);
-            self.root = NodePtr::from_ref(&self.root_box);
             node_gc().send(old_root);
             true
         } else {
@@ -260,9 +255,7 @@ impl MCTSTree {
 
     /// Clear the tree and create a fresh root from `game`.
     pub fn reinit(&mut self, game: &GameState) {
-        let (new_root_box, new_root) = alloc_root(game);
-        let old_root = std::mem::replace(&mut *self.root_box, new_root_box);
-        self.root = new_root;
+        let old_root = std::mem::replace(&mut *self.root_box, alloc_root(game));
         node_gc().send(old_root);
     }
 
@@ -284,6 +277,8 @@ impl MCTSTree {
         // Walk sibling chain via NodePtr to find prev → target.
         let mut node_ptr = self.root_box.first_child();
         while let Some(ptr) = node_ptr {
+            // SAFETY: ptr points to a child node (distinct heap allocation from
+            // root_box), so mutating it doesn't alias root_box or other siblings.
             let node = unsafe { ptr.as_mut() };
             if node
                 .next_sibling
@@ -311,7 +306,7 @@ impl Drop for MCTSTree {
 }
 
 /// Allocate a root node from the current game state.
-fn alloc_root(game: &GameState) -> (Box<Node>, NodePtr) {
+fn alloc_root(game: &GameState) -> Box<Node> {
     let eff_p1 = game.effective_actions_p1();
     let eff_p2 = game.effective_actions_p2();
 
@@ -324,9 +319,7 @@ fn alloc_root(game: &GameState) -> (Box<Node>, NodePtr) {
     let mut node = Node::new(p1_half, p2_half);
     node.set_value_scale(game.cheese.remaining_cheese().max(1) as f32);
 
-    let root_box = Box::new(node);
-    let root_ptr = NodePtr::from_ref(&root_box);
-    (root_box, root_ptr)
+    Box::new(node)
 }
 
 // ---------------------------------------------------------------------------
