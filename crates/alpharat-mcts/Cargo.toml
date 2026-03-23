@@ -14,5 +14,12 @@ rand_distr = "0.4"
 pyo3 = { version = "0.25", optional = true }
 numpy = { version = "0.25", optional = true }
 
+[dev-dependencies]
+criterion = { version = "0.5", features = ["html_reports"] }
+
 [features]
 python = ["dep:pyo3", "dep:numpy", "pyrat/python"]
+
+[[bench]]
+name = "search"
+harness = false
