@@ -313,7 +313,7 @@ class PyRat:
         """
         ...
 
-    def get_valid_moves(self, pos: Coordinates | tuple[int, int]) -> list[int]:
+    def effective_moves(self, pos: Coordinates | tuple[int, int]) -> list[int]:
         """Get valid movement directions from a position.
 
         Returns direction values where movement is possible (not blocked by
