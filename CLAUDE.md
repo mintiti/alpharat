@@ -525,7 +525,7 @@ from pyrat_engine.core.game import PyRat, MoveUndo
 game.wall_entries()              # → list[Wall]
 game.mud_entries()               # → list[Mud]
 game.cheese_positions()          # → list[Coordinates]
-game.get_valid_moves(position)   # → list[int] (0-3: UP, RIGHT, DOWN, LEFT)
+game.effective_moves(position)   # → list[int] (0-3: UP, RIGHT, DOWN, LEFT)
 game.effective_actions(position) # → bytes[5] (action → effective action)
 
 # Position properties
