@@ -632,16 +632,16 @@ impl SharedNode {
     // --- Transposition tracking (atomic, safe from any thread) ---
 
     pub fn add_parent(&self) {
-        self.num_parents.fetch_add(1, Ordering::Relaxed);
+        self.num_parents.fetch_add(1, Ordering::AcqRel);
     }
 
     pub fn remove_parent(&self) {
-        let prev = self.num_parents.fetch_sub(1, Ordering::Relaxed);
+        let prev = self.num_parents.fetch_sub(1, Ordering::AcqRel);
         debug_assert!(prev > 0, "remove_parent: num_parents is already 0");
     }
 
     pub fn num_parents(&self) -> u16 {
-        self.num_parents.load(Ordering::Relaxed)
+        self.num_parents.load(Ordering::Acquire)
     }
 
     pub fn is_transposition(&self) -> bool {

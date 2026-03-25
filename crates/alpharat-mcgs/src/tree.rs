@@ -242,14 +242,14 @@ impl MCGSTree {
             }
         }
 
+        // Flush thread-local GC batch so edges are visible to the GC thread
+        crate::gc::flush();
+
         // Set the new root
         self.root = match new_root {
             Some(node) => node,
             None => create_root_node(game, &mut self.tt),
         };
-
-        // Clean up stale TT entries from pruned subtrees
-        self.tt.evict_expired();
     }
 }
 
@@ -833,13 +833,19 @@ mod tests {
         );
         tree.advance_root(&game, p1_action, p2_action);
 
-        // Wait a bit for GC to process pruned edges
-        std::thread::sleep(std::time::Duration::from_millis(50));
+        // Deterministic sync: let GC process all pruned edges
+        crate::gc::start();
+        crate::gc::stop();
+        crate::gc::wait();
 
-        // After eviction, TT should have fewer entries (pruned siblings gone)
-        // At minimum, the new root should still be in TT
+        // Evict stale TT entries now that GC has dropped pruned subtrees
+        tree.tt_mut().evict_expired();
+
         let tt_after = tree.tt().live_count();
-        assert!(tt_after >= 1, "new root should be in TT");
+        assert!(
+            tt_after < tt_before,
+            "TT should shrink after evicting pruned subtrees: before={tt_before}, after={tt_after}"
+        );
     }
 
     #[test]
@@ -885,7 +891,37 @@ mod tests {
         let config = SearchConfig::default();
         let backend = SmartUniformBackend;
         let mut rng = SmallRng::seed_from_u64(42);
-        run_search(&mut tree, &game, &backend, &config, 200, 8, &mut rng).unwrap();
+        // Use enough sims to produce transpositions in this symmetric setup
+        run_search(&mut tree, &game, &backend, &config, 500, 8, &mut rng).unwrap();
+
+        // Walk the tree to find a node with num_parents > 1 (a transposition).
+        // Collect Weak refs to all transposed nodes reachable from root's children.
+        let mut transposition_weak: Option<std::sync::Weak<SharedNode>> = None;
+        let mut cursor = tree.root().get().first_child();
+        while let Some(edge) = cursor {
+            let child = edge.low_node();
+            if child.num_parents() > 1 {
+                transposition_weak = Some(Arc::downgrade(child));
+                break;
+            }
+            // Also check grandchildren
+            let mut inner = child.get().first_child();
+            while let Some(inner_edge) = inner {
+                if inner_edge.low_node().num_parents() > 1 {
+                    transposition_weak = Some(Arc::downgrade(inner_edge.low_node()));
+                    break;
+                }
+                inner = inner_edge.next_sibling();
+            }
+            if transposition_weak.is_some() {
+                break;
+            }
+            cursor = edge.next_sibling();
+        }
+
+        let weak = transposition_weak.expect(
+            "search should produce at least one transposition with 500 sims on symmetric setup",
+        );
 
         // Advance
         let root_low = tree.root().get();
@@ -899,7 +935,16 @@ mod tests {
         );
         tree.advance_root(&game, p1_action, p2_action);
 
-        // Nodes reachable from the new subtree should still be in TT.
-        assert!(tree.tt().live_count() >= 1);
+        // Let GC process pruned edges
+        crate::gc::start();
+        crate::gc::stop();
+        crate::gc::wait();
+
+        // The transposed node should still be alive (kept by multiple parent edges
+        // in the surviving subtree, or by the TT)
+        assert!(
+            weak.upgrade().is_some(),
+            "transposition node should survive advance_root (still reachable from new subtree)"
+        );
     }
 }
