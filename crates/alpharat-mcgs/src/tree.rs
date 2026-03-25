@@ -598,7 +598,7 @@ mod tests {
     #[should_panic(expected = "populate_node: node already has")]
     fn populate_node_on_visited_panics() {
         let node = SharedNode::new(LowNode::new_shell([0, 1, 2, 3, 4], [0, 1, 2, 3, 4]));
-        node.get_mut().update_value(1.0, 1.0);
+        node.get_mut().finalize_score_update(1.0, 1.0);
         let eval = crate::EvalResult {
             policy_p1: [0.2; 5],
             policy_p2: [0.2; 5],

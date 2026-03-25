@@ -1,4 +1,5 @@
 use alpharat_eval_core::compute_outcomes;
+use std::cell::UnsafeCell;
 use std::sync::atomic::{AtomicU16, Ordering};
 use std::sync::Arc;
 
@@ -80,6 +81,13 @@ pub struct LowNode {
     edge_q_p2: [[f32; 5]; 5],
     edge_visits: [[u32; 5]; 5],
 
+    // Virtual loss per (i,j) for PUCT bias during descent.
+    // Only [0..n1][0..n2] entries are valid.
+    edge_in_flight: [[u32; 5]; 5],
+
+    // Collision detection: prevents double NN eval of same position.
+    n_in_flight: u32,
+
     // Children: head of Edge linked list
     first_child: Option<Box<Edge>>,
 
@@ -131,6 +139,8 @@ impl LowNode {
             edge_q_p1: [[0.0; 5]; 5],
             edge_q_p2: [[0.0; 5]; 5],
             edge_visits: [[0; 5]; 5],
+            edge_in_flight: [[0; 5]; 5],
+            n_in_flight: 0,
             first_child: None,
             value_scale: 0.0,
             is_terminal: false,
@@ -161,24 +171,112 @@ impl LowNode {
         self.value_scale = scale;
     }
 
-    /// Welford running-average update on aggregate values.
-    pub fn update_value(&mut self, q1: f32, q2: f32) {
+    /// LC0's FinalizeScoreUpdate: Welford running-average on node aggregates.
+    /// Increments total_visits, then adjusts v1/v2 toward the new value.
+    pub fn finalize_score_update(&mut self, q1: f32, q2: f32) {
         self.total_visits += 1;
         let n = self.total_visits as f32;
         self.v1 += (q1 - self.v1) / n;
         self.v2 += (q2 - self.v2) / n;
     }
 
+    /// LC0's AdjustForTerminal on node-level aggregates.
+    /// Retroactively adjust n_to_fix old visits by delta.
+    pub fn adjust_for_terminal(&mut self, v1_delta: f32, v2_delta: f32, n_to_fix: u32) {
+        let n = self.total_visits as f32;
+        self.v1 += n_to_fix as f32 * v1_delta / n;
+        self.v2 += n_to_fix as f32 * v2_delta / n;
+    }
+
     // --- Per-(i,j) edge matrix ---
 
-    /// Welford running-average update on the (i, j) entry of the joint matrix.
-    pub fn update_edge(&mut self, i: usize, j: usize, q1: f32, q2: f32) {
+    /// LC0's FinalizeScoreUpdate on a joint matrix cell.
+    /// Increments edge_visits[i][j], then adjusts edge_q toward the new value.
+    pub fn finalize_edge_update(&mut self, i: usize, j: usize, q1: f32, q2: f32) {
         debug_assert!(i < self.n1());
         debug_assert!(j < self.n2());
         self.edge_visits[i][j] += 1;
         let n = self.edge_visits[i][j] as f32;
         self.edge_q_p1[i][j] += (q1 - self.edge_q_p1[i][j]) / n;
         self.edge_q_p2[i][j] += (q2 - self.edge_q_p2[i][j]) / n;
+    }
+
+    /// LC0's AdjustForTerminal on a joint matrix cell.
+    /// Retroactively adjust n_to_fix old visits by delta.
+    pub fn adjust_edge_for_terminal(&mut self, i: usize, j: usize, q1_delta: f32, q2_delta: f32, n_to_fix: u32) {
+        debug_assert!(i < self.n1());
+        debug_assert!(j < self.n2());
+        let n = self.edge_visits[i][j] as f32;
+        self.edge_q_p1[i][j] += n_to_fix as f32 * q1_delta / n;
+        self.edge_q_p2[i][j] += n_to_fix as f32 * q2_delta / n;
+    }
+
+    // --- Virtual loss on (i,j) matrix ---
+
+    pub fn add_virtual_loss(&mut self, i: usize, j: usize) {
+        debug_assert!(i < self.n1());
+        debug_assert!(j < self.n2());
+        self.edge_in_flight[i][j] += 1;
+    }
+
+    pub fn revert_virtual_loss(&mut self, i: usize, j: usize) {
+        debug_assert!(i < self.n1());
+        debug_assert!(j < self.n2());
+        debug_assert!(
+            self.edge_in_flight[i][j] > 0,
+            "revert_virtual_loss: edge_in_flight[{i}][{j}] is already 0"
+        );
+        self.edge_in_flight[i][j] -= 1;
+    }
+
+    pub fn edge_in_flight(&self, i: usize, j: usize) -> u32 {
+        debug_assert!(i < self.n1());
+        debug_assert!(j < self.n2());
+        self.edge_in_flight[i][j]
+    }
+
+    /// Sum edge_in_flight[i][j] over all j (marginal in-flight for p1 outcome i).
+    pub fn marginal_in_flight_p1(&self, i: usize) -> u32 {
+        debug_assert!(i < self.n1());
+        let mut sum = 0u32;
+        for j in 0..self.n2() {
+            sum += self.edge_in_flight[i][j];
+        }
+        sum
+    }
+
+    /// Sum edge_in_flight[i][j] over all i (marginal in-flight for p2 outcome j).
+    pub fn marginal_in_flight_p2(&self, j: usize) -> u32 {
+        debug_assert!(j < self.n2());
+        let mut sum = 0u32;
+        for i in 0..self.n1() {
+            sum += self.edge_in_flight[i][j];
+        }
+        sum
+    }
+
+    // --- Collision detection ---
+
+    /// lc0 pattern: for unvisited nodes, fails if already claimed.
+    /// For visited nodes, always succeeds.
+    pub fn try_start_score_update(&mut self) -> bool {
+        if self.total_visits == 0 && self.n_in_flight > 0 {
+            return false;
+        }
+        self.n_in_flight += 1;
+        true
+    }
+
+    pub fn cancel_score_update(&mut self) {
+        debug_assert!(
+            self.n_in_flight > 0,
+            "cancel_score_update: n_in_flight is already 0"
+        );
+        self.n_in_flight -= 1;
+    }
+
+    pub fn n_in_flight(&self) -> u32 {
+        self.n_in_flight
     }
 
     pub fn edge_q_p1(&self, i: usize, j: usize) -> f32 {
@@ -373,6 +471,18 @@ impl LowNode {
         self.num_parents() > 1
     }
 
+    // --- Prior setters (for Dirichlet noise) ---
+
+    pub fn set_p1_prior_at(&mut self, idx: usize, value: f32) {
+        debug_assert!(idx < self.n1());
+        self.p1_prior[idx] = value;
+    }
+
+    pub fn set_p2_prior_at(&mut self, idx: usize, value: f32) {
+        debug_assert!(idx < self.n2());
+        self.p2_prior[idx] = value;
+    }
+
     // --- Prior expansion (for policy extraction) ---
 
     /// Expand p1 outcome-indexed priors back to 5-action space.
@@ -405,12 +515,6 @@ impl LowNode {
 // Per-(i,j) Q accumulators live on LowNode (joint matrix), not here.
 
 pub struct Edge {
-    // Per-edge aggregate values (for delta detection during backup)
-    v1: f32,
-    v2: f32,
-    total_visits: u32,
-    n_in_flight: u32,
-
     // Transition reward from parent to child (per-parent, not shared)
     edge_r1: f32,
     edge_r2: f32,
@@ -422,17 +526,13 @@ pub struct Edge {
     next_sibling: Option<Box<Edge>>,
 
     // Shared child position
-    low_node: Arc<LowNode>,
+    low_node: Arc<SharedNode>,
 }
 
 impl std::fmt::Debug for Edge {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Edge")
             .field("parent_outcome", &self.parent_outcome)
-            .field("v1", &self.v1)
-            .field("v2", &self.v2)
-            .field("total_visits", &self.total_visits)
-            .field("n_in_flight", &self.n_in_flight)
             .field("edge_r1", &self.edge_r1)
             .field("edge_r2", &self.edge_r2)
             .finish()
@@ -448,17 +548,13 @@ impl Edge {
     ///
     /// Automatically increments `low_node.num_parents`.
     pub fn new(
-        low_node: Arc<LowNode>,
+        low_node: Arc<SharedNode>,
         parent_outcome: (u8, u8),
         r1: f32,
         r2: f32,
     ) -> Self {
-        low_node.add_parent();
+        low_node.get().add_parent();
         Self {
-            v1: 0.0,
-            v2: 0.0,
-            total_visits: 0,
-            n_in_flight: 0,
             edge_r1: r1,
             edge_r2: r2,
             parent_outcome,
@@ -467,53 +563,7 @@ impl Edge {
         }
     }
 
-    // --- Aggregate value ---
-
-    /// Welford running-average update on edge's aggregate values.
-    pub fn update_value(&mut self, q1: f32, q2: f32) {
-        self.total_visits += 1;
-        let n = self.total_visits as f32;
-        self.v1 += (q1 - self.v1) / n;
-        self.v2 += (q2 - self.v2) / n;
-    }
-
-    // --- Virtual loss ---
-
-    /// lc0 pattern. For unvisited nodes: fails if already claimed.
-    /// For visited nodes: always succeeds.
-    pub fn try_start_score_update(&mut self) -> bool {
-        if self.total_visits == 0 && self.n_in_flight > 0 {
-            return false;
-        }
-        self.n_in_flight += 1;
-        true
-    }
-
-    pub fn cancel_score_update(&mut self) {
-        debug_assert!(
-            self.n_in_flight > 0,
-            "cancel_score_update: n_in_flight is already 0"
-        );
-        self.n_in_flight -= 1;
-    }
-
     // --- Getters ---
-
-    pub fn v1(&self) -> f32 {
-        self.v1
-    }
-
-    pub fn v2(&self) -> f32 {
-        self.v2
-    }
-
-    pub fn total_visits(&self) -> u32 {
-        self.total_visits
-    }
-
-    pub fn n_in_flight(&self) -> u32 {
-        self.n_in_flight
-    }
 
     pub fn r1(&self) -> f32 {
         self.edge_r1
@@ -527,7 +577,7 @@ impl Edge {
         self.parent_outcome
     }
 
-    pub fn low_node(&self) -> &Arc<LowNode> {
+    pub fn low_node(&self) -> &Arc<SharedNode> {
         &self.low_node
     }
 
@@ -545,9 +595,54 @@ impl Edge {
 
 impl Drop for Edge {
     fn drop(&mut self) {
-        self.low_node.remove_parent();
+        self.low_node.get().remove_parent();
     }
 }
+
+// ---------------------------------------------------------------------------
+// SharedNode — UnsafeCell wrapper for interior mutability
+// ---------------------------------------------------------------------------
+//
+// LowNode lives behind Arc (for TT Weak refs and Edge sharing). During search,
+// we need &mut LowNode for backup, populate, virtual loss. SharedNode wraps
+// LowNode in UnsafeCell for zero-cost interior mutability.
+//
+// Safety invariant: single-threaded search. All access to a SharedNode happens
+// on the same thread. This matches lc0's const_cast pattern.
+
+pub struct SharedNode(UnsafeCell<LowNode>);
+
+impl SharedNode {
+    pub fn new(node: LowNode) -> Self {
+        Self(UnsafeCell::new(node))
+    }
+
+    /// Immutable access to the inner LowNode.
+    #[inline]
+    pub fn get(&self) -> &LowNode {
+        // SAFETY: single-threaded search — no concurrent mutation.
+        unsafe { &*self.0.get() }
+    }
+
+    /// Mutable access to the inner LowNode.
+    #[inline]
+    #[allow(clippy::mut_from_ref)]
+    pub fn get_mut(&self) -> &mut LowNode {
+        // SAFETY: single-threaded search — no concurrent access.
+        unsafe { &mut *self.0.get() }
+    }
+}
+
+impl std::fmt::Debug for SharedNode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.get().fmt(f)
+    }
+}
+
+// SAFETY: single-threaded search. SharedNode is only accessed from one thread.
+// Required because Arc<SharedNode> needs Send+Sync for Weak refs in the TT.
+unsafe impl Send for SharedNode {}
+unsafe impl Sync for SharedNode {}
 
 // ---------------------------------------------------------------------------
 // Tests
@@ -556,6 +651,9 @@ impl Drop for Edge {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// All actions open — simplest effective-action mapping.
+    const OPEN: [u8; 5] = [0, 1, 2, 3, 4];
 
     // ---- LowNode: creation and outcome mapping ----
 
@@ -658,9 +756,9 @@ mod tests {
     fn low_node_welford() {
         let mut low = LowNode::new_shell([0, 1, 2, 3, 4], [0, 1, 2, 3, 4]);
 
-        low.update_value(2.0, 1.0);
-        low.update_value(4.0, 3.0);
-        low.update_value(6.0, 5.0);
+        low.finalize_score_update(2.0, 1.0);
+        low.finalize_score_update(4.0, 3.0);
+        low.finalize_score_update(6.0, 5.0);
 
         assert_eq!(low.total_visits(), 3);
         assert!((low.v1() - 4.0).abs() < 1e-5);
@@ -700,13 +798,22 @@ mod tests {
 
     // ---- Edge: creation and Arc sharing ----
 
+    /// Helper: wrap LowNode in SharedNode + Arc for Edge tests.
+    fn make_shared(eff_p1: [u8; 5], eff_p2: [u8; 5]) -> Arc<SharedNode> {
+        Arc::new(SharedNode::new(LowNode::new_shell(eff_p1, eff_p2)))
+    }
+
+    fn make_shared_open() -> Arc<SharedNode> {
+        make_shared(OPEN, OPEN)
+    }
+
     #[test]
     fn edge_creation_increments_parents() {
-        let low = Arc::new(LowNode::new_shell([0, 1, 2, 3, 4], [0, 1, 2, 3, 4]));
-        assert_eq!(low.num_parents(), 0);
+        let low = make_shared_open();
+        assert_eq!(low.get().num_parents(), 0);
 
         let edge = Edge::new(Arc::clone(&low), (0, 1), 1.0, 0.5);
-        assert_eq!(low.num_parents(), 1);
+        assert_eq!(low.get().num_parents(), 1);
         assert_eq!(edge.parent_outcome(), (0, 1));
         assert!((edge.r1() - 1.0).abs() < 1e-6);
         assert!((edge.r2() - 0.5).abs() < 1e-6);
@@ -714,117 +821,49 @@ mod tests {
 
     #[test]
     fn edge_drop_decrements_parents() {
-        let low = Arc::new(LowNode::new_shell([0, 1, 2, 3, 4], [0, 1, 2, 3, 4]));
+        let low = make_shared_open();
 
         {
             let _edge = Edge::new(Arc::clone(&low), (0, 0), 0.0, 0.0);
-            assert_eq!(low.num_parents(), 1);
+            assert_eq!(low.get().num_parents(), 1);
         }
         // Edge dropped
-        assert_eq!(low.num_parents(), 0);
+        assert_eq!(low.get().num_parents(), 0);
     }
 
     #[test]
     fn multiple_edges_share_low_node() {
-        let low = Arc::new(LowNode::new_shell([0, 1, 2, 3, 4], [0, 1, 2, 3, 4]));
+        let low = make_shared_open();
 
         let edge1 = Edge::new(Arc::clone(&low), (0, 0), 1.0, 0.0);
         let edge2 = Edge::new(Arc::clone(&low), (1, 0), 0.0, 1.0);
-        assert_eq!(low.num_parents(), 2);
-        assert!(low.is_transposition());
+        assert_eq!(low.get().num_parents(), 2);
+        assert!(low.get().is_transposition());
 
         // Both edges see the same LowNode
         assert!(Arc::ptr_eq(edge1.low_node(), edge2.low_node()));
 
         drop(edge1);
-        assert_eq!(low.num_parents(), 1);
-        assert!(!low.is_transposition());
+        assert_eq!(low.get().num_parents(), 1);
+        assert!(!low.get().is_transposition());
 
         drop(edge2);
-        assert_eq!(low.num_parents(), 0);
+        assert_eq!(low.get().num_parents(), 0);
     }
 
     #[test]
     fn arc_keeps_low_node_alive() {
-        let low = Arc::new(LowNode::new_shell([0, 1, 2, 3, 4], [0, 1, 2, 3, 4]));
+        let low = make_shared_open();
         let weak = Arc::downgrade(&low);
 
         let edge = Edge::new(Arc::clone(&low), (0, 0), 0.0, 0.0);
         drop(low); // Original Arc dropped, but edge still holds one
 
         assert!(weak.upgrade().is_some());
-        assert_eq!(edge.low_node().num_parents(), 1);
+        assert_eq!(edge.low_node().get().num_parents(), 1);
 
         drop(edge);
         assert!(weak.upgrade().is_none()); // LowNode freed
-    }
-
-    // ---- Edge: Welford update ----
-
-    #[test]
-    fn edge_welford() {
-        let low = Arc::new(LowNode::new_shell([0, 1, 2, 3, 4], [0, 1, 2, 3, 4]));
-        let mut edge = Edge::new(Arc::clone(&low), (0, 0), 0.0, 0.0);
-
-        edge.update_value(2.0, 1.0);
-        edge.update_value(4.0, 3.0);
-        edge.update_value(6.0, 5.0);
-
-        assert_eq!(edge.total_visits(), 3);
-        assert!((edge.v1() - 4.0).abs() < 1e-5);
-        assert!((edge.v2() - 3.0).abs() < 1e-5);
-    }
-
-    // ---- Edge: virtual loss ----
-
-    #[test]
-    fn edge_try_start_fresh() {
-        let low = Arc::new(LowNode::new_shell([0, 1, 2, 3, 4], [0, 1, 2, 3, 4]));
-        let mut edge = Edge::new(Arc::clone(&low), (0, 0), 0.0, 0.0);
-
-        assert!(edge.try_start_score_update());
-        assert_eq!(edge.n_in_flight(), 1);
-    }
-
-    #[test]
-    fn edge_collision_unvisited() {
-        let low = Arc::new(LowNode::new_shell([0, 1, 2, 3, 4], [0, 1, 2, 3, 4]));
-        let mut edge = Edge::new(Arc::clone(&low), (0, 0), 0.0, 0.0);
-
-        assert!(edge.try_start_score_update());
-        assert!(!edge.try_start_score_update()); // collision
-        assert_eq!(edge.n_in_flight(), 1);
-    }
-
-    #[test]
-    fn edge_visited_always_succeeds() {
-        let low = Arc::new(LowNode::new_shell([0, 1, 2, 3, 4], [0, 1, 2, 3, 4]));
-        let mut edge = Edge::new(Arc::clone(&low), (0, 0), 0.0, 0.0);
-
-        edge.update_value(1.0, 1.0);
-        assert!(edge.try_start_score_update());
-        assert!(edge.try_start_score_update());
-        assert!(edge.try_start_score_update());
-        assert_eq!(edge.n_in_flight(), 3);
-    }
-
-    #[test]
-    fn edge_cancel_score_update() {
-        let low = Arc::new(LowNode::new_shell([0, 1, 2, 3, 4], [0, 1, 2, 3, 4]));
-        let mut edge = Edge::new(Arc::clone(&low), (0, 0), 0.0, 0.0);
-
-        edge.update_value(1.0, 2.0);
-        assert!(edge.try_start_score_update());
-        edge.cancel_score_update();
-        assert_eq!(edge.n_in_flight(), 0);
-    }
-
-    #[test]
-    #[should_panic(expected = "cancel_score_update: n_in_flight is already 0")]
-    fn edge_cancel_at_zero_panics() {
-        let low = Arc::new(LowNode::new_shell([0, 1, 2, 3, 4], [0, 1, 2, 3, 4]));
-        let mut edge = Edge::new(Arc::clone(&low), (0, 0), 0.0, 0.0);
-        edge.cancel_score_update();
     }
 
     // ---- LowNode: per-(i,j) edge matrix ----
@@ -833,8 +872,8 @@ mod tests {
     fn low_node_edge_welford() {
         let mut low = LowNode::new_shell([0, 1, 2, 3, 4], [0, 1, 2, 3, 4]);
 
-        low.update_edge(0, 0, 5.0, 2.0);
-        low.update_edge(0, 0, 3.0, 4.0);
+        low.finalize_edge_update(0, 0, 5.0, 2.0);
+        low.finalize_edge_update(0, 0, 3.0, 4.0);
         assert_eq!(low.edge_visits(0, 0), 2);
         assert!((low.edge_q_p1(0, 0) - 4.0).abs() < 1e-5);
         assert!((low.edge_q_p2(0, 0) - 3.0).abs() < 1e-5);
@@ -849,9 +888,9 @@ mod tests {
         // Different j values for the same i accumulate independently
         let mut low = LowNode::new_shell([0, 1, 2, 3, 4], [0, 1, 2, 3, 4]);
 
-        low.update_edge(2, 0, 10.0, 1.0);
-        low.update_edge(2, 1, 20.0, 2.0);
-        low.update_edge(2, 0, 12.0, 3.0);
+        low.finalize_edge_update(2, 0, 10.0, 1.0);
+        low.finalize_edge_update(2, 1, 20.0, 2.0);
+        low.finalize_edge_update(2, 0, 12.0, 3.0);
 
         assert_eq!(low.edge_visits(2, 0), 2);
         assert!((low.edge_q_p1(2, 0) - 11.0).abs() < 1e-5);
@@ -864,10 +903,10 @@ mod tests {
     fn low_node_marginal_visits() {
         let mut low = LowNode::new_shell([0, 1, 2, 3, 4], [0, 1, 2, 3, 4]);
 
-        low.update_edge(1, 0, 1.0, 1.0);
-        low.update_edge(1, 0, 1.0, 1.0);
-        low.update_edge(1, 2, 1.0, 1.0);
-        low.update_edge(3, 2, 1.0, 1.0);
+        low.finalize_edge_update(1, 0, 1.0, 1.0);
+        low.finalize_edge_update(1, 0, 1.0, 1.0);
+        low.finalize_edge_update(1, 2, 1.0, 1.0);
+        low.finalize_edge_update(3, 2, 1.0, 1.0);
 
         // P1 marginal: i=1 visited with j=0 (2x) and j=2 (1x)
         assert_eq!(low.marginal_visits_p1(1), 3);
@@ -885,9 +924,9 @@ mod tests {
         let mut low = LowNode::new_shell([0, 1, 2, 3, 4], [0, 1, 2, 3, 4]);
         assert_eq!(low.total_edge_visits(), 0);
 
-        low.update_edge(0, 0, 1.0, 1.0);
-        low.update_edge(0, 0, 1.0, 1.0);
-        low.update_edge(2, 3, 1.0, 1.0);
+        low.finalize_edge_update(0, 0, 1.0, 1.0);
+        low.finalize_edge_update(0, 0, 1.0, 1.0);
+        low.finalize_edge_update(2, 3, 1.0, 1.0);
         assert_eq!(low.total_edge_visits(), 3);
     }
 
@@ -900,12 +939,12 @@ mod tests {
         // P1 outcome 0 maps to action 1, outcome 3 maps to action 4
         // Give visits to outcome 0 with various j
         for j in 0..5 {
-            low.update_edge(0, j, 1.0, 1.0);
-            low.update_edge(0, j, 1.0, 1.0); // 2 visits per j = 10 total for i=0
+            low.finalize_edge_update(0, j, 1.0, 1.0);
+            low.finalize_edge_update(0, j, 1.0, 1.0); // 2 visits per j = 10 total for i=0
         }
         // Give visits to outcome 3 (action 4)
         for _ in 0..7 {
-            low.update_edge(3, 0, 1.0, 1.0);
+            low.finalize_edge_update(3, 0, 1.0, 1.0);
         }
 
         let expanded = low.expand_p1_visits();
@@ -920,23 +959,20 @@ mod tests {
 
     #[test]
     fn child_list_prepend_and_find() {
-        let parent = Arc::new(LowNode::new_shell([0, 1, 2, 3, 4], [0, 1, 2, 3, 4]));
-        let child1 = Arc::new(LowNode::new_shell([0, 1, 2, 3, 4], [0, 1, 2, 3, 4]));
-        let child2 = Arc::new(LowNode::new_shell([0, 1, 2, 3, 4], [0, 1, 2, 3, 4]));
+        let child1 = make_shared_open();
+        let child2 = make_shared_open();
 
-        // Need mutable access to parent for prepend_child.
-        // In real usage, parent wouldn't be behind Arc yet (or we'd use interior mutability).
-        // For testing, we build the list manually.
-        let mut parent_owned = LowNode::new_shell([0, 1, 2, 3, 4], [0, 1, 2, 3, 4]);
+        // Use SharedNode for parent too — interior mutability via get_mut().
+        let parent = SharedNode::new(LowNode::new_shell(OPEN, OPEN));
 
         let edge1 = Box::new(Edge::new(Arc::clone(&child1), (0, 1), 1.0, 0.0));
         let edge2 = Box::new(Edge::new(Arc::clone(&child2), (2, 3), 0.0, 1.0));
 
-        parent_owned.prepend_child(edge1);
-        parent_owned.prepend_child(edge2);
+        parent.get_mut().prepend_child(edge1);
+        parent.get_mut().prepend_child(edge2);
 
         // edge2 was prepended last, so it's first
-        let first = parent_owned.first_child().unwrap();
+        let first = parent.get().first_child().unwrap();
         assert_eq!(first.parent_outcome(), (2, 3));
 
         let second = first.next_sibling().unwrap();
@@ -945,46 +981,43 @@ mod tests {
         assert!(second.next_sibling().is_none());
 
         // find_child
-        assert!(parent_owned.find_child(0, 1).is_some());
-        assert_eq!(parent_owned.find_child(0, 1).unwrap().parent_outcome(), (0, 1));
+        assert!(parent.get().find_child(0, 1).is_some());
+        assert_eq!(parent.get().find_child(0, 1).unwrap().parent_outcome(), (0, 1));
 
-        assert!(parent_owned.find_child(2, 3).is_some());
-        assert_eq!(parent_owned.find_child(2, 3).unwrap().parent_outcome(), (2, 3));
+        assert!(parent.get().find_child(2, 3).is_some());
+        assert_eq!(parent.get().find_child(2, 3).unwrap().parent_outcome(), (2, 3));
 
-        assert!(parent_owned.find_child(4, 4).is_none());
+        assert!(parent.get().find_child(4, 4).is_none());
 
         // Verify Arc sharing: both edges point to distinct child LowNodes
         assert!(!Arc::ptr_eq(
-            parent_owned.find_child(0, 1).unwrap().low_node(),
-            parent_owned.find_child(2, 3).unwrap().low_node()
+            parent.get().find_child(0, 1).unwrap().low_node(),
+            parent.get().find_child(2, 3).unwrap().low_node()
         ));
 
         // Verify parent counts
-        assert_eq!(child1.num_parents(), 1);
-        assert_eq!(child2.num_parents(), 1);
+        assert_eq!(child1.get().num_parents(), 1);
+        assert_eq!(child2.get().num_parents(), 1);
 
-        // Dropping parent_owned should drop all edges, decrementing parent counts
-        drop(parent_owned);
-        assert_eq!(child1.num_parents(), 0);
-        assert_eq!(child2.num_parents(), 0);
-
-        // Clean up unused Arcs
+        // Dropping parent should drop all edges, decrementing parent counts
         drop(parent);
+        assert_eq!(child1.get().num_parents(), 0);
+        assert_eq!(child2.get().num_parents(), 0);
     }
 
     #[test]
     fn child_list_find_mut() {
-        let child = Arc::new(LowNode::new_shell([0, 1, 2, 3, 4], [0, 1, 2, 3, 4]));
-        let mut parent = LowNode::new_shell([0, 1, 2, 3, 4], [0, 1, 2, 3, 4]);
+        let child = make_shared_open();
+        let mut parent = LowNode::new_shell(OPEN, OPEN);
 
         let edge = Box::new(Edge::new(Arc::clone(&child), (1, 2), 0.5, 0.5));
         parent.prepend_child(edge);
 
-        // Mutate through find_child_mut
+        // Verify we can find the edge and read its fields
         let found = parent.find_child_mut(1, 2).unwrap();
-        found.update_value(3.0, 7.0);
-        assert_eq!(found.total_visits(), 1);
-        assert!((found.v1() - 3.0).abs() < 1e-6);
+        assert_eq!(found.parent_outcome(), (1, 2));
+        assert!((found.r1() - 0.5).abs() < 1e-6);
+        assert!((found.r2() - 0.5).abs() < 1e-6);
     }
 
     // ---- Edge: HalfEdge virtual loss ----
@@ -1010,5 +1043,123 @@ mod tests {
     fn half_edge_revert_at_zero_panics() {
         let mut edge = HalfEdge::default();
         edge.revert_virtual_loss();
+    }
+
+    // ---- LowNode: virtual loss on (i,j) matrix ----
+
+    #[test]
+    fn low_node_virtual_loss_round_trip() {
+        let mut low = LowNode::new_shell(OPEN, OPEN);
+
+        low.add_virtual_loss(1, 2);
+        low.add_virtual_loss(1, 2);
+        low.add_virtual_loss(1, 3);
+
+        assert_eq!(low.edge_in_flight(1, 2), 2);
+        assert_eq!(low.edge_in_flight(1, 3), 1);
+        assert_eq!(low.edge_in_flight(0, 0), 0);
+
+        low.revert_virtual_loss(1, 2);
+        assert_eq!(low.edge_in_flight(1, 2), 1);
+
+        low.revert_virtual_loss(1, 2);
+        assert_eq!(low.edge_in_flight(1, 2), 0);
+    }
+
+    #[test]
+    fn low_node_marginal_in_flight() {
+        let mut low = LowNode::new_shell(OPEN, OPEN);
+
+        low.add_virtual_loss(1, 0);
+        low.add_virtual_loss(1, 2);
+        low.add_virtual_loss(3, 2);
+
+        // P1 marginal: i=1 has in-flight at j=0 (1) and j=2 (1)
+        assert_eq!(low.marginal_in_flight_p1(1), 2);
+        assert_eq!(low.marginal_in_flight_p1(3), 1);
+        assert_eq!(low.marginal_in_flight_p1(0), 0);
+
+        // P2 marginal: j=0 from i=1 (1), j=2 from i=1 (1) + i=3 (1)
+        assert_eq!(low.marginal_in_flight_p2(0), 1);
+        assert_eq!(low.marginal_in_flight_p2(2), 2);
+        assert_eq!(low.marginal_in_flight_p2(1), 0);
+    }
+
+    #[test]
+    #[should_panic(expected = "revert_virtual_loss: edge_in_flight[0][0] is already 0")]
+    fn low_node_revert_virtual_loss_at_zero_panics() {
+        let mut low = LowNode::new_shell(OPEN, OPEN);
+        low.revert_virtual_loss(0, 0);
+    }
+
+    // ---- LowNode: collision detection ----
+
+    #[test]
+    fn low_node_try_start_fresh() {
+        let mut low = LowNode::new_shell(OPEN, OPEN);
+
+        assert!(low.try_start_score_update());
+        assert_eq!(low.n_in_flight(), 1);
+    }
+
+    #[test]
+    fn low_node_collision_unvisited() {
+        let mut low = LowNode::new_shell(OPEN, OPEN);
+
+        assert!(low.try_start_score_update());
+        assert!(!low.try_start_score_update()); // collision
+        assert_eq!(low.n_in_flight(), 1);
+    }
+
+    #[test]
+    fn low_node_visited_always_succeeds() {
+        let mut low = LowNode::new_shell(OPEN, OPEN);
+
+        low.finalize_score_update(1.0, 1.0);
+        assert!(low.try_start_score_update());
+        assert!(low.try_start_score_update());
+        assert!(low.try_start_score_update());
+        assert_eq!(low.n_in_flight(), 3);
+    }
+
+    #[test]
+    fn low_node_cancel_score_update() {
+        let mut low = LowNode::new_shell(OPEN, OPEN);
+
+        low.finalize_score_update(1.0, 1.0);
+        assert!(low.try_start_score_update());
+        low.cancel_score_update();
+        assert_eq!(low.n_in_flight(), 0);
+    }
+
+    #[test]
+    #[should_panic(expected = "cancel_score_update: n_in_flight is already 0")]
+    fn low_node_cancel_at_zero_panics() {
+        let mut low = LowNode::new_shell(OPEN, OPEN);
+        low.cancel_score_update();
+    }
+
+    // ---- SharedNode ----
+
+    #[test]
+    fn shared_node_get_and_get_mut() {
+        let shared = SharedNode::new(LowNode::new_shell(OPEN, OPEN));
+        assert_eq!(shared.get().n1(), 5);
+        assert_eq!(shared.get().total_visits(), 0);
+
+        shared.get_mut().finalize_score_update(3.0, 2.0);
+        assert_eq!(shared.get().total_visits(), 1);
+        assert!((shared.get().v1() - 3.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn shared_node_in_arc() {
+        let shared = Arc::new(SharedNode::new(LowNode::new_shell(OPEN, OPEN)));
+        let clone = Arc::clone(&shared);
+
+        shared.get_mut().finalize_score_update(5.0, 5.0);
+        // Clone sees same data (same UnsafeCell behind Arc)
+        assert_eq!(clone.get().total_visits(), 1);
+        assert!((clone.get().v1() - 5.0).abs() < 1e-6);
     }
 }

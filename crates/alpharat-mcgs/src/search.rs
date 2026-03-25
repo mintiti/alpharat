@@ -580,39 +580,79 @@ fn descend(
 // ---------------------------------------------------------------------------
 
 /// Walk leaf→root, updating LowNode values and Edge Q along the path.
+/// Applies delta correction for transposition staleness (LC0's AdjustForTerminal).
 ///
 /// `g1, g2` are the leaf evaluation (NN value or terminal reward).
 fn backup(path: &[PathEntry], leaf: &SharedNode, g1: f32, g2: f32) {
-    // Visit 1 on the leaf: NN eval or terminal value.
-    leaf.get_mut().update_value(g1, g2);
+    leaf.get_mut().finalize_score_update(g1, g2);
 
     let mut v1 = g1;
     let mut v2 = g2;
+    let mut n_to_fix: u32 = 0;
+    let mut v1_delta: f32 = 0.0;
+    let mut v2_delta: f32 = 0.0;
 
     for entry in path.iter().rev() {
         let i = entry.p1_outcome as usize;
         let j = entry.p2_outcome as usize;
 
-        // Find the edge to get transition rewards.
-        let edge = entry.node.get().find_child(entry.p1_outcome, entry.p2_outcome)
+        // Get edge for rewards and child LowNode access.
+        let edge = entry
+            .node
+            .get()
+            .find_child(entry.p1_outcome, entry.p2_outcome)
             .expect("backup: edge must exist");
-        let q1 = edge.r1() + v1;
-        let q2 = edge.r2() + v2;
+        let r1 = edge.r1();
+        let r2 = edge.r2();
+        let child = Arc::clone(edge.low_node());
 
-        // Update per-edge aggregate.
-        let edge_mut = entry.node.get_mut().find_child_mut(entry.p1_outcome, entry.p2_outcome)
-            .expect("backup: edge must exist");
-        edge_mut.update_value(q1, q2);
+        // Compute Q with transition rewards.
+        let mut q1 = r1 + v1;
+        let mut q2 = r2 + v2;
+        let mut q1_delta = v1_delta; // rewards cancel (constant per edge)
+        let mut q2_delta = v2_delta;
 
-        // Update LowNode aggregate.
+        // --- Delta detection ---
+        // If child is a transposition, its aggregate incorporates info
+        // from other parents that our edge_q[i][j] doesn't have yet.
+        let child_low = child.get();
+        if child_low.num_parents() > 1 {
+            let correct_q1 = r1 + child_low.v1();
+            let correct_q2 = r2 + child_low.v2();
+
+            let node = entry.node.get();
+            q1_delta = correct_q1 - node.edge_q_p1(i, j);
+            q2_delta = correct_q2 - node.edge_q_p2(i, j);
+            n_to_fix = node.edge_visits(i, j);
+
+            q1 = correct_q1;
+            q2 = correct_q2;
+        }
+
+        // --- Apply updates ---
         let node = entry.node.get_mut();
-        node.update_value(q1, q2);
 
-        // Update joint matrix.
-        node.update_edge(i, j, q1, q2);
+        // FinalizeScoreUpdate on joint matrix (new visit).
+        node.finalize_edge_update(i, j, q1, q2);
 
+        // AdjustForTerminal on joint matrix (fix stale visits).
+        if n_to_fix > 0 {
+            node.adjust_edge_for_terminal(i, j, q1_delta, q2_delta, n_to_fix);
+        }
+
+        // FinalizeScoreUpdate on node aggregate (new visit).
+        node.finalize_score_update(q1, q2);
+
+        // AdjustForTerminal on node aggregate (fix stale visits).
+        if n_to_fix > 0 {
+            node.adjust_for_terminal(q1_delta, q2_delta, n_to_fix);
+        }
+
+        // Propagate upward.
         v1 = q1;
         v2 = q2;
+        v1_delta = q1_delta;
+        v2_delta = q2_delta;
     }
 }
 
@@ -942,10 +982,10 @@ mod tests {
         let root = crate::tree::create_root_node(&game, &mut tt);
 
         // Add some visits to (0, 0)
-        root.get_mut().update_edge(0, 0, 1.0, 1.0);
-        root.get_mut().update_edge(0, 0, 1.0, 1.0);
-        root.get_mut().update_value(1.0, 1.0);
-        root.get_mut().update_value(1.0, 1.0);
+        root.get_mut().finalize_edge_update(0, 0, 1.0, 1.0);
+        root.get_mut().finalize_edge_update(0, 0, 1.0, 1.0);
+        root.get_mut().finalize_score_update(1.0, 1.0);
+        root.get_mut().finalize_score_update(1.0, 1.0);
 
         let config = default_config();
         let mut r = rng();
@@ -965,10 +1005,10 @@ mod tests {
 
         // i=0, j=0: Q=2.0, 3 visits
         for _ in 0..3 {
-            low.update_edge(0, 0, 2.0, 1.0);
+            low.finalize_edge_update(0, 0, 2.0, 1.0);
         }
         // i=0, j=1: Q=4.0, 1 visit
-        low.update_edge(0, 1, 4.0, 2.0);
+        low.finalize_edge_update(0, 1, 4.0, 2.0);
 
         let mq = marginal_q_p1(&low, 0);
         // Expected: (3 * 2.0 + 1 * 4.0) / 4 = 10.0 / 4 = 2.5
@@ -1648,13 +1688,13 @@ mod tests {
             for j in 0..5 {
                 let q = if i == 2 { 10.0 } else { 1.0 };
                 for _ in 0..10 {
-                    node.get_mut().update_edge(i, j, q, q);
+                    node.get_mut().finalize_edge_update(i, j, q, q);
                 }
             }
         }
         // Need some total_visits for value to be nonzero
         for _ in 0..250 {
-            node.get_mut().update_value(1.0, 1.0);
+            node.get_mut().finalize_score_update(1.0, 1.0);
         }
 
         let config = default_config();
@@ -1674,8 +1714,8 @@ mod tests {
             .set_prior([0.05, 0.05, 0.7, 0.1, 0.1], [0.2; 5]);
 
         // Give 1 visit at (0,0) so total_edge_visits > 0
-        node.get_mut().update_edge(0, 0, 1.0, 1.0);
-        node.get_mut().update_value(1.0, 1.0);
+        node.get_mut().finalize_edge_update(0, 0, 1.0, 1.0);
+        node.get_mut().finalize_score_update(1.0, 1.0);
 
         let config = SearchConfig {
             force_k: 0.0,
@@ -1702,8 +1742,8 @@ mod tests {
         // Give 100 visits to outcomes 0-3, leave outcome 4 unvisited
         for i in 0..4 {
             for _ in 0..100 {
-                node.get_mut().update_edge(i, 0, 1.0, 1.0);
-                node.get_mut().update_value(1.0, 1.0);
+                node.get_mut().finalize_edge_update(i, 0, 1.0, 1.0);
+                node.get_mut().finalize_score_update(1.0, 1.0);
             }
         }
 
@@ -1725,9 +1765,9 @@ mod tests {
         )));
         node_lo.get_mut().set_value_scale(5.0);
         node_lo.get_mut().set_prior([0.2; 5], [0.2; 5]);
-        node_lo.get_mut().update_value(5.0, 5.0);
+        node_lo.get_mut().finalize_score_update(5.0, 5.0);
         // Visit 1 outcome → visited_mass = 0.2
-        node_lo.get_mut().update_edge(0, 0, 5.0, 5.0);
+        node_lo.get_mut().finalize_edge_update(0, 0, 5.0, 5.0);
 
         let node_hi = Arc::new(SharedNode::new(LowNode::new_shell(
             [0, 1, 2, 3, 4],
@@ -1735,11 +1775,11 @@ mod tests {
         )));
         node_hi.get_mut().set_value_scale(5.0);
         node_hi.get_mut().set_prior([0.2; 5], [0.2; 5]);
-        node_hi.get_mut().update_value(5.0, 5.0);
+        node_hi.get_mut().finalize_score_update(5.0, 5.0);
         // Visit 3 outcomes → visited_mass = 0.6
-        node_hi.get_mut().update_edge(0, 0, 5.0, 5.0);
-        node_hi.get_mut().update_edge(1, 0, 5.0, 5.0);
-        node_hi.get_mut().update_edge(2, 0, 5.0, 5.0);
+        node_hi.get_mut().finalize_edge_update(0, 0, 5.0, 5.0);
+        node_hi.get_mut().finalize_edge_update(1, 0, 5.0, 5.0);
+        node_hi.get_mut().finalize_edge_update(2, 0, 5.0, 5.0);
 
         // FPU = v1 - fpu_reduction * value_scale * sqrt(visited_mass)
         // node_lo: FPU = 5 - 0.2 * 5 * sqrt(0.2) ~ 4.553
@@ -1766,8 +1806,8 @@ mod tests {
             .set_prior([0.05, 0.05, 0.7, 0.1, 0.1], [0.2; 5]);
 
         // Give 1 visit so sqrt_total > 0
-        node.get_mut().update_edge(0, 0, 0.0, 0.0);
-        node.get_mut().update_value(0.0, 0.0);
+        node.get_mut().finalize_edge_update(0, 0, 0.0, 0.0);
+        node.get_mut().finalize_score_update(0.0, 0.0);
 
         let config = SearchConfig {
             force_k: 0.0,
@@ -1789,15 +1829,15 @@ mod tests {
 
         // Give 100 visits to outcomes 0 and 1
         for _ in 0..50 {
-            node.get_mut().update_edge(0, 0, 1.0, 1.0);
-            node.get_mut().update_edge(1, 0, 1.0, 1.0);
-            node.get_mut().update_value(1.0, 1.0);
-            node.get_mut().update_value(1.0, 1.0);
+            node.get_mut().finalize_edge_update(0, 0, 1.0, 1.0);
+            node.get_mut().finalize_edge_update(1, 0, 1.0, 1.0);
+            node.get_mut().finalize_score_update(1.0, 1.0);
+            node.get_mut().finalize_score_update(1.0, 1.0);
         }
         // Outcomes 2,3,4 have 1 visit each
         for i in 2..5 {
-            node.get_mut().update_edge(i, 0, 1.0, 1.0);
-            node.get_mut().update_value(1.0, 1.0);
+            node.get_mut().finalize_edge_update(i, 0, 1.0, 1.0);
+            node.get_mut().finalize_score_update(1.0, 1.0);
         }
 
         // total_edge_visits = 103
@@ -1823,12 +1863,12 @@ mod tests {
 
         // Give many visits and high Q to outcome 0, few visits to others
         for _ in 0..100 {
-            node.get_mut().update_edge(0, 0, 10.0, 10.0);
-            node.get_mut().update_value(10.0, 10.0);
+            node.get_mut().finalize_edge_update(0, 0, 10.0, 10.0);
+            node.get_mut().finalize_score_update(10.0, 10.0);
         }
         for i in 1..5 {
-            node.get_mut().update_edge(i, 0, 1.0, 1.0);
-            node.get_mut().update_value(1.0, 1.0);
+            node.get_mut().finalize_edge_update(i, 0, 1.0, 1.0);
+            node.get_mut().finalize_score_update(1.0, 1.0);
         }
 
         let config = default_config();
@@ -1859,14 +1899,14 @@ mod tests {
                 .set_prior([0.05, 0.05, 0.05, 0.6, 0.25], [0.2; 5]);
             // Outcome 0: high Q, many visits
             for _ in 0..100 {
-                node.get_mut().update_edge(0, 0, 10.0, 10.0);
-                node.get_mut().update_value(10.0, 10.0);
+                node.get_mut().finalize_edge_update(0, 0, 10.0, 10.0);
+                node.get_mut().finalize_score_update(10.0, 10.0);
             }
             // Outcomes 1-4: low Q, few visits
             for i in 1..5 {
                 for _ in 0..5 {
-                    node.get_mut().update_edge(i, 0, 0.1, 0.1);
-                    node.get_mut().update_value(0.1, 0.1);
+                    node.get_mut().finalize_edge_update(i, 0, 0.1, 0.1);
+                    node.get_mut().finalize_score_update(0.1, 0.1);
                 }
             }
             node
@@ -1905,8 +1945,8 @@ mod tests {
             [0.1, 0.3, 0.2, 0.15, 0.25],
             [0.8, 0.05, 0.05, 0.05, 0.05],
         );
-        node_a.get_mut().update_edge(0, 0, 2.0, 2.0);
-        node_a.get_mut().update_value(2.0, 2.0);
+        node_a.get_mut().finalize_edge_update(0, 0, 2.0, 2.0);
+        node_a.get_mut().finalize_score_update(2.0, 2.0);
 
         let node_b = Arc::new(SharedNode::new(LowNode::new_shell(
             [0, 1, 2, 3, 4],
@@ -1917,8 +1957,8 @@ mod tests {
             [0.1, 0.3, 0.2, 0.15, 0.25],
             [0.05, 0.05, 0.05, 0.05, 0.8],
         );
-        node_b.get_mut().update_edge(0, 0, 2.0, 2.0);
-        node_b.get_mut().update_value(2.0, 2.0);
+        node_b.get_mut().finalize_edge_update(0, 0, 2.0, 2.0);
+        node_b.get_mut().finalize_score_update(2.0, 2.0);
 
         let config = SearchConfig {
             force_k: 0.0,
@@ -1959,8 +1999,8 @@ mod tests {
         node.get_mut().set_prior([0.2; 5], [0.2; 5]);
         // Give some visits so selection isn't degenerate
         for i in 0..5 {
-            node.get_mut().update_edge(i, 0, 2.0, 2.0);
-            node.get_mut().update_value(2.0, 2.0);
+            node.get_mut().finalize_edge_update(i, 0, 2.0, 2.0);
+            node.get_mut().finalize_score_update(2.0, 2.0);
         }
 
         let config = SearchConfig {
@@ -2000,8 +2040,8 @@ mod tests {
         node.get_mut().set_prior([0.2; 5], [0.2; 5]);
 
         // Give 1 visit so total_edge_visits > 0
-        node.get_mut().update_edge(0, 0, 1.0, 1.0);
-        node.get_mut().update_value(1.0, 1.0);
+        node.get_mut().finalize_edge_update(0, 0, 1.0, 1.0);
+        node.get_mut().finalize_score_update(1.0, 1.0);
 
         let config = SearchConfig {
             force_k: 0.0,
@@ -2483,5 +2523,409 @@ mod tests {
         // and produces a valid result.
         let result = run_search(&mut tree, &game, &backend, &config, 5, 100, &mut r).unwrap();
         assert!(result.nn_evals + result.terminals + result.collisions > 0);
+    }
+
+    // =====================================================================
+    // Delta correction tests
+    // =====================================================================
+
+    /// No transposition: delta stays 0, backup produces identical results to before.
+    #[test]
+    fn delta_no_transposition_baseline() {
+        let root = Arc::new(SharedNode::new(LowNode::new_shell(
+            [0, 1, 2, 3, 4],
+            [0, 1, 2, 3, 4],
+        )));
+        root.get_mut().set_value_scale(5.0);
+        root.get_mut().set_prior([0.2; 5], [0.2; 5]);
+
+        let child = Arc::new(SharedNode::new(LowNode::new_shell(
+            [0, 1, 2, 3, 4],
+            [0, 1, 2, 3, 4],
+        )));
+        child.get_mut().set_value_scale(5.0);
+
+        // Only one parent edge → num_parents == 1, no delta correction.
+        let edge = Box::new(Edge::new(Arc::clone(&child), (0, 1), 1.0, 0.5));
+        root.get_mut().prepend_child(edge);
+        assert_eq!(child.get().num_parents(), 1);
+
+        let path = vec![PathEntry {
+            node: Arc::clone(&root),
+            p1_outcome: 0,
+            p2_outcome: 1,
+        }];
+
+        backup(&path, &child, 3.0, 2.0);
+
+        // Same results as non-delta-correction backup.
+        assert_eq!(child.get().total_visits(), 1);
+        assert!((child.get().v1() - 3.0).abs() < 1e-6);
+        assert!((child.get().v2() - 2.0).abs() < 1e-6);
+
+        // q1 = 1.0 + 3.0 = 4.0, q2 = 0.5 + 2.0 = 2.5
+        assert_eq!(root.get().total_visits(), 1);
+        assert!((root.get().v1() - 4.0).abs() < 1e-6);
+        assert!((root.get().v2() - 2.5).abs() < 1e-6);
+        assert_eq!(root.get().edge_visits(0, 1), 1);
+        assert!((root.get().edge_q_p1(0, 1) - 4.0).abs() < 1e-6);
+        assert!((root.get().edge_q_p2(0, 1) - 2.5).abs() < 1e-6);
+    }
+
+    /// Simple transposition correction.
+    /// Root → A → C and Root → B → C. Backup through A, then through B.
+    /// After B's backup, A's edge_q should reflect C's aggregate (not just the
+    /// single visit that went through A).
+    #[test]
+    fn delta_simple_transposition_correction() {
+        // Shared child C (the transposition).
+        let child_c = Arc::new(SharedNode::new(LowNode::new_shell(
+            [0, 1, 2, 3, 4],
+            [0, 1, 2, 3, 4],
+        )));
+        child_c.get_mut().set_value_scale(5.0);
+
+        // Parent A, with edge to C.
+        let parent_a = Arc::new(SharedNode::new(LowNode::new_shell(
+            [0, 1, 2, 3, 4],
+            [0, 1, 2, 3, 4],
+        )));
+        parent_a.get_mut().set_value_scale(5.0);
+        parent_a.get_mut().set_prior([0.2; 5], [0.2; 5]);
+        let edge_a_c = Box::new(Edge::new(Arc::clone(&child_c), (0, 0), 1.0, 0.5));
+        parent_a.get_mut().prepend_child(edge_a_c);
+
+        // Parent B, with edge to C.
+        let parent_b = Arc::new(SharedNode::new(LowNode::new_shell(
+            [0, 1, 2, 3, 4],
+            [0, 1, 2, 3, 4],
+        )));
+        parent_b.get_mut().set_value_scale(5.0);
+        parent_b.get_mut().set_prior([0.2; 5], [0.2; 5]);
+        let edge_b_c = Box::new(Edge::new(Arc::clone(&child_c), (0, 0), 0.0, 0.0));
+        parent_b.get_mut().prepend_child(edge_b_c);
+
+        assert_eq!(child_c.get().num_parents(), 2);
+
+        // Backup 1: through A with leaf value (2.0, 3.0).
+        let path_a = vec![PathEntry {
+            node: Arc::clone(&parent_a),
+            p1_outcome: 0,
+            p2_outcome: 0,
+        }];
+        backup(&path_a, &child_c, 2.0, 3.0);
+
+        // After backup 1: C.v = (2.0, 3.0), A.edge_q = (1+2, 0.5+3) = (3.0, 3.5).
+        assert_eq!(child_c.get().total_visits(), 1);
+        assert!((child_c.get().v1() - 2.0).abs() < 1e-6);
+        assert!((parent_a.get().edge_q_p1(0, 0) - 3.0).abs() < 1e-6);
+        assert!((parent_a.get().edge_q_p2(0, 0) - 3.5).abs() < 1e-6);
+
+        // Backup 2: through B with leaf value (4.0, 5.0).
+        let path_b = vec![PathEntry {
+            node: Arc::clone(&parent_b),
+            p1_outcome: 0,
+            p2_outcome: 0,
+        }];
+        backup(&path_b, &child_c, 4.0, 5.0);
+
+        // After backup 2: C.v = mean(2, 4) = 3.0, mean(3, 5) = 4.0.
+        assert_eq!(child_c.get().total_visits(), 2);
+        assert!((child_c.get().v1() - 3.0).abs() < 1e-6);
+        assert!((child_c.get().v2() - 4.0).abs() < 1e-6);
+
+        // B's edge sees C as a transposition (num_parents > 1).
+        // correct_q1 = r1(0) + C.v1(3.0) = 3.0
+        // correct_q2 = r2(0) + C.v2(4.0) = 4.0
+        // B had no prior visits, so the Welford new-visit gets correct_q directly.
+        assert_eq!(parent_b.get().edge_visits(0, 0), 1);
+        assert!((parent_b.get().edge_q_p1(0, 0) - 3.0).abs() < 1e-6);
+        assert!((parent_b.get().edge_q_p2(0, 0) - 4.0).abs() < 1e-6);
+
+        // Now backup through A again with leaf value (6.0, 7.0).
+        // C.v becomes mean(2, 4, 6) = 4.0, mean(3, 5, 7) = 5.0.
+        let path_a2 = vec![PathEntry {
+            node: Arc::clone(&parent_a),
+            p1_outcome: 0,
+            p2_outcome: 0,
+        }];
+        backup(&path_a2, &child_c, 6.0, 7.0);
+
+        assert_eq!(child_c.get().total_visits(), 3);
+        assert!((child_c.get().v1() - 4.0).abs() < 1e-6);
+        assert!((child_c.get().v2() - 5.0).abs() < 1e-6);
+
+        // A's edge_q should now be corrected.
+        // correct_q1 = r1(1.0) + C.v1(4.0) = 5.0
+        // correct_q2 = r2(0.5) + C.v2(5.0) = 5.5
+        //
+        // Before this backup, A had 1 visit with edge_q = (3.0, 3.5).
+        // Delta detection: correct_q1(5.0) - old_edge_q1(3.0) = 2.0, n_to_fix=1.
+        // FinalizeEdge adds visit 2 with Welford(5.0): (3.0 + (5.0-3.0)/2) = 4.0.
+        // AdjustEdge: 4.0 + 1*2.0/2 = 5.0. (exact catch-up)
+        assert_eq!(parent_a.get().edge_visits(0, 0), 2);
+        assert!((parent_a.get().edge_q_p1(0, 0) - 5.0).abs() < 1e-5);
+        assert!((parent_a.get().edge_q_p2(0, 0) - 5.5).abs() < 1e-5);
+    }
+
+    /// Exact catch-up: when all prior visits are stale, adjustment should
+    /// bring edge_q exactly to r + child.v.
+    #[test]
+    fn delta_exact_catchup() {
+        let child = Arc::new(SharedNode::new(LowNode::new_shell(
+            [0, 1, 2, 3, 4],
+            [0, 1, 2, 3, 4],
+        )));
+        child.get_mut().set_value_scale(5.0);
+
+        let parent = Arc::new(SharedNode::new(LowNode::new_shell(
+            [0, 1, 2, 3, 4],
+            [0, 1, 2, 3, 4],
+        )));
+        parent.get_mut().set_value_scale(5.0);
+        parent.get_mut().set_prior([0.2; 5], [0.2; 5]);
+
+        // Parent needs 2 edges to child so num_parents > 1.
+        let other_parent = Arc::new(SharedNode::new(LowNode::new_shell(
+            [0, 1, 2, 3, 4],
+            [0, 1, 2, 3, 4],
+        )));
+        other_parent.get_mut().set_value_scale(5.0);
+        other_parent.get_mut().set_prior([0.2; 5], [0.2; 5]);
+
+        let edge1 = Box::new(Edge::new(Arc::clone(&child), (0, 0), 2.0, 1.0));
+        parent.get_mut().prepend_child(edge1);
+        let edge2 = Box::new(Edge::new(Arc::clone(&child), (0, 0), 0.0, 0.0));
+        other_parent.get_mut().prepend_child(edge2);
+
+        assert_eq!(child.get().num_parents(), 2);
+
+        // 5 backups through other_parent updating child but not parent.
+        for val in [1.0, 2.0, 3.0, 4.0, 5.0] {
+            let path_other = vec![PathEntry {
+                node: Arc::clone(&other_parent),
+                p1_outcome: 0,
+                p2_outcome: 0,
+            }];
+            backup(&path_other, &child, val, val * 0.5);
+        }
+
+        // child.v1 = mean(1,2,3,4,5) = 3.0, child.v2 = mean(0.5,1,1.5,2,2.5) = 1.5
+        assert_eq!(child.get().total_visits(), 5);
+        assert!((child.get().v1() - 3.0).abs() < 1e-5);
+        assert!((child.get().v2() - 1.5).abs() < 1e-5);
+
+        // parent has 0 edge visits to child. Now backup through parent.
+        let path = vec![PathEntry {
+            node: Arc::clone(&parent),
+            p1_outcome: 0,
+            p2_outcome: 0,
+        }];
+        backup(&path, &child, 10.0, 5.0);
+
+        // child.v after 6th visit: mean(1,2,3,4,5,10) = 25/6 ≈ 4.1667
+        // But for parent's edge_q, the delta detection reads child.v AFTER
+        // finalize_score_update on the leaf.
+        // correct_q1 = r(2.0) + child.v1 ≈ 2.0 + 4.1667 = 6.1667
+        // correct_q2 = r(1.0) + child.v2 ≈ 1.0 + 2.0833 = 3.0833
+        //
+        // n_to_fix = 0 (parent had no visits), so no adjustment needed.
+        // First visit just gets the correct value directly.
+        let expected_child_v1 = 25.0 / 6.0;
+        let expected_child_v2 = (0.5 + 1.0 + 1.5 + 2.0 + 2.5 + 5.0) / 6.0;
+        let expected_q1 = 2.0 + expected_child_v1;
+        let expected_q2 = 1.0 + expected_child_v2;
+
+        assert_eq!(parent.get().edge_visits(0, 0), 1);
+        assert!((parent.get().edge_q_p1(0, 0) - expected_q1).abs() < 1e-4);
+        assert!((parent.get().edge_q_p2(0, 0) - expected_q2).abs() < 1e-4);
+    }
+
+    /// Cascading correction: A → B → C, D → B.
+    /// Backup through D updates B, then backup through A should correct
+    /// both B's and A's edge_q.
+    #[test]
+    fn delta_cascading_correction() {
+        // C (leaf)
+        let node_c = Arc::new(SharedNode::new(LowNode::new_shell(
+            [0, 1, 2, 3, 4],
+            [0, 1, 2, 3, 4],
+        )));
+        node_c.get_mut().set_value_scale(5.0);
+
+        // B (intermediate, shared by A and D)
+        let node_b = Arc::new(SharedNode::new(LowNode::new_shell(
+            [0, 1, 2, 3, 4],
+            [0, 1, 2, 3, 4],
+        )));
+        node_b.get_mut().set_value_scale(5.0);
+        node_b.get_mut().set_prior([0.2; 5], [0.2; 5]);
+        let edge_b_c = Box::new(Edge::new(Arc::clone(&node_c), (0, 0), 0.5, 0.5));
+        node_b.get_mut().prepend_child(edge_b_c);
+
+        // A (root-like, single path through B to C)
+        let node_a = Arc::new(SharedNode::new(LowNode::new_shell(
+            [0, 1, 2, 3, 4],
+            [0, 1, 2, 3, 4],
+        )));
+        node_a.get_mut().set_value_scale(5.0);
+        node_a.get_mut().set_prior([0.2; 5], [0.2; 5]);
+        let edge_a_b = Box::new(Edge::new(Arc::clone(&node_b), (0, 0), 1.0, 1.0));
+        node_a.get_mut().prepend_child(edge_a_b);
+
+        // D (another parent of B, creating the transposition)
+        let node_d = Arc::new(SharedNode::new(LowNode::new_shell(
+            [0, 1, 2, 3, 4],
+            [0, 1, 2, 3, 4],
+        )));
+        node_d.get_mut().set_value_scale(5.0);
+        node_d.get_mut().set_prior([0.2; 5], [0.2; 5]);
+        let edge_d_b = Box::new(Edge::new(Arc::clone(&node_b), (0, 0), 0.0, 0.0));
+        node_d.get_mut().prepend_child(edge_d_b);
+
+        assert_eq!(node_b.get().num_parents(), 2); // B is a transposition
+
+        // Step 1: backup A → B → C with leaf value (2.0, 1.0).
+        let path_abc = vec![
+            PathEntry { node: Arc::clone(&node_a), p1_outcome: 0, p2_outcome: 0 },
+            PathEntry { node: Arc::clone(&node_b), p1_outcome: 0, p2_outcome: 0 },
+        ];
+        backup(&path_abc, &node_c, 2.0, 1.0);
+
+        // C.v = (2.0, 1.0), B.v = (0.5+2.0, 0.5+1.0) = (2.5, 1.5)
+        // A.v = (1+2.5, 1+1.5) = (3.5, 2.5)
+        assert!((node_c.get().v1() - 2.0).abs() < 1e-6);
+        assert!((node_b.get().v1() - 2.5).abs() < 1e-6);
+        assert!((node_a.get().v1() - 3.5).abs() < 1e-6);
+
+        // Step 2: backup D → B → C with leaf value (6.0, 5.0).
+        // This updates C and B but not A.
+        let path_dbc = vec![
+            PathEntry { node: Arc::clone(&node_d), p1_outcome: 0, p2_outcome: 0 },
+            PathEntry { node: Arc::clone(&node_b), p1_outcome: 0, p2_outcome: 0 },
+        ];
+        backup(&path_dbc, &node_c, 6.0, 5.0);
+
+        // C.v = mean(2, 6) = 4.0, mean(1, 5) = 3.0
+        assert!((node_c.get().v1() - 4.0).abs() < 1e-6);
+        assert!((node_c.get().v2() - 3.0).abs() < 1e-6);
+
+        // B now has 2 visits. B's edge_q should reflect corrected C.v.
+        // At step 2, B saw C as transposition → used correct_q = 0.5 + 4.0 = 4.5.
+        // B's edge_q should be corrected from the first stale visit.
+        assert_eq!(node_b.get().edge_visits(0, 0), 2);
+
+        // Step 3: backup A → B → C with leaf value (8.0, 7.0).
+        // A should see B as transposition and correct its stale visit.
+        let path_abc2 = vec![
+            PathEntry { node: Arc::clone(&node_a), p1_outcome: 0, p2_outcome: 0 },
+            PathEntry { node: Arc::clone(&node_b), p1_outcome: 0, p2_outcome: 0 },
+        ];
+        backup(&path_abc2, &node_c, 8.0, 7.0);
+
+        // C.v = mean(2, 6, 8) = 16/3 ≈ 5.333
+        assert!((node_c.get().v1() - 16.0 / 3.0).abs() < 1e-4);
+
+        // A should have corrected edge_q. The key property: A's edge_q
+        // should be close to r(1,1) + B.v, not stuck at the old stale value.
+        // B.v after 3 visits reflects all information through C.
+        let b_v1 = node_b.get().v1();
+        let b_v2 = node_b.get().v2();
+        let a_correct_q1 = 1.0 + b_v1;
+        let a_correct_q2 = 1.0 + b_v2;
+
+        // A has 2 edge visits. The corrected edge_q should be close to the correct value.
+        assert_eq!(node_a.get().edge_visits(0, 0), 2);
+        assert!(
+            (node_a.get().edge_q_p1(0, 0) - a_correct_q1).abs() < 0.5,
+            "A.edge_q_p1 = {}, expected near {}", node_a.get().edge_q_p1(0, 0), a_correct_q1,
+        );
+        assert!(
+            (node_a.get().edge_q_p2(0, 0) - a_correct_q2).abs() < 0.5,
+            "A.edge_q_p2 = {}, expected near {}", node_a.get().edge_q_p2(0, 0), a_correct_q2,
+        );
+    }
+
+    /// Non-transposition child with transposition grandchild: delta
+    /// propagates through the intermediate node.
+    #[test]
+    fn delta_propagates_through_non_transposition() {
+        // grandchild (transposition, shared by mid and other_parent)
+        let grandchild = Arc::new(SharedNode::new(LowNode::new_shell(
+            [0, 1, 2, 3, 4],
+            [0, 1, 2, 3, 4],
+        )));
+        grandchild.get_mut().set_value_scale(5.0);
+
+        // mid (non-transposition, single parent: root)
+        let mid = Arc::new(SharedNode::new(LowNode::new_shell(
+            [0, 1, 2, 3, 4],
+            [0, 1, 2, 3, 4],
+        )));
+        mid.get_mut().set_value_scale(5.0);
+        mid.get_mut().set_prior([0.2; 5], [0.2; 5]);
+        let edge_mid_gc = Box::new(Edge::new(Arc::clone(&grandchild), (0, 0), 0.5, 0.5));
+        mid.get_mut().prepend_child(edge_mid_gc);
+
+        // root
+        let root = Arc::new(SharedNode::new(LowNode::new_shell(
+            [0, 1, 2, 3, 4],
+            [0, 1, 2, 3, 4],
+        )));
+        root.get_mut().set_value_scale(5.0);
+        root.get_mut().set_prior([0.2; 5], [0.2; 5]);
+        let edge_root_mid = Box::new(Edge::new(Arc::clone(&mid), (0, 0), 1.0, 1.0));
+        root.get_mut().prepend_child(edge_root_mid);
+
+        // other_parent (creates transposition at grandchild)
+        let other = Arc::new(SharedNode::new(LowNode::new_shell(
+            [0, 1, 2, 3, 4],
+            [0, 1, 2, 3, 4],
+        )));
+        other.get_mut().set_value_scale(5.0);
+        other.get_mut().set_prior([0.2; 5], [0.2; 5]);
+        let edge_other_gc = Box::new(Edge::new(Arc::clone(&grandchild), (0, 0), 0.0, 0.0));
+        other.get_mut().prepend_child(edge_other_gc);
+
+        assert_eq!(mid.get().num_parents(), 1);       // not a transposition
+        assert_eq!(grandchild.get().num_parents(), 2); // transposition
+
+        // Backup 1: root → mid → grandchild, leaf = (1.0, 1.0).
+        let path1 = vec![
+            PathEntry { node: Arc::clone(&root), p1_outcome: 0, p2_outcome: 0 },
+            PathEntry { node: Arc::clone(&mid), p1_outcome: 0, p2_outcome: 0 },
+        ];
+        backup(&path1, &grandchild, 1.0, 1.0);
+
+        let root_q1_after_1 = root.get().edge_q_p1(0, 0);
+
+        // Backup 2: other → grandchild, leaf = (10.0, 10.0).
+        // Updates grandchild but not mid or root.
+        let path_other = vec![PathEntry {
+            node: Arc::clone(&other),
+            p1_outcome: 0,
+            p2_outcome: 0,
+        }];
+        backup(&path_other, &grandchild, 10.0, 10.0);
+
+        // grandchild.v1 = mean(1, 10) = 5.5
+        assert!((grandchild.get().v1() - 5.5).abs() < 1e-5);
+
+        // Backup 3: root → mid → grandchild, leaf = (4.0, 4.0).
+        // Mid sees grandchild as transposition → delta detected.
+        // Root sees mid as non-transposition → delta from below propagates.
+        let path3 = vec![
+            PathEntry { node: Arc::clone(&root), p1_outcome: 0, p2_outcome: 0 },
+            PathEntry { node: Arc::clone(&mid), p1_outcome: 0, p2_outcome: 0 },
+        ];
+        backup(&path3, &grandchild, 4.0, 4.0);
+
+        // Root's edge_q should have changed significantly from the first value.
+        // The delta from the grandchild transposition should have propagated up.
+        let root_q1_after_3 = root.get().edge_q_p1(0, 0);
+        assert!(
+            (root_q1_after_3 - root_q1_after_1).abs() > 0.5,
+            "Delta should propagate: before={root_q1_after_1}, after={root_q1_after_3}",
+        );
     }
 }
