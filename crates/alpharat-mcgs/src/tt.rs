@@ -275,7 +275,7 @@ mod tests {
         tt.clear();
         // Edge's Arc keeps the node alive even after TT is cleared
         assert!(Arc::ptr_eq(&edge.low_node(), &node));
-        assert_eq!(node.get().num_parents(), 1);
+        assert_eq!(node.num_parents(), 1);
     }
 
     #[test]
@@ -300,7 +300,7 @@ mod tests {
         let edge2 = Edge::new(Arc::clone(&node), (1, 1), 0.0, 0.0);
         tt.insert(42, &node);
 
-        assert_eq!(node.get().num_parents(), 2);
+        assert_eq!(node.num_parents(), 2);
 
         drop(node); // TT + 2 edges remain
         drop(edge1);

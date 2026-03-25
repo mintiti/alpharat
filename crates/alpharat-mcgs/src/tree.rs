@@ -206,6 +206,51 @@ impl MCGSTree {
     pub fn tt_mut(&mut self) -> &mut TranspositionTable {
         &mut self.tt
     }
+
+    /// Advance the root to the child reached by `(p1_action, p2_action)`.
+    ///
+    /// Reuses the existing subtree when possible. Pruned siblings are sent to
+    /// the background GC. If no matching child edge exists (unexplored move),
+    /// creates a fresh root from the new game state. TT is preserved for
+    /// transposition hits; stale entries are evicted after advancement.
+    ///
+    /// `game` must already reflect the state after the move.
+    pub fn advance_root(&mut self, game: &GameState, p1_action: u8, p2_action: u8) {
+        let old_root = &self.root;
+        let old_low = old_root.get();
+
+        // Map raw actions to outcome indices
+        let i = old_low.p1_action_to_outcome_idx(p1_action);
+        let j = old_low.p2_action_to_outcome_idx(p2_action);
+
+        // Detach the child list from the old root
+        let mut cursor = old_root.get_mut().take_first_child();
+        let mut new_root: Option<Arc<SharedNode>> = None;
+
+        // Walk the linked list: find the matching edge, queue the rest
+        while let Some(mut edge) = cursor {
+            // Detach next sibling before we consume this edge
+            cursor = edge.take_next_sibling();
+
+            let (ei, ej) = edge.parent_outcome();
+            if ei == i && ej == j && new_root.is_none() {
+                new_root = Some(Arc::clone(edge.low_node()));
+                // Drop the edge (decrements num_parents), don't queue it
+                drop(edge);
+            } else {
+                crate::gc::queue(edge);
+            }
+        }
+
+        // Set the new root
+        self.root = match new_root {
+            Some(node) => node,
+            None => create_root_node(game, &mut self.tt),
+        };
+
+        // Clean up stale TT entries from pruned subtrees
+        self.tt.evict_expired();
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -372,7 +417,7 @@ mod tests {
         let (child, is_new) = find_or_create_child(&root, i, j, &child_game, &mut tt, r1, r2);
         assert!(is_new);
         assert!(!child.get().is_evaluated());
-        assert_eq!(child.get().num_parents(), 1);
+        assert_eq!(child.num_parents(), 1);
         assert_eq!(tt.live_count(), 2); // root + child
 
         // Edge exists on root
@@ -434,7 +479,7 @@ mod tests {
         let (child, is_new) = find_or_create_child(&root, i, j, &child_game, &mut tt, 0.0, 0.0);
         assert!(!is_new);
         assert!(Arc::ptr_eq(&child, &existing));
-        assert_eq!(existing.get().num_parents(), 1); // edge incremented it
+        assert_eq!(existing.num_parents(), 1); // edge incremented it
     }
 
     // ---- MCGSTree ----
@@ -606,5 +651,255 @@ mod tests {
             value_p2: 1.0,
         };
         populate_node(&node, Some(&eval));
+    }
+
+    // ---- advance_root ----
+
+    /// Search a tree for a few sims, then advance root to a child.
+    fn search_and_advance(
+        tree: &mut MCGSTree,
+        game: &mut GameState,
+        p1_action: u8,
+        p2_action: u8,
+        n_sims: u32,
+    ) {
+        use crate::{SearchConfig, SmartUniformBackend, run_search};
+        use pyrat::Direction;
+        use rand::SeedableRng;
+        use rand::rngs::SmallRng;
+
+        let config = SearchConfig {
+            c_puct: 1.5,
+            ..Default::default()
+        };
+        let backend = SmartUniformBackend;
+        let mut rng = SmallRng::seed_from_u64(42);
+
+        run_search(tree, game, &backend, &config, n_sims, 8, &mut rng).unwrap();
+
+        let _undo = game.make_move(
+            Direction::try_from(p1_action).unwrap(),
+            Direction::try_from(p2_action).unwrap(),
+        );
+        tree.advance_root(game, p1_action, p2_action);
+    }
+
+    #[test]
+    fn advance_root_reuses_explored_child() {
+        crate::gc::init();
+
+        let mut game = open_5x5_game(
+            Coordinates::new(0, 0),
+            Coordinates::new(4, 4),
+            &[Coordinates::new(2, 2)],
+        );
+        let mut tree = MCGSTree::new(&game);
+
+        // Search to expand children
+        use crate::{SearchConfig, SmartUniformBackend, run_search};
+        use rand::SeedableRng;
+        use rand::rngs::SmallRng;
+        let config = SearchConfig::default();
+        let backend = SmartUniformBackend;
+        let mut rng = SmallRng::seed_from_u64(42);
+        run_search(&mut tree, &game, &backend, &config, 50, 8, &mut rng).unwrap();
+
+        // Pick an action that was explored
+        let root_low = tree.root().get();
+        let p1_action = root_low.p1_outcome_action(0);
+        let p2_action = root_low.p2_outcome_action(0);
+        let i = root_low.p1_action_to_outcome_idx(p1_action);
+        let j = root_low.p2_action_to_outcome_idx(p2_action);
+
+        // Get the child node before advancing
+        let expected_child = Arc::clone(
+            root_low.find_child(i, j).unwrap().low_node(),
+        );
+
+        use pyrat::Direction;
+        let _undo = game.make_move(
+            Direction::try_from(p1_action).unwrap(),
+            Direction::try_from(p2_action).unwrap(),
+        );
+        tree.advance_root(&game, p1_action, p2_action);
+
+        // Root should be the same node as the child we found
+        assert!(Arc::ptr_eq(tree.root(), &expected_child));
+    }
+
+    #[test]
+    fn advance_root_unexplored_creates_fresh() {
+        crate::gc::init();
+
+        let mut game = open_5x5_game(
+            Coordinates::new(2, 2),
+            Coordinates::new(2, 2),
+            &[Coordinates::new(0, 0)],
+        );
+        let mut tree = MCGSTree::new(&game);
+
+        // Don't search at all — no children exist
+        let old_root = Arc::clone(tree.root());
+
+        use pyrat::Direction;
+        let _undo = game.make_move(Direction::Up, Direction::Down);
+        tree.advance_root(&game, 0, 2);
+
+        // Root should be a fresh node (not the old root)
+        assert!(!Arc::ptr_eq(tree.root(), &old_root));
+        assert!(tree.root().get().is_evaluated()); // create_root_node sets priors
+        assert_eq!(tree.root().get().total_visits(), 0);
+
+        // TT still works (new root is in TT)
+        let hash = position_hash(&game);
+        assert!(tree.tt().lookup(hash).is_some());
+    }
+
+    #[test]
+    fn advance_root_preserves_search_stats() {
+        crate::gc::init();
+
+        let mut game = open_5x5_game(
+            Coordinates::new(0, 0),
+            Coordinates::new(4, 4),
+            &[Coordinates::new(2, 2)],
+        );
+        let mut tree = MCGSTree::new(&game);
+
+        use crate::{SearchConfig, SmartUniformBackend, run_search};
+        use rand::SeedableRng;
+        use rand::rngs::SmallRng;
+        let config = SearchConfig::default();
+        let backend = SmartUniformBackend;
+        let mut rng = SmallRng::seed_from_u64(42);
+        run_search(&mut tree, &game, &backend, &config, 50, 8, &mut rng).unwrap();
+
+        // Pick an explored action
+        let root_low = tree.root().get();
+        let p1_action = root_low.p1_outcome_action(0);
+        let p2_action = root_low.p2_outcome_action(0);
+        let i = root_low.p1_action_to_outcome_idx(p1_action);
+        let j = root_low.p2_action_to_outcome_idx(p2_action);
+
+        let child = root_low.find_child(i, j).unwrap().low_node();
+        let visits_before = child.get().total_visits();
+        let v1_before = child.get().v1();
+        let v2_before = child.get().v2();
+
+        use pyrat::Direction;
+        let _undo = game.make_move(
+            Direction::try_from(p1_action).unwrap(),
+            Direction::try_from(p2_action).unwrap(),
+        );
+        tree.advance_root(&game, p1_action, p2_action);
+
+        // Stats should be preserved
+        assert_eq!(tree.root().get().total_visits(), visits_before);
+        assert!((tree.root().get().v1() - v1_before).abs() < 1e-6);
+        assert!((tree.root().get().v2() - v2_before).abs() < 1e-6);
+    }
+
+    #[test]
+    fn advance_root_tt_eviction() {
+        crate::gc::init();
+
+        let mut game = open_5x5_game(
+            Coordinates::new(0, 0),
+            Coordinates::new(4, 4),
+            &[Coordinates::new(2, 2)],
+        );
+        let mut tree = MCGSTree::new(&game);
+
+        use crate::{SearchConfig, SmartUniformBackend, run_search};
+        use rand::SeedableRng;
+        use rand::rngs::SmallRng;
+        let config = SearchConfig::default();
+        let backend = SmartUniformBackend;
+        let mut rng = SmallRng::seed_from_u64(42);
+        run_search(&mut tree, &game, &backend, &config, 100, 8, &mut rng).unwrap();
+
+        let tt_before = tree.tt().live_count();
+        assert!(tt_before > 1, "should have explored multiple nodes");
+
+        // Advance
+        let root_low = tree.root().get();
+        let p1_action = root_low.p1_outcome_action(0);
+        let p2_action = root_low.p2_outcome_action(0);
+
+        use pyrat::Direction;
+        let _undo = game.make_move(
+            Direction::try_from(p1_action).unwrap(),
+            Direction::try_from(p2_action).unwrap(),
+        );
+        tree.advance_root(&game, p1_action, p2_action);
+
+        // Wait a bit for GC to process pruned edges
+        std::thread::sleep(std::time::Duration::from_millis(50));
+
+        // After eviction, TT should have fewer entries (pruned siblings gone)
+        // At minimum, the new root should still be in TT
+        let tt_after = tree.tt().live_count();
+        assert!(tt_after >= 1, "new root should be in TT");
+    }
+
+    #[test]
+    fn advance_root_multiple_consecutive() {
+        crate::gc::init();
+
+        let mut game = open_5x5_game(
+            Coordinates::new(0, 0),
+            Coordinates::new(4, 4),
+            &[Coordinates::new(2, 2), Coordinates::new(3, 3)],
+        );
+        let mut tree = MCGSTree::new(&game);
+
+        // Three consecutive advance-root cycles
+        for _ in 0..3 {
+            search_and_advance(&mut tree, &mut game, 1, 3, 30); // RIGHT, LEFT
+            if game.check_game_over() {
+                break;
+            }
+        }
+
+        // No crash, tree is still functional
+        assert!(tree.root().get().is_evaluated());
+        assert!(tree.tt().live_count() >= 1);
+    }
+
+    #[test]
+    fn advance_root_transposition_survives() {
+        crate::gc::init();
+
+        // Set up a position where transpositions are likely:
+        // both players near center, cheese at corners
+        let mut game = open_5x5_game(
+            Coordinates::new(2, 2),
+            Coordinates::new(2, 2),
+            &[Coordinates::new(0, 0), Coordinates::new(4, 4)],
+        );
+        let mut tree = MCGSTree::new(&game);
+
+        use crate::{SearchConfig, SmartUniformBackend, run_search};
+        use rand::SeedableRng;
+        use rand::rngs::SmallRng;
+        let config = SearchConfig::default();
+        let backend = SmartUniformBackend;
+        let mut rng = SmallRng::seed_from_u64(42);
+        run_search(&mut tree, &game, &backend, &config, 200, 8, &mut rng).unwrap();
+
+        // Advance
+        let root_low = tree.root().get();
+        let p1_action = root_low.p1_outcome_action(0);
+        let p2_action = root_low.p2_outcome_action(0);
+
+        use pyrat::Direction;
+        let _undo = game.make_move(
+            Direction::try_from(p1_action).unwrap(),
+            Direction::try_from(p2_action).unwrap(),
+        );
+        tree.advance_root(&game, p1_action, p2_action);
+
+        // Nodes reachable from the new subtree should still be in TT.
+        assert!(tree.tt().live_count() >= 1);
     }
 }

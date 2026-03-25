@@ -615,8 +615,8 @@ fn backup(path: &[PathEntry], leaf: &SharedNode, g1: f32, g2: f32) {
         // --- Delta detection ---
         // If child is a transposition, its aggregate incorporates info
         // from other parents that our edge_q[i][j] doesn't have yet.
-        let child_low = child.get();
-        if child_low.num_parents() > 1 {
+        if child.num_parents() > 1 {
+            let child_low = child.get();
             let correct_q1 = r1 + child_low.v1();
             let correct_q2 = r2 + child_low.v2();
 
@@ -2548,7 +2548,7 @@ mod tests {
         // Only one parent edge → num_parents == 1, no delta correction.
         let edge = Box::new(Edge::new(Arc::clone(&child), (0, 1), 1.0, 0.5));
         root.get_mut().prepend_child(edge);
-        assert_eq!(child.get().num_parents(), 1);
+        assert_eq!(child.num_parents(), 1);
 
         let path = vec![PathEntry {
             node: Arc::clone(&root),
@@ -2605,7 +2605,7 @@ mod tests {
         let edge_b_c = Box::new(Edge::new(Arc::clone(&child_c), (0, 0), 0.0, 0.0));
         parent_b.get_mut().prepend_child(edge_b_c);
 
-        assert_eq!(child_c.get().num_parents(), 2);
+        assert_eq!(child_c.num_parents(), 2);
 
         // Backup 1: through A with leaf value (2.0, 3.0).
         let path_a = vec![PathEntry {
@@ -2698,7 +2698,7 @@ mod tests {
         let edge2 = Box::new(Edge::new(Arc::clone(&child), (0, 0), 0.0, 0.0));
         other_parent.get_mut().prepend_child(edge2);
 
-        assert_eq!(child.get().num_parents(), 2);
+        assert_eq!(child.num_parents(), 2);
 
         // 5 backups through other_parent updating child but not parent.
         for val in [1.0, 2.0, 3.0, 4.0, 5.0] {
@@ -2783,7 +2783,7 @@ mod tests {
         let edge_d_b = Box::new(Edge::new(Arc::clone(&node_b), (0, 0), 0.0, 0.0));
         node_d.get_mut().prepend_child(edge_d_b);
 
-        assert_eq!(node_b.get().num_parents(), 2); // B is a transposition
+        assert_eq!(node_b.num_parents(), 2); // B is a transposition
 
         // Step 1: backup A → B → C with leaf value (2.0, 1.0).
         let path_abc = vec![
@@ -2887,8 +2887,8 @@ mod tests {
         let edge_other_gc = Box::new(Edge::new(Arc::clone(&grandchild), (0, 0), 0.0, 0.0));
         other.get_mut().prepend_child(edge_other_gc);
 
-        assert_eq!(mid.get().num_parents(), 1);       // not a transposition
-        assert_eq!(grandchild.get().num_parents(), 2); // transposition
+        assert_eq!(mid.num_parents(), 1);       // not a transposition
+        assert_eq!(grandchild.num_parents(), 2); // transposition
 
         // Backup 1: root → mid → grandchild, leaf = (1.0, 1.0).
         let path1 = vec![

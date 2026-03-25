@@ -95,9 +95,6 @@ pub struct LowNode {
     value_scale: f32,
     is_terminal: bool,
     is_evaluated: bool,
-
-    // Transposition tracking
-    num_parents: AtomicU16,
 }
 
 impl std::fmt::Debug for LowNode {
@@ -110,7 +107,6 @@ impl std::fmt::Debug for LowNode {
             .field("total_visits", &self.total_visits)
             .field("is_terminal", &self.is_terminal)
             .field("is_evaluated", &self.is_evaluated)
-            .field("num_parents", &self.num_parents.load(Ordering::Relaxed))
             .finish()
     }
 }
@@ -145,7 +141,6 @@ impl LowNode {
             value_scale: 0.0,
             is_terminal: false,
             is_evaluated: false,
-            num_parents: AtomicU16::new(0),
         }
     }
 
@@ -452,23 +447,11 @@ impl LowNode {
         None
     }
 
-    // --- Transposition tracking ---
+    // --- Child list mutations ---
 
-    pub fn add_parent(&self) {
-        self.num_parents.fetch_add(1, Ordering::Relaxed);
-    }
-
-    pub fn remove_parent(&self) {
-        let prev = self.num_parents.fetch_sub(1, Ordering::Relaxed);
-        debug_assert!(prev > 0, "remove_parent: num_parents is already 0");
-    }
-
-    pub fn num_parents(&self) -> u16 {
-        self.num_parents.load(Ordering::Relaxed)
-    }
-
-    pub fn is_transposition(&self) -> bool {
-        self.num_parents() > 1
+    /// Detach and return the entire child list. Leaves `first_child` as `None`.
+    pub fn take_first_child(&mut self) -> Option<Box<Edge>> {
+        self.first_child.take()
     }
 
     // --- Prior setters (for Dirichlet noise) ---
@@ -553,7 +536,7 @@ impl Edge {
         r1: f32,
         r2: f32,
     ) -> Self {
-        low_node.get().add_parent();
+        low_node.add_parent();
         Self {
             edge_r1: r1,
             edge_r2: r2,
@@ -591,11 +574,18 @@ impl Edge {
         self.next_sibling.as_deref_mut()
     }
 
+    /// Detach and return the next sibling. Leaves `next_sibling` as `None`.
+    pub fn take_next_sibling(&mut self) -> Option<Box<Edge>> {
+        self.next_sibling.take()
+    }
 }
 
 impl Drop for Edge {
     fn drop(&mut self) {
-        self.low_node.get().remove_parent();
+        self.low_node.remove_parent();
+        if let Some(sibling) = self.next_sibling.take() {
+            crate::gc::queue(sibling);
+        }
     }
 }
 
@@ -610,18 +600,25 @@ impl Drop for Edge {
 // Safety invariant: single-threaded search. All access to a SharedNode happens
 // on the same thread. This matches lc0's const_cast pattern.
 
-pub struct SharedNode(UnsafeCell<LowNode>);
+pub struct SharedNode {
+    inner: UnsafeCell<LowNode>,
+    // Outside UnsafeCell — safe for concurrent atomic access (e.g. from GC thread).
+    num_parents: AtomicU16,
+}
 
 impl SharedNode {
     pub fn new(node: LowNode) -> Self {
-        Self(UnsafeCell::new(node))
+        Self {
+            inner: UnsafeCell::new(node),
+            num_parents: AtomicU16::new(0),
+        }
     }
 
     /// Immutable access to the inner LowNode.
     #[inline]
     pub fn get(&self) -> &LowNode {
         // SAFETY: single-threaded search — no concurrent mutation.
-        unsafe { &*self.0.get() }
+        unsafe { &*self.inner.get() }
     }
 
     /// Mutable access to the inner LowNode.
@@ -629,7 +626,36 @@ impl SharedNode {
     #[allow(clippy::mut_from_ref)]
     pub fn get_mut(&self) -> &mut LowNode {
         // SAFETY: single-threaded search — no concurrent access.
-        unsafe { &mut *self.0.get() }
+        unsafe { &mut *self.inner.get() }
+    }
+
+    // --- Transposition tracking (atomic, safe from any thread) ---
+
+    pub fn add_parent(&self) {
+        self.num_parents.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn remove_parent(&self) {
+        let prev = self.num_parents.fetch_sub(1, Ordering::Relaxed);
+        debug_assert!(prev > 0, "remove_parent: num_parents is already 0");
+    }
+
+    pub fn num_parents(&self) -> u16 {
+        self.num_parents.load(Ordering::Relaxed)
+    }
+
+    pub fn is_transposition(&self) -> bool {
+        self.num_parents() > 1
+    }
+}
+
+impl Drop for SharedNode {
+    fn drop(&mut self) {
+        // Exclusive access guaranteed: last Arc just dropped (strong_count == 0).
+        let low = self.inner.get_mut();
+        if let Some(child) = low.first_child.take() {
+            crate::gc::queue(child);
+        }
     }
 }
 
@@ -775,25 +801,25 @@ mod tests {
         assert!(low.is_terminal());
     }
 
-    // ---- LowNode: transposition tracking ----
+    // ---- SharedNode: transposition tracking ----
 
     #[test]
-    fn low_node_num_parents() {
-        let low = LowNode::new_shell([0, 1, 2, 3, 4], [0, 1, 2, 3, 4]);
-        assert_eq!(low.num_parents(), 0);
-        assert!(!low.is_transposition());
+    fn shared_node_num_parents() {
+        let shared = SharedNode::new(LowNode::new_shell([0, 1, 2, 3, 4], [0, 1, 2, 3, 4]));
+        assert_eq!(shared.num_parents(), 0);
+        assert!(!shared.is_transposition());
 
-        low.add_parent();
-        assert_eq!(low.num_parents(), 1);
-        assert!(!low.is_transposition());
+        shared.add_parent();
+        assert_eq!(shared.num_parents(), 1);
+        assert!(!shared.is_transposition());
 
-        low.add_parent();
-        assert_eq!(low.num_parents(), 2);
-        assert!(low.is_transposition());
+        shared.add_parent();
+        assert_eq!(shared.num_parents(), 2);
+        assert!(shared.is_transposition());
 
-        low.remove_parent();
-        assert_eq!(low.num_parents(), 1);
-        assert!(!low.is_transposition());
+        shared.remove_parent();
+        assert_eq!(shared.num_parents(), 1);
+        assert!(!shared.is_transposition());
     }
 
     // ---- Edge: creation and Arc sharing ----
@@ -810,10 +836,10 @@ mod tests {
     #[test]
     fn edge_creation_increments_parents() {
         let low = make_shared_open();
-        assert_eq!(low.get().num_parents(), 0);
+        assert_eq!(low.num_parents(), 0);
 
         let edge = Edge::new(Arc::clone(&low), (0, 1), 1.0, 0.5);
-        assert_eq!(low.get().num_parents(), 1);
+        assert_eq!(low.num_parents(), 1);
         assert_eq!(edge.parent_outcome(), (0, 1));
         assert!((edge.r1() - 1.0).abs() < 1e-6);
         assert!((edge.r2() - 0.5).abs() < 1e-6);
@@ -825,10 +851,10 @@ mod tests {
 
         {
             let _edge = Edge::new(Arc::clone(&low), (0, 0), 0.0, 0.0);
-            assert_eq!(low.get().num_parents(), 1);
+            assert_eq!(low.num_parents(), 1);
         }
         // Edge dropped
-        assert_eq!(low.get().num_parents(), 0);
+        assert_eq!(low.num_parents(), 0);
     }
 
     #[test]
@@ -837,18 +863,18 @@ mod tests {
 
         let edge1 = Edge::new(Arc::clone(&low), (0, 0), 1.0, 0.0);
         let edge2 = Edge::new(Arc::clone(&low), (1, 0), 0.0, 1.0);
-        assert_eq!(low.get().num_parents(), 2);
-        assert!(low.get().is_transposition());
+        assert_eq!(low.num_parents(), 2);
+        assert!(low.is_transposition());
 
         // Both edges see the same LowNode
         assert!(Arc::ptr_eq(edge1.low_node(), edge2.low_node()));
 
         drop(edge1);
-        assert_eq!(low.get().num_parents(), 1);
-        assert!(!low.get().is_transposition());
+        assert_eq!(low.num_parents(), 1);
+        assert!(!low.is_transposition());
 
         drop(edge2);
-        assert_eq!(low.get().num_parents(), 0);
+        assert_eq!(low.num_parents(), 0);
     }
 
     #[test]
@@ -860,7 +886,7 @@ mod tests {
         drop(low); // Original Arc dropped, but edge still holds one
 
         assert!(weak.upgrade().is_some());
-        assert_eq!(edge.low_node().get().num_parents(), 1);
+        assert_eq!(edge.low_node().num_parents(), 1);
 
         drop(edge);
         assert!(weak.upgrade().is_none()); // LowNode freed
@@ -996,13 +1022,8 @@ mod tests {
         ));
 
         // Verify parent counts
-        assert_eq!(child1.get().num_parents(), 1);
-        assert_eq!(child2.get().num_parents(), 1);
-
-        // Dropping parent should drop all edges, decrementing parent counts
-        drop(parent);
-        assert_eq!(child1.get().num_parents(), 0);
-        assert_eq!(child2.get().num_parents(), 0);
+        assert_eq!(child1.num_parents(), 1);
+        assert_eq!(child2.num_parents(), 1);
     }
 
     #[test]
