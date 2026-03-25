@@ -1,35 +1,37 @@
-use std::collections::hash_map::Entry;
-use std::collections::HashMap;
 use std::sync::{Arc, Weak};
 
-use crate::node::LowNode;
+use rustc_hash::FxHashMap;
+
+use crate::node::SharedNode;
 
 /// Hash-based transposition table mapping position hashes to shared LowNodes.
 ///
-/// Follows lc0's pattern: Edges hold `Arc<LowNode>` (strong ownership), the TT
-/// holds `Weak<LowNode>` (observer). When all Edges pointing to a LowNode are
+/// Follows lc0's pattern: Edges hold `Arc<SharedNode>` (strong ownership), the TT
+/// holds `Weak<SharedNode>` (observer). When all Edges pointing to a LowNode are
 /// dropped, the Weak expires and lookup returns None.
 ///
-/// Single-threaded. No capacity limits.
+/// Single-threaded. No capacity limits. Uses FxHash (not SipHash) since keys
+/// are pre-hashed u64 Zobrist values, not untrusted input.
+#[derive(Default)]
 pub struct TranspositionTable {
-    map: HashMap<u64, Weak<LowNode>>,
+    map: FxHashMap<u64, Weak<SharedNode>>,
 }
 
 impl TranspositionTable {
     pub fn new() -> Self {
         Self {
-            map: HashMap::new(),
+            map: FxHashMap::default(),
         }
     }
 
     pub fn with_capacity(cap: usize) -> Self {
         Self {
-            map: HashMap::with_capacity(cap),
+            map: FxHashMap::with_capacity_and_hasher(cap, Default::default()),
         }
     }
 
     /// Look up a position by hash. Returns `None` if absent or expired.
-    pub fn lookup(&self, hash: u64) -> Option<Arc<LowNode>> {
+    pub fn lookup(&self, hash: u64) -> Option<Arc<SharedNode>> {
         self.map.get(&hash).and_then(|w| w.upgrade())
     }
 
@@ -39,7 +41,12 @@ impl TranspositionTable {
     /// - Vacant: insert, return `true`
     /// - Occupied + expired: replace, return `true`
     /// - Occupied + live: leave existing, return `false`
-    pub fn insert(&mut self, hash: u64, node: &Arc<LowNode>) -> bool {
+    ///
+    /// Correctness assumes the hash is collision-free for the game state space:
+    /// if two different positions produce the same hash, the second insert
+    /// silently fails and a subsequent lookup returns the wrong node.
+    pub fn insert(&mut self, hash: u64, node: &Arc<SharedNode>) -> bool {
+        use std::collections::hash_map::Entry;
         match self.map.entry(hash) {
             Entry::Vacant(slot) => {
                 slot.insert(Arc::downgrade(node));
@@ -80,12 +87,6 @@ impl TranspositionTable {
     }
 }
 
-impl Default for TranspositionTable {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -93,13 +94,13 @@ impl Default for TranspositionTable {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::node::Edge;
+    use crate::node::{Edge, LowNode};
 
     /// All actions open — simplest effective-action mapping.
     const OPEN: [u8; 5] = [0, 1, 2, 3, 4];
 
-    fn make_node() -> Arc<LowNode> {
-        Arc::new(LowNode::new_shell(OPEN, OPEN))
+    fn make_node() -> Arc<SharedNode> {
+        Arc::new(SharedNode::new(LowNode::new_shell(OPEN, OPEN)))
     }
 
     // ---- Basic operations ----
@@ -274,7 +275,7 @@ mod tests {
         tt.clear();
         // Edge's Arc keeps the node alive even after TT is cleared
         assert!(Arc::ptr_eq(&edge.low_node(), &node));
-        assert_eq!(node.num_parents(), 1);
+        assert_eq!(node.get().num_parents(), 1);
     }
 
     #[test]
@@ -299,7 +300,7 @@ mod tests {
         let edge2 = Edge::new(Arc::clone(&node), (1, 1), 0.0, 0.0);
         tt.insert(42, &node);
 
-        assert_eq!(node.num_parents(), 2);
+        assert_eq!(node.get().num_parents(), 2);
 
         drop(node); // TT + 2 edges remain
         drop(edge1);

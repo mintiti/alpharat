@@ -34,6 +34,7 @@ dependencies = [
  "pyrat-rust",
  "rand 0.8.5",
  "rand_distr",
+ "rustc-hash",
 ]
 
 [[package]]

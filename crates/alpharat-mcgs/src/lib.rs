@@ -1,9 +1,13 @@
 pub mod node;
+pub mod search;
+pub mod tree;
 pub mod tt;
 
 pub use alpharat_eval_core::{
     smart_uniform_prior, Backend, BackendError, ConstantValueBackend, EvalResult,
     SmartUniformBackend,
 };
-pub use node::{Edge, HalfEdge, LowNode};
+pub use node::{Edge, HalfEdge, LowNode, SharedNode};
+pub use search::{SearchConfig, SearchResult, run_search};
+pub use tree::{MCGSTree, compute_rewards, find_or_create_child, populate_node, position_hash};
 pub use tt::TranspositionTable;
