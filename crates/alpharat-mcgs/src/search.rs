@@ -177,7 +177,7 @@ fn select_p1(
         return 0;
     }
 
-    let total_visits = low.total_edge_visits();
+    let total_visits = low.total_visits();
     let value_scale = low.value_scale();
     debug_assert!(value_scale > 0.0, "value_scale must be positive");
 
@@ -232,7 +232,7 @@ fn select_p2(
         return 0;
     }
 
-    let total_visits = low.total_edge_visits();
+    let total_visits = low.total_visits();
     let value_scale = low.value_scale();
     debug_assert!(value_scale > 0.0, "value_scale must be positive");
 
@@ -616,20 +616,26 @@ fn backup(path: &[PathEntry], leaf: &SharedNode, g1: f32, g2: f32) {
         let mut q2_delta = v2_delta;
 
         // --- Delta detection ---
-        // If child is a transposition, its aggregate incorporates info
-        // from other parents that our edge_q[i][j] doesn't have yet.
-        if child.num_parents() > 1 {
+        // Correct our edge_q when the child's aggregate has diverged.
+        // Two causes: (1) transposition — other parents updated the child,
+        // (2) stale edge after root advancement pruned a parent, leaving
+        // num_parents=1 but edge_visits < child.total_visits.
+        {
             let child_low = child.get();
-            let correct_q1 = r1 + child_low.v1();
-            let correct_q2 = r2 + child_low.v2();
+            let parent_low = entry.node.get();
+            let edge_vis = parent_low.edge_visits(i, j);
 
-            let node = entry.node.get();
-            q1_delta = correct_q1 - node.edge_q_p1(i, j);
-            q2_delta = correct_q2 - node.edge_q_p2(i, j);
-            n_to_fix = node.edge_visits(i, j);
+            if child.num_parents() > 1 || edge_vis < child_low.total_visits() {
+                let correct_q1 = r1 + child_low.v1();
+                let correct_q2 = r2 + child_low.v2();
 
-            q1 = correct_q1;
-            q2 = correct_q2;
+                q1_delta = correct_q1 - parent_low.edge_q_p1(i, j);
+                q2_delta = correct_q2 - parent_low.edge_q_p2(i, j);
+                n_to_fix = edge_vis;
+
+                q1 = correct_q1;
+                q2 = correct_q2;
+            }
         }
 
         // --- Apply updates ---
@@ -686,7 +692,7 @@ fn extract_result(
     _rng: &mut impl Rng,
 ) -> SearchResult {
     let low = root.get();
-    let total_visits = low.total_edge_visits();
+    let total_visits = low.total_visits();
 
     let (policy_p1, visit_counts_p1, value_p1, q_values_p1) = extract_p1(low, config);
     let (policy_p2, visit_counts_p2, value_p2, q_values_p2) = extract_p2(low, config);
@@ -723,7 +729,7 @@ fn extract_p1(
         return ([0.0; 5], [0.0; 5], low.v1(), [0.0; 5]);
     }
 
-    let total_visits = low.total_edge_visits();
+    let total_visits = low.total_visits();
 
     // Compute FPU for unvisited outcomes.
     let mut visited_prior_mass = 0.0f32;
@@ -799,7 +805,7 @@ fn extract_p2(
         return ([0.0; 5], [0.0; 5], low.v2(), [0.0; 5]);
     }
 
-    let total_visits = low.total_edge_visits();
+    let total_visits = low.total_visits();
 
     let mut visited_prior_mass = 0.0f32;
     for j in 0..n {
@@ -1015,6 +1021,41 @@ mod tests {
         assert!((a2 as usize) < root.get().n2());
     }
 
+    #[test]
+    fn select_actions_respects_priors_after_root_eval() {
+        // After root NN eval: total_visits()=1, total_edge_visits()=0.
+        // Before the fix, sqrt(0) killed the exploration term entirely,
+        // making selection degenerate to FPU-only (ignoring priors).
+        let mut low = LowNode::new_shell([0, 1, 2, 3, 4], [0, 1, 2, 3, 4]);
+        low.set_value_scale(5.0);
+
+        // Non-uniform priors: heavily favor outcome 2
+        let mut prior_p1 = [0.0f32; 5];
+        prior_p1[0] = 0.05;
+        prior_p1[1] = 0.05;
+        prior_p1[2] = 0.80;
+        prior_p1[3] = 0.05;
+        prior_p1[4] = 0.05;
+        low.set_prior(prior_p1, [0.2; 5]);
+
+        // Simulate one finalize_score_update (root NN eval) without any edge visits.
+        low.finalize_score_update(1.0, 1.0);
+        assert_eq!(low.total_visits(), 1);
+        assert_eq!(low.total_edge_visits(), 0);
+
+        let root = Arc::new(SharedNode::new(low));
+        let config = SearchConfig {
+            force_k: 0.0, // disable forced playouts to test pure PUCT
+            ..default_config()
+        };
+        let mut r = rng();
+
+        // With total_visits() used, sqrt(1)=1 gives exploration a non-zero term.
+        // The high prior on outcome 2 should make it the preferred selection.
+        let (a1, _a2) = select_actions(&root, &config, false, &mut r);
+        assert_eq!(a1, 2, "should select outcome with highest prior");
+    }
+
     // ---- marginal_q ----
 
     #[test]
@@ -1085,6 +1126,68 @@ mod tests {
         assert_eq!(root.get().edge_visits(0, 1), 1);
         assert!((root.get().edge_q_p1(0, 1) - 4.0).abs() < 1e-6);
         assert!((root.get().edge_q_p2(0, 1) - 2.5).abs() < 1e-6);
+    }
+
+    #[test]
+    fn backup_stale_edge_delta_catchup() {
+        // A child has total_visits=5, but the parent's edge only has 2 visits
+        // and num_parents=1. This simulates a stale edge after root advancement
+        // pruned another parent. The delta correction should still trigger.
+        let root = Arc::new(SharedNode::new(LowNode::new_shell(
+            [0, 1, 2, 3, 4],
+            [0, 1, 2, 3, 4],
+        )));
+        root.get_mut().set_value_scale(5.0);
+        root.get_mut().set_prior([0.2; 5], [0.2; 5]);
+
+        let child = Arc::new(SharedNode::new(LowNode::new_shell(
+            [0, 1, 2, 3, 4],
+            [0, 1, 2, 3, 4],
+        )));
+        child.get_mut().set_value_scale(5.0);
+
+        // Simulate child having been visited 5 times from another (now-pruned) parent
+        // with Q that drifted from what our edge knows.
+        for _ in 0..5 {
+            child.get_mut().finalize_score_update(3.0, 2.0);
+        }
+        assert_eq!(child.get().total_visits(), 5);
+        assert_eq!(child.num_parents(), 0); // no edge yet
+
+        // Wire edge: root --(0,1)--> child, with r=(1.0, 0.5)
+        let edge = Box::new(Edge::new(Arc::clone(&child), (0, 1), 1.0, 0.5));
+        root.get_mut().prepend_child(edge);
+        assert_eq!(child.num_parents(), 1);
+
+        // Add 2 stale visits on the edge with outdated Q values
+        root.get_mut().finalize_edge_update(0, 1, 2.0, 1.0);
+        root.get_mut().finalize_edge_update(0, 1, 2.0, 1.0);
+        root.get_mut().finalize_score_update(2.0, 1.0);
+        root.get_mut().finalize_score_update(2.0, 1.0);
+        assert_eq!(root.get().edge_visits(0, 1), 2);
+
+        // Now backup a new visit through this path.
+        let path = vec![PathEntry {
+            node: Arc::clone(&root),
+            p1_outcome: 0,
+            p2_outcome: 1,
+        }];
+        backup(&path, &child, 3.0, 2.0);
+
+        // The correct Q for the edge is r + child.v = (1+3, 0.5+2) = (4.0, 2.5).
+        // Before the fix, num_parents=1 would skip delta correction, leaving
+        // the edge Q based only on the new visit + stale visits.
+        // With the fix, edge_visits(2) < child.total_visits(6) triggers correction.
+        let edge_q1 = root.get().edge_q_p1(0, 1);
+        let edge_q2 = root.get().edge_q_p2(0, 1);
+        assert!(
+            (edge_q1 - 4.0).abs() < 0.5,
+            "edge Q1 should be corrected toward 4.0, got {edge_q1}"
+        );
+        assert!(
+            (edge_q2 - 2.5).abs() < 0.5,
+            "edge Q2 should be corrected toward 2.5, got {edge_q2}"
+        );
     }
 
     // ---- cleanup_descent ----

@@ -892,41 +892,49 @@ mod tests {
         let backend = SmartUniformBackend;
         let mut rng = SmallRng::seed_from_u64(42);
         // Use enough sims to produce transpositions in this symmetric setup
-        run_search(&mut tree, &game, &backend, &config, 500, 8, &mut rng).unwrap();
+        run_search(&mut tree, &game, &backend, &config, 1000, 8, &mut rng).unwrap();
 
-        // Walk the tree to find a node with num_parents > 1 (a transposition).
-        // Collect Weak refs to all transposed nodes reachable from root's children.
+        // Advance to the most-visited child so we keep the largest subtree.
+        let root_low = tree.root().get();
+        let mut best_i = 0u8;
+        let mut best_visits = 0u32;
+        for i in 0..root_low.n1() as u8 {
+            let v = root_low.marginal_visits_p1(i as usize);
+            if v > best_visits {
+                best_visits = v;
+                best_i = i;
+            }
+        }
+        let mut best_j = 0u8;
+        best_visits = 0;
+        for j in 0..root_low.n2() as u8 {
+            let v = root_low.marginal_visits_p2(j as usize);
+            if v > best_visits {
+                best_visits = v;
+                best_j = j;
+            }
+        }
+        let p1_action = root_low.p1_outcome_action(best_i as usize);
+        let p2_action = root_low.p2_outcome_action(best_j as usize);
+
+        // Find a transposition reachable from the chosen child's subtree.
+        let target_edge = root_low.find_child(best_i, best_j)
+            .expect("best edge must exist");
+        let target_child = target_edge.low_node();
         let mut transposition_weak: Option<std::sync::Weak<SharedNode>> = None;
-        let mut cursor = tree.root().get().first_child();
+        let mut cursor = target_child.get().first_child();
         while let Some(edge) = cursor {
-            let child = edge.low_node();
-            if child.num_parents() > 1 {
-                transposition_weak = Some(Arc::downgrade(child));
-                break;
-            }
-            // Also check grandchildren
-            let mut inner = child.get().first_child();
-            while let Some(inner_edge) = inner {
-                if inner_edge.low_node().num_parents() > 1 {
-                    transposition_weak = Some(Arc::downgrade(inner_edge.low_node()));
-                    break;
-                }
-                inner = inner_edge.next_sibling();
-            }
-            if transposition_weak.is_some() {
+            let grandchild = edge.low_node();
+            if grandchild.num_parents() > 1 {
+                transposition_weak = Some(Arc::downgrade(grandchild));
                 break;
             }
             cursor = edge.next_sibling();
         }
 
         let weak = transposition_weak.expect(
-            "search should produce at least one transposition with 500 sims on symmetric setup",
+            "search should produce at least one transposition with 1000 sims on symmetric setup",
         );
-
-        // Advance
-        let root_low = tree.root().get();
-        let p1_action = root_low.p1_outcome_action(0);
-        let p2_action = root_low.p2_outcome_action(0);
 
         use pyrat::Direction;
         let _undo = game.make_move(
