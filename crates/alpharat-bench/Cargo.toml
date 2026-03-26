@@ -12,5 +12,12 @@ path = "src/main.rs"
 alpharat-mcts = { path = "../alpharat-mcts" }
 alpharat-mcgs = { path = "../alpharat-mcgs" }
 alpharat-eval-core = { path = "../alpharat-eval-core" }
+alpharat-sampling = { path = "../alpharat-sampling", optional = true, default-features = false }
 pyrat = { package = "pyrat-rust", git = "https://github.com/mintiti/pyrat-rust", branch = "main", default-features = false }
 rand = { version = "0.8", features = ["small_rng"] }
+
+[features]
+default = []
+onnx = ["dep:alpharat-sampling", "alpharat-sampling/onnx"]
+onnx-cuda = ["dep:alpharat-sampling", "alpharat-sampling/onnx-cuda"]
+onnx-coreml = ["dep:alpharat-sampling", "alpharat-sampling/onnx-coreml"]

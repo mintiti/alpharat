@@ -1,6 +1,6 @@
 use std::time::Instant;
 
-use alpharat_eval_core::SmartUniformBackend;
+use alpharat_eval_core::{Backend, SmartUniformBackend};
 use pyrat::{Coordinates, GameBuilder, GameState, MazeParams};
 use rand::rngs::SmallRng;
 use rand::SeedableRng;
@@ -15,6 +15,8 @@ struct Args {
     maze: MazeType,
     iters: usize,
     batch_size: u32,
+    model: Option<String>,
+    device: String,
 }
 
 #[derive(Clone, Copy)]
@@ -29,6 +31,8 @@ fn parse_args() -> Args {
     let mut maze = MazeType::Open;
     let mut iters = 10usize;
     let mut batch_size = 64u32;
+    let mut model: Option<String> = None;
+    let mut device = "auto".to_string();
 
     let args: Vec<String> = std::env::args().collect();
     let mut i = 1;
@@ -58,6 +62,14 @@ fn parse_args() -> Args {
                 i += 1;
                 batch_size = args[i].parse().unwrap();
             }
+            "--model" => {
+                i += 1;
+                model = Some(args[i].clone());
+            }
+            "--device" => {
+                i += 1;
+                device = args[i].clone();
+            }
             "--help" | "-h" => {
                 eprintln!("Usage: bench-compare [OPTIONS]");
                 eprintln!();
@@ -67,6 +79,11 @@ fn parse_args() -> Args {
                 eprintln!("  --maze open|walled      Maze type (default: open)");
                 eprintln!("  --iters N               Iterations per config (default: 10)");
                 eprintln!("  --batch-size N          Batch size (default: 64)");
+                eprintln!("  --model <path.onnx>     ONNX model (default: SmartUniform)");
+                eprintln!("  --device auto|cpu|cuda|coreml  Execution provider (default: auto)");
+                eprintln!();
+                eprintln!("NN backend requires building with --features onnx (or onnx-cuda, onnx-coreml).");
+                eprintln!("Models are grid-size specific: use a single --grids value with --model.");
                 std::process::exit(0);
             }
             other => panic!("unknown flag: {other}"),
@@ -80,7 +97,63 @@ fn parse_args() -> Args {
         maze,
         iters,
         batch_size,
+        model,
+        device,
     }
+}
+
+// ---------------------------------------------------------------------------
+// Backend construction
+// ---------------------------------------------------------------------------
+
+/// Create an ONNX backend for the given grid size and model path.
+///
+/// Requires the `onnx` feature (or `onnx-cuda`, `onnx-coreml`).
+#[cfg(feature = "onnx")]
+fn make_onnx_backend(
+    model_path: &str,
+    grid_size: u8,
+    device: &str,
+) -> Box<dyn Backend> {
+    use alpharat_sampling::{ExecutionProvider, FlatEncoder, OnnxBackend};
+
+    let encoder = FlatEncoder::new(grid_size, grid_size);
+    let provider = device
+        .try_into()
+        .unwrap_or_else(|_| panic!("unknown device: {device}"));
+
+    let backend = OnnxBackend::with_provider(model_path, encoder, provider)
+        .unwrap_or_else(|e| panic!("failed to create ONNX backend: {e}"));
+
+    // Warmup: first inference is slow (graph optimization, kernel compilation)
+    eprintln!("  Warming up ONNX backend ({device})...");
+    let warmup_game = GameBuilder::new(grid_size, grid_size)
+        .with_open_maze()
+        .with_custom_positions(
+            Coordinates::new(0, 0),
+            Coordinates::new(grid_size - 1, grid_size - 1),
+        )
+        .with_custom_cheese(vec![Coordinates::new(grid_size / 2, grid_size / 2)])
+        .with_max_turns(30)
+        .build()
+        .create(Some(0))
+        .unwrap();
+    let _ = backend.evaluate(&warmup_game);
+    eprintln!("  Ready.");
+
+    Box::new(backend)
+}
+
+#[cfg(not(feature = "onnx"))]
+fn make_onnx_backend(
+    _model_path: &str,
+    _grid_size: u8,
+    _device: &str,
+) -> Box<dyn Backend> {
+    panic!(
+        "ONNX backend requires building with --features onnx (or onnx-cuda, onnx-coreml).\n\
+         Example: cargo run --release -p alpharat-bench --features onnx-coreml --bin bench-compare -- --model model.onnx"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -173,18 +246,20 @@ fn median(values: &mut [f64]) -> f64 {
 
 fn run_mcts(
     game: &GameState,
+    backend: &dyn Backend,
     n_sims: u32,
     batch_size: u32,
     iters: usize,
 ) -> RunStats {
-    let backend = SmartUniformBackend;
     let config = alpharat_mcts::SearchConfig::default();
 
     // Warmup
     {
         let mut tree = alpharat_mcts::MCTSTree::new(game);
         let mut rng = SmallRng::seed_from_u64(0);
-        let _ = alpharat_mcts::run_search(&mut tree, game, &backend, &config, n_sims, batch_size, &mut rng);
+        let _ = alpharat_mcts::run_search(
+            &mut tree, game, backend, &config, n_sims, batch_size, &mut rng,
+        );
     }
 
     let mut timings = Vec::with_capacity(iters);
@@ -196,7 +271,7 @@ fn run_mcts(
 
         let start = Instant::now();
         let result = alpharat_mcts::run_search(
-            &mut tree, game, &backend, &config, n_sims, batch_size, &mut rng,
+            &mut tree, game, backend, &config, n_sims, batch_size, &mut rng,
         )
         .unwrap();
         timings.push(start.elapsed().as_secs_f64());
@@ -216,18 +291,20 @@ fn run_mcts(
 
 fn run_mcgs(
     game: &GameState,
+    backend: &dyn Backend,
     n_sims: u32,
     batch_size: u32,
     iters: usize,
 ) -> RunStats {
-    let backend = SmartUniformBackend;
     let config = alpharat_mcgs::SearchConfig::default();
 
     // Warmup
     {
         let mut tree = alpharat_mcgs::MCGSTree::new(game);
         let mut rng = SmallRng::seed_from_u64(0);
-        let _ = alpharat_mcgs::run_search(&mut tree, game, &backend, &config, n_sims, batch_size, &mut rng);
+        let _ = alpharat_mcgs::run_search(
+            &mut tree, game, backend, &config, n_sims, batch_size, &mut rng,
+        );
     }
 
     let mut timings = Vec::with_capacity(iters);
@@ -241,7 +318,7 @@ fn run_mcgs(
 
         let start = Instant::now();
         let result = alpharat_mcgs::run_search(
-            &mut tree, game, &backend, &config, n_sims, batch_size, &mut rng,
+            &mut tree, game, backend, &config, n_sims, batch_size, &mut rng,
         )
         .unwrap();
         timings.push(start.elapsed().as_secs_f64());
@@ -302,7 +379,8 @@ fn format_count(n: Option<usize>) -> String {
 fn print_header() {
     println!(
         "{:<8} {:>8} {:>6} {:>10} {:>8} {:>8} {:>8} {:>8} {:>12} {:>12}",
-        "Grid", "Sims", "Engine", "Sims/s", "Time", "NN%", "Term%", "Coll%", "TT Entries", "TT Live"
+        "Grid", "Sims", "Engine", "Sims/s", "Time", "NN%", "Term%", "Coll%", "TT Entries",
+        "TT Live"
     );
     println!("{}", "-".repeat(110));
 }
@@ -335,8 +413,13 @@ fn main() {
         MazeType::Open => "open",
         MazeType::Walled => "walled",
     };
+    let backend_label = match &args.model {
+        Some(p) => format!("onnx ({}, {})", p, args.device),
+        None => "SmartUniform".to_string(),
+    };
     println!(
-        "MCGS vs MCTS comparison  |  maze: {maze_label}  |  batch: {}  |  iters: {}",
+        "MCGS vs MCTS comparison  |  backend: {backend_label}  |  maze: {maze_label}  \
+         |  batch: {}  |  iters: {}",
         args.batch_size, args.iters
     );
     println!();
@@ -346,11 +429,17 @@ fn main() {
         let label = format!("{size}x{size}");
         let game = make_game(size, args.maze, 42);
 
+        // Build backend for this grid size
+        let backend: Box<dyn Backend> = match &args.model {
+            Some(model_path) => make_onnx_backend(model_path, size, &args.device),
+            None => Box::new(SmartUniformBackend),
+        };
+
         for &sims in &args.sims {
-            let mcts = run_mcts(&game, sims, args.batch_size, args.iters);
+            let mcts = run_mcts(&game, backend.as_ref(), sims, args.batch_size, args.iters);
             print_row(&label, sims, "MCTS", &mcts);
 
-            let mcgs = run_mcgs(&game, sims, args.batch_size, args.iters);
+            let mcgs = run_mcgs(&game, backend.as_ref(), sims, args.batch_size, args.iters);
             print_row(&label, sims, "MCGS", &mcgs);
 
             // Blank line between sim budgets for readability
