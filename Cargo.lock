@@ -18,6 +18,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "alpharat-bench"
+version = "0.1.0"
+dependencies = [
+ "alpharat-eval-core",
+ "alpharat-mcgs",
+ "alpharat-mcts",
+ "pyrat-rust",
+ "rand 0.8.5",
+]
+
+[[package]]
 name = "alpharat-bot"
 version = "0.1.0"
 dependencies = [
@@ -39,6 +50,7 @@ name = "alpharat-mcgs"
 version = "0.1.0"
 dependencies = [
  "alpharat-eval-core",
+ "criterion",
  "numpy",
  "pyo3",
  "pyrat-rust",

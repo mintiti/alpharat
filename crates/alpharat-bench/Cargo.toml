@@ -1,0 +1,16 @@
+[package]
+name = "alpharat-bench"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[[bin]]
+name = "bench-compare"
+path = "src/main.rs"
+
+[dependencies]
+alpharat-mcts = { path = "../alpharat-mcts" }
+alpharat-mcgs = { path = "../alpharat-mcgs" }
+alpharat-eval-core = { path = "../alpharat-eval-core" }
+pyrat = { package = "pyrat-rust", git = "https://github.com/mintiti/pyrat-rust", branch = "main", default-features = false }
+rand = { version = "0.8", features = ["small_rng"] }
