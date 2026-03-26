@@ -85,9 +85,15 @@ pub fn position_hash(game: &GameState) -> u64 {
 
 /// Create a root node from the current game state.
 ///
-/// Root gets smart uniform priors and `value_scale = max(remaining_cheese, 1)`.
-/// Inserts into TT. Returns the Arc<SharedNode>.
+/// Checks TT first — if the position already exists (e.g. from a prior search),
+/// returns the existing node. Otherwise creates a fresh node with smart uniform
+/// priors and `value_scale = max(remaining_cheese, 1)`, inserts into TT.
 pub fn create_root_node(game: &GameState, tt: &mut TranspositionTable) -> Arc<SharedNode> {
+    let hash = position_hash(game);
+    if let Some(existing) = tt.lookup(hash) {
+        return existing;
+    }
+
     let eff_p1 = game.effective_actions_p1();
     let eff_p2 = game.effective_actions_p2();
 
@@ -99,7 +105,6 @@ pub fn create_root_node(game: &GameState, tt: &mut TranspositionTable) -> Arc<Sh
     node.set_value_scale(game.cheese.remaining_cheese().max(1) as f32);
 
     let shared = Arc::new(SharedNode::new(node));
-    let hash = position_hash(game);
     tt.insert(hash, &shared);
     shared
 }
@@ -211,8 +216,10 @@ impl MCGSTree {
     ///
     /// Reuses the existing subtree when possible. Pruned siblings are sent to
     /// the background GC. If no matching child edge exists (unexplored move),
-    /// creates a fresh root from the new game state. TT is preserved for
-    /// transposition hits; stale entries are evicted after advancement.
+    /// falls back to `create_root_node` which checks TT before creating fresh.
+    ///
+    /// TT entries expire naturally via Weak references as the GC drops
+    /// unreachable nodes. Call `tt.evict_expired()` explicitly to reclaim space.
     ///
     /// `game` must already reflect the state after the move.
     pub fn advance_root(&mut self, game: &GameState, p1_action: u8, p2_action: u8) {
