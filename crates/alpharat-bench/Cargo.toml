@@ -19,5 +19,5 @@ rand = { version = "0.8", features = ["small_rng"] }
 [features]
 default = []
 onnx = ["dep:alpharat-sampling", "alpharat-sampling/onnx"]
-onnx-cuda = ["dep:alpharat-sampling", "alpharat-sampling/onnx-cuda"]
-onnx-coreml = ["dep:alpharat-sampling", "alpharat-sampling/onnx-coreml"]
+onnx-cuda = ["onnx", "alpharat-sampling/onnx-cuda"]
+onnx-coreml = ["onnx", "alpharat-sampling/onnx-coreml"]

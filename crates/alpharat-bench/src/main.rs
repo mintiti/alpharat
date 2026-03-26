@@ -115,7 +115,7 @@ fn make_onnx_backend(
     grid_size: u8,
     device: &str,
 ) -> Box<dyn Backend> {
-    use alpharat_sampling::{ExecutionProvider, FlatEncoder, OnnxBackend};
+    use alpharat_sampling::{FlatEncoder, OnnxBackend};
 
     let encoder = FlatEncoder::new(grid_size, grid_size);
     let provider = device
