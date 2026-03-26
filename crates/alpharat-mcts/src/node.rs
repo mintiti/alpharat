@@ -77,12 +77,28 @@ impl HalfEdge {
         self.q += (value - self.q) / self.visits as f32;
     }
 
+    /// Multivisit Welford update: equivalent to calling `update(value)` count
+    /// times with the same value, but O(1). Matches LC0's FinalizeScoreUpdate.
+    pub fn update_multivisit(&mut self, value: f32, count: u32) {
+        self.visits += count;
+        self.q += (value - self.q) * count as f32 / self.visits as f32;
+    }
+
     pub fn n_in_flight(&self) -> u32 {
         self.n_in_flight
     }
 
+    /// N + n_in_flight, matching LC0's GetNStarted().
+    pub fn n_started(&self) -> u32 {
+        self.visits + self.n_in_flight
+    }
+
     pub fn add_virtual_loss(&mut self) {
         self.n_in_flight += 1;
+    }
+
+    pub fn add_virtual_loss_multi(&mut self, count: u32) {
+        self.n_in_flight += count;
     }
 
     pub fn revert_virtual_loss(&mut self) {
@@ -91,6 +107,16 @@ impl HalfEdge {
             "revert_virtual_loss: n_in_flight is already 0"
         );
         self.n_in_flight -= 1;
+    }
+
+    pub fn revert_virtual_loss_multi(&mut self, count: u32) {
+        debug_assert!(
+            self.n_in_flight >= count,
+            "revert_virtual_loss_multi: n_in_flight {} < count {}",
+            self.n_in_flight,
+            count
+        );
+        self.n_in_flight -= count;
     }
 }
 
@@ -352,6 +378,11 @@ impl Node {
         self.n_in_flight
     }
 
+    /// LC0's GetNStarted(): total_visits + n_in_flight.
+    pub fn n_started(&self) -> u32 {
+        self.total_visits + self.n_in_flight
+    }
+
     /// lc0 pattern. For unvisited nodes (total_visits == 0): fails if already
     /// claimed (n_in_flight > 0). For visited nodes: always succeeds.
     pub fn try_start_score_update(&mut self) -> bool {
@@ -362,13 +393,20 @@ impl Node {
         true
     }
 
-    /// Revert a score update claim (collision or post-backup).
-    pub fn cancel_score_update(&mut self) {
+    /// Revert score update claims (collision or post-backup). LC0's CancelScoreUpdate.
+    pub fn cancel_score_update(&mut self, multivisit: u32) {
         debug_assert!(
-            self.n_in_flight > 0,
-            "cancel_score_update: n_in_flight is already 0"
+            self.n_in_flight >= multivisit,
+            "cancel_score_update: n_in_flight {} < multivisit {}",
+            self.n_in_flight,
+            multivisit
         );
-        self.n_in_flight -= 1;
+        self.n_in_flight -= multivisit;
+    }
+
+    /// Increment n_in_flight for path propagation. LC0's IncrementNInFlight.
+    pub fn increment_n_in_flight(&mut self, count: u32) {
+        self.n_in_flight += count;
     }
 
     // --- Setters ---
@@ -393,12 +431,29 @@ impl Node {
 
     // --- Value update ---
 
-    /// Welford running-average update on v1/v2. Increments total_visits.
+    /// Welford running-average update on v1/v2. Increments total_visits by 1.
     pub fn update_value(&mut self, q1: f32, q2: f32) {
         self.total_visits += 1;
         let n = self.total_visits as f32;
         self.v1 += (q1 - self.v1) / n;
         self.v2 += (q2 - self.v2) / n;
+    }
+
+    /// LC0's FinalizeScoreUpdate: atomically updates values, increments visits,
+    /// and decrements n_in_flight. Multivisit weighted Welford.
+    pub fn finalize_score_update(&mut self, q1: f32, q2: f32, multivisit: u32) {
+        self.total_visits += multivisit;
+        let n = self.total_visits as f32;
+        let w = multivisit as f32;
+        self.v1 += (q1 - self.v1) * w / n;
+        self.v2 += (q2 - self.v2) * w / n;
+        debug_assert!(
+            self.n_in_flight >= multivisit,
+            "finalize_score_update: n_in_flight {} < multivisit {}",
+            self.n_in_flight,
+            multivisit
+        );
+        self.n_in_flight -= multivisit;
     }
 }
 
@@ -911,7 +966,7 @@ mod tests {
         assert!(node.try_start_score_update());
         assert_eq!(node.n_in_flight(), 1);
 
-        node.cancel_score_update();
+        node.cancel_score_update(1);
         assert_eq!(node.n_in_flight(), 0);
         // Values untouched.
         assert!((node.v1() - 1.0).abs() < 1e-6);
@@ -919,11 +974,100 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "cancel_score_update: n_in_flight is already 0")]
+    #[should_panic(expected = "cancel_score_update: n_in_flight")]
     fn cancel_score_update_at_zero_panics() {
         let h = HalfNode::new([0.2; 5], [0, 1, 2, 3, 4]);
         let mut node = Node::new(h, h);
-        node.cancel_score_update();
+        node.cancel_score_update(1);
+    }
+
+    // ---- Multivisit Welford equivalence ----
+
+    #[test]
+    fn finalize_score_update_matches_repeated_single() {
+        let h = HalfNode::new([0.2; 5], [0, 1, 2, 3, 4]);
+
+        // Multivisit path: one call with count=5.
+        let mut node_multi = Node::new(h, h);
+        node_multi.increment_n_in_flight(5);
+        node_multi.finalize_score_update(3.0, 5.0, 5);
+
+        // Single-visit path: five calls with count=1.
+        let mut node_single = Node::new(h, h);
+        for _ in 0..5 {
+            node_single.update_value(3.0, 5.0);
+        }
+
+        assert_eq!(node_multi.total_visits(), node_single.total_visits());
+        assert!(
+            (node_multi.v1() - node_single.v1()).abs() < 1e-6,
+            "v1 mismatch: multi={} single={}",
+            node_multi.v1(),
+            node_single.v1()
+        );
+        assert!(
+            (node_multi.v2() - node_single.v2()).abs() < 1e-6,
+            "v2 mismatch: multi={} single={}",
+            node_multi.v2(),
+            node_single.v2()
+        );
+        assert_eq!(node_multi.n_in_flight(), 0);
+    }
+
+    #[test]
+    fn edge_update_multivisit_matches_repeated_single() {
+        let mut edge_multi = HalfEdge::default();
+        edge_multi.update_multivisit(7.0, 4);
+
+        let mut edge_single = HalfEdge::default();
+        for _ in 0..4 {
+            edge_single.update(7.0);
+        }
+
+        assert_eq!(edge_multi.visits, edge_single.visits);
+        assert!(
+            (edge_multi.q - edge_single.q).abs() < 1e-6,
+            "q mismatch: multi={} single={}",
+            edge_multi.q,
+            edge_single.q
+        );
+    }
+
+    #[test]
+    fn finalize_score_update_mixed_values() {
+        let h = HalfNode::new([0.2; 5], [0, 1, 2, 3, 4]);
+
+        // Multivisit: 3x value 2.0, then 2x value 8.0.
+        let mut node_multi = Node::new(h, h);
+        node_multi.increment_n_in_flight(5);
+        node_multi.finalize_score_update(2.0, 2.0, 3);
+        // After first finalize: n_in_flight = 5 - 3 = 2
+        node_multi.increment_n_in_flight(0); // no-op, just for clarity
+        node_multi.finalize_score_update(8.0, 8.0, 2);
+
+        // Single-visit: 3x update(2.0), 2x update(8.0).
+        let mut node_single = Node::new(h, h);
+        for _ in 0..3 {
+            node_single.update_value(2.0, 2.0);
+        }
+        for _ in 0..2 {
+            node_single.update_value(8.0, 8.0);
+        }
+
+        assert_eq!(node_multi.total_visits(), 5);
+        assert_eq!(node_single.total_visits(), 5);
+        assert!(
+            (node_multi.v1() - node_single.v1()).abs() < 1e-5,
+            "v1 mismatch: multi={} single={}",
+            node_multi.v1(),
+            node_single.v1()
+        );
+        // Expected: (2*3 + 8*2) / 5 = 22/5 = 4.4
+        assert!(
+            (node_multi.v1() - 4.4).abs() < 1e-5,
+            "v1={} expected=4.4",
+            node_multi.v1()
+        );
     }
 
     // ---- Virtual loss: HalfEdge ----

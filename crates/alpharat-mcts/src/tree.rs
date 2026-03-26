@@ -212,6 +212,7 @@ pub fn find_or_extend_child(
 /// async deallocation.
 pub struct MCTSTree {
     root_box: ManuallyDrop<Box<Node>>,
+    node_count: u32,
 }
 
 impl MCTSTree {
@@ -224,6 +225,7 @@ impl MCTSTree {
         node_gc();
         Self {
             root_box: ManuallyDrop::new(alloc_root(game)),
+            node_count: 1,
         }
     }
 
@@ -234,6 +236,16 @@ impl MCTSTree {
     /// Immutable reference to the root node.
     pub fn root_node(&self) -> &Node {
         &self.root_box
+    }
+
+    /// Number of nodes in the tree. Used for collision budget scaling.
+    pub fn node_count(&self) -> u32 {
+        self.node_count
+    }
+
+    /// Increment node count (called when a new node is created).
+    pub fn increment_node_count(&mut self) {
+        self.node_count += 1;
     }
 
     /// Move root to the child matching the given action pair.
@@ -260,6 +272,7 @@ impl MCTSTree {
     pub fn reinit(&mut self, game: &GameState) {
         let old_root = std::mem::replace(&mut *self.root_box, alloc_root(game));
         node_gc().send(old_root);
+        self.node_count = 1;
     }
 
     /// Detach the child matching outcome `(i, j)` from root's linked list.

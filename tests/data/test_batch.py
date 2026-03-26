@@ -254,7 +254,11 @@ class TestBatchMetadataError:
         "batch_size": 8,
         "noise_epsilon": 0.0,
         "noise_concentration": 10.83,
-        "max_collisions": 0,
+        "collision_limit_min": 1,
+        "collision_limit_max": 256,
+        "collision_scaling_start": 800,
+        "collision_scaling_end": 50000,
+        "collision_scaling_power": 1.0,
     }
     _VALID_GAME = {
         "width": 5,

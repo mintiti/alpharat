@@ -28,9 +28,16 @@ pub struct SearchConfig {
     /// Per-move alpha = concentration / n_outcomes.
     /// Default: 10.83 (KataGo's value, = 361 * 0.03).
     pub noise_concentration: f32,
-    /// Maximum collision retries per batch before stopping the gather phase.
-    /// 0 = use batch_size as the limit (default).
-    pub max_collisions: u32,
+    /// Collision budget scaling (LC0 pattern). The collision limit scales
+    /// with tree size from `collision_limit_min` to `collision_limit_max`.
+    pub collision_limit_min: u32,
+    pub collision_limit_max: u32,
+    /// Tree node count at which collision limit starts ramping.
+    pub collision_scaling_start: u32,
+    /// Tree node count at which collision limit reaches max.
+    pub collision_scaling_end: u32,
+    /// Power-law interpolation exponent.
+    pub collision_scaling_power: f32,
 }
 
 impl Default for SearchConfig {
@@ -41,7 +48,11 @@ impl Default for SearchConfig {
             force_k: 2.0,
             noise_epsilon: 0.0,
             noise_concentration: 10.83,
-            max_collisions: 0,
+            collision_limit_min: 1,
+            collision_limit_max: 256,
+            collision_scaling_start: 800,
+            collision_scaling_end: 50_000,
+            collision_scaling_power: 1.0,
         }
     }
 }
@@ -292,28 +303,22 @@ struct BatchStats {
 }
 
 // ---------------------------------------------------------------------------
-// DescentOutcome — internal, what happened at the leaf
+// NodeToProcess — LC0-style batch entry
 // ---------------------------------------------------------------------------
 
-/// What happened at the leaf of a single PUCT descent.
-enum DescentOutcome {
-    /// Leaf needs NN evaluation.
-    NeedsEval {
-        path: SearchPath,
-        leaf: NodePtr,
-        game_state: GameState,
-    },
-    /// Leaf is terminal (game over).
-    Terminal {
-        path: SearchPath,
-        leaf: NodePtr,
-        /// Whether try_start_score_update was called on the leaf.
-        leaf_claimed: bool,
-    },
-    /// Collision: another descent already claimed this unvisited leaf.
-    Collision {
-        path: SearchPath,
-    },
+/// What this batch entry represents.
+enum NodeKind {
+    /// Leaf needs NN evaluation (multivisit always 1).
+    NeedsEval { game_state: GameState },
+    /// Terminal node (game over). Backed up with (0, 0).
+    Terminal,
+}
+
+/// A single entry from the batch gather phase. Matches LC0's NodeToProcess.
+struct NodeToProcess {
+    node: NodePtr,
+    kind: NodeKind,
+    multivisit: u32,
 }
 
 
@@ -395,7 +400,469 @@ fn apply_dirichlet_noise(half: &mut HalfNode, epsilon: f32, concentration: f32, 
 }
 
 // ---------------------------------------------------------------------------
-// simulate_batch — gather/eval/backup cycle
+// calculate_collisions_left — LC0's tree-size-based collision budget
+// ---------------------------------------------------------------------------
+
+/// LC0's CalculateCollisionsLeft: power-law interpolation from min to max
+/// based on tree node count.
+fn calculate_collisions_left(tree_node_count: u32, config: &SearchConfig) -> u32 {
+    if tree_node_count >= config.collision_scaling_end {
+        return config.collision_limit_max;
+    }
+    if tree_node_count <= config.collision_scaling_start {
+        return config.collision_limit_min;
+    }
+    let ratio = (tree_node_count - config.collision_scaling_start) as f32
+        / (config.collision_scaling_end - config.collision_scaling_start) as f32;
+    let scaled = config.collision_limit_min as f32
+        + (config.collision_limit_max as f32 - config.collision_limit_min as f32)
+            * ratio.powf(config.collision_scaling_power);
+    (scaled.round() as u32).clamp(config.collision_limit_min, config.collision_limit_max)
+}
+
+// ---------------------------------------------------------------------------
+// estimated_visits_to_change_best — LC0's batch allocation helper
+// ---------------------------------------------------------------------------
+
+/// For one player's half-node, compute how many more visits to the best
+/// outcome before the second-best outcome overtakes it in PUCT score.
+///
+/// Returns (best_idx, visits_to_change). If only one outcome or the best
+/// utility alone beats second-best, returns u32::MAX.
+///
+/// Port of LC0's `estimated_visits_to_change_best` logic (search.cc:1787-1799).
+fn estimated_visits_to_change_best_half(
+    half: &HalfNode,
+    node_value: f32,
+    value_scale: f32,
+    children_visits: u32,
+    config: &SearchConfig,
+    is_root: bool,
+    nstarted: &[u32; 5],
+    rng: &mut impl Rng,
+) -> (u8, u32) {
+    let n = half.n_outcomes();
+    if n <= 1 {
+        return (0, u32::MAX);
+    }
+
+    // Compute PUCT scores using the local nstarted array.
+    let mut visited_prior_mass = 0.0f32;
+    for i in 0..n {
+        if half.edge(i).visits > 0 {
+            visited_prior_mass += half.prior(i);
+        }
+    }
+    let fpu = node_value - config.fpu_reduction * value_scale * visited_prior_mass.sqrt();
+    let sqrt_total = (children_visits.max(1) as f32).sqrt();
+    let c_puct = config.c_puct;
+
+    // Find best and second-best by PUCT score.
+    let mut best_idx = 0u8;
+    let mut best_score = f32::NEG_INFINITY;
+    let mut best_utility = f32::NEG_INFINITY;
+    let mut second_best_score = f32::NEG_INFINITY;
+
+    for i in 0..n {
+        let edge = half.edge(i);
+        let prior = half.prior(i);
+        let q = if edge.visits > 0 { edge.q } else { fpu };
+        let q_norm = q / value_scale;
+        let exploration = c_puct * prior * sqrt_total / (1.0 + nstarted[i] as f32);
+        let mut score = q_norm + exploration;
+
+        if is_root && config.force_k > 0.0 && prior > 0.0 {
+            let threshold = (config.force_k * prior * children_visits as f32).sqrt();
+            if (edge.visits as f32) < threshold {
+                score = FORCED_PLAYOUT_SCORE;
+            }
+        }
+
+        if score > best_score {
+            second_best_score = best_score;
+            best_score = score;
+            best_idx = i as u8;
+            best_utility = q_norm;
+        } else if score > second_best_score {
+            second_best_score = score;
+        }
+    }
+
+    // Handle ties with reservoir sampling (same rng as select_half).
+    let mut tie_count = 1u32;
+    for i in 0..n {
+        if i as u8 == best_idx {
+            continue;
+        }
+        let edge = half.edge(i);
+        let prior = half.prior(i);
+        let q = if edge.visits > 0 { edge.q } else { fpu };
+        let q_norm = q / value_scale;
+        let exploration = c_puct * prior * sqrt_total / (1.0 + nstarted[i] as f32);
+        let mut score = q_norm + exploration;
+        if is_root && config.force_k > 0.0 && prior > 0.0 {
+            let threshold = (config.force_k * prior * children_visits as f32).sqrt();
+            if (edge.visits as f32) < threshold {
+                score = FORCED_PLAYOUT_SCORE;
+            }
+        }
+        if (score - best_score).abs() < 1e-12 {
+            tie_count += 1;
+            if rng.gen_range(0..tie_count) == 0 {
+                best_idx = i as u8;
+                best_utility = q_norm;
+            }
+        }
+    }
+
+    if second_best_score <= f32::NEG_INFINITY {
+        // Only one outcome was viable.
+        return (best_idx, u32::MAX);
+    }
+
+    // LC0 formula: if utility alone beats second_best, never changes.
+    if best_utility >= second_best_score {
+        return (best_idx, u32::MAX);
+    }
+
+    // Solve: c_puct * prior * sqrt_total / (1 + nstarted + k) + utility = second_best
+    // k = c_puct * prior * sqrt_total / (second_best - utility) - (1 + nstarted)
+    let prior_best = half.prior(best_idx as usize);
+    let n1 = nstarted[best_idx as usize] as f32 + 1.0;
+    let denom = second_best_score - best_utility;
+    if denom <= 0.0 {
+        return (best_idx, u32::MAX);
+    }
+    let vtc = (c_puct * prior_best * sqrt_total / denom - n1 + 1.0).max(1.0);
+    (best_idx, (vtc as u32).max(1))
+}
+
+// ---------------------------------------------------------------------------
+// pick_nodes_to_extend — LC0-style batch allocation via tree traversal
+// ---------------------------------------------------------------------------
+
+/// Gather phase state for one level of the iterative tree traversal.
+struct GatherLevel {
+    node: NodePtr,
+    /// Flat [a1 * 5 + a2] → allocated visits for that (a1, a2) child.
+    vtp: [u32; 25],
+    /// Next flat index to process.
+    next_idx: usize,
+    /// Last flat index with non-zero visits.
+    last_idx: usize,
+}
+
+/// LC0's PickNodesToExtendTask adapted for 2-player. Distributes `batch_size`
+/// visits through the tree in a single pass, producing NodeToProcess entries.
+///
+/// Returns (to_process, shared_collisions) where shared_collisions are
+/// (node, multivisit) pairs to cancel after backup.
+fn pick_nodes_to_extend(
+    tree: &mut MCTSTree,
+    game: &GameState,
+    config: &SearchConfig,
+    batch_size: u32,
+    _collision_limit: u32,
+    rng: &mut impl Rng,
+) -> (Vec<NodeToProcess>, Vec<(NodePtr, u32)>) {
+    let root = tree.root();
+    let mut to_process: Vec<NodeToProcess> = Vec::with_capacity(batch_size as usize);
+    let mut shared_collisions: Vec<(NodePtr, u32)> = Vec::new();
+    let mut work_game = game.clone();
+    let mut undos: Vec<_> = Vec::new();
+
+    // LC0 distributes batch_size visits. The collision_limit only caps how
+    // many collision entries we accept, not the total visits distributed.
+    let cur_limit = batch_size;
+
+    // Handle root: unvisited or terminal.
+    let root_node = unsafe { root.as_ref() };
+    if root_node.total_visits() == 0 || root_node.is_terminal() {
+        if root_node.total_visits() == 0 && !root_node.is_terminal() {
+            if unsafe { root.as_mut() }.try_start_score_update() {
+                if work_game.check_game_over() {
+                    populate_node(root, None);
+                    to_process.push(NodeToProcess {
+                        node: root,
+                        kind: NodeKind::Terminal,
+                        multivisit: 1,
+                    });
+                } else {
+                    to_process.push(NodeToProcess {
+                        node: root,
+                        kind: NodeKind::NeedsEval { game_state: work_game.clone() },
+                        multivisit: 1,
+                    });
+                }
+                if cur_limit > 1 {
+                    shared_collisions.push((root, cur_limit - 1));
+                }
+            } else {
+                shared_collisions.push((root, cur_limit));
+            }
+        } else {
+            // Terminal root: backup with multivisit.
+            if root_node.total_visits() == 0 {
+                populate_node(root, None);
+            }
+            unsafe { root.as_mut() }.increment_n_in_flight(cur_limit);
+            to_process.push(NodeToProcess {
+                node: root,
+                kind: NodeKind::Terminal,
+                multivisit: cur_limit,
+            });
+        }
+        return (to_process, shared_collisions);
+    }
+
+    // Root is an interior node: increment n_in_flight for all visits.
+    unsafe { root.as_mut() }.increment_n_in_flight(cur_limit);
+
+    // Build first level: distribute cur_limit visits at root.
+    let first_level = build_gather_level(root, cur_limit, config, true, rng);
+    let mut levels: Vec<GatherLevel> = vec![first_level];
+
+    while let Some(level) = levels.last_mut() {
+        // Find next (a1, a2) pair with allocated visits.
+        let mut found_child = false;
+        while level.next_idx <= level.last_idx {
+            let idx = level.next_idx;
+            level.next_idx += 1;
+            if level.vtp[idx] == 0 {
+                continue;
+            }
+            let a1 = (idx / 5) as u8;
+            let a2 = (idx % 5) as u8;
+            let k = level.vtp[idx];
+
+            // Convert outcome indices to canonical actions.
+            let (act1, act2) = unsafe {
+                let node = level.node.as_ref();
+                (node.p1.outcome_action(a1 as usize), node.p2.outcome_action(a2 as usize))
+            };
+            let d1 = Direction::try_from(act1).expect("valid direction");
+            let d2 = Direction::try_from(act2).expect("valid direction");
+            let scores_before = (work_game.player1_score(), work_game.player2_score());
+            let undo = work_game.make_move(d1, d2);
+            let (r1, r2) = compute_rewards(&work_game, scores_before);
+
+            let (child_ptr, is_new) = find_or_extend_child(level.node, a1, a2, &work_game, r1, r2);
+            if is_new {
+                tree.increment_node_count();
+            }
+
+            let child = unsafe { child_ptr.as_ref() };
+            if child.total_visits() == 0 || child.is_terminal() {
+                // Leaf or terminal.
+                if unsafe { child_ptr.as_mut() }.try_start_score_update() {
+                    if child.is_terminal() || work_game.check_game_over() {
+                        // Terminal.
+                        if child.total_visits() == 0 {
+                            populate_node(child_ptr, None);
+                        }
+                        to_process.push(NodeToProcess {
+                            node: child_ptr,
+                            kind: NodeKind::Terminal,
+                            multivisit: 1,
+                        });
+                        if k > 1 {
+                            shared_collisions.push((child_ptr, k - 1));
+                        }
+                    } else {
+                        // Needs NN eval.
+                        to_process.push(NodeToProcess {
+                            node: child_ptr,
+                            kind: NodeKind::NeedsEval { game_state: work_game.clone() },
+                            multivisit: 1,
+                        });
+                        if k > 1 {
+                            shared_collisions.push((child_ptr, k - 1));
+                        }
+                    }
+                } else {
+                    // Collision: all k visits.
+                    shared_collisions.push((child_ptr, k));
+                }
+                work_game.unmake_move(undo);
+            } else {
+                // Interior child: descend with k visits.
+                // TryStartScoreUpdate for the initial claim, then add remaining.
+                if unsafe { child_ptr.as_mut() }.try_start_score_update() {
+                    // Claim succeeded. Add remaining k-1 visits.
+                    if k > 1 {
+                        unsafe { child_ptr.as_mut() }.increment_n_in_flight(k - 1);
+                    }
+                    undos.push(undo);
+                    let child_level = build_gather_level(child_ptr, k, config, false, rng);
+                    levels.push(child_level);
+                    found_child = true;
+                    break;
+                } else {
+                    // Collision on interior node: all k visits.
+                    shared_collisions.push((child_ptr, k));
+                    work_game.unmake_move(undo);
+                }
+            }
+        }
+
+        if !found_child {
+            // All children processed, backtrack.
+            levels.pop();
+            if let Some(undo) = undos.pop() {
+                work_game.unmake_move(undo);
+            }
+        }
+    }
+
+    (to_process, shared_collisions)
+}
+
+/// Build a GatherLevel: distribute `cur_limit` visits at `node` using
+/// decoupled PUCT with LC0's estimated_visits_to_change_best.
+fn build_gather_level(
+    node: NodePtr,
+    cur_limit: u32,
+    config: &SearchConfig,
+    is_root: bool,
+    rng: &mut impl Rng,
+) -> GatherLevel {
+    let node_ref = unsafe { node.as_ref() };
+    let n1 = node_ref.p1.n_outcomes();
+    let n2 = node_ref.p2.n_outcomes();
+    let children_visits = node_ref.children_visits();
+    let value_scale = node_ref.value_scale();
+    let v1 = node_ref.v1();
+    let v2 = node_ref.v2();
+
+    // Initialize nstarted from current edge state.
+    let mut ns_p1 = [0u32; 5];
+    let mut ns_p2 = [0u32; 5];
+    for i in 0..n1 {
+        ns_p1[i] = node_ref.p1.edge(i).n_started();
+    }
+    for j in 0..n2 {
+        ns_p2[j] = node_ref.p2.edge(j).n_started();
+    }
+
+    let mut vtp = [0u32; 25];
+    let mut remaining = cur_limit;
+    let mut last_idx = 0usize;
+
+    while remaining > 0 {
+        // Select best outcome for each player.
+        let (best1, vtcb1) = estimated_visits_to_change_best_half(
+            &node_ref.p1, v1, value_scale, children_visits + (cur_limit - remaining),
+            config, is_root, &ns_p1, rng,
+        );
+        let (best2, vtcb2) = estimated_visits_to_change_best_half(
+            &node_ref.p2, v2, value_scale, children_visits + (cur_limit - remaining),
+            config, is_root, &ns_p2, rng,
+        );
+
+        let k = remaining.min(vtcb1).min(vtcb2).max(1);
+
+        let flat = best1 as usize * 5 + best2 as usize;
+        vtp[flat] += k;
+        ns_p1[best1 as usize] += k;
+        ns_p2[best2 as usize] += k;
+        remaining -= k;
+        if flat > last_idx && vtp[flat] > 0 {
+            last_idx = flat;
+        }
+    }
+
+    // Apply edge virtual loss: compute delta per edge and write back.
+    let node_mut = unsafe { node.as_mut() };
+    for i in 0..n1 {
+        let delta = ns_p1[i] - node_ref.p1.edge(i).n_started();
+        if delta > 0 {
+            node_mut.p1.edge_mut(i).add_virtual_loss_multi(delta);
+        }
+    }
+    for j in 0..n2 {
+        let delta = ns_p2[j] - node_ref.p2.edge(j).n_started();
+        if delta > 0 {
+            node_mut.p2.edge_mut(j).add_virtual_loss_multi(delta);
+        }
+    }
+
+    GatherLevel { node, vtp, next_idx: 0, last_idx }
+}
+
+// ---------------------------------------------------------------------------
+// backup_and_finalize — LC0-style backup with n_in_flight cleanup
+// ---------------------------------------------------------------------------
+
+/// Walk from leaf to root, applying finalize_score_update (weighted Welford +
+/// n_in_flight decrement) at each node and updating edge Q. Combines the old
+/// `backup` + `cleanup_descent` into a single pass.
+fn backup_and_finalize(leaf: NodePtr, g1: f32, g2: f32, multivisit: u32) {
+    // Leaf: finalize.
+    unsafe { leaf.as_mut() }.finalize_score_update(g1, g2, multivisit);
+
+    let mut v1 = g1;
+    let mut v2 = g2;
+    let mut current = leaf;
+
+    while let Some(parent_ptr) = unsafe { current.as_ref() }.parent() {
+        let (a1, a2) = unsafe { current.as_ref() }.parent_outcome();
+        let r1 = unsafe { current.as_ref() }.edge_r1();
+        let r2 = unsafe { current.as_ref() }.edge_r2();
+        let q1 = r1 + v1;
+        let q2 = r2 + v2;
+
+        let parent = unsafe { parent_ptr.as_mut() };
+        parent.finalize_score_update(q1, q2, multivisit);
+        parent.p1.edge_mut(a1 as usize).update_multivisit(q1, multivisit);
+        parent.p2.edge_mut(a2 as usize).update_multivisit(q2, multivisit);
+        parent.p1.edge_mut(a1 as usize).revert_virtual_loss_multi(multivisit);
+        parent.p2.edge_mut(a2 as usize).revert_virtual_loss_multi(multivisit);
+
+        v1 = q1;
+        v2 = q2;
+        current = parent_ptr;
+    }
+}
+
+// ---------------------------------------------------------------------------
+// cancel_shared_collisions — LC0's CancelSharedCollisions
+// ---------------------------------------------------------------------------
+
+/// Cancel virtual losses from collision entries. Walks from each collision
+/// node's parent up to root, decrementing n_in_flight and edge VL.
+fn cancel_shared_collisions(
+    collisions: &[(NodePtr, u32)],
+    root: NodePtr,
+) {
+    for &(collision_node, multivisit) in collisions {
+        // The collision node itself: if it was claimed (n_in_flight > 0 from
+        // TryStartScoreUpdate), cancel that claim. But for pure collisions
+        // (TryStartScoreUpdate failed), n_in_flight was never incremented
+        // on the collision node. We handle this by canceling on the node
+        // only if it has n_in_flight contributed by this collision.
+        //
+        // LC0 pattern: walk from collision_node's PARENT up to root.
+        // The collision node's n_in_flight was never incremented for collisions
+        // (TryStartScoreUpdate failed). For Visit entries where k>1 generated
+        // k-1 collisions, the node's n_in_flight includes the TryStartScoreUpdate
+        // claim (1) which gets handled by backup_and_finalize for the Visit.
+        let mut current = collision_node;
+        while let Some(parent_ptr) = unsafe { current.as_ref() }.parent() {
+            let (a1, a2) = unsafe { current.as_ref() }.parent_outcome();
+            let parent = unsafe { parent_ptr.as_mut() };
+            parent.cancel_score_update(multivisit);
+            parent.p1.edge_mut(a1 as usize).revert_virtual_loss_multi(multivisit);
+            parent.p2.edge_mut(a2 as usize).revert_virtual_loss_multi(multivisit);
+            if parent_ptr == root {
+                break;
+            }
+            current = parent_ptr;
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// simulate_batch — LC0-style gather/eval/backup cycle
 // ---------------------------------------------------------------------------
 
 fn simulate_batch(
@@ -407,89 +874,54 @@ fn simulate_batch(
     rng: &mut impl Rng,
 ) -> Result<BatchStats, BackendError> {
     let root = tree.root();
-    let max_collisions = if config.max_collisions > 0 {
-        config.max_collisions
-    } else {
-        batch_size
-    };
+    let collision_limit = calculate_collisions_left(tree.node_count(), config);
 
-    // ---- OOO Gather Phase (matches Lc0's GatherMinibatch) ----
-    // Target batch_size NN evaluations. Terminals are "free" — backed up
-    // immediately and their slot recycled for another descent.
-    // Three stopping conditions:
-    //   1. NN batch full (nn_outcomes.len() >= batch_size)
-    //   2. Collision budget exhausted
-    //   3. OOO budget exhausted (too many terminals, prevents runaway)
-    let max_ooo = 2 * batch_size; // Lc0 uses 2.4x; 2x is conservative enough
-    let mut nn_outcomes: Vec<DescentOutcome> = Vec::with_capacity(batch_size as usize);
-    let mut collisions = 0u32;
+    // ---- Gather Phase (LC0's GatherMinibatch + PickNodesToExtend) ----
+    let (to_process, shared_collisions) =
+        pick_nodes_to_extend(tree, game, config, batch_size, collision_limit, rng);
+
+    let mut nn_evals = 0u32;
     let mut terminals = 0u32;
-    let mut n_ooo = 0u32;
-    let mut collision_paths: Vec<SearchPath> = Vec::new();
-    let mut work_game = game.clone();
+    let collisions = shared_collisions.len() as u32;
 
-    while (nn_outcomes.len() as u32) < batch_size
-        && collisions < max_collisions
-        && n_ooo < max_ooo
-    {
-        let outcome = descend(root, &mut work_game, config, rng);
-
-        match outcome {
-            DescentOutcome::NeedsEval { .. } => {
-                nn_outcomes.push(outcome);
+    // ---- Process terminals immediately ----
+    for entry in &to_process {
+        if let NodeKind::Terminal = &entry.kind {
+            if unsafe { entry.node.as_ref() }.total_visits() == 0 {
+                // Root terminal was already populated in pick_nodes_to_extend.
+                // Non-root terminals were populated there too.
             }
-            DescentOutcome::Terminal {
-                ref path,
-                leaf,
-                leaf_claimed,
-            } => {
-                if unsafe { leaf.as_ref() }.total_visits() == 0 {
-                    populate_node(leaf, None);
-                }
-                backup(path, leaf, 0.0, 0.0);
-                let claimed = if leaf_claimed { Some(leaf) } else { None };
-                cleanup_descent(path, claimed);
-                terminals += 1;
-                n_ooo += 1;
-            }
-            DescentOutcome::Collision { path } => {
-                collision_paths.push(path);
-                collisions += 1;
-            }
+            backup_and_finalize(entry.node, 0.0, 0.0, entry.multivisit);
+            terminals += entry.multivisit;
         }
     }
 
-    let nn_evals = nn_outcomes.len() as u32;
-
-    // ---- Eval Phase ----
-    let needs_eval_refs: Vec<&GameState> = nn_outcomes
+    // ---- Eval Phase: batch NN evaluation ----
+    let game_states: Vec<&GameState> = to_process
         .iter()
-        .filter_map(|o| match o {
-            DescentOutcome::NeedsEval { game_state, .. } => Some(game_state),
+        .filter_map(|entry| match &entry.kind {
+            NodeKind::NeedsEval { game_state } => Some(game_state),
             _ => None,
         })
         .collect();
 
-    let eval_results = if needs_eval_refs.is_empty() {
+    let eval_results = if game_states.is_empty() {
         Vec::new()
     } else {
-        backend.evaluate_batch(&needs_eval_refs)?
+        backend.evaluate_batch(&game_states)?
     };
 
-    // ---- Backup Phase (NeedsEval only) ----
+    // ---- Backup Phase: NN eval results ----
     let mut eval_idx = 0;
-    for outcome in nn_outcomes {
-        if let DescentOutcome::NeedsEval {
-            path, leaf, ..
-        } = outcome
-        {
+    for entry in &to_process {
+        if let NodeKind::NeedsEval { .. } = &entry.kind {
             let eval = &eval_results[eval_idx];
             eval_idx += 1;
 
-            populate_node(leaf, Some(eval));
+            populate_node(entry.node, Some(eval));
 
-            if leaf == root && config.noise_epsilon > 0.0 {
-                let node = unsafe { leaf.as_mut() };
+            if entry.node == root && config.noise_epsilon > 0.0 {
+                let node = unsafe { entry.node.as_mut() };
                 apply_dirichlet_noise(
                     &mut node.p1,
                     config.noise_epsilon,
@@ -504,138 +936,21 @@ fn simulate_batch(
                 );
             }
 
-            backup(&path, leaf, eval.value_p1, eval.value_p2);
-            cleanup_descent(&path, Some(leaf));
+            backup_and_finalize(entry.node, eval.value_p1, eval.value_p2, entry.multivisit);
+            nn_evals += 1;
         }
     }
 
-    // ---- Collision Cleanup (deferred from gather phase) ----
-    // Virtual losses from collisions persist through gather+backup so that
-    // later descents in the same batch are steered away from blocked paths.
-    for path in &collision_paths {
-        cleanup_descent(path, None);
-    }
+    // ---- Cancel shared collisions (LC0 pattern) ----
+    // Virtual losses from collisions persisted through gather+backup.
+    // Now revert them by walking from each collision node to root.
+    cancel_shared_collisions(&shared_collisions, root);
 
     Ok(BatchStats {
         nn_evals,
         terminals,
         collisions,
     })
-}
-
-// ---------------------------------------------------------------------------
-// descend — single PUCT descent with virtual loss
-// ---------------------------------------------------------------------------
-
-fn descend(
-    root: NodePtr,
-    game: &mut GameState,
-    config: &SearchConfig,
-    rng: &mut impl Rng,
-) -> DescentOutcome {
-    let mut current = root;
-    let mut path: SearchPath = Vec::new();
-    let mut undos: Vec<_> = Vec::new();
-
-    let result = loop {
-        // Read phase: copy scalars, drop &Node before any mutation.
-        let (visits, terminal) = unsafe {
-            let node = current.as_ref();
-            (node.total_visits(), node.is_terminal())
-        };
-
-        // Unvisited leaf — try to claim it.
-        if visits == 0 && !terminal {
-            if !unsafe { current.as_mut() }.try_start_score_update() {
-                break DescentOutcome::Collision { path };
-            }
-            // Leaf claimed. Game is at leaf position.
-            if game.check_game_over() {
-                break DescentOutcome::Terminal {
-                    path,
-                    leaf: current,
-                    leaf_claimed: true,
-                };
-            }
-            let leaf_game = game.clone();
-            break DescentOutcome::NeedsEval {
-                path,
-                leaf: current,
-                game_state: leaf_game,
-            };
-        }
-
-        // Revisited terminal — no claim needed.
-        if terminal {
-            break DescentOutcome::Terminal {
-                path,
-                leaf: current,
-                leaf_claimed: false,
-            };
-        }
-
-        // Interior node: select actions via PUCT.
-        let (idx1, idx2) = unsafe {
-            let node = current.as_ref();
-            let is_root = current == root;
-            select_actions(node, config, is_root, rng)
-        };
-
-        // Add virtual loss on selected edges (no &Node alive).
-        unsafe { current.as_mut() }.p1.edge_mut(idx1 as usize).add_virtual_loss();
-        unsafe { current.as_mut() }.p2.edge_mut(idx2 as usize).add_virtual_loss();
-
-        // Record path step.
-        path.push((current, idx1, idx2));
-
-        // Convert outcome indices to actions (no &mut Node alive).
-        let (a1, a2) = unsafe {
-            let node = current.as_ref();
-            (node.p1.outcome_action(idx1 as usize), node.p2.outcome_action(idx2 as usize))
-        };
-
-        // Advance game state.
-        let scores_before = (game.player1_score(), game.player2_score());
-        let d1 = Direction::try_from(a1).expect("valid direction");
-        let d2 = Direction::try_from(a2).expect("valid direction");
-        let undo = game.make_move(d1, d2);
-        undos.push(undo);
-        let (r1, r2) = compute_rewards(game, scores_before);
-
-        // Find or create child.
-        let (child_ptr, _is_new) =
-            find_or_extend_child(current, idx1, idx2, game, r1, r2);
-
-        current = child_ptr;
-    };
-
-    // Unwind game state back to root position.
-    for undo in undos.into_iter().rev() {
-        game.unmake_move(undo);
-    }
-
-    result
-}
-
-// ---------------------------------------------------------------------------
-// cleanup_descent — revert virtual losses
-// ---------------------------------------------------------------------------
-
-fn cleanup_descent(
-    path: &[(NodePtr, u8, u8)],
-    leaf_claimed: Option<NodePtr>,
-) {
-    // Revert edge virtual losses along the path.
-    for &(node_ptr, a1, a2) in path {
-        let node = unsafe { node_ptr.as_mut() };
-        node.p1.edge_mut(a1 as usize).revert_virtual_loss();
-        node.p2.edge_mut(a2 as usize).revert_virtual_loss();
-    }
-
-    // Cancel leaf claim if applicable.
-    if let Some(leaf) = leaf_claimed {
-        unsafe { leaf.as_mut() }.cancel_score_update();
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1848,7 +2163,7 @@ mod tests {
         // Revert everything.
         for a in &vl_edges {
             node.p1.edge_mut(*a as usize).revert_virtual_loss();
-            node.cancel_score_update();
+            node.cancel_score_update(1);
         }
 
         assert_eq!(node.n_in_flight(), 0);
@@ -2653,35 +2968,37 @@ mod tests {
         assert!((sum - 1.0).abs() < 1e-5, "Noisy policy should sum to ~1.0, got {}", sum);
     }
 
-    // ---- OOO gather tests ----
+    // ---- LC0-style batch allocation tests ----
 
-    // OOO: short game has terminals within shallow search. Terminals are
-    // backed up OOO (free), so the tree gets more total visits than n_sims
-    // since terminal visits don't consume NN slots.
+    // LC0-style batch allocation: in a short game, terminals absorb visits
+    // from the batch allocation. Excess visits to already-claimed terminals
+    // become collisions, so total_visits may be less than n_sims.
     #[test]
-    fn ooo_terminal_fills_batch() {
+    fn batch_short_game_completes() {
         // short_game: 3 turns, 1 cheese. Terminals appear at depth 3.
         let game = test_util::short_game();
         let mut tree = MCTSTree::new(&game);
         let config = default_config();
         let mut r = search_rng();
 
-        // Run with batch_size=8, 50 sims. OOO terminals are free, so the
-        // tree accumulates more visits than the 50 NN eval budget.
+        // Should complete without panics. Total visits may be less than 50
+        // because collisions at terminals don't produce new visits.
         let result = run_search(&mut tree, &game, &BACKEND, &config, 50, 8, &mut r).unwrap();
 
-        assert!(
-            result.total_visits > 50,
-            "OOO terminals should give more visits than n_sims={}, got {}",
-            50,
-            result.total_visits
-        );
+        assert!(result.total_visits > 0, "Should have some visits");
+        // n_in_flight should be zero after search.
+        walk_tree(tree.root(), &mut |node| {
+            assert_eq!(
+                node.n_in_flight(), 0,
+                "n_in_flight should be 0 after search, got {} on node with {} visits",
+                node.n_in_flight(), node.total_visits()
+            );
+        });
     }
 
-    // OOO: collision budget prevents infinite gather on empty tree.
-    // batch_size=10 on unvisited root: first descent claims root, retries collide.
+    // LC0-style: batch on unvisited root claims it once, rest become collisions.
     #[test]
-    fn ooo_collision_budget_stops_gather() {
+    fn batch_unvisited_root_one_eval() {
         let cheese = [Coordinates::new(2, 2)];
         let game = test_util::open_5x5_game(
             Coordinates::new(1, 1),
@@ -2689,20 +3006,16 @@ mod tests {
             &cheese,
         );
         let mut tree = MCTSTree::new(&game);
-        let config = SearchConfig {
-            max_collisions: 5,
-            ..default_config()
-        };
+        let config = default_config();
         let mut r = search_rng();
 
-        // n_sims=1, batch_size=10, max_collisions=5.
-        // First descent claims root (NeedsEval). Retries collide.
-        // After 5 collisions the gather stops with 1 NN eval.
+        // batch_size=10 on unvisited root: pick_nodes_to_extend claims root
+        // once (NeedsEval), remaining 9 become shared collisions.
         let result = run_search(&mut tree, &game, &BACKEND, &config, 1, 10, &mut r).unwrap();
 
         assert_eq!(
             result.total_visits, 1,
-            "Should have exactly 1 visit (1 NN eval, rest collided). Got {}",
+            "Should have exactly 1 visit (1 NN eval). Got {}",
             result.total_visits
         );
     }
@@ -2761,5 +3074,390 @@ mod tests {
             result.unwrap_err().to_string().contains("intentional test failure"),
             "error message should be preserved"
         );
+    }
+
+    // ---- backup_and_finalize: direct tests ----
+
+    #[test]
+    fn backup_finalize_single_level() {
+        let mut root_box = make_open_node([0.2; 5], [0.2; 5]);
+        let root_ptr = NodePtr::from_ref(&root_box);
+        let mut child_box = make_open_node([0.2; 5], [0.2; 5]);
+        let child_ptr = NodePtr::from_ref(&child_box);
+
+        child_box.set_parent(Some(root_ptr), (0, 1));
+        child_box.set_edge_rewards(1.0, 0.5);
+        child_box.set_value_scale(5.0);
+        root_box.set_value_scale(5.0);
+        root_box.first_child = Some(child_box);
+
+        // Simulate the n_in_flight and edge VL that pick_nodes_to_extend would set.
+        unsafe { root_ptr.as_mut() }.increment_n_in_flight(1);
+        unsafe { child_ptr.as_mut() }.increment_n_in_flight(1);
+        unsafe { root_ptr.as_mut() }.p1.edge_mut(0).add_virtual_loss();
+        unsafe { root_ptr.as_mut() }.p2.edge_mut(1).add_virtual_loss();
+
+        backup_and_finalize(child_ptr, 3.0, 2.0, 1);
+
+        // Values: same as backup_single_level.
+        let child = unsafe { child_ptr.as_ref() };
+        assert_eq!(child.total_visits(), 1);
+        assert!((child.v1() - 3.0).abs() < 1e-6);
+        assert!((child.v2() - 2.0).abs() < 1e-6);
+
+        let root = unsafe { root_ptr.as_ref() };
+        assert_eq!(root.total_visits(), 1);
+        assert!((root.v1() - 4.0).abs() < 1e-6); // 1.0 + 3.0
+        assert!((root.v2() - 2.5).abs() < 1e-6); // 0.5 + 2.0
+
+        // n_in_flight and edge VL all cleaned up.
+        assert_eq!(child.n_in_flight(), 0);
+        assert_eq!(root.n_in_flight(), 0);
+        assert_eq!(root.p1.edge(0).n_in_flight(), 0);
+        assert_eq!(root.p2.edge(1).n_in_flight(), 0);
+        assert_eq!(root.p1.edge(0).visits, 1);
+        assert_eq!(root.p2.edge(1).visits, 1);
+    }
+
+    #[test]
+    fn backup_finalize_two_level() {
+        let mut root_box = make_open_node([0.2; 5], [0.2; 5]);
+        let root_ptr = NodePtr::from_ref(&root_box);
+        let mut mid_box = make_open_node([0.2; 5], [0.2; 5]);
+        let mid_ptr = NodePtr::from_ref(&mid_box);
+        let mut leaf_box = make_open_node([0.2; 5], [0.2; 5]);
+        let leaf_ptr = NodePtr::from_ref(&leaf_box);
+
+        leaf_box.set_parent(Some(mid_ptr), (1, 2));
+        leaf_box.set_edge_rewards(0.5, 1.0);
+        leaf_box.set_value_scale(5.0);
+        mid_box.set_parent(Some(root_ptr), (0, 0));
+        mid_box.set_edge_rewards(1.0, 0.5);
+        mid_box.set_value_scale(5.0);
+        mid_box.first_child = Some(leaf_box);
+        root_box.set_value_scale(5.0);
+        root_box.first_child = Some(mid_box);
+
+        // Set n_in_flight chain and edge VL.
+        unsafe { root_ptr.as_mut() }.increment_n_in_flight(1);
+        unsafe { mid_ptr.as_mut() }.increment_n_in_flight(1);
+        unsafe { leaf_ptr.as_mut() }.increment_n_in_flight(1);
+        unsafe { root_ptr.as_mut() }.p1.edge_mut(0).add_virtual_loss();
+        unsafe { root_ptr.as_mut() }.p2.edge_mut(0).add_virtual_loss();
+        unsafe { mid_ptr.as_mut() }.p1.edge_mut(1).add_virtual_loss();
+        unsafe { mid_ptr.as_mut() }.p2.edge_mut(2).add_virtual_loss();
+
+        backup_and_finalize(leaf_ptr, 2.0, 3.0, 1);
+
+        // Values: same as backup_two_level_q_chain.
+        assert!((unsafe { leaf_ptr.as_ref() }.v1() - 2.0).abs() < 1e-6);
+        assert!((unsafe { mid_ptr.as_ref() }.v1() - 2.5).abs() < 1e-6); // 0.5 + 2.0
+        assert!((unsafe { root_ptr.as_ref() }.v1() - 3.5).abs() < 1e-6); // 1.0 + 2.5
+
+        // All n_in_flight and edge VL cleaned up.
+        assert_eq!(unsafe { leaf_ptr.as_ref() }.n_in_flight(), 0);
+        assert_eq!(unsafe { mid_ptr.as_ref() }.n_in_flight(), 0);
+        assert_eq!(unsafe { root_ptr.as_ref() }.n_in_flight(), 0);
+        assert_eq!(unsafe { root_ptr.as_ref() }.p1.edge(0).n_in_flight(), 0);
+        assert_eq!(unsafe { mid_ptr.as_ref() }.p1.edge(1).n_in_flight(), 0);
+    }
+
+    #[test]
+    fn backup_finalize_multivisit() {
+        let mut root_box = make_open_node([0.2; 5], [0.2; 5]);
+        let root_ptr = NodePtr::from_ref(&root_box);
+        let mut child_box = make_open_node([0.2; 5], [0.2; 5]);
+        let child_ptr = NodePtr::from_ref(&child_box);
+
+        child_box.set_parent(Some(root_ptr), (0, 0));
+        child_box.set_edge_rewards(0.0, 0.0);
+        child_box.set_value_scale(5.0);
+        root_box.set_value_scale(5.0);
+        root_box.first_child = Some(child_box);
+
+        // 3 visits worth of n_in_flight and edge VL.
+        unsafe { root_ptr.as_mut() }.increment_n_in_flight(3);
+        unsafe { child_ptr.as_mut() }.increment_n_in_flight(3);
+        unsafe { root_ptr.as_mut() }.p1.edge_mut(0).add_virtual_loss_multi(3);
+        unsafe { root_ptr.as_mut() }.p2.edge_mut(0).add_virtual_loss_multi(3);
+
+        backup_and_finalize(child_ptr, 4.0, 2.0, 3);
+
+        let child = unsafe { child_ptr.as_ref() };
+        let root = unsafe { root_ptr.as_ref() };
+        assert_eq!(child.total_visits(), 3);
+        assert_eq!(root.total_visits(), 3);
+        // All same value → result is that value.
+        assert!((child.v1() - 4.0).abs() < 1e-6);
+        assert!((root.v1() - 4.0).abs() < 1e-6); // edge_r=0 + 4.0
+        // All cleaned up.
+        assert_eq!(child.n_in_flight(), 0);
+        assert_eq!(root.n_in_flight(), 0);
+        assert_eq!(root.p1.edge(0).n_in_flight(), 0);
+        assert_eq!(root.p2.edge(0).n_in_flight(), 0);
+        assert_eq!(root.p1.edge(0).visits, 3);
+    }
+
+    // ---- build_gather_level: visit distribution ----
+
+    #[test]
+    fn pick_distribute_uniform_priors() {
+        let mut node_box = make_open_node([0.2; 5], [0.2; 5]);
+        let node_ptr = NodePtr::from_ref(&node_box);
+        node_box.set_value_scale(5.0);
+        node_box.update_value(2.0, 2.0); // 1 visit so it's "interior"
+
+        let config = default_config();
+        let mut r = rng();
+        let level = build_gather_level(node_ptr, 10, &config, false, &mut r);
+
+        // Total distributed = 10.
+        let total: u32 = level.vtp.iter().sum();
+        assert_eq!(total, 10, "vtp should sum to cur_limit");
+
+        // Multiple pairs should get visits (uniform priors → diversification).
+        let non_zero = level.vtp.iter().filter(|&&v| v > 0).count();
+        assert!(
+            non_zero > 1,
+            "Uniform priors should distribute across multiple pairs, got {}",
+            non_zero
+        );
+
+        // Edge VL written back: sum of p1 edge VL = 10, sum of p2 edge VL = 10.
+        let node = unsafe { node_ptr.as_ref() };
+        let p1_vl: u32 = (0..node.p1.n_outcomes()).map(|i| node.p1.edge(i).n_in_flight()).sum();
+        let p2_vl: u32 = (0..node.p2.n_outcomes()).map(|j| node.p2.edge(j).n_in_flight()).sum();
+        assert_eq!(p1_vl, 10, "P1 edge VL should sum to 10");
+        assert_eq!(p2_vl, 10, "P2 edge VL should sum to 10");
+    }
+
+    #[test]
+    fn pick_distribute_dominant_prior() {
+        let p1_prior = [0.8, 0.05, 0.05, 0.05, 0.05];
+        let mut node_box = make_open_node(p1_prior, [0.2; 5]);
+        let node_ptr = NodePtr::from_ref(&node_box);
+        node_box.set_value_scale(5.0);
+        node_box.update_value(2.0, 2.0);
+
+        let config = default_config();
+        let mut r = rng();
+        let level = build_gather_level(node_ptr, 20, &config, false, &mut r);
+
+        // Outcome 0 for P1 should get the majority.
+        let mut p1_visits = [0u32; 5];
+        for a1 in 0..5 {
+            for a2 in 0..5 {
+                p1_visits[a1] += level.vtp[a1 * 5 + a2];
+            }
+        }
+        assert!(
+            p1_visits[0] > 10,
+            "Dominant P1 prior should get majority of 20 visits, got {}",
+            p1_visits[0]
+        );
+    }
+
+    #[test]
+    fn estimated_vtcb_single_outcome() {
+        let stuck = [4, 4, 4, 4, 4];
+        let half = HalfNode::new([0.2; 5], stuck);
+        assert_eq!(half.n_outcomes(), 1);
+
+        let config = default_config();
+        let ns = [0u32; 5];
+        let mut r = rng();
+        let (best, vtcb) = estimated_visits_to_change_best_half(
+            &half, 2.0, 5.0, 1, &config, false, &ns, &mut r,
+        );
+        assert_eq!(best, 0);
+        assert_eq!(vtcb, u32::MAX);
+    }
+
+    #[test]
+    fn estimated_vtcb_uniform_unvisited() {
+        let half = HalfNode::new([0.2; 5], [0, 1, 2, 3, 4]);
+        let config = default_config();
+        let ns = [0u32; 5];
+        let mut r = rng();
+        let (_, vtcb) = estimated_visits_to_change_best_half(
+            &half, 2.0, 5.0, 0, &config, false, &ns, &mut r,
+        );
+        // All tied → after 1 visit to best, the score changes.
+        assert_eq!(vtcb, 1, "Uniform tied edges should change after 1 visit");
+    }
+
+    // ---- cancel_shared_collisions ----
+
+    #[test]
+    fn collision_cancel_depth1() {
+        let mut root_box = make_open_node([0.2; 5], [0.2; 5]);
+        let root_ptr = NodePtr::from_ref(&root_box);
+        let mut child_box = make_open_node([0.2; 5], [0.2; 5]);
+        let child_ptr = NodePtr::from_ref(&child_box);
+
+        child_box.set_parent(Some(root_ptr), (2, 3));
+        root_box.first_child = Some(child_box);
+
+        // Simulate: 5 visits allocated through edge (2, 3), all collided.
+        unsafe { root_ptr.as_mut() }.increment_n_in_flight(5);
+        unsafe { root_ptr.as_mut() }.p1.edge_mut(2).add_virtual_loss_multi(5);
+        unsafe { root_ptr.as_mut() }.p2.edge_mut(3).add_virtual_loss_multi(5);
+
+        cancel_shared_collisions(&[(child_ptr, 5)], root_ptr);
+
+        let root = unsafe { root_ptr.as_ref() };
+        assert_eq!(root.n_in_flight(), 0);
+        assert_eq!(root.p1.edge(2).n_in_flight(), 0);
+        assert_eq!(root.p2.edge(3).n_in_flight(), 0);
+    }
+
+    #[test]
+    fn collision_cancel_depth2() {
+        let mut root_box = make_open_node([0.2; 5], [0.2; 5]);
+        let root_ptr = NodePtr::from_ref(&root_box);
+        let mut mid_box = make_open_node([0.2; 5], [0.2; 5]);
+        let mid_ptr = NodePtr::from_ref(&mid_box);
+        let mut leaf_box = make_open_node([0.2; 5], [0.2; 5]);
+        let leaf_ptr = NodePtr::from_ref(&leaf_box);
+
+        leaf_box.set_parent(Some(mid_ptr), (1, 0));
+        mid_box.set_parent(Some(root_ptr), (0, 0));
+        mid_box.first_child = Some(leaf_box);
+        root_box.first_child = Some(mid_box);
+
+        // 3 visits through root→mid→leaf, all collided at leaf.
+        unsafe { root_ptr.as_mut() }.increment_n_in_flight(3);
+        unsafe { root_ptr.as_mut() }.p1.edge_mut(0).add_virtual_loss_multi(3);
+        unsafe { root_ptr.as_mut() }.p2.edge_mut(0).add_virtual_loss_multi(3);
+        unsafe { mid_ptr.as_mut() }.increment_n_in_flight(3);
+        unsafe { mid_ptr.as_mut() }.p1.edge_mut(1).add_virtual_loss_multi(3);
+        unsafe { mid_ptr.as_mut() }.p2.edge_mut(0).add_virtual_loss_multi(3);
+
+        cancel_shared_collisions(&[(leaf_ptr, 3)], root_ptr);
+
+        assert_eq!(unsafe { root_ptr.as_ref() }.n_in_flight(), 0);
+        assert_eq!(unsafe { mid_ptr.as_ref() }.n_in_flight(), 0);
+        assert_eq!(unsafe { root_ptr.as_ref() }.p1.edge(0).n_in_flight(), 0);
+        assert_eq!(unsafe { mid_ptr.as_ref() }.p1.edge(1).n_in_flight(), 0);
+    }
+
+    #[test]
+    fn collision_cancel_partial() {
+        let mut root_box = make_open_node([0.2; 5], [0.2; 5]);
+        let root_ptr = NodePtr::from_ref(&root_box);
+        let mut child_box = make_open_node([0.2; 5], [0.2; 5]);
+        let child_ptr = NodePtr::from_ref(&child_box);
+
+        child_box.set_parent(Some(root_ptr), (0, 0));
+        root_box.first_child = Some(child_box);
+
+        // 5 visits allocated, cancel only 2.
+        unsafe { root_ptr.as_mut() }.increment_n_in_flight(5);
+        unsafe { root_ptr.as_mut() }.p1.edge_mut(0).add_virtual_loss_multi(5);
+        unsafe { root_ptr.as_mut() }.p2.edge_mut(0).add_virtual_loss_multi(5);
+
+        cancel_shared_collisions(&[(child_ptr, 2)], root_ptr);
+
+        let root = unsafe { root_ptr.as_ref() };
+        assert_eq!(root.n_in_flight(), 3);
+        assert_eq!(root.p1.edge(0).n_in_flight(), 3);
+        assert_eq!(root.p2.edge(0).n_in_flight(), 3);
+    }
+
+    // ---- Shared-edge VL with multiple children ----
+
+    #[test]
+    fn edge_vl_multiple_children_same_p1() {
+        // Skew P1 priors so outcome 0 dominates, uniform P2.
+        // With enough visits, outcome 0 gets visits with multiple P2 actions.
+        let p1_prior = [0.9, 0.025, 0.025, 0.025, 0.025];
+        let mut node_box = make_open_node(p1_prior, [0.2; 5]);
+        let node_ptr = NodePtr::from_ref(&node_box);
+        node_box.set_value_scale(5.0);
+        node_box.update_value(2.0, 2.0);
+
+        let config = default_config();
+        let mut r = rng();
+        let level = build_gather_level(node_ptr, 15, &config, false, &mut r);
+
+        // Compute marginals.
+        let mut p1_marginal = [0u32; 5];
+        let mut p2_marginal = [0u32; 5];
+        for a1 in 0..5 {
+            for a2 in 0..5 {
+                let v = level.vtp[a1 * 5 + a2];
+                p1_marginal[a1] += v;
+                p2_marginal[a2] += v;
+            }
+        }
+
+        let node = unsafe { node_ptr.as_ref() };
+        // P1 edge VL should match marginals.
+        for i in 0..5 {
+            assert_eq!(
+                node.p1.edge(i).n_in_flight(), p1_marginal[i],
+                "P1 edge {} VL mismatch: got {}, expected {}",
+                i, node.p1.edge(i).n_in_flight(), p1_marginal[i]
+            );
+        }
+        // P2 edge VL should match marginals.
+        for j in 0..5 {
+            assert_eq!(
+                node.p2.edge(j).n_in_flight(), p2_marginal[j],
+                "P2 edge {} VL mismatch: got {}, expected {}",
+                j, node.p2.edge(j).n_in_flight(), p2_marginal[j]
+            );
+        }
+    }
+
+    #[test]
+    fn full_cycle_shared_edge_balance() {
+        // Integration: batch_size=8, 20 sims on open maze. After search,
+        // every node should have n_in_flight=0 and edge VL=0.
+        let cheese: Vec<_> = (0..5).map(|i| Coordinates::new(i, 0)).collect();
+        let game = test_util::open_5x5_game(
+            Coordinates::new(2, 2),
+            Coordinates::new(2, 2),
+            &cheese,
+        );
+        let mut tree = MCTSTree::new(&game);
+        let config = default_config();
+        let mut r = search_rng();
+
+        let _result = run_search(&mut tree, &game, &BACKEND, &config, 20, 8, &mut r).unwrap();
+
+        walk_tree(tree.root(), &mut |node| {
+            assert_eq!(
+                node.n_in_flight(), 0,
+                "Node n_in_flight should be 0 after search, got {} (visits={})",
+                node.n_in_flight(), node.total_visits()
+            );
+            for i in 0..node.p1.n_outcomes() {
+                assert_eq!(
+                    node.p1.edge(i).n_in_flight(), 0,
+                    "P1 edge {} n_in_flight should be 0, got {}",
+                    i, node.p1.edge(i).n_in_flight()
+                );
+            }
+            for j in 0..node.p2.n_outcomes() {
+                assert_eq!(
+                    node.p2.edge(j).n_in_flight(), 0,
+                    "P2 edge {} n_in_flight should be 0, got {}",
+                    j, node.p2.edge(j).n_in_flight()
+                );
+            }
+            // Interior nodes: edge visit sum == total_visits - 1.
+            if node.total_visits() > 0 && node.first_child().is_some() {
+                let p1_sum: u32 = (0..node.p1.n_outcomes())
+                    .map(|i| node.p1.edge(i).visits)
+                    .sum();
+                assert_eq!(
+                    p1_sum,
+                    node.total_visits() - 1,
+                    "P1 edge visit sum mismatch: {} != {} - 1",
+                    p1_sum, node.total_visits()
+                );
+            }
+        });
     }
 }

@@ -286,7 +286,11 @@ fn create_onnx_backend(
     force_k = 2.0,
     noise_epsilon = 0.0,
     noise_concentration = 10.83,
-    max_collisions = 0,
+    collision_limit_min = 1,
+    collision_limit_max = 256,
+    collision_scaling_start = 800,
+    collision_scaling_end = 50000,
+    collision_scaling_power = 1.0,
     num_threads = 4,
     output_dir,
     max_games_per_bundle = 32,
@@ -319,7 +323,11 @@ fn rust_self_play(
     force_k: f32,
     noise_epsilon: f32,
     noise_concentration: f32,
-    max_collisions: u32,
+    collision_limit_min: u32,
+    collision_limit_max: u32,
+    collision_scaling_start: u32,
+    collision_scaling_end: u32,
+    collision_scaling_power: f32,
     // Sampling
     num_threads: u32,
     output_dir: &str,
@@ -354,7 +362,11 @@ fn rust_self_play(
         force_k,
         noise_epsilon,
         noise_concentration,
-        max_collisions,
+        collision_limit_min,
+        collision_limit_max,
+        collision_scaling_start,
+        collision_scaling_end,
+        collision_scaling_power,
     };
 
     let selfplay_config = SelfPlayConfig {

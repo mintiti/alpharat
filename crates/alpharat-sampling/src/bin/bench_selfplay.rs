@@ -236,7 +236,7 @@ fn main() {
         force_k: 0.103,
         noise_epsilon: 0.25,
         noise_concentration: 10.83,
-        max_collisions: 0,
+        ..SearchConfig::default()
     };
 
     // --- SmartUniform baseline (no NN) ---
