@@ -7,7 +7,9 @@ MCTSConfig is an alias for RustMCTSConfig.
 from __future__ import annotations
 
 from abc import abstractmethod
-from typing import TYPE_CHECKING, Literal, Self
+from typing import TYPE_CHECKING, Annotated, Literal, Self
+
+from pydantic import Field
 
 from alpharat.config.base import StrictBaseModel
 
@@ -196,4 +198,7 @@ class RustMCGSConfig(MCTSConfigBase):
         )
 
 
-MCTSConfig = RustMCTSConfig
+MCTSConfig = Annotated[
+    RustMCTSConfig | RustMCGSConfig,
+    Field(discriminator="backend"),
+]
