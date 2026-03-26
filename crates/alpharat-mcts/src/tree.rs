@@ -201,6 +201,31 @@ pub fn find_or_extend_child(
 }
 
 // ---------------------------------------------------------------------------
+// count_subtree_nodes
+// ---------------------------------------------------------------------------
+
+/// Count nodes in the subtree rooted at `root` (inclusive).
+/// Iterative to match `Node::drop` pattern and avoid stack overflow.
+fn count_subtree_nodes(root: &Node) -> u32 {
+    let mut count = 1u32;
+    let mut stack: Vec<NodePtr> = Vec::new();
+    if let Some(child) = root.first_child() {
+        stack.push(child);
+    }
+    while let Some(ptr) = stack.pop() {
+        count += 1;
+        let node = unsafe { ptr.as_ref() };
+        if let Some(child) = node.first_child() {
+            stack.push(child);
+        }
+        if let Some(sibling) = node.next_sibling() {
+            stack.push(sibling);
+        }
+    }
+    count
+}
+
+// ---------------------------------------------------------------------------
 // MCTSTree
 // ---------------------------------------------------------------------------
 
@@ -262,6 +287,7 @@ impl MCTSTree {
         if let Some(child_box) = self.detach_child(i, j) {
             let old_root = std::mem::replace(&mut *self.root_box, child_box);
             node_gc().send(old_root);
+            self.node_count = count_subtree_nodes(&self.root_box);
             true
         } else {
             false
@@ -1145,5 +1171,48 @@ mod tests {
 
         assert!(tree.advance_root(0, 1));
         assert_eq!(tree.root(), child_ptr);
+    }
+
+    #[test]
+    fn advance_root_updates_node_count() {
+        let cheese = [Coordinates::new(0, 0), Coordinates::new(4, 4)];
+        let mut game =
+            test_util::open_5x5_game(Coordinates::new(2, 2), Coordinates::new(2, 2), &cheese);
+
+        let mut tree = MCTSTree::new(&game);
+        assert_eq!(tree.node_count(), 1);
+
+        // Create two children off root: (UP, RIGHT) and (DOWN, LEFT).
+        let i1 = tree.root_node().p1.action_to_outcome_idx(0);
+        let j1 = tree.root_node().p2.action_to_outcome_idx(1);
+        let undo1 = game.make_move(pyrat::Direction::Up, pyrat::Direction::Right);
+        let (_child1, _) = find_or_extend_child(tree.root(), i1, j1, &game, 0.0, 0.0);
+        tree.increment_node_count();
+        game.unmake_move(undo1);
+
+        let i2 = tree.root_node().p1.action_to_outcome_idx(2);
+        let j2 = tree.root_node().p2.action_to_outcome_idx(3);
+        let undo2 = game.make_move(pyrat::Direction::Down, pyrat::Direction::Left);
+        let (_child2, _) = find_or_extend_child(tree.root(), i2, j2, &game, 0.0, 0.0);
+        tree.increment_node_count();
+        game.unmake_move(undo2);
+
+        // Also add a grandchild under child1.
+        let _undo1b = game.make_move(pyrat::Direction::Up, pyrat::Direction::Right);
+        let gi = unsafe { _child1.as_ref() }.p1.action_to_outcome_idx(1);
+        let gj = unsafe { _child1.as_ref() }.p2.action_to_outcome_idx(0);
+        let _undo_gc = game.make_move(pyrat::Direction::Right, pyrat::Direction::Up);
+        let (_grandchild, _) = find_or_extend_child(_child1, gi, gj, &game, 0.0, 0.0);
+        tree.increment_node_count();
+
+        // Tree: root -> child1 -> grandchild, root -> child2
+        assert_eq!(tree.node_count(), 4);
+
+        // Advance to child1: keeps child1 subtree (child1 + grandchild = 2 nodes).
+        assert!(tree.advance_root(0, 1));
+        assert_eq!(
+            tree.node_count(), 2,
+            "After advancing to child1, only child1 + grandchild remain"
+        );
     }
 }

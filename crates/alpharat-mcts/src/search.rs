@@ -111,6 +111,23 @@ pub fn backup(
 }
 
 // ---------------------------------------------------------------------------
+// compute_fpu — first-play urgency
+// ---------------------------------------------------------------------------
+
+/// Compute FPU: pessimistic value for unvisited outcomes, scaled by the
+/// fraction of prior mass already visited. Used in PUCT selection and policy
+/// extraction. Matches LC0's GetFpu.
+fn compute_fpu(half: &HalfNode, node_value: f32, value_scale: f32, fpu_reduction: f32) -> f32 {
+    let mut visited_prior_mass = 0.0f32;
+    for i in 0..half.n_outcomes() {
+        if half.edge(i).visits > 0 {
+            visited_prior_mass += half.prior(i);
+        }
+    }
+    node_value - fpu_reduction * value_scale * visited_prior_mass.sqrt()
+}
+
+// ---------------------------------------------------------------------------
 // select_actions
 // ---------------------------------------------------------------------------
 
@@ -147,16 +164,8 @@ fn select_half(
         return 0;
     }
 
-    // FPU: compute visited prior mass for pessimistic default.
-    let mut visited_prior_mass = 0.0f32;
-    for i in 0..n {
-        if half.edge(i).visits > 0 {
-            visited_prior_mass += half.prior(i);
-        }
-    }
-
     debug_assert!(value_scale > 0.0, "value_scale must be positive, got {value_scale}");
-    let fpu = node_value - config.fpu_reduction * value_scale * visited_prior_mass.sqrt();
+    let fpu = compute_fpu(half, node_value, value_scale, config.fpu_reduction);
 
     let sqrt_total = (children_visits.max(1) as f32).sqrt();
 
@@ -344,12 +353,12 @@ pub fn run_search(
     let mut total_terminals = 0u32;
     let mut total_collisions = 0u32;
     while remaining > 0 {
-        let actual = remaining.min(batch_size);
-        let batch = simulate_batch(tree, game, backend, config, actual, rng)?;
+        let batch = simulate_batch(tree, game, backend, config, remaining.min(batch_size), rng)?;
         total_nn_evals += batch.nn_evals;
         total_terminals += batch.terminals;
         total_collisions += batch.collisions;
-        remaining -= actual;
+        let produced = batch.nn_evals + batch.terminals;
+        remaining = remaining.saturating_sub(produced.max(1));
     }
 
     let root = tree.root();
@@ -446,14 +455,7 @@ fn estimated_visits_to_change_best_half(
         return (0, u32::MAX);
     }
 
-    // Compute PUCT scores using the local nstarted array.
-    let mut visited_prior_mass = 0.0f32;
-    for i in 0..n {
-        if half.edge(i).visits > 0 {
-            visited_prior_mass += half.prior(i);
-        }
-    }
-    let fpu = node_value - config.fpu_reduction * value_scale * visited_prior_mass.sqrt();
+    let fpu = compute_fpu(half, node_value, value_scale, config.fpu_reduction);
     let sqrt_total = (children_visits.max(1) as f32).sqrt();
     let c_puct = config.c_puct;
 
@@ -561,19 +563,16 @@ fn pick_nodes_to_extend(
     tree: &mut MCTSTree,
     game: &GameState,
     config: &SearchConfig,
-    batch_size: u32,
-    _collision_limit: u32,
+    budget: u32,
     rng: &mut impl Rng,
 ) -> (Vec<NodeToProcess>, Vec<(NodePtr, u32)>) {
     let root = tree.root();
-    let mut to_process: Vec<NodeToProcess> = Vec::with_capacity(batch_size as usize);
+    let mut to_process: Vec<NodeToProcess> = Vec::with_capacity(budget as usize);
     let mut shared_collisions: Vec<(NodePtr, u32)> = Vec::new();
     let mut work_game = game.clone();
     let mut undos: Vec<_> = Vec::new();
 
-    // LC0 distributes batch_size visits. The collision_limit only caps how
-    // many collision entries we accept, not the total visits distributed.
-    let cur_limit = batch_size;
+    let cur_limit = budget;
 
     // Handle root: unvisited or terminal.
     let root_node = unsafe { root.as_ref() };
@@ -874,30 +873,48 @@ fn simulate_batch(
     rng: &mut impl Rng,
 ) -> Result<BatchStats, BackendError> {
     let root = tree.root();
-    let collision_limit = calculate_collisions_left(tree.node_count(), config);
+    let mut collisions_left = calculate_collisions_left(tree.node_count(), config) as i32;
 
-    // ---- Gather Phase (LC0's GatherMinibatch + PickNodesToExtend) ----
-    let (to_process, shared_collisions) =
-        pick_nodes_to_extend(tree, game, config, batch_size, collision_limit, rng);
-
-    let mut nn_evals = 0u32;
+    let mut all_to_process: Vec<NodeToProcess> = Vec::with_capacity(batch_size as usize);
+    let mut all_collisions: Vec<(NodePtr, u32)> = Vec::new();
+    let mut minibatch_size = 0u32;
     let mut terminals = 0u32;
-    let collisions = shared_collisions.len() as u32;
 
-    // ---- Process terminals immediately ----
-    for entry in &to_process {
-        if let NodeKind::Terminal = &entry.kind {
-            if unsafe { entry.node.as_ref() }.total_visits() == 0 {
-                // Root terminal was already populated in pick_nodes_to_extend.
-                // Non-root terminals were populated there too.
+    // ---- Outer Gather Loop (LC0's GatherMinibatch) ----
+    // Each iteration picks budget = min(collisions_left, remaining_batch_slots)
+    // visits. minibatch_size counts all non-collision entries (NeedsEval +
+    // Terminal), matching LC0. Collision VLs persist through the loop.
+    while minibatch_size < batch_size && collisions_left > 0 {
+        let budget = (collisions_left as u32).min(batch_size - minibatch_size);
+        let (to_process, shared_collisions) =
+            pick_nodes_to_extend(tree, game, config, budget, rng);
+
+        // Backup terminals immediately, accumulate NN evals.
+        for entry in to_process {
+            match entry.kind {
+                NodeKind::Terminal => {
+                    backup_and_finalize(entry.node, 0.0, 0.0, entry.multivisit);
+                    terminals += entry.multivisit;
+                    minibatch_size += 1;
+                }
+                NodeKind::NeedsEval { .. } => {
+                    minibatch_size += 1;
+                    all_to_process.push(entry);
+                }
             }
-            backup_and_finalize(entry.node, 0.0, 0.0, entry.multivisit);
-            terminals += entry.multivisit;
         }
+
+        for &(_, mv) in &shared_collisions {
+            collisions_left -= mv as i32;
+        }
+        all_collisions.extend(shared_collisions);
     }
 
+    let nn_evals = all_to_process.len() as u32;
+    let total_collisions = all_collisions.iter().map(|&(_, mv)| mv).sum::<u32>();
+
     // ---- Eval Phase: batch NN evaluation ----
-    let game_states: Vec<&GameState> = to_process
+    let game_states: Vec<&GameState> = all_to_process
         .iter()
         .filter_map(|entry| match &entry.kind {
             NodeKind::NeedsEval { game_state } => Some(game_state),
@@ -913,7 +930,7 @@ fn simulate_batch(
 
     // ---- Backup Phase: NN eval results ----
     let mut eval_idx = 0;
-    for entry in &to_process {
+    for entry in &all_to_process {
         if let NodeKind::NeedsEval { .. } = &entry.kind {
             let eval = &eval_results[eval_idx];
             eval_idx += 1;
@@ -937,19 +954,18 @@ fn simulate_batch(
             }
 
             backup_and_finalize(entry.node, eval.value_p1, eval.value_p2, entry.multivisit);
-            nn_evals += 1;
         }
     }
 
-    // ---- Cancel shared collisions (LC0 pattern) ----
+    // ---- Cancel all accumulated shared collisions (LC0 pattern) ----
     // Virtual losses from collisions persisted through gather+backup.
     // Now revert them by walking from each collision node to root.
-    cancel_shared_collisions(&shared_collisions, root);
+    cancel_shared_collisions(&all_collisions, root);
 
     Ok(BatchStats {
         nn_evals,
         terminals,
-        collisions,
+        collisions: total_collisions,
     })
 }
 
@@ -1007,14 +1023,7 @@ fn extract_half(
         return ([0.0; 5], [0.0; 5], node_value);
     }
 
-    // Compute FPU for unvisited outcomes.
-    let mut visited_prior_mass = 0.0f32;
-    for i in 0..n {
-        if half.edge(i).visits > 0 {
-            visited_prior_mass += half.prior(i);
-        }
-    }
-    let fpu = node_value - config.fpu_reduction * value_scale * visited_prior_mass.sqrt();
+    let fpu = compute_fpu(half, node_value, value_scale, config.fpu_reduction);
 
     // Read Q and visits per outcome.
     let mut q = [0.0f32; 5];
@@ -2691,14 +2700,14 @@ mod tests {
         let config = default_config();
         let mut r = search_rng();
 
-        // batch_size=10 but only n_sims=3. With batch_size > n_sims, we run one
-        // batch of 3 descents. Some may collide (root is unvisited), so
-        // total_visits <= 3. At least 1 should succeed (the first descent).
+        // batch_size=10 but only n_sims=3. With collision-budgeted gathering
+        // (LC0 pattern), small trees get budget=1 per pick call. The outer
+        // loop retries, so we produce ~3 actual visits.
         let result = run_search(&mut tree, &game, &BACKEND, &config, 3, 10, &mut r).unwrap();
 
-        assert_eq!(
-            result.total_visits, 1,
-            "3 descents on unvisited root: first claims it, other 2 collide. Got {}",
+        assert!(
+            result.total_visits >= 3,
+            "n_sims=3 should produce at least 3 visits, got {}",
             result.total_visits
         );
     }
