@@ -314,6 +314,9 @@ pub struct SearchResult {
     /// NN/uniform prior at root in 5-action space.
     pub prior_p1: [f32; 5],
     pub prior_p2: [f32; 5],
+    /// Per-action Q-values in 5-action space (unvisited actions get FPU).
+    pub q_values_p1: [f32; 5],
+    pub q_values_p2: [f32; 5],
     /// Root visit count after search.
     pub total_visits: u32,
     /// Number of descents that required NN evaluation.
@@ -1085,9 +1088,9 @@ fn extract_result(
     let total_visits = node.total_visits();
     let children_visits = node.children_visits();
 
-    let (policy_p1, visit_counts_p1, value_p1) =
+    let (policy_p1, visit_counts_p1, value_p1, q_values_p1) =
         extract_half(&node.p1, node.v1(), node.value_scale(), children_visits, config);
-    let (policy_p2, visit_counts_p2, value_p2) =
+    let (policy_p2, visit_counts_p2, value_p2, q_values_p2) =
         extract_half(&node.p2, node.v2(), node.value_scale(), children_visits, config);
 
     let prior_p1 = node.p1.expand_prior();
@@ -1102,6 +1105,8 @@ fn extract_result(
         visit_counts_p2,
         prior_p1,
         prior_p2,
+        q_values_p1,
+        q_values_p2,
         total_visits,
         // Filled in by run_search after accumulation.
         nn_evals: 0,
@@ -1112,18 +1117,18 @@ fn extract_result(
 
 /// Extract policy, visit counts, and value for one player from root.
 ///
-/// Returns (policy, visit_counts, value) all in 5-action space.
+/// Returns (policy, visit_counts, value, q_values) all in 5-action space.
 fn extract_half(
     half: &HalfNode,
     node_value: f32,
     value_scale: f32,
     children_visits: u32,
     config: &SearchConfig,
-) -> ([f32; 5], [f32; 5], f32) {
+) -> ([f32; 5], [f32; 5], f32, [f32; 5]) {
     let n = half.n_outcomes();
 
     if n == 0 {
-        return ([0.0; 5], [0.0; 5], node_value);
+        return ([0.0; 5], [0.0; 5], node_value, [0.0; 5]);
     }
 
     let fpu = compute_fpu(half, node_value, value_scale, config.fpu_reduction);
@@ -1164,6 +1169,13 @@ fn extract_half(
         policy = half.expand_prior();
     }
 
+    // Expand Q-values to 5-action space.
+    let mut q_values = [0.0f32; 5];
+    for i in 0..n {
+        let action = half.outcome_action(i) as usize;
+        q_values[action] = q[i];
+    }
+
     // Value = dot(q, raw_visits) / sum(raw_visits).
     let visit_sum: f32 = raw_visits[..n].iter().sum();
     let value = if visit_sum > 0.0 {
@@ -1173,7 +1185,7 @@ fn extract_half(
         node_value
     };
 
-    (policy, visit_counts, value)
+    (policy, visit_counts, value, q_values)
 }
 
 // ---------------------------------------------------------------------------

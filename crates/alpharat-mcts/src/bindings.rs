@@ -71,6 +71,16 @@ impl PySearchResult {
     }
 
     #[getter]
+    fn q_values_p1<'py>(&self, py: Python<'py>) -> Bound<'py, PyArray1<f32>> {
+        PyArray1::from_slice(py, &self.inner.q_values_p1)
+    }
+
+    #[getter]
+    fn q_values_p2<'py>(&self, py: Python<'py>) -> Bound<'py, PyArray1<f32>> {
+        PyArray1::from_slice(py, &self.inner.q_values_p2)
+    }
+
+    #[getter]
     fn total_visits(&self) -> u32 {
         self.inner.total_visits
     }

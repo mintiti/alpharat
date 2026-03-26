@@ -71,6 +71,9 @@ pub struct SearchResult {
     /// NN/uniform prior at root in 5-action space.
     pub prior_p1: [f32; 5],
     pub prior_p2: [f32; 5],
+    /// Per-action Q-values in 5-action space (unvisited actions get FPU).
+    pub q_values_p1: [f32; 5],
+    pub q_values_p2: [f32; 5],
     /// Root visit count after search.
     pub total_visits: u32,
     /// Number of descents that required NN evaluation.
@@ -685,8 +688,8 @@ fn extract_result(
     let low = root.get();
     let total_visits = low.total_edge_visits();
 
-    let (policy_p1, visit_counts_p1, value_p1) = extract_p1(low, config);
-    let (policy_p2, visit_counts_p2, value_p2) = extract_p2(low, config);
+    let (policy_p1, visit_counts_p1, value_p1, q_values_p1) = extract_p1(low, config);
+    let (policy_p2, visit_counts_p2, value_p2, q_values_p2) = extract_p2(low, config);
 
     let prior_p1 = low.expand_p1_prior();
     let prior_p2 = low.expand_p2_prior();
@@ -700,6 +703,8 @@ fn extract_result(
         visit_counts_p2,
         prior_p1,
         prior_p2,
+        q_values_p1,
+        q_values_p2,
         total_visits,
         nn_evals: 0,
         terminals: 0,
@@ -707,15 +712,15 @@ fn extract_result(
     }
 }
 
-/// Extract policy, visit counts, and value for player 1 from root.
+/// Extract policy, visit counts, value, and Q-values for player 1 from root.
 fn extract_p1(
     low: &crate::node::LowNode,
     config: &SearchConfig,
-) -> ([f32; 5], [f32; 5], f32) {
+) -> ([f32; 5], [f32; 5], f32, [f32; 5]) {
     let n = low.n1();
 
     if n == 0 {
-        return ([0.0; 5], [0.0; 5], low.v1());
+        return ([0.0; 5], [0.0; 5], low.v1(), [0.0; 5]);
     }
 
     let total_visits = low.total_edge_visits();
@@ -764,6 +769,13 @@ fn extract_p1(
         policy = low.expand_p1_prior();
     }
 
+    // Expand Q-values to 5-action space.
+    let mut q_values = [0.0f32; 5];
+    for i in 0..n {
+        let action = low.p1_outcome_action(i) as usize;
+        q_values[action] = q[i];
+    }
+
     // Value = dot(q, raw_visits) / sum(raw_visits).
     let visit_sum: f32 = raw_visits[..n].iter().sum();
     let value = if visit_sum > 0.0 {
@@ -773,18 +785,18 @@ fn extract_p1(
         low.v1()
     };
 
-    (policy, visit_counts, value)
+    (policy, visit_counts, value, q_values)
 }
 
-/// Extract policy, visit counts, and value for player 2 from root.
+/// Extract policy, visit counts, value, and Q-values for player 2 from root.
 fn extract_p2(
     low: &crate::node::LowNode,
     config: &SearchConfig,
-) -> ([f32; 5], [f32; 5], f32) {
+) -> ([f32; 5], [f32; 5], f32, [f32; 5]) {
     let n = low.n2();
 
     if n == 0 {
-        return ([0.0; 5], [0.0; 5], low.v2());
+        return ([0.0; 5], [0.0; 5], low.v2(), [0.0; 5]);
     }
 
     let total_visits = low.total_edge_visits();
@@ -828,6 +840,13 @@ fn extract_p2(
         policy = low.expand_p2_prior();
     }
 
+    // Expand Q-values to 5-action space.
+    let mut q_values = [0.0f32; 5];
+    for j in 0..n {
+        let action = low.p2_outcome_action(j) as usize;
+        q_values[action] = q[j];
+    }
+
     let visit_sum: f32 = raw_visits[..n].iter().sum();
     let value = if visit_sum > 0.0 {
         let dot: f32 = (0..n).map(|j| q[j] * raw_visits[j]).sum();
@@ -836,7 +855,7 @@ fn extract_p2(
         low.v2()
     };
 
-    (policy, visit_counts, value)
+    (policy, visit_counts, value, q_values)
 }
 
 /// Forced-playout pruning: cap visits on low-Q outcomes.

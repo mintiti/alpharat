@@ -113,5 +113,7 @@ class RustSearcher:
             visit_counts_p2=np.asarray(rust_result.visit_counts_p2, dtype=np.float64),
             prior_p1=np.asarray(rust_result.prior_p1, dtype=np.float64),
             prior_p2=np.asarray(rust_result.prior_p2, dtype=np.float64),
+            q_values_p1=np.asarray(rust_result.q_values_p1, dtype=np.float64),
+            q_values_p2=np.asarray(rust_result.q_values_p2, dtype=np.float64),
             total_visits=int(rust_result.total_visits),
         )
