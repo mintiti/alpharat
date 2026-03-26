@@ -20,65 +20,6 @@ pub fn compute_rewards(game: &GameState, scores_before: (f32, f32)) -> (f32, f32
     )
 }
 
-/// FNV-1a position hash over game state.
-///
-/// Covers positions, scores, mud timers, turn, board size, cheese layout,
-/// and wall topology. Matches the approach in alpharat-sampling.
-pub fn position_hash(game: &GameState) -> u64 {
-    const FNV_OFFSET: u64 = 0xcbf29ce484222325;
-    const FNV_PRIME: u64 = 0x100000001b3;
-
-    let mut h = FNV_OFFSET;
-
-    macro_rules! mix {
-        ($val:expr) => {
-            h ^= $val as u64;
-            h = h.wrapping_mul(FNV_PRIME);
-        };
-    }
-
-    // Player positions
-    mix!(game.player1.current_pos.x);
-    mix!(game.player1.current_pos.y);
-    mix!(game.player2.current_pos.x);
-    mix!(game.player2.current_pos.y);
-
-    // Scores (as raw bits for exact matching)
-    mix!(game.player1.score.to_bits());
-    mix!(game.player2.score.to_bits());
-
-    // Mud timers
-    mix!(game.player1.mud_timer);
-    mix!(game.player2.mud_timer);
-
-    // Turn progress
-    mix!(game.turn);
-    mix!(game.max_turns);
-
-    // Board dimensions
-    mix!(game.width);
-    mix!(game.height);
-
-    let w = game.width;
-    let h_board = game.height;
-
-    for y in 0..h_board {
-        for x in 0..w {
-            let pos = Coordinates::new(x, y);
-
-            // Cheese state
-            if game.cheese.has_cheese(pos) {
-                mix!(y as u64 * w as u64 + x as u64 + 1);
-            }
-
-            // Wall topology: pre-computed valid moves bitmask per cell.
-            mix!(game.move_table.get_valid_moves(pos) as u64);
-        }
-    }
-
-    h
-}
-
 // ---------------------------------------------------------------------------
 // Three-phase lifecycle: create_root_node + populate_node + find_or_create_child
 // ---------------------------------------------------------------------------
@@ -89,7 +30,7 @@ pub fn position_hash(game: &GameState) -> u64 {
 /// returns the existing node. Otherwise creates a fresh node with smart uniform
 /// priors and `value_scale = max(remaining_cheese, 1)`, inserts into TT.
 pub fn create_root_node(game: &GameState, tt: &mut TranspositionTable) -> Arc<SharedNode> {
-    let hash = position_hash(game);
+    let hash = game.state_hash();
     if let Some(existing) = tt.lookup(hash) {
         return existing;
     }
@@ -156,7 +97,7 @@ pub fn find_or_create_child(
         return (Arc::clone(edge.low_node()), false);
     }
 
-    let hash = position_hash(game);
+    let hash = game.state_hash();
 
     // Case 2: TT hit — reuse existing LowNode
     if let Some(existing) = tt.lookup(hash) {
@@ -300,7 +241,7 @@ mod tests {
         assert_eq!(r2, 0.0);
     }
 
-    // ---- position_hash ----
+    // ---- state_hash ----
 
     #[test]
     fn hash_same_state_deterministic() {
@@ -309,7 +250,7 @@ mod tests {
             Coordinates::new(4, 4),
             &[Coordinates::new(2, 2)],
         );
-        assert_eq!(position_hash(&game), position_hash(&game));
+        assert_eq!(game.state_hash(), game.state_hash());
     }
 
     #[test]
@@ -324,7 +265,7 @@ mod tests {
             Coordinates::new(4, 4),
             &[Coordinates::new(2, 2)],
         );
-        assert_ne!(position_hash(&g1), position_hash(&g2));
+        assert_ne!(g1.state_hash(), g2.state_hash());
     }
 
     #[test]
@@ -339,7 +280,7 @@ mod tests {
             Coordinates::new(4, 4),
             &[Coordinates::new(3, 3)],
         );
-        assert_ne!(position_hash(&g1), position_hash(&g2));
+        assert_ne!(g1.state_hash(), g2.state_hash());
     }
 
     // ---- create_root_node ----
@@ -359,7 +300,7 @@ mod tests {
         assert_eq!(tt.live_count(), 1);
 
         // TT lookup returns the same node
-        let hash = position_hash(&game);
+        let hash = game.state_hash();
         let found = tt.lookup(hash).unwrap();
         assert!(Arc::ptr_eq(&found, &root));
     }
@@ -474,7 +415,7 @@ mod tests {
         let _undo = child_game.make_move(Direction::Up, Direction::Down);
 
         // Pre-insert the child in TT at its hash
-        let child_hash = position_hash(&child_game);
+        let child_hash = child_game.state_hash();
         let eff_p1 = child_game.effective_actions_p1();
         let eff_p2 = child_game.effective_actions_p2();
         let existing = Arc::new(SharedNode::new(LowNode::new_shell(eff_p1, eff_p2)));
@@ -758,7 +699,7 @@ mod tests {
         assert_eq!(tree.root().get().total_visits(), 0);
 
         // TT still works (new root is in TT)
-        let hash = position_hash(&game);
+        let hash = game.state_hash();
         assert!(tree.tt().lookup(hash).is_some());
     }
 

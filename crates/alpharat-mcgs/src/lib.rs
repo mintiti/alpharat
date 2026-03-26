@@ -12,5 +12,5 @@ pub use alpharat_eval_core::{
 };
 pub use node::{Edge, HalfEdge, LowNode, SharedNode};
 pub use search::{SearchConfig, SearchResult, run_search};
-pub use tree::{MCGSTree, compute_rewards, find_or_create_child, populate_node, position_hash};
+pub use tree::{MCGSTree, compute_rewards, find_or_create_child, populate_node};
 pub use tt::TranspositionTable;
