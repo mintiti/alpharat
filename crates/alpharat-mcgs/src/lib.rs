@@ -1,3 +1,5 @@
+#[cfg(feature = "python")]
+pub mod bindings;
 pub mod gc;
 pub mod node;
 pub mod search;

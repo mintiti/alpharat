@@ -12,3 +12,8 @@ pyrat = { package = "pyrat-rust", git = "https://github.com/mintiti/pyrat-rust",
 rand = { version = "0.8", features = ["small_rng"] }
 rand_distr = "0.4"
 rustc-hash = "2"
+pyo3 = { version = "0.25", optional = true }
+numpy = { version = "0.25", optional = true }
+
+[features]
+python = ["dep:pyo3", "dep:numpy", "pyrat/python"]

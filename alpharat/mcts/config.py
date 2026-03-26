@@ -135,4 +135,65 @@ class RustMCTSConfig(MCTSConfigBase):
         )
 
 
+class RustMCGSConfig(MCTSConfigBase):
+    """Configuration for the Rust MCGS backend (DAG search with transpositions)."""
+
+    backend: Literal["mcgs"] = "mcgs"
+    simulations: int = 100
+    c_puct: float = 1.5
+    force_k: float = 2.0
+    fpu_reduction: float = 0.2
+    batch_size: int = 8
+    noise_epsilon: float = 0.0
+    noise_concentration: float = 10.83
+    max_collisions: int = 0
+
+    def for_evaluation(self) -> Self:
+        """Return a copy with Dirichlet noise disabled."""
+        if self.noise_epsilon == 0.0:
+            return self
+        return self.model_copy(update={"noise_epsilon": 0.0})
+
+    def build_searcher(
+        self,
+        checkpoint: str | None = None,
+        device: str = "cpu",
+    ) -> Searcher:
+        from alpharat.mcts.searcher import RustMCGSSearcher
+
+        predict_fn = None
+        if checkpoint is not None:
+            from alpharat.ai.predict_batch import make_batched_predict_fn
+
+            predict_fn = make_batched_predict_fn(checkpoint, device=device)
+
+        return RustMCGSSearcher(
+            simulations=self.simulations,
+            c_puct=self.c_puct,
+            force_k=self.force_k,
+            fpu_reduction=self.fpu_reduction,
+            batch_size=self.batch_size,
+            noise_epsilon=self.noise_epsilon,
+            noise_concentration=self.noise_concentration,
+            max_collisions=self.max_collisions,
+            predict_fn=predict_fn,
+        )
+
+    def build_agent(
+        self,
+        checkpoint: str | None = None,
+        temperature: float = 1.0,
+        device: str = "cpu",
+    ) -> Agent:
+        from alpharat.ai.searcher_agent import SearcherAgent
+
+        searcher = self.build_searcher(checkpoint=checkpoint, device=device)
+        return SearcherAgent(
+            searcher=searcher,
+            temperature=temperature,
+            simulations=self.simulations,
+            checkpoint=checkpoint,
+        )
+
+
 MCTSConfig = RustMCTSConfig

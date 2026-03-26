@@ -30,6 +30,11 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     alpharat_mcts::bindings::register_mcts_module(&mcts_module)?;
     m.add_submodule(&mcts_module)?;
 
+    // Register mcgs types
+    let mcgs_module = PyModule::new(m.py(), "mcgs")?;
+    alpharat_mcgs::bindings::register_mcgs_module(&mcgs_module)?;
+    m.add_submodule(&mcgs_module)?;
+
     // Register sampling types
     let sampling_module = PyModule::new(m.py(), "sampling")?;
     alpharat_sampling::bindings::register_sampling_module(&sampling_module)?;
