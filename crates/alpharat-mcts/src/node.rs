@@ -319,6 +319,11 @@ impl Node {
     pub fn total_visits(&self) -> u32 {
         self.total_visits
     }
+    /// Child visits (total minus the node's own NN eval).
+    /// Matches LC0's `GetChildrenVisits()`.
+    pub fn children_visits(&self) -> u32 {
+        if self.total_visits > 0 { self.total_visits - 1 } else { 0 }
+    }
     pub fn value_scale(&self) -> f32 {
         self.value_scale
     }

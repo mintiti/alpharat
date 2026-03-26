@@ -113,8 +113,9 @@ pub fn select_actions(
     is_root: bool,
     rng: &mut impl Rng,
 ) -> (u8, u8) {
-    let a1 = select_half(&node.p1, node.v1(), node.value_scale(), node.total_visits(), config, is_root, rng);
-    let a2 = select_half(&node.p2, node.v2(), node.value_scale(), node.total_visits(), config, is_root, rng);
+    let children_visits = node.children_visits();
+    let a1 = select_half(&node.p1, node.v1(), node.value_scale(), children_visits, config, is_root, rng);
+    let a2 = select_half(&node.p2, node.v2(), node.value_scale(), children_visits, config, is_root, rng);
     (a1, a2)
 }
 
@@ -123,7 +124,7 @@ fn select_half(
     half: &HalfNode,
     node_value: f32,
     value_scale: f32,
-    total_visits: u32,
+    children_visits: u32,
     config: &SearchConfig,
     is_root: bool,
     rng: &mut impl Rng,
@@ -146,7 +147,7 @@ fn select_half(
     debug_assert!(value_scale > 0.0, "value_scale must be positive, got {value_scale}");
     let fpu = node_value - config.fpu_reduction * value_scale * visited_prior_mass.sqrt();
 
-    let sqrt_total = (total_visits as f32).sqrt();
+    let sqrt_total = (children_visits.max(1) as f32).sqrt();
 
     argmax_tiebreak(n, rng, |i| {
         let edge = half.edge(i);
@@ -161,7 +162,7 @@ fn select_half(
 
         // Forced playouts: at root, boost undervisited outcomes.
         if is_root && config.force_k > 0.0 && prior > 0.0 {
-            let threshold = (config.force_k * prior * total_visits as f32).sqrt();
+            let threshold = (config.force_k * prior * children_visits as f32).sqrt();
             if (edge.visits as f32) < threshold {
                 score = FORCED_PLAYOUT_SCORE;
             }
@@ -210,7 +211,7 @@ pub fn compute_pruned_visits(
     prior: &[f32],
     visits: &[f32],
     n: usize,
-    total_visits: u32,
+    parent_visits: u32,
     c_puct: f32,
 ) -> [f32; 5] {
     let mut result = [0.0f32; 5];
@@ -233,7 +234,7 @@ pub fn compute_pruned_visits(
     }
 
     // PUCT* threshold: the PUCT score of the best outcome.
-    let sqrt_total = (total_visits as f32).sqrt();
+    let sqrt_total = (parent_visits.max(1) as f32).sqrt();
     let puct_star =
         q_norm[best_idx] + c_puct * prior[best_idx] * sqrt_total / (1.0 + visits[best_idx]);
 
@@ -424,12 +425,14 @@ fn simulate_batch(
     let mut collisions = 0u32;
     let mut terminals = 0u32;
     let mut n_ooo = 0u32;
+    let mut collision_paths: Vec<SearchPath> = Vec::new();
+    let mut work_game = game.clone();
 
     while (nn_outcomes.len() as u32) < batch_size
         && collisions < max_collisions
         && n_ooo < max_ooo
     {
-        let outcome = descend(root, game, config, rng);
+        let outcome = descend(root, &mut work_game, config, rng);
 
         match outcome {
             DescentOutcome::NeedsEval { .. } => {
@@ -449,8 +452,8 @@ fn simulate_batch(
                 terminals += 1;
                 n_ooo += 1;
             }
-            DescentOutcome::Collision { ref path } => {
-                cleanup_descent(path, None);
+            DescentOutcome::Collision { path } => {
+                collision_paths.push(path);
                 collisions += 1;
             }
         }
@@ -506,6 +509,13 @@ fn simulate_batch(
         }
     }
 
+    // ---- Collision Cleanup (deferred from gather phase) ----
+    // Virtual losses from collisions persist through gather+backup so that
+    // later descents in the same batch are steered away from blocked paths.
+    for path in &collision_paths {
+        cleanup_descent(path, None);
+    }
+
     Ok(BatchStats {
         nn_evals,
         terminals,
@@ -519,15 +529,15 @@ fn simulate_batch(
 
 fn descend(
     root: NodePtr,
-    game: &GameState,
+    game: &mut GameState,
     config: &SearchConfig,
     rng: &mut impl Rng,
 ) -> DescentOutcome {
     let mut current = root;
     let mut path: SearchPath = Vec::new();
-    let mut game = game.clone();
+    let mut undos: Vec<_> = Vec::new();
 
-    loop {
+    let result = loop {
         // Read phase: copy scalars, drop &Node before any mutation.
         let (visits, terminal) = unsafe {
             let node = current.as_ref();
@@ -537,26 +547,27 @@ fn descend(
         // Unvisited leaf — try to claim it.
         if visits == 0 && !terminal {
             if !unsafe { current.as_mut() }.try_start_score_update() {
-                return DescentOutcome::Collision { path };
+                break DescentOutcome::Collision { path };
             }
             // Leaf claimed. Game is at leaf position.
             if game.check_game_over() {
-                return DescentOutcome::Terminal {
+                break DescentOutcome::Terminal {
                     path,
                     leaf: current,
                     leaf_claimed: true,
                 };
             }
-            return DescentOutcome::NeedsEval {
+            let leaf_game = game.clone();
+            break DescentOutcome::NeedsEval {
                 path,
                 leaf: current,
-                game_state: game,
+                game_state: leaf_game,
             };
         }
 
         // Revisited terminal — no claim needed.
         if terminal {
-            return DescentOutcome::Terminal {
+            break DescentOutcome::Terminal {
                 path,
                 leaf: current,
                 leaf_claimed: false,
@@ -587,15 +598,23 @@ fn descend(
         let scores_before = (game.player1_score(), game.player2_score());
         let d1 = Direction::try_from(a1).expect("valid direction");
         let d2 = Direction::try_from(a2).expect("valid direction");
-        let _undo = game.make_move(d1, d2);
-        let (r1, r2) = compute_rewards(&game, scores_before);
+        let undo = game.make_move(d1, d2);
+        undos.push(undo);
+        let (r1, r2) = compute_rewards(game, scores_before);
 
         // Find or create child.
         let (child_ptr, _is_new) =
-            find_or_extend_child(current, idx1, idx2, &game, r1, r2);
+            find_or_extend_child(current, idx1, idx2, game, r1, r2);
 
         current = child_ptr;
+    };
+
+    // Unwind game state back to root position.
+    for undo in undos.into_iter().rev() {
+        game.unmake_move(undo);
     }
+
+    result
 }
 
 // ---------------------------------------------------------------------------
@@ -630,11 +649,12 @@ fn extract_result(
 ) -> SearchResult {
     let node = unsafe { root.as_ref() };
     let total_visits = node.total_visits();
+    let children_visits = node.children_visits();
 
     let (policy_p1, visit_counts_p1, value_p1) =
-        extract_half(&node.p1, node.v1(), node.value_scale(), total_visits, config);
+        extract_half(&node.p1, node.v1(), node.value_scale(), children_visits, config);
     let (policy_p2, visit_counts_p2, value_p2) =
-        extract_half(&node.p2, node.v2(), node.value_scale(), total_visits, config);
+        extract_half(&node.p2, node.v2(), node.value_scale(), children_visits, config);
 
     let prior_p1 = node.p1.expand_prior();
     let prior_p2 = node.p2.expand_prior();
@@ -663,7 +683,7 @@ fn extract_half(
     half: &HalfNode,
     node_value: f32,
     value_scale: f32,
-    total_visits: u32,
+    children_visits: u32,
     config: &SearchConfig,
 ) -> ([f32; 5], [f32; 5], f32) {
     let n = half.n_outcomes();
@@ -696,7 +716,7 @@ fn extract_half(
     }
 
     // Compute pruned visits for policy.
-    let pruned = compute_pruned_visits(&q_norm, &prior, &raw_visits, n, total_visits, config.c_puct);
+    let pruned = compute_pruned_visits(&q_norm, &prior, &raw_visits, n, children_visits, config.c_puct);
 
     // Expand pruned visits to 5-action space.
     let mut visit_counts = [0.0f32; 5];
@@ -1101,8 +1121,8 @@ mod tests {
         let edge = node.p1.edge(0);
         let vs = node.value_scale();
         let q_norm = edge.q / vs;
-        let total = node.total_visits();
-        let exploration = config.c_puct * 0.2 * (total as f32).sqrt() / (1.0 + edge.visits as f32);
+        let cv = node.children_visits().max(1);
+        let exploration = config.c_puct * 0.2 * (cv as f32).sqrt() / (1.0 + edge.visits as f32);
 
         assert!(exploration > 0.0, "Exploration bonus should be positive");
         assert!(q_norm + exploration > q_norm, "PUCT > Q_norm");
@@ -1792,7 +1812,7 @@ mod tests {
         for _ in 0..3 {
             assert!(node.try_start_score_update());
             let a1 = select_half(
-                &node.p1, node.v1(), node.value_scale(), node.total_visits(),
+                &node.p1, node.v1(), node.value_scale(), node.children_visits(),
                 &config, false, &mut r,
             );
             node.p1.edge_mut(a1 as usize).add_virtual_loss();
@@ -1818,7 +1838,7 @@ mod tests {
         for _ in 0..3 {
             assert!(node.try_start_score_update());
             let a1 = select_half(
-                &node.p1, node.v1(), node.value_scale(), node.total_visits(),
+                &node.p1, node.v1(), node.value_scale(), node.children_visits(),
                 &config, false, &mut r,
             );
             node.p1.edge_mut(a1 as usize).add_virtual_loss();
@@ -1851,7 +1871,7 @@ mod tests {
 
         for _ in 0..3 {
             let a1 = select_half(
-                &node.p1, node.v1(), node.value_scale(), node.total_visits(),
+                &node.p1, node.v1(), node.value_scale(), node.children_visits(),
                 &config, false, &mut r,
             );
             node.p1.edge_mut(a1 as usize).add_virtual_loss();
