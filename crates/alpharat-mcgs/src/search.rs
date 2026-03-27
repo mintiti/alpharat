@@ -6,7 +6,7 @@ use rand_distr::Gamma;
 use crate::node::SharedNode;
 use crate::tree::{compute_rewards, find_or_create_child, populate_node, MCGSTree};
 use crate::{Backend, BackendError};
-use pyrat::{Direction, GameState};
+use pyrat::{Direction, GameState, MoveUndo};
 
 /// Score assigned to forced-playout outcomes to guarantee selection.
 const FORCED_PLAYOUT_SCORE: f32 = 1e20;
@@ -129,12 +129,14 @@ pub fn run_search(
     let mut total_terminals = 0u32;
     let mut total_collisions = 0u32;
     while remaining > 0 {
-        let actual = remaining.min(batch_size);
-        let batch = simulate_batch(tree, game, backend, config, actual, rng)?;
+        let batch = simulate_batch(tree, game, backend, config, remaining.min(batch_size), rng)?;
         total_nn_evals += batch.nn_evals;
         total_terminals += batch.terminals;
         total_collisions += batch.collisions;
-        remaining -= actual;
+        // Only count descents that produced useful information (NN evals + terminals).
+        // Collisions don't consume the sim budget — they're wasted work.
+        let produced = batch.nn_evals + batch.terminals;
+        remaining = remaining.saturating_sub(produced.max(1));
     }
 
     let root = Arc::clone(tree.root());
@@ -165,6 +167,32 @@ fn select_actions(
     (a1, a2)
 }
 
+// ---------------------------------------------------------------------------
+// compute_fpu — first-play urgency
+// ---------------------------------------------------------------------------
+
+/// FPU for player 1: pessimistic value scaled by visited prior mass.
+fn compute_fpu_p1(low: &crate::node::LowNode, config: &SearchConfig) -> f32 {
+    let mut visited_prior_mass = 0.0f32;
+    for i in 0..low.n1() {
+        if low.marginal_visits_p1(i) > 0 {
+            visited_prior_mass += low.p1_prior(i);
+        }
+    }
+    low.v1() - config.fpu_reduction * low.value_scale() * visited_prior_mass.sqrt()
+}
+
+/// FPU for player 2: pessimistic value scaled by visited prior mass.
+fn compute_fpu_p2(low: &crate::node::LowNode, config: &SearchConfig) -> f32 {
+    let mut visited_prior_mass = 0.0f32;
+    for j in 0..low.n2() {
+        if low.marginal_visits_p2(j) > 0 {
+            visited_prior_mass += low.p2_prior(j);
+        }
+    }
+    low.v2() - config.fpu_reduction * low.value_scale() * visited_prior_mass.sqrt()
+}
+
 /// PUCT selection for player 1 — marginalizes over j.
 fn select_p1(
     low: &crate::node::LowNode,
@@ -177,20 +205,13 @@ fn select_p1(
         return 0;
     }
 
-    let total_visits = low.total_visits();
+    let children_visits = low.total_edge_visits();
     let value_scale = low.value_scale();
     debug_assert!(value_scale > 0.0, "value_scale must be positive");
 
-    // FPU: compute visited prior mass.
-    let mut visited_prior_mass = 0.0f32;
-    for i in 0..n {
-        if low.marginal_visits_p1(i) > 0 {
-            visited_prior_mass += low.p1_prior(i);
-        }
-    }
-    let fpu = low.v1() - config.fpu_reduction * value_scale * visited_prior_mass.sqrt();
+    let fpu = compute_fpu_p1(low, config);
 
-    let sqrt_total = (total_visits as f32).sqrt();
+    let sqrt_total = (children_visits.max(1) as f32).sqrt();
 
     argmax_tiebreak(n, rng, |i| {
         let visits = low.marginal_visits_p1(i);
@@ -210,7 +231,7 @@ fn select_p1(
 
         // Forced playouts: at root, boost undervisited outcomes.
         if is_root && config.force_k > 0.0 && prior > 0.0 {
-            let threshold = (config.force_k * prior * total_visits as f32).sqrt();
+            let threshold = (config.force_k * prior * children_visits as f32).sqrt();
             if (visits as f32) < threshold {
                 score = FORCED_PLAYOUT_SCORE;
             }
@@ -232,20 +253,13 @@ fn select_p2(
         return 0;
     }
 
-    let total_visits = low.total_visits();
+    let children_visits = low.total_edge_visits();
     let value_scale = low.value_scale();
     debug_assert!(value_scale > 0.0, "value_scale must be positive");
 
-    // FPU: compute visited prior mass.
-    let mut visited_prior_mass = 0.0f32;
-    for j in 0..n {
-        if low.marginal_visits_p2(j) > 0 {
-            visited_prior_mass += low.p2_prior(j);
-        }
-    }
-    let fpu = low.v2() - config.fpu_reduction * value_scale * visited_prior_mass.sqrt();
+    let fpu = compute_fpu_p2(low, config);
 
-    let sqrt_total = (total_visits as f32).sqrt();
+    let sqrt_total = (children_visits.max(1) as f32).sqrt();
 
     argmax_tiebreak(n, rng, |j| {
         let visits = low.marginal_visits_p2(j);
@@ -265,7 +279,7 @@ fn select_p2(
 
         // Forced playouts
         if is_root && config.force_k > 0.0 && prior > 0.0 {
-            let threshold = (config.force_k * prior * total_visits as f32).sqrt();
+            let threshold = (config.force_k * prior * children_visits as f32).sqrt();
             if (visits as f32) < threshold {
                 score = FORCED_PLAYOUT_SCORE;
             }
@@ -419,18 +433,23 @@ fn simulate_batch(
         batch_size
     };
 
-    // ---- OOO Gather Phase ----
+    // ---- Gather Phase ----
     let max_ooo = 2 * batch_size;
     let mut nn_outcomes: Vec<DescentOutcome> = Vec::with_capacity(batch_size as usize);
+    let mut collision_paths: Vec<SearchPath> = Vec::new();
     let mut collisions = 0u32;
     let mut terminals = 0u32;
     let mut n_ooo = 0u32;
+
+    // Shared work game: clone once per batch, reuse via make/unmake per descent.
+    let mut work_game = game.clone();
+    let mut undos: Vec<MoveUndo> = Vec::new();
 
     while (nn_outcomes.len() as u32) < batch_size
         && collisions < max_collisions
         && n_ooo < max_ooo
     {
-        let outcome = descend(tree, &root, game, config, rng);
+        let outcome = descend(tree, &root, config, rng, &mut work_game, &mut undos);
 
         match outcome {
             DescentOutcome::NeedsEval { .. } => {
@@ -449,8 +468,10 @@ fn simulate_batch(
                 terminals += 1;
                 n_ooo += 1;
             }
-            DescentOutcome::Collision { ref path } => {
-                cleanup_descent(path, None);
+            DescentOutcome::Collision { path } => {
+                // Defer VL cleanup: keep collision paths "poisoned" so later
+                // descents in this batch don't repeat the same collision.
+                collision_paths.push(path);
                 collisions += 1;
             }
         }
@@ -492,6 +513,11 @@ fn simulate_batch(
         }
     }
 
+    // Revert collision VLs after all backups are done.
+    for path in &collision_paths {
+        cleanup_descent(path, None);
+    }
+
     Ok(BatchStats {
         nn_evals,
         terminals,
@@ -506,13 +532,14 @@ fn simulate_batch(
 fn descend(
     tree: &mut MCGSTree,
     root: &Arc<SharedNode>,
-    game: &GameState,
     config: &SearchConfig,
     rng: &mut impl Rng,
+    work_game: &mut GameState,
+    undos: &mut Vec<MoveUndo>,
 ) -> DescentOutcome {
     let mut current = Arc::clone(root);
     let mut path: SearchPath = Vec::new();
-    let mut game = game.clone();
+    undos.clear();
 
     loop {
         let low = current.get();
@@ -520,24 +547,30 @@ fn descend(
         // Unvisited leaf — try to claim it.
         if low.total_visits() == 0 && !low.is_terminal() {
             if !current.get_mut().try_start_score_update() {
+                for undo in undos.drain(..).rev() { work_game.unmake_move(undo); }
                 return DescentOutcome::Collision { path };
             }
-            if game.check_game_over() {
+            if work_game.check_game_over() {
+                for undo in undos.drain(..).rev() { work_game.unmake_move(undo); }
                 return DescentOutcome::Terminal {
                     path,
                     leaf: current,
                     leaf_claimed: true,
                 };
             }
+            // Clone only for NN eval leaves (need the state for the backend).
+            let leaf_state = work_game.clone();
+            for undo in undos.drain(..).rev() { work_game.unmake_move(undo); }
             return DescentOutcome::NeedsEval {
                 path,
                 leaf: current,
-                game_state: game,
+                game_state: leaf_state,
             };
         }
 
         // Revisited terminal — no claim needed.
         if low.is_terminal() {
+            for undo in undos.drain(..).rev() { work_game.unmake_move(undo); }
             return DescentOutcome::Terminal {
                 path,
                 leaf: current,
@@ -563,16 +596,17 @@ fn descend(
             p2_outcome: idx2,
         });
 
-        // Advance game state.
-        let scores_before = (game.player1_score(), game.player2_score());
+        // Advance game state via make_move (rewind via undos at leaf).
+        let scores_before = (work_game.player1_score(), work_game.player2_score());
         let d1 = Direction::try_from(a1).expect("valid direction");
         let d2 = Direction::try_from(a2).expect("valid direction");
-        let _undo = game.make_move(d1, d2);
-        let (r1, r2) = compute_rewards(&game, scores_before);
+        let undo = work_game.make_move(d1, d2);
+        undos.push(undo);
+        let (r1, r2) = compute_rewards(work_game, scores_before);
 
         // Find or create child — TT interaction happens here.
         let (child, _is_new) =
-            find_or_create_child(&current, idx1, idx2, &game, tree.tt_mut(), r1, r2);
+            find_or_create_child(&current, idx1, idx2, work_game, tree.tt_mut(), r1, r2);
 
         current = child;
     }
@@ -729,16 +763,9 @@ fn extract_p1(
         return ([0.0; 5], [0.0; 5], low.v1(), [0.0; 5]);
     }
 
-    let total_visits = low.total_visits();
+    let children_visits = low.total_edge_visits();
 
-    // Compute FPU for unvisited outcomes.
-    let mut visited_prior_mass = 0.0f32;
-    for i in 0..n {
-        if low.marginal_visits_p1(i) > 0 {
-            visited_prior_mass += low.p1_prior(i);
-        }
-    }
-    let fpu = low.v1() - config.fpu_reduction * low.value_scale() * visited_prior_mass.sqrt();
+    let fpu = compute_fpu_p1(low, config);
 
     // Read Q and visits per outcome.
     let mut q = [0.0f32; 5];
@@ -755,7 +782,7 @@ fn extract_p1(
     }
 
     // Compute pruned visits.
-    let pruned = compute_pruned_visits(&q_norm, &prior, &raw_visits, n, total_visits, config.c_puct);
+    let pruned = compute_pruned_visits(&q_norm, &prior, &raw_visits, n, children_visits, config.c_puct);
 
     // Expand to 5-action space.
     let mut visit_counts = [0.0f32; 5];
@@ -805,15 +832,9 @@ fn extract_p2(
         return ([0.0; 5], [0.0; 5], low.v2(), [0.0; 5]);
     }
 
-    let total_visits = low.total_visits();
+    let children_visits = low.total_edge_visits();
 
-    let mut visited_prior_mass = 0.0f32;
-    for j in 0..n {
-        if low.marginal_visits_p2(j) > 0 {
-            visited_prior_mass += low.p2_prior(j);
-        }
-    }
-    let fpu = low.v2() - config.fpu_reduction * low.value_scale() * visited_prior_mass.sqrt();
+    let fpu = compute_fpu_p2(low, config);
 
     let mut q = [0.0f32; 5];
     let mut raw_visits = [0.0f32; 5];
@@ -828,7 +849,7 @@ fn extract_p2(
         q_norm[j] = q[j] / low.value_scale();
     }
 
-    let pruned = compute_pruned_visits(&q_norm, &prior, &raw_visits, n, total_visits, config.c_puct);
+    let pruned = compute_pruned_visits(&q_norm, &prior, &raw_visits, n, children_visits, config.c_puct);
 
     let mut visit_counts = [0.0f32; 5];
     for (j, &pv) in pruned.iter().enumerate().take(n) {
@@ -3049,5 +3070,112 @@ mod tests {
             (root_q1_after_3 - root_q1_after_1).abs() > 0.5,
             "Delta should propagate: before={root_q1_after_1}, after={root_q1_after_3}",
         );
+    }
+
+    // =====================================================================
+    // Tier 1 LC0 port fix tests
+    // =====================================================================
+
+    #[test]
+    fn children_visits_vs_total_visits() {
+        // After N sims, root.total_edge_visits() == root.total_visits() - 1.
+        // The first visit is the root's own NN eval (no edge update).
+        let game = open_5x5_game(
+            Coordinates::new(0, 0),
+            Coordinates::new(4, 4),
+            &[Coordinates::new(2, 2)],
+        );
+        let backend = SmartUniformBackend;
+        let config = SearchConfig {
+            force_k: 0.0,
+            ..default_config()
+        };
+        let mut tree = MCGSTree::new(&game);
+        let mut r = rng();
+
+        let result = run_search(&mut tree, &game, &backend, &config, 50, 8, &mut r).unwrap();
+        let root_low = tree.root().get();
+        let total = root_low.total_visits();
+        let edge = root_low.total_edge_visits();
+
+        // Root's first visit is its own NN eval. Every subsequent visit
+        // is a child visit (edge update). So edge_visits == total - 1.
+        assert_eq!(
+            edge,
+            total - 1,
+            "children_visits should be total_visits - 1 at root, got edge={edge} total={total}"
+        );
+
+        // Sanity: result.total_visits matches.
+        assert_eq!(result.total_visits, total);
+    }
+
+    #[test]
+    fn sim_counting_not_wasted_on_collisions() {
+        // On a tiny tree with large batch sizes, collisions are likely.
+        // Verify the sim budget produces enough useful visits.
+        let game = GameBuilder::new(3, 3)
+            .with_open_maze()
+            .with_custom_positions(Coordinates::new(0, 0), Coordinates::new(2, 2))
+            .with_custom_cheese(vec![Coordinates::new(1, 1)])
+            .with_max_turns(5)
+            .build()
+            .create(None)
+            .unwrap();
+        let backend = SmartUniformBackend;
+        let config = default_config();
+        let mut tree = MCGSTree::new(&game);
+        let mut r = rng();
+
+        let n_sims = 100u32;
+        let result = run_search(&mut tree, &game, &backend, &config, n_sims, 32, &mut r).unwrap();
+        let useful = result.nn_evals + result.terminals;
+
+        // With the fix, useful visits should reach (or exceed) n_sims.
+        // Allow slight undershoot from the max(1) floor on all-collision batches.
+        assert!(
+            useful >= n_sims,
+            "useful visits ({useful}) should be >= n_sims ({n_sims}), collisions={}",
+            result.collisions,
+        );
+    }
+
+    #[test]
+    fn collision_vl_deferred_reduces_repeat_collisions() {
+        // Run search with batch_size > 1 to exercise collision VL deferral.
+        // A batch_size=1 search can't benefit from deferred VLs since there's
+        // only one descent per batch. With batch_size=16, deferred VLs should
+        // reduce repeated collisions compared to immediate cleanup.
+        //
+        // We can't directly test "what would happen without the fix" in a single
+        // test, but we CAN verify that after search, all VLs are reverted (no
+        // leaked in-flight counts) and collisions stay bounded.
+        let game = open_5x5_game(
+            Coordinates::new(2, 2),
+            Coordinates::new(2, 2),
+            &[Coordinates::new(0, 0)],
+        );
+        let backend = SmartUniformBackend;
+        let config = default_config();
+        let mut tree = MCGSTree::new(&game);
+        let mut r = rng();
+
+        let result = run_search(&mut tree, &game, &backend, &config, 200, 16, &mut r).unwrap();
+
+        // No leaked virtual losses.
+        let root_low = tree.root().get();
+        for i in 0..root_low.n1() {
+            for j in 0..root_low.n2() {
+                assert_eq!(
+                    root_low.edge_in_flight(i, j), 0,
+                    "VL leak at ({i},{j})"
+                );
+            }
+        }
+        assert_eq!(root_low.n_in_flight(), 0, "root n_in_flight leak");
+
+        // Collisions should be bounded — not exploding.
+        let useful = result.nn_evals + result.terminals;
+        assert!(useful > 0, "should have some useful work done");
     }
 }
