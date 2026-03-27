@@ -81,7 +81,6 @@ class RustMCGSSearcher:
             force_k=self._force_k,
             noise_epsilon=self._noise_epsilon,
             noise_concentration=self._noise_concentration,
-            max_collisions=self._max_collisions,
             seed=self._seed,
         )
 
@@ -105,6 +104,10 @@ class RustMCGSSearcher:
             q_values_p1=np.asarray(rust_result.q_values_p1, dtype=np.float64),
             q_values_p2=np.asarray(rust_result.q_values_p2, dtype=np.float64),
             total_visits=int(rust_result.total_visits),
+            nn_evals=int(rust_result.nn_evals),
+            collisions=int(rust_result.collisions),
+            terminals=int(rust_result.terminals),
+            tt_stop_hits=int(rust_result.tt_stop_hits),
         )
 
 
@@ -199,4 +202,7 @@ class RustSearcher:
             q_values_p1=np.asarray(rust_result.q_values_p1, dtype=np.float64),
             q_values_p2=np.asarray(rust_result.q_values_p2, dtype=np.float64),
             total_visits=int(rust_result.total_visits),
+            nn_evals=int(rust_result.nn_evals),
+            collisions=int(rust_result.collisions),
+            terminals=int(rust_result.terminals),
         )

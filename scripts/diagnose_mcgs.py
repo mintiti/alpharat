@@ -47,6 +47,7 @@ class SearchOutput:
     nn_evals: int
     collisions: int
     terminals: int
+    tt_stop_hits: int
 
 
 def build_scenarios(grid: int) -> list[Scenario]:
@@ -129,9 +130,10 @@ def run_search(game: Any, searcher_name: str, searcher: Any) -> SearchOutput:
         value_p1=result.value_p1,
         visit_counts_p1=result.visit_counts_p1,
         total_visits=result.total_visits,
-        nn_evals=0,
-        collisions=0,
-        terminals=0,
+        nn_evals=result.nn_evals,
+        collisions=result.collisions,
+        terminals=result.terminals,
+        tt_stop_hits=result.tt_stop_hits,
     )
 
 
@@ -164,6 +166,10 @@ def print_comparison(scenario: Scenario, outputs: list[SearchOutput]) -> None:
         print(f"    policy:  {format_array(out.policy_p1)}")
         print(f"    Q-vals:  {format_array(out.q_values_p1, '.4f')}")
         print(f"    visits:  {format_array(out.visit_counts_p1, '.0f')}")
+        print(
+            f"    stats:   nn={out.nn_evals}  term={out.terminals}  "
+            f"coll={out.collisions}  tt_stop={out.tt_stop_hits}"
+        )
 
     # Diff summary
     if len(outputs) == 2:

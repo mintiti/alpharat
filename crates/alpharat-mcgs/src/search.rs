@@ -94,6 +94,8 @@ pub struct SearchResult {
     pub terminals: u32,
     /// Number of descents that collided (wasted — no backup).
     pub collisions: u32,
+    /// Number of transposition stops (edge initialized from shared child's aggregate).
+    pub tt_stop_hits: u32,
 }
 
 /// Per-batch counters from simulate_batch.
@@ -101,6 +103,7 @@ struct BatchStats {
     nn_evals: u32,
     terminals: u32,
     collisions: u32,
+    tt_stop_hits: u32,
 }
 
 
@@ -122,11 +125,13 @@ pub fn run_search(
     let mut total_nn_evals = 0u32;
     let mut total_terminals = 0u32;
     let mut total_collisions = 0u32;
+    let mut total_tt_stop_hits = 0u32;
     while remaining > 0 {
         let batch = simulate_batch(tree, game, backend, config, remaining.min(batch_size), rng)?;
         total_nn_evals += batch.nn_evals;
         total_terminals += batch.terminals;
         total_collisions += batch.collisions;
+        total_tt_stop_hits += batch.tt_stop_hits;
         // Only count descents that produced useful information (NN evals + terminals).
         // Collisions don't consume the sim budget — they're wasted work.
         let produced = batch.nn_evals + batch.terminals;
@@ -138,6 +143,7 @@ pub fn run_search(
     result.nn_evals = total_nn_evals;
     result.terminals = total_terminals;
     result.collisions = total_collisions;
+    result.tt_stop_hits = total_tt_stop_hits;
     Ok(result)
 }
 
@@ -681,6 +687,9 @@ enum NodeKind {
     NeedsEval { game_state: GameState },
     /// Terminal node. Can have multivisit > 1.
     Terminal,
+    /// First-hit transposition stop. Edge has no visits but child has aggregate
+    /// from other parents. Values read from leaf at processing time.
+    TranspositionHit,
 }
 
 /// A single entry from the batch gather phase.
@@ -739,17 +748,25 @@ fn pick_nodes_to_extend(
                 shared_collisions.push(SharedCollision { path: Vec::new(), multivisit: budget });
             }
         } else {
-            // Terminal root: backup with multivisit.
+            // Terminal root: one real visit + rest as collisions (LC0 pattern).
+            // Every pick does one real visit, matching dag_classic's
+            // ShouldStopPickingHere + TryStartScoreUpdate path.
             if root_low.total_visits() == 0 {
                 populate_node(&root, None);
             }
-            root.get_mut().increment_n_in_flight(budget);
+            root.get_mut().increment_n_in_flight(1);
             to_process.push(NodeToProcess {
                 leaf: Arc::clone(&root),
                 path: Vec::new(),
                 kind: NodeKind::Terminal,
-                multivisit: budget,
+                multivisit: 1,
             });
+            if budget > 1 {
+                shared_collisions.push(SharedCollision {
+                    path: Vec::new(),
+                    multivisit: budget - 1,
+                });
+            }
         }
         return (to_process, shared_collisions);
     }
@@ -831,16 +848,45 @@ fn pick_nodes_to_extend(
                 // Interior child: check transposition stopping.
                 let parent_low = level.node.get();
                 let edge_vis = parent_low.edge_visits(i as usize, j as usize);
-                if child.num_parents() > 1 && edge_vis > 0 && edge_vis < child_low.total_visits() {
+                if child.num_parents() > 1
+                    && edge_vis == 0
+                    && child_low.total_visits() > 0
+                {
+                    // First-hit TT stop: edge has no visits but child has
+                    // aggregate from other parents. Stop here, initialize
+                    // edge from child's aggregate during backup.
+                    // Don't increment child's n_in_flight — we're reading,
+                    // not visiting.
+                    to_process.push(NodeToProcess {
+                        leaf: Arc::clone(&child),
+                        path: child_path.clone(),
+                        kind: NodeKind::TranspositionHit,
+                        multivisit: 1,
+                    });
+                    if k > 1 {
+                        shared_collisions.push(SharedCollision {
+                            path: child_path,
+                            multivisit: k - 1,
+                        });
+                    }
+                    work_game.unmake_move(undo);
+                } else if child.num_parents() > 1
+                    && edge_vis > 0
+                    && edge_vis < child_low.total_visits()
+                {
                     // Stale transposition: treat as collision.
-                    shared_collisions.push(SharedCollision { path: child_path, multivisit: k });
+                    shared_collisions.push(SharedCollision {
+                        path: child_path,
+                        multivisit: k,
+                    });
                     work_game.unmake_move(undo);
                 } else {
-                    // Descend with k visits.
+                    // Normal interior: descend with k visits.
                     child.get_mut().increment_n_in_flight(k);
                     undos.push(undo);
                     path_prefix = child_path;
-                    let child_level = build_gather_level(&child, k, config, false, rng);
+                    let child_level =
+                        build_gather_level(&child, k, config, false, rng);
                     levels.push(child_level);
                     found_child = true;
                     break;
@@ -938,6 +984,78 @@ fn backup_and_finalize(
     }
 }
 
+/// Back up a transposition stop: initialize the new edge from the shared
+/// child's existing aggregate without incrementing the child's visit count.
+///
+/// Same path walk as `backup_and_finalize` but skips leaf finalization.
+/// Reads v1/v2 from the leaf at processing time (not gather time).
+fn backup_transposition_stop(
+    path: &[PathEntry],
+    leaf: &SharedNode,
+    multivisit: u32,
+) {
+    // Read the leaf's current aggregate — not frozen at gather time.
+    let mut v1 = leaf.get().v1();
+    let mut v2 = leaf.get().v2();
+    let mut n_to_fix: u32 = 0;
+    let mut v1_delta: f32 = 0.0;
+    let mut v2_delta: f32 = 0.0;
+
+    for entry in path.iter().rev() {
+        let i = entry.p1_outcome as usize;
+        let j = entry.p2_outcome as usize;
+
+        let edge = entry
+            .node
+            .get()
+            .find_child(entry.p1_outcome, entry.p2_outcome)
+            .expect("backup: edge must exist");
+        let r1 = edge.r1();
+        let r2 = edge.r2();
+        let child = Arc::clone(edge.low_node());
+
+        let mut q1 = r1 + v1;
+        let mut q2 = r2 + v2;
+        let mut q1_delta = v1_delta;
+        let mut q2_delta = v2_delta;
+
+        // Delta detection (same as backup_and_finalize).
+        {
+            let child_low = child.get();
+            let parent_low = entry.node.get();
+            let edge_vis = parent_low.edge_visits(i, j);
+
+            if child.num_parents() > 1 || edge_vis < child_low.total_visits() {
+                let correct_q1 = r1 + child_low.v1();
+                let correct_q2 = r2 + child_low.v2();
+                q1_delta = correct_q1 - parent_low.edge_q_p1(i, j);
+                q2_delta = correct_q2 - parent_low.edge_q_p2(i, j);
+                n_to_fix = edge_vis;
+                q1 = correct_q1;
+                q2 = correct_q2;
+            }
+        }
+
+        let node = entry.node.get_mut();
+
+        node.finalize_edge_update_multi(i, j, q1, q2, multivisit);
+        if n_to_fix > 0 {
+            node.adjust_edge_for_terminal(i, j, q1_delta, q2_delta, n_to_fix);
+        }
+        node.finalize_score_update_multi(q1, q2, multivisit);
+        if n_to_fix > 0 {
+            node.adjust_for_terminal(q1_delta, q2_delta, n_to_fix);
+        }
+
+        node.revert_virtual_loss_multi(i, j, multivisit);
+
+        v1 = q1;
+        v2 = q2;
+        v1_delta = q1_delta;
+        v2_delta = q2_delta;
+    }
+}
+
 // ---------------------------------------------------------------------------
 // cancel_shared_collisions — revert VL for unused visits
 // ---------------------------------------------------------------------------
@@ -979,6 +1097,55 @@ fn calculate_collisions_left(tree_node_count: u32, config: &SearchConfig) -> u32
 }
 
 // ---------------------------------------------------------------------------
+// GatherCleanupGuard — RAII revert of VL/n_in_flight on early exit
+// ---------------------------------------------------------------------------
+
+/// Drop guard that reverts virtual loss and n_in_flight for gathered-but-not-backed-up
+/// entries if simulate_batch exits early (e.g., backend error). Call `disarm()` on
+/// the success path to skip cleanup.
+struct GatherCleanupGuard<'a> {
+    to_process: &'a [NodeToProcess],
+    collisions: &'a [SharedCollision],
+    armed: bool,
+}
+
+impl<'a> GatherCleanupGuard<'a> {
+    fn new(to_process: &'a [NodeToProcess], collisions: &'a [SharedCollision]) -> Self {
+        Self {
+            to_process,
+            collisions,
+            armed: true,
+        }
+    }
+
+    fn disarm(&mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for GatherCleanupGuard<'_> {
+    fn drop(&mut self) {
+        if !self.armed {
+            return;
+        }
+        // Revert each NeedsEval entry: VL on path entries + n_in_flight on path + leaf.
+        for entry in self.to_process {
+            for pe in &entry.path {
+                let low = pe.node.get_mut();
+                low.revert_virtual_loss_multi(
+                    pe.p1_outcome as usize,
+                    pe.p2_outcome as usize,
+                    entry.multivisit,
+                );
+                low.cancel_score_update_multi(entry.multivisit);
+            }
+            entry.leaf.get_mut().cancel_score_update_multi(entry.multivisit);
+        }
+        cancel_shared_collisions(self.collisions);
+    }
+}
+
+// ---------------------------------------------------------------------------
 // simulate_batch — LC0-style gather/eval/backup cycle
 // ---------------------------------------------------------------------------
 
@@ -997,6 +1164,7 @@ fn simulate_batch(
     let mut all_collisions: Vec<SharedCollision> = Vec::new();
     let mut minibatch_size = 0u32;
     let mut terminals = 0u32;
+    let mut tt_stop_hits = 0u32;
 
     // ---- Outer Gather Loop (LC0's GatherMinibatch) ----
     while minibatch_size < batch_size && collisions_left > 0 {
@@ -1009,6 +1177,15 @@ fn simulate_batch(
                 NodeKind::Terminal => {
                     backup_and_finalize(&entry.path, &entry.leaf, 0.0, 0.0, entry.multivisit);
                     terminals += entry.multivisit;
+                    minibatch_size += 1;
+                }
+                NodeKind::TranspositionHit => {
+                    backup_transposition_stop(
+                        &entry.path,
+                        &entry.leaf,
+                        entry.multivisit,
+                    );
+                    tt_stop_hits += entry.multivisit;
                     minibatch_size += 1;
                 }
                 NodeKind::NeedsEval { .. } => {
@@ -1025,6 +1202,9 @@ fn simulate_batch(
     }
 
     let nn_evals = all_to_process.len() as u32;
+
+    // Guard: if evaluate_batch fails, revert all gathered VL/n_in_flight.
+    let mut cleanup_guard = GatherCleanupGuard::new(&all_to_process, &all_collisions);
 
     // ---- Eval Phase: batch NN evaluation ----
     let game_states: Vec<&GameState> = all_to_process
@@ -1059,6 +1239,9 @@ fn simulate_batch(
         }
     }
 
+    // Success: disarm guard before normal collision cancellation.
+    cleanup_guard.disarm();
+
     // ---- Cancel all accumulated shared collisions ----
     cancel_shared_collisions(&all_collisions);
     let total_collisions: u32 = all_collisions.iter().map(|c| c.multivisit).sum();
@@ -1067,6 +1250,7 @@ fn simulate_batch(
         nn_evals,
         terminals,
         collisions: total_collisions,
+        tt_stop_hits,
     })
 }
 
@@ -1103,6 +1287,7 @@ fn extract_result(
         nn_evals: 0,
         terminals: 0,
         collisions: 0,
+        tt_stop_hits: 0,
     }
 }
 
@@ -1666,10 +1851,19 @@ mod tests {
         let mut tree = MCGSTree::new(&game);
         let mut r = rng();
 
-        let result = run_search(&mut tree, &game, &backend, &config, 50, 16, &mut r).unwrap();
+        let n_sims = 50;
+        let result =
+            run_search(&mut tree, &game, &backend, &config, n_sims, 16, &mut r).unwrap();
 
-        // Terminal root: should be detected immediately
-        assert!(result.terminals > 0 || result.total_visits == 0);
+        // Terminal root: one real visit per pick, total = n_sims.
+        // Before fix: quadratic blowup (multivisit=budget per pick, counts as 1).
+        let root_visits = tree.root().get().total_visits();
+        assert_eq!(
+            root_visits, n_sims,
+            "terminal root should have exactly {n_sims} visits, got {root_visits}"
+        );
+        assert_eq!(result.terminals, n_sims);
+        assert_eq!(tree.root().get().n_in_flight(), 0, "root n_in_flight leak");
     }
 
     #[test]
@@ -2968,6 +3162,57 @@ mod tests {
     }
 
     #[test]
+    fn backend_error_reverts_bookkeeping() {
+        let game = open_5x5_game(
+            Coordinates::new(0, 0),
+            Coordinates::new(4, 4),
+            &[Coordinates::new(2, 2), Coordinates::new(1, 1)],
+        );
+        let config = default_config();
+        let mut tree = MCGSTree::new(&game);
+        let mut r = rng();
+
+        // Phase 1: expand the tree just enough that gather descends interior nodes,
+        // but not so much that every leaf is a transposition stop.
+        let _ =
+            run_search(&mut tree, &game, &SmartUniformBackend, &config, 10, 8, &mut r).unwrap();
+
+        // Phase 2: search with failing backend — high budget to ensure NeedsEval.
+        let result = run_search(&mut tree, &game, &FailingBackend, &config, 100, 16, &mut r);
+        assert!(result.is_err());
+
+        // Phase 3: verify the tree is clean — all n_in_flight and edge_in_flight = 0.
+        for &ptr in &walk_dag(tree.root()) {
+            let node_ref = unsafe { &*ptr };
+            let low = node_ref.get();
+            assert_eq!(
+                low.n_in_flight(),
+                0,
+                "n_in_flight={} after backend error",
+                low.n_in_flight()
+            );
+            for i in 0..low.n1() {
+                for j in 0..low.n2() {
+                    assert_eq!(
+                        low.edge_in_flight(i, j),
+                        0,
+                        "edge_in_flight[{i}][{j}]={} after backend error",
+                        low.edge_in_flight(i, j)
+                    );
+                }
+            }
+        }
+
+        // Phase 4: rerun with good backend — tree should be usable.
+        let result2 =
+            run_search(&mut tree, &game, &SmartUniformBackend, &config, 50, 8, &mut r).unwrap();
+        assert!(
+            result2.total_visits > 0,
+            "search after backend error should produce visits"
+        );
+    }
+
+    #[test]
     fn ooo_terminal_fills_batch() {
         // Short game with reachable terminals
         let game = short_game();
@@ -3563,5 +3808,122 @@ mod tests {
         // Collisions should be bounded — not exploding.
         let useful = result.nn_evals + result.terminals;
         assert!(useful > 0, "should have some useful work done");
+    }
+
+    // =====================================================================
+    // Transposition stop tests
+    // =====================================================================
+
+    #[test]
+    fn tt_stop_initializes_edge_from_aggregate() {
+        // Manual DAG: child C has visits via parent A.
+        // Parent B has an edge to C but no visits on it.
+        // backup_transposition_stop should initialize B's edge from C's aggregate
+        // without incrementing C's total_visits.
+        let child_c = Arc::new(SharedNode::new(LowNode::new_shell(
+            [0, 1, 2, 3, 4],
+            [0, 1, 2, 3, 4],
+        )));
+        child_c.get_mut().set_value_scale(5.0);
+
+        // Parent A with edge to C at (0,0), reward (1.0, 0.5).
+        let parent_a = Arc::new(SharedNode::new(LowNode::new_shell(
+            [0, 1, 2, 3, 4],
+            [0, 1, 2, 3, 4],
+        )));
+        parent_a.get_mut().set_value_scale(5.0);
+        parent_a.get_mut().set_prior([0.2; 5], [0.2; 5]);
+        let edge_a = Box::new(Edge::new(Arc::clone(&child_c), (0, 0), 1.0, 0.5));
+        parent_a.get_mut().prepend_child(edge_a);
+
+        // Backup through A to give C some visits.
+        let path_a = vec![PathEntry {
+            node: Arc::clone(&parent_a),
+            p1_outcome: 0,
+            p2_outcome: 0,
+        }];
+        backup(&path_a, &child_c, 2.0, 3.0);
+        assert_eq!(child_c.get().total_visits(), 1);
+        assert!((child_c.get().v1() - 2.0).abs() < 1e-6);
+        assert!((child_c.get().v2() - 3.0).abs() < 1e-6);
+
+        // Parent B with edge to C at (1,2), reward (0.5, 1.0).
+        let parent_b = Arc::new(SharedNode::new(LowNode::new_shell(
+            [0, 1, 2, 3, 4],
+            [0, 1, 2, 3, 4],
+        )));
+        parent_b.get_mut().set_value_scale(5.0);
+        parent_b.get_mut().set_prior([0.2; 5], [0.2; 5]);
+        let edge_b = Box::new(Edge::new(Arc::clone(&child_c), (1, 2), 0.5, 1.0));
+        parent_b.get_mut().prepend_child(edge_b);
+
+        assert_eq!(child_c.num_parents(), 2);
+
+        // B's edge visits = 0, C has visits from A.
+        // This is exactly the first-hit transposition scenario.
+        assert_eq!(parent_b.get().edge_visits(1, 2), 0);
+
+        let child_visits_before = child_c.get().total_visits();
+
+        // Simulate gather: VL + n_in_flight on path entries (but NOT on child).
+        let path_b = vec![PathEntry {
+            node: Arc::clone(&parent_b),
+            p1_outcome: 1,
+            p2_outcome: 2,
+        }];
+        for entry in &path_b {
+            entry.node.get_mut().increment_n_in_flight(1);
+            entry.node.get_mut().add_virtual_loss(
+                entry.p1_outcome as usize,
+                entry.p2_outcome as usize,
+            );
+        }
+
+        // Run backup_transposition_stop through B's path.
+        backup_transposition_stop(&path_b, &child_c, 1);
+
+        // Child C's total_visits should NOT change.
+        assert_eq!(
+            child_c.get().total_visits(),
+            child_visits_before,
+            "transposition stop should not increment child visits"
+        );
+
+        // B's edge should be initialized from C's aggregate.
+        // Expected: edge_q = r + child.v = (0.5+2.0, 1.0+3.0) = (2.5, 4.0).
+        let b_low = parent_b.get();
+        assert_eq!(b_low.edge_visits(1, 2), 1, "B's edge should have 1 visit");
+        assert!(
+            (b_low.edge_q_p1(1, 2) - 2.5).abs() < 1e-5,
+            "B's edge Q p1 = {}, expected 2.5",
+            b_low.edge_q_p1(1, 2)
+        );
+        assert!(
+            (b_low.edge_q_p2(1, 2) - 4.0).abs() < 1e-5,
+            "B's edge Q p2 = {}, expected 4.0",
+            b_low.edge_q_p2(1, 2)
+        );
+    }
+
+    #[test]
+    fn tt_stop_hits_nonzero_on_open_maze() {
+        // Open 5x5 with 2 cheese: transpositions are common (e.g. UP+RIGHT = RIGHT+UP).
+        let game = open_5x5_game(
+            Coordinates::new(2, 2),
+            Coordinates::new(2, 2),
+            &[Coordinates::new(0, 0), Coordinates::new(4, 4)],
+        );
+        let backend = SmartUniformBackend;
+        let config = default_config();
+        let mut tree = MCGSTree::new(&game);
+        let mut r = rng();
+
+        let result =
+            run_search(&mut tree, &game, &backend, &config, 500, 8, &mut r).unwrap();
+
+        assert!(
+            result.tt_stop_hits > 0,
+            "expected transposition stops on open maze, got 0"
+        );
     }
 }

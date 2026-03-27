@@ -100,6 +100,11 @@ impl PyMCGSSearchResult {
         self.inner.collisions
     }
 
+    #[getter]
+    fn tt_stop_hits(&self) -> u32 {
+        self.inner.tt_stop_hits
+    }
+
     fn __repr__(&self) -> String {
         format!(
             "SearchResult(value_p1={:.4}, value_p2={:.4}, total_visits={})",
