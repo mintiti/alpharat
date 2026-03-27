@@ -131,6 +131,7 @@ pub fn find_or_create_child(
 pub struct MCGSTree {
     root: Arc<SharedNode>,
     tt: TranspositionTable,
+    node_count: u32,
 }
 
 impl MCGSTree {
@@ -138,7 +139,7 @@ impl MCGSTree {
     pub fn new(game: &GameState) -> Self {
         let mut tt = TranspositionTable::new();
         let root = create_root_node(game, &mut tt);
-        Self { root, tt }
+        Self { root, tt, node_count: 1 }
     }
 
     pub fn root(&self) -> &Arc<SharedNode> {
@@ -151,6 +152,14 @@ impl MCGSTree {
 
     pub fn tt_mut(&mut self) -> &mut TranspositionTable {
         &mut self.tt
+    }
+
+    pub fn node_count(&self) -> u32 {
+        self.node_count
+    }
+
+    pub fn increment_node_count(&mut self) {
+        self.node_count += 1;
     }
 
     /// Advance the root to the child reached by `(p1_action, p2_action)`.
@@ -198,6 +207,9 @@ impl MCGSTree {
             Some(node) => node,
             None => create_root_node(game, &mut self.tt),
         };
+
+        // Recount after pruning (TT live_count is O(n) but advance_root is infrequent).
+        self.node_count = self.tt.live_count() as u32;
     }
 }
 

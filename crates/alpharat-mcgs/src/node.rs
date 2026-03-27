@@ -183,6 +183,38 @@ impl LowNode {
         self.v2 += n_to_fix as f32 * v2_delta / n;
     }
 
+    /// Multivisit Welford on node aggregate. Equivalent to calling
+    /// `finalize_score_update` `count` times with the same value, but O(1).
+    /// Also decrements n_in_flight (LC0's combined FinalizeScoreUpdate).
+    pub fn finalize_score_update_multi(&mut self, q1: f32, q2: f32, count: u32) {
+        self.total_visits += count;
+        let n = self.total_visits as f32;
+        let w = count as f32;
+        self.v1 += (q1 - self.v1) * w / n;
+        self.v2 += (q2 - self.v2) * w / n;
+        debug_assert!(
+            self.n_in_flight >= count,
+            "finalize_score_update_multi: n_in_flight {} < count {}",
+            self.n_in_flight, count,
+        );
+        self.n_in_flight -= count;
+    }
+
+    /// Increment n_in_flight by count. For path propagation during gather.
+    pub fn increment_n_in_flight(&mut self, count: u32) {
+        self.n_in_flight += count;
+    }
+
+    /// Cancel score update by count. Decrements n_in_flight without touching visits.
+    pub fn cancel_score_update_multi(&mut self, count: u32) {
+        debug_assert!(
+            self.n_in_flight >= count,
+            "cancel_score_update_multi: n_in_flight {} < count {}",
+            self.n_in_flight, count,
+        );
+        self.n_in_flight -= count;
+    }
+
     // --- Per-(i,j) edge matrix ---
 
     /// LC0's FinalizeScoreUpdate on a joint matrix cell.
@@ -194,6 +226,17 @@ impl LowNode {
         let n = self.edge_visits[i][j] as f32;
         self.edge_q_p1[i][j] += (q1 - self.edge_q_p1[i][j]) / n;
         self.edge_q_p2[i][j] += (q2 - self.edge_q_p2[i][j]) / n;
+    }
+
+    /// Multivisit Welford on a joint matrix cell.
+    pub fn finalize_edge_update_multi(&mut self, i: usize, j: usize, q1: f32, q2: f32, count: u32) {
+        debug_assert!(i < self.n1());
+        debug_assert!(j < self.n2());
+        self.edge_visits[i][j] += count;
+        let n = self.edge_visits[i][j] as f32;
+        let w = count as f32;
+        self.edge_q_p1[i][j] += (q1 - self.edge_q_p1[i][j]) * w / n;
+        self.edge_q_p2[i][j] += (q2 - self.edge_q_p2[i][j]) * w / n;
     }
 
     /// LC0's AdjustForTerminal on a joint matrix cell.
@@ -214,6 +257,12 @@ impl LowNode {
         self.edge_in_flight[i][j] += 1;
     }
 
+    pub fn add_virtual_loss_multi(&mut self, i: usize, j: usize, count: u32) {
+        debug_assert!(i < self.n1());
+        debug_assert!(j < self.n2());
+        self.edge_in_flight[i][j] += count;
+    }
+
     pub fn revert_virtual_loss(&mut self, i: usize, j: usize) {
         debug_assert!(i < self.n1());
         debug_assert!(j < self.n2());
@@ -222,6 +271,17 @@ impl LowNode {
             "revert_virtual_loss: edge_in_flight[{i}][{j}] is already 0"
         );
         self.edge_in_flight[i][j] -= 1;
+    }
+
+    pub fn revert_virtual_loss_multi(&mut self, i: usize, j: usize, count: u32) {
+        debug_assert!(i < self.n1());
+        debug_assert!(j < self.n2());
+        debug_assert!(
+            self.edge_in_flight[i][j] >= count,
+            "revert_virtual_loss_multi: edge_in_flight[{i}][{j}] {} < count {count}",
+            self.edge_in_flight[i][j],
+        );
+        self.edge_in_flight[i][j] -= count;
     }
 
     pub fn edge_in_flight(&self, i: usize, j: usize) -> u32 {
@@ -248,6 +308,17 @@ impl LowNode {
             sum += self.edge_in_flight[i][j];
         }
         sum
+    }
+
+    /// Marginal n_started for p1 outcome i: visits + in_flight, summed over j.
+    /// LC0's GetNStarted() equivalent, marginalized for decoupled PUCT.
+    pub fn marginal_n_started_p1(&self, i: usize) -> u32 {
+        self.marginal_visits_p1(i) + self.marginal_in_flight_p1(i)
+    }
+
+    /// Marginal n_started for p2 outcome j: visits + in_flight, summed over i.
+    pub fn marginal_n_started_p2(&self, j: usize) -> u32 {
+        self.marginal_visits_p2(j) + self.marginal_in_flight_p2(j)
     }
 
     // --- Collision detection ---
@@ -1182,5 +1253,104 @@ mod tests {
         // Clone sees same data (same UnsafeCell behind Arc)
         assert_eq!(clone.get().total_visits(), 1);
         assert!((clone.get().v1() - 5.0).abs() < 1e-6);
+    }
+
+    // ---- Multivisit methods ----
+
+    #[test]
+    fn finalize_score_update_multi_matches_repeated_single() {
+        // Single-visit finalize_score_update doesn't touch n_in_flight.
+        // Compare visit counts and values only.
+        let mut single = LowNode::new_shell(OPEN, OPEN);
+        single.set_value_scale(5.0);
+        single.finalize_score_update(2.0, 1.0);
+        single.finalize_score_update(2.0, 1.0);
+        single.finalize_score_update(2.0, 1.0);
+
+        let mut multi = LowNode::new_shell(OPEN, OPEN);
+        multi.set_value_scale(5.0);
+        multi.n_in_flight = 3; // multi version decrements n_in_flight
+        multi.finalize_score_update_multi(2.0, 1.0, 3);
+
+        assert_eq!(single.total_visits(), multi.total_visits());
+        assert!((single.v1() - multi.v1()).abs() < 1e-6);
+        assert!((single.v2() - multi.v2()).abs() < 1e-6);
+        assert_eq!(multi.n_in_flight(), 0);
+    }
+
+    #[test]
+    fn finalize_score_update_multi_mixed_values() {
+        // Multi with count=3 of value 4.0, then single of 2.0
+        let mut low = LowNode::new_shell(OPEN, OPEN);
+        low.n_in_flight = 4;
+        low.finalize_score_update_multi(4.0, 4.0, 3);
+        assert_eq!(low.total_visits(), 3);
+        assert!((low.v1() - 4.0).abs() < 1e-6);
+
+        low.finalize_score_update_multi(2.0, 2.0, 1);
+        // mean(4,4,4,2) = 3.5
+        assert_eq!(low.total_visits(), 4);
+        assert!((low.v1() - 3.5).abs() < 1e-5);
+        assert_eq!(low.n_in_flight(), 0);
+    }
+
+    #[test]
+    fn finalize_edge_update_multi_matches_repeated_single() {
+        let mut single = LowNode::new_shell(OPEN, OPEN);
+        single.finalize_edge_update(1, 2, 3.0, 1.0);
+        single.finalize_edge_update(1, 2, 3.0, 1.0);
+        single.finalize_edge_update(1, 2, 3.0, 1.0);
+
+        let mut multi = LowNode::new_shell(OPEN, OPEN);
+        multi.finalize_edge_update_multi(1, 2, 3.0, 1.0, 3);
+
+        assert_eq!(single.edge_visits(1, 2), multi.edge_visits(1, 2));
+        assert!((single.edge_q_p1(1, 2) - multi.edge_q_p1(1, 2)).abs() < 1e-6);
+        assert!((single.edge_q_p2(1, 2) - multi.edge_q_p2(1, 2)).abs() < 1e-6);
+    }
+
+    #[test]
+    fn virtual_loss_multi_round_trip() {
+        let mut low = LowNode::new_shell(OPEN, OPEN);
+        low.add_virtual_loss_multi(2, 3, 5);
+        assert_eq!(low.edge_in_flight(2, 3), 5);
+        assert_eq!(low.marginal_in_flight_p1(2), 5);
+
+        low.revert_virtual_loss_multi(2, 3, 3);
+        assert_eq!(low.edge_in_flight(2, 3), 2);
+
+        low.revert_virtual_loss_multi(2, 3, 2);
+        assert_eq!(low.edge_in_flight(2, 3), 0);
+    }
+
+    #[test]
+    fn increment_and_cancel_n_in_flight() {
+        let mut low = LowNode::new_shell(OPEN, OPEN);
+        low.increment_n_in_flight(10);
+        assert_eq!(low.n_in_flight(), 10);
+
+        low.cancel_score_update_multi(4);
+        assert_eq!(low.n_in_flight(), 6);
+
+        low.cancel_score_update_multi(6);
+        assert_eq!(low.n_in_flight(), 0);
+    }
+
+    #[test]
+    fn marginal_n_started() {
+        let mut low = LowNode::new_shell(OPEN, OPEN);
+        // 3 visits at (1,0), 2 in-flight at (1,2)
+        low.finalize_edge_update(1, 0, 1.0, 1.0);
+        low.finalize_edge_update(1, 0, 1.0, 1.0);
+        low.finalize_edge_update(1, 0, 1.0, 1.0);
+        low.add_virtual_loss_multi(1, 2, 2);
+
+        // p1 outcome 1: 3 visits + 2 in_flight = 5
+        assert_eq!(low.marginal_n_started_p1(1), 5);
+
+        // p2 outcome 0: 3 visits + 0 in_flight = 3
+        assert_eq!(low.marginal_n_started_p2(0), 3);
+        // p2 outcome 2: 0 visits + 2 in_flight = 2
+        assert_eq!(low.marginal_n_started_p2(2), 2);
     }
 }
