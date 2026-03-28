@@ -132,9 +132,10 @@ pub fn run_search(
         total_terminals += batch.terminals;
         total_collisions += batch.collisions;
         total_tt_stop_hits += batch.tt_stop_hits;
-        // Only count descents that produced useful information (NN evals + terminals).
+        // Count descents that produced useful information.
         // Collisions don't consume the sim budget — they're wasted work.
-        let produced = batch.nn_evals + batch.terminals;
+        // TT stops are productive: they initialize edges from shared aggregates.
+        let produced = batch.nn_evals + batch.terminals + batch.tt_stop_hits;
         remaining = remaining.saturating_sub(produced.max(1));
     }
 
@@ -3924,6 +3925,41 @@ mod tests {
         assert!(
             result.tt_stop_hits > 0,
             "expected transposition stops on open maze, got 0"
+        );
+    }
+
+    #[test]
+    fn tt_stop_hits_consume_sim_budget() {
+        // On a transposition-heavy position, tt_stop_hits should count toward
+        // the sim budget. Without this, the search overshoots n_sims.
+        let game = open_5x5_game(
+            Coordinates::new(2, 2),
+            Coordinates::new(2, 2),
+            &[Coordinates::new(0, 0), Coordinates::new(4, 4)],
+        );
+        let backend = SmartUniformBackend;
+        let config = default_config();
+        let mut tree = MCGSTree::new(&game);
+        let mut r = rng();
+
+        let n_sims = 200;
+        let result =
+            run_search(&mut tree, &game, &backend, &config, n_sims, 8, &mut r).unwrap();
+
+        // Productive work = nn_evals + terminals + tt_stop_hits.
+        let productive = result.nn_evals + result.terminals + result.tt_stop_hits;
+        assert!(
+            productive >= n_sims,
+            "productive work ({productive}) should be >= n_sims ({n_sims})"
+        );
+
+        // Root visits should not wildly overshoot. Allow some slack for
+        // batching (up to one extra batch worth).
+        let max_expected = n_sims + 8;
+        assert!(
+            result.total_visits <= max_expected,
+            "root visits ({}) overshot n_sims ({n_sims}) by more than one batch",
+            result.total_visits
         );
     }
 }

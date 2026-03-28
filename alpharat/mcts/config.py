@@ -138,7 +138,12 @@ class RustMCTSConfig(MCTSConfigBase):
 
 
 class RustMCGSConfig(MCTSConfigBase):
-    """Configuration for the Rust MCGS backend (DAG search with transpositions)."""
+    """Configuration for the Rust MCGS backend (DAG search with transpositions).
+
+    Collision budget uses LC0-style power-law scaling (configured at the Rust
+    binding level via collision_limit_min/max/scaling params). Unlike MCTS,
+    there is no single max_collisions knob.
+    """
 
     backend: Literal["mcgs"] = "mcgs"
     simulations: int = 100
@@ -148,7 +153,6 @@ class RustMCGSConfig(MCTSConfigBase):
     batch_size: int = 8
     noise_epsilon: float = 0.0
     noise_concentration: float = 10.83
-    max_collisions: int = 0
 
     def for_evaluation(self) -> Self:
         """Return a copy with Dirichlet noise disabled."""
@@ -177,7 +181,6 @@ class RustMCGSConfig(MCTSConfigBase):
             batch_size=self.batch_size,
             noise_epsilon=self.noise_epsilon,
             noise_concentration=self.noise_concentration,
-            max_collisions=self.max_collisions,
             predict_fn=predict_fn,
         )
 

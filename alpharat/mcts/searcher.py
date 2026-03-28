@@ -52,7 +52,6 @@ class RustMCGSSearcher:
         batch_size: int = 8,
         noise_epsilon: float = 0.0,
         noise_concentration: float = 10.83,
-        max_collisions: int = 0,
         predict_fn: Callable[..., Any] | None = None,
         seed: int | None = None,
     ) -> None:
@@ -63,7 +62,6 @@ class RustMCGSSearcher:
         self._batch_size = batch_size
         self._noise_epsilon = noise_epsilon
         self._noise_concentration = noise_concentration
-        self._max_collisions = max_collisions
         self._predict_fn = predict_fn
         self._seed = seed
 
