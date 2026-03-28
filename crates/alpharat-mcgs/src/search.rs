@@ -3900,6 +3900,124 @@ mod tests {
     }
 
     #[test]
+    fn tt_stop_stale_edge_corrects_from_aggregate() {
+        // Manual DAG: child C has visits from parent A. Parent B's edge to C
+        // has 1 visit (from the first-hit stop). Then C gets more visits via A,
+        // making B's edge stale (edge_vis < child.total_visits).
+        // A second backup_transposition_stop should correct B's edge Q toward
+        // the new aggregate, without incrementing C's total_visits.
+
+        // -- Setup: shared child C --
+        let child_c = Arc::new(SharedNode::new(LowNode::new_shell(
+            [0, 1, 2, 3, 4],
+            [0, 1, 2, 3, 4],
+        )));
+        child_c.get_mut().set_value_scale(5.0);
+
+        // -- Parent A: edge to C at (0,0), reward (1.0, 0.5) --
+        let parent_a = Arc::new(SharedNode::new(LowNode::new_shell(
+            [0, 1, 2, 3, 4],
+            [0, 1, 2, 3, 4],
+        )));
+        parent_a.get_mut().set_value_scale(5.0);
+        parent_a.get_mut().set_prior([0.2; 5], [0.2; 5]);
+        let edge_a = Box::new(Edge::new(Arc::clone(&child_c), (0, 0), 1.0, 0.5));
+        parent_a.get_mut().prepend_child(edge_a);
+
+        // -- Parent B: edge to C at (1,2), reward (0.5, 1.0) --
+        let parent_b = Arc::new(SharedNode::new(LowNode::new_shell(
+            [0, 1, 2, 3, 4],
+            [0, 1, 2, 3, 4],
+        )));
+        parent_b.get_mut().set_value_scale(5.0);
+        parent_b.get_mut().set_prior([0.2; 5], [0.2; 5]);
+        let edge_b = Box::new(Edge::new(Arc::clone(&child_c), (1, 2), 0.5, 1.0));
+        parent_b.get_mut().prepend_child(edge_b);
+
+        assert_eq!(child_c.num_parents(), 2);
+
+        // -- Step 1: Give C one visit through A with values (2.0, 3.0) --
+        let path_a = vec![PathEntry {
+            node: Arc::clone(&parent_a),
+            p1_outcome: 0,
+            p2_outcome: 0,
+        }];
+        backup(&path_a, &child_c, 2.0, 3.0);
+        assert_eq!(child_c.get().total_visits(), 1);
+
+        // -- Step 2: First-hit TT stop through B (edge_vis == 0) --
+        let path_b = vec![PathEntry {
+            node: Arc::clone(&parent_b),
+            p1_outcome: 1,
+            p2_outcome: 2,
+        }];
+        for entry in &path_b {
+            entry.node.get_mut().increment_n_in_flight(1);
+            entry
+                .node
+                .get_mut()
+                .add_virtual_loss(entry.p1_outcome as usize, entry.p2_outcome as usize);
+        }
+        backup_transposition_stop(&path_b, &child_c, 1);
+
+        // B's edge now has 1 visit, Q = r + child.v = (0.5+2.0, 1.0+3.0) = (2.5, 4.0).
+        assert_eq!(parent_b.get().edge_visits(1, 2), 1);
+        assert!((parent_b.get().edge_q_p1(1, 2) - 2.5).abs() < 1e-5);
+
+        // -- Step 3: C gets more visits through A, shifting C's aggregate --
+        // New values (6.0, 1.0): C.v goes from (2.0, 3.0) to mean(2.0, 6.0) = (4.0, 2.0).
+        backup(&path_a, &child_c, 6.0, 1.0);
+        assert_eq!(child_c.get().total_visits(), 2);
+        assert!((child_c.get().v1() - 4.0).abs() < 1e-5);
+        assert!((child_c.get().v2() - 2.0).abs() < 1e-5);
+
+        // B's edge is now stale: edge_vis(1) < child.total_visits(2).
+        assert!(parent_b.get().edge_visits(1, 2) < child_c.get().total_visits());
+
+        let child_visits_before = child_c.get().total_visits();
+
+        // -- Step 4: Stale TT stop through B --
+        for entry in &path_b {
+            entry.node.get_mut().increment_n_in_flight(1);
+            entry
+                .node
+                .get_mut()
+                .add_virtual_loss(entry.p1_outcome as usize, entry.p2_outcome as usize);
+        }
+        backup_transposition_stop(&path_b, &child_c, 1);
+
+        // Child C's total_visits should NOT change.
+        assert_eq!(
+            child_c.get().total_visits(),
+            child_visits_before,
+            "stale TT stop should not increment child visits"
+        );
+
+        // B's edge should now have 2 visits.
+        assert_eq!(
+            parent_b.get().edge_visits(1, 2),
+            2,
+            "B's edge should have 2 visits after stale stop"
+        );
+
+        // B's edge Q should be corrected toward the new aggregate.
+        // Delta correction: correct_q = r + child.v = (0.5+4.0, 1.0+2.0) = (4.5, 3.0).
+        // n_to_fix = 1 (one prior visit to correct), so the edge gets adjusted
+        // to the correct aggregate-derived value.
+        let b_low = parent_b.get();
+        assert!(
+            (b_low.edge_q_p1(1, 2) - 4.5).abs() < 1e-4,
+            "stale stop should correct edge Q p1 to 4.5, got {}",
+            b_low.edge_q_p1(1, 2)
+        );
+        assert!(
+            (b_low.edge_q_p2(1, 2) - 3.0).abs() < 1e-4,
+            "stale stop should correct edge Q p2 to 3.0, got {}",
+            b_low.edge_q_p2(1, 2)
+        );
+    }
+
+    #[test]
     fn tt_stop_hits_nonzero_on_open_maze() {
         // Open 5x5 with 2 cheese: transpositions are common (e.g. UP+RIGHT = RIGHT+UP).
         let game = open_5x5_game(
