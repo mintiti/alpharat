@@ -850,12 +850,14 @@ fn pick_nodes_to_extend(
                 let parent_low = level.node.get();
                 let edge_vis = parent_low.edge_visits(i as usize, j as usize);
                 if child.num_parents() > 1
-                    && edge_vis == 0
-                    && child_low.total_visits() > 0
+                    && edge_vis < child_low.total_visits()
                 {
-                    // First-hit TT stop: edge has no visits but child has
-                    // aggregate from other parents. Stop here, initialize
-                    // edge from child's aggregate during backup.
+                    // TT stop: edge is behind the shared aggregate.
+                    // Covers both first-hit (edge_vis == 0) and stale
+                    // (edge_vis > 0) cases. One productive stop that
+                    // backs up the child's current aggregate through the
+                    // path, correcting the edge via delta fixup.
+                    // Remaining k-1 visits become collisions.
                     // Don't increment child's n_in_flight — we're reading,
                     // not visiting.
                     to_process.push(NodeToProcess {
@@ -870,16 +872,6 @@ fn pick_nodes_to_extend(
                             multivisit: k - 1,
                         });
                     }
-                    work_game.unmake_move(undo);
-                } else if child.num_parents() > 1
-                    && edge_vis > 0
-                    && edge_vis < child_low.total_visits()
-                {
-                    // Stale transposition: treat as collision.
-                    shared_collisions.push(SharedCollision {
-                        path: child_path,
-                        multivisit: k,
-                    });
                     work_game.unmake_move(undo);
                 } else {
                     // Normal interior: descend with k visits.
@@ -3761,13 +3753,14 @@ mod tests {
 
         let n_sims = 100u32;
         let result = run_search(&mut tree, &game, &backend, &config, n_sims, 8, &mut r).unwrap();
-        let useful = result.nn_evals + result.terminals;
+        let useful = result.nn_evals + result.terminals + result.tt_stop_hits;
 
         // Should produce a meaningful number of useful visits.
         assert!(
             useful >= n_sims / 2,
-            "useful visits ({useful}) should be >= n_sims/2 ({n_sims}/2), collisions={}",
-            result.collisions,
+            "useful visits ({useful}) should be >= n_sims/2 ({n_sims}/2), \
+             nn={}, term={}, tt_stop={}, coll={}",
+            result.nn_evals, result.terminals, result.tt_stop_hits, result.collisions,
         );
         assert!(result.total_visits > 0);
     }
