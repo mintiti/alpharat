@@ -230,6 +230,7 @@ struct RunStats {
     nn_evals: u32,
     terminals: u32,
     collisions: u32,
+    tt_stop_hits: u32,
     tt_entries: Option<usize>,
     tt_live: Option<usize>,
 }
@@ -284,6 +285,7 @@ fn run_mcts(
         nn_evals: r.nn_evals,
         terminals: r.terminals,
         collisions: r.collisions,
+        tt_stop_hits: 0,
         tt_entries: None,
         tt_live: None,
     }
@@ -334,6 +336,7 @@ fn run_mcgs(
         nn_evals: r.nn_evals,
         terminals: r.terminals,
         collisions: r.collisions,
+        tt_stop_hits: r.tt_stop_hits,
         tt_entries: Some(last_tt_entries),
         tt_live: Some(last_tt_live),
     }
@@ -378,17 +381,17 @@ fn format_count(n: Option<usize>) -> String {
 
 fn print_header() {
     println!(
-        "{:<8} {:>8} {:>6} {:>10} {:>8} {:>8} {:>8} {:>8} {:>12} {:>12}",
-        "Grid", "Sims", "Engine", "Sims/s", "Time", "NN%", "Term%", "Coll%", "TT Entries",
-        "TT Live"
+        "{:<8} {:>8} {:>6} {:>10} {:>8} {:>8} {:>8} {:>8} {:>8} {:>12} {:>12}",
+        "Grid", "Sims", "Engine", "Sims/s", "Time", "NN%", "Term%", "Coll%", "TTStop%",
+        "TT Entries", "TT Live"
     );
-    println!("{}", "-".repeat(110));
+    println!("{}", "-".repeat(120));
 }
 
 fn print_row(grid: &str, sims: u32, engine: &str, stats: &RunStats) {
-    let total = stats.nn_evals + stats.terminals + stats.collisions;
+    let total = stats.nn_evals + stats.terminals + stats.collisions + stats.tt_stop_hits;
     println!(
-        "{:<8} {:>8} {:>6} {:>10} {:>7.1}ms {:>8} {:>8} {:>8} {:>12} {:>12}",
+        "{:<8} {:>8} {:>6} {:>10} {:>7.1}ms {:>8} {:>8} {:>8} {:>8} {:>12} {:>12}",
         grid,
         sims,
         engine,
@@ -397,6 +400,7 @@ fn print_row(grid: &str, sims: u32, engine: &str, stats: &RunStats) {
         pct(stats.nn_evals, total),
         pct(stats.terminals, total),
         pct(stats.collisions, total),
+        pct(stats.tt_stop_hits, total),
         format_count(stats.tt_entries),
         format_count(stats.tt_live),
     );
