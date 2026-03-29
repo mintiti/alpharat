@@ -600,16 +600,23 @@ fn pick_nodes_to_extend(
                 shared_collisions.push((root, cur_limit));
             }
         } else {
-            // Terminal root: backup with multivisit.
+            // Terminal root: one productive visit + collisions (LC0 pattern).
+            // Mirrors the unvisited non-terminal root path above.
             if root_node.total_visits() == 0 {
                 populate_node(root, None);
             }
-            unsafe { root.as_mut() }.increment_n_in_flight(cur_limit);
-            to_process.push(NodeToProcess {
-                node: root,
-                kind: NodeKind::Terminal,
-                multivisit: cur_limit,
-            });
+            if unsafe { root.as_mut() }.try_start_score_update() {
+                to_process.push(NodeToProcess {
+                    node: root,
+                    kind: NodeKind::Terminal,
+                    multivisit: 1,
+                });
+                if cur_limit > 1 {
+                    shared_collisions.push((root, cur_limit - 1));
+                }
+            } else {
+                shared_collisions.push((root, cur_limit));
+            }
         }
         return (to_process, shared_collisions);
     }
@@ -861,6 +868,72 @@ fn cancel_shared_collisions(
 }
 
 // ---------------------------------------------------------------------------
+// cancel_leaf_and_path — revert a gathered entry's bookkeeping
+// ---------------------------------------------------------------------------
+
+/// Revert n_in_flight and virtual loss for a gathered leaf entry.
+/// Unlike `cancel_shared_collisions` (which starts from the collision node's
+/// parent because try_start_score_update failed), this includes the leaf node
+/// itself because try_start_score_update succeeded for gathered entries.
+fn cancel_leaf_and_path(leaf: NodePtr, multivisit: u32) {
+    unsafe { leaf.as_mut() }.cancel_score_update(multivisit);
+    let mut current = leaf;
+    while let Some(parent_ptr) = unsafe { current.as_ref() }.parent() {
+        let (a1, a2) = unsafe { current.as_ref() }.parent_outcome();
+        let parent = unsafe { parent_ptr.as_mut() };
+        parent.cancel_score_update(multivisit);
+        parent.p1.edge_mut(a1 as usize).revert_virtual_loss_multi(multivisit);
+        parent.p2.edge_mut(a2 as usize).revert_virtual_loss_multi(multivisit);
+        current = parent_ptr;
+    }
+}
+
+// ---------------------------------------------------------------------------
+// GatherCleanupGuard — RAII revert of VL/n_in_flight on early exit
+// ---------------------------------------------------------------------------
+
+/// Drop guard that reverts virtual loss and n_in_flight for gathered-but-not-
+/// backed-up entries if simulate_batch exits early (e.g., backend error).
+/// Call `disarm()` on the success path to skip cleanup.
+struct GatherCleanupGuard<'a> {
+    to_process: &'a [NodeToProcess],
+    collisions: &'a [(NodePtr, u32)],
+    root: NodePtr,
+    armed: bool,
+}
+
+impl<'a> GatherCleanupGuard<'a> {
+    fn new(
+        to_process: &'a [NodeToProcess],
+        collisions: &'a [(NodePtr, u32)],
+        root: NodePtr,
+    ) -> Self {
+        Self {
+            to_process,
+            collisions,
+            root,
+            armed: true,
+        }
+    }
+
+    fn disarm(&mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for GatherCleanupGuard<'_> {
+    fn drop(&mut self) {
+        if !self.armed {
+            return;
+        }
+        for entry in self.to_process {
+            cancel_leaf_and_path(entry.node, entry.multivisit);
+        }
+        cancel_shared_collisions(self.collisions, self.root);
+    }
+}
+
+// ---------------------------------------------------------------------------
 // simulate_batch — LC0-style gather/eval/backup cycle
 // ---------------------------------------------------------------------------
 
@@ -889,19 +962,13 @@ fn simulate_batch(
         let (to_process, shared_collisions) =
             pick_nodes_to_extend(tree, game, config, budget, rng);
 
-        // Backup terminals immediately, accumulate NN evals.
+        // Accumulate all entries (LC0 pattern: backup happens after eval, not during gather).
         for entry in to_process {
-            match entry.kind {
-                NodeKind::Terminal => {
-                    backup_and_finalize(entry.node, 0.0, 0.0, entry.multivisit);
-                    terminals += entry.multivisit;
-                    minibatch_size += 1;
-                }
-                NodeKind::NeedsEval { .. } => {
-                    minibatch_size += 1;
-                    all_to_process.push(entry);
-                }
+            if let NodeKind::Terminal = &entry.kind {
+                terminals += entry.multivisit;
             }
+            minibatch_size += 1;
+            all_to_process.push(entry);
         }
 
         for &(_, mv) in &shared_collisions {
@@ -910,8 +977,14 @@ fn simulate_batch(
         all_collisions.extend(shared_collisions);
     }
 
-    let nn_evals = all_to_process.len() as u32;
+    let nn_evals = all_to_process
+        .iter()
+        .filter(|e| matches!(e.kind, NodeKind::NeedsEval { .. }))
+        .count() as u32;
     let total_collisions = all_collisions.iter().map(|&(_, mv)| mv).sum::<u32>();
+
+    // Guard: if evaluate_batch fails, revert all gathered VL/n_in_flight.
+    let mut cleanup_guard = GatherCleanupGuard::new(&all_to_process, &all_collisions, root);
 
     // ---- Eval Phase: batch NN evaluation ----
     let game_states: Vec<&GameState> = all_to_process
@@ -928,34 +1001,43 @@ fn simulate_batch(
         backend.evaluate_batch(&game_states)?
     };
 
-    // ---- Backup Phase: NN eval results ----
+    // ---- Backup Phase: NN eval results + terminal values (LC0 pattern) ----
+    // All entries backed up together after eval, matching LC0's DoBackupUpdate.
     let mut eval_idx = 0;
     for entry in &all_to_process {
-        if let NodeKind::NeedsEval { .. } = &entry.kind {
-            let eval = &eval_results[eval_idx];
-            eval_idx += 1;
+        match &entry.kind {
+            NodeKind::NeedsEval { .. } => {
+                let eval = &eval_results[eval_idx];
+                eval_idx += 1;
 
-            populate_node(entry.node, Some(eval));
+                populate_node(entry.node, Some(eval));
 
-            if entry.node == root && config.noise_epsilon > 0.0 {
-                let node = unsafe { entry.node.as_mut() };
-                apply_dirichlet_noise(
-                    &mut node.p1,
-                    config.noise_epsilon,
-                    config.noise_concentration,
-                    rng,
-                );
-                apply_dirichlet_noise(
-                    &mut node.p2,
-                    config.noise_epsilon,
-                    config.noise_concentration,
-                    rng,
-                );
+                if entry.node == root && config.noise_epsilon > 0.0 {
+                    let node = unsafe { entry.node.as_mut() };
+                    apply_dirichlet_noise(
+                        &mut node.p1,
+                        config.noise_epsilon,
+                        config.noise_concentration,
+                        rng,
+                    );
+                    apply_dirichlet_noise(
+                        &mut node.p2,
+                        config.noise_epsilon,
+                        config.noise_concentration,
+                        rng,
+                    );
+                }
+
+                backup_and_finalize(entry.node, eval.value_p1, eval.value_p2, entry.multivisit);
             }
-
-            backup_and_finalize(entry.node, eval.value_p1, eval.value_p2, entry.multivisit);
+            NodeKind::Terminal => {
+                backup_and_finalize(entry.node, 0.0, 0.0, entry.multivisit);
+            }
         }
     }
+
+    // Success: disarm guard before normal collision cancellation.
+    cleanup_guard.disarm();
 
     // ---- Cancel all accumulated shared collisions (LC0 pattern) ----
     // Virtual losses from collisions persisted through gather+backup.
@@ -3468,5 +3550,121 @@ mod tests {
                 );
             }
         });
+    }
+
+    // ---- LC0-parity regression tests ----
+
+    /// Assert all nodes and edges have n_in_flight == 0.
+    fn assert_tree_clean(root: NodePtr) {
+        let mut node_index = 0usize;
+        walk_tree(root, &mut |node| {
+            let i = node_index;
+            node_index += 1;
+
+            assert_eq!(
+                node.n_in_flight(),
+                0,
+                "Node {i}: n_in_flight should be 0, got {}",
+                node.n_in_flight()
+            );
+            for j in 0..node.p1.n_outcomes() {
+                assert_eq!(
+                    node.p1.edge(j).n_in_flight(),
+                    0,
+                    "Node {i} P1 edge {j}: n_in_flight should be 0"
+                );
+            }
+            for j in 0..node.p2.n_outcomes() {
+                assert_eq!(
+                    node.p2.edge(j).n_in_flight(),
+                    0,
+                    "Node {i} P2 edge {j}: n_in_flight should be 0"
+                );
+            }
+        });
+    }
+
+    // Fix 1: terminal root produces exactly 1 visit per batch, not O(batch²).
+    #[test]
+    fn terminal_root_exact_accounting() {
+        let game = test_util::terminal_game();
+        let mut tree = MCTSTree::new(&game);
+        let config = default_config();
+        let mut r = search_rng();
+
+        let result = run_search(&mut tree, &game, &BACKEND, &config, 100, 16, &mut r).unwrap();
+
+        assert_eq!(
+            result.total_visits, 100,
+            "Terminal root: expected exactly 100 visits, got {}",
+            result.total_visits
+        );
+        assert_eq!(
+            result.terminals, 100,
+            "Terminal root: expected exactly 100 terminals, got {}",
+            result.terminals
+        );
+        assert_eq!(
+            result.nn_evals, 0,
+            "Terminal root: expected 0 nn_evals, got {}",
+            result.nn_evals
+        );
+        assert!(
+            result.collisions > 0,
+            "Terminal root: expected collisions > 0 (collision budget drains), got 0"
+        );
+    }
+
+    // Fix 2: backend error on a warm tree leaves all n_in_flight and edge VL clean.
+    #[test]
+    fn backend_error_cleanup_warm_tree() {
+        let game = test_util::short_game();
+        let mut tree = MCTSTree::new(&game);
+        let config = default_config();
+        let mut r = search_rng();
+
+        // Warm the tree: build depth so the failing batch exercises interior paths.
+        let _ = run_search(&mut tree, &game, &BACKEND, &config, 20, 4, &mut r).unwrap();
+
+        // Now fail on a batch with the warm tree.
+        let result = simulate_batch(&mut tree, &game, &FailingBackend, &config, 8, &mut r);
+        assert!(result.is_err(), "FailingBackend should return an error");
+
+        // Every node and edge must have n_in_flight == 0.
+        assert_tree_clean(tree.root());
+    }
+
+    // Fix 3: deferred terminal backup — visit accounting proves terminals go
+    // through the common backup phase exactly once.
+    #[test]
+    fn deferred_terminal_backup_visit_accounting() {
+        let game = test_util::short_game();
+        let mut tree = MCTSTree::new(&game);
+        let config = default_config();
+        let mut r = search_rng();
+
+        // Warm the tree: terminals appear at depth 3 in short_game.
+        let _ = run_search(&mut tree, &game, &BACKEND, &config, 20, 4, &mut r).unwrap();
+
+        let pre_visits = unsafe { tree.root().as_ref() }.total_visits();
+
+        let stats = simulate_batch(&mut tree, &game, &BACKEND, &config, 8, &mut r).unwrap();
+
+        assert!(
+            stats.terminals > 0,
+            "Expected terminals > 0 on warm short_game tree, got 0"
+        );
+
+        let post_visits = unsafe { tree.root().as_ref() }.total_visits();
+        assert_eq!(
+            post_visits,
+            pre_visits + stats.nn_evals + stats.terminals,
+            "Visit accounting: post ({post_visits}) != pre ({pre_visits}) + nn ({}) + term ({})",
+            stats.nn_evals,
+            stats.terminals,
+        );
+
+        // All n_in_flight and edge VL must be clean after a successful batch.
+        assert_tree_clean(tree.root());
     }
 }
