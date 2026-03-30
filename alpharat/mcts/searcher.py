@@ -49,7 +49,11 @@ class RustSearcher:
         batch_size: int = 8,
         noise_epsilon: float = 0.0,
         noise_concentration: float = 10.83,
-        max_collisions: int = 0,
+        collision_limit_min: int = 1,
+        collision_limit_max: int = 256,
+        collision_scaling_start: int = 800,
+        collision_scaling_end: int = 50_000,
+        collision_scaling_power: float = 1.0,
         predict_fn: Callable[..., Any] | None = None,
         seed: int | None = None,
     ) -> None:
@@ -60,7 +64,11 @@ class RustSearcher:
         self._batch_size = batch_size
         self._noise_epsilon = noise_epsilon
         self._noise_concentration = noise_concentration
-        self._max_collisions = max_collisions
+        self._collision_limit_min = collision_limit_min
+        self._collision_limit_max = collision_limit_max
+        self._collision_scaling_start = collision_scaling_start
+        self._collision_scaling_end = collision_scaling_end
+        self._collision_scaling_power = collision_scaling_power
         self._predict_fn = predict_fn
         self._seed = seed
 
@@ -78,7 +86,11 @@ class RustSearcher:
             force_k=self._force_k,
             noise_epsilon=self._noise_epsilon,
             noise_concentration=self._noise_concentration,
-            max_collisions=self._max_collisions,
+            collision_limit_min=self._collision_limit_min,
+            collision_limit_max=self._collision_limit_max,
+            collision_scaling_start=self._collision_scaling_start,
+            collision_scaling_end=self._collision_scaling_end,
+            collision_scaling_power=self._collision_scaling_power,
             seed=self._seed,
         )
 
