@@ -2,7 +2,7 @@ use rand::Rng;
 use rand_distr::Gamma;
 
 use crate::backend::{Backend, BackendError};
-use crate::node::{HalfNode, Node, NodePtr};
+use crate::node::{HalfEdge, HalfNode, Node, NodePtr};
 use crate::tree::{compute_rewards, find_or_extend_child, populate_node, MCTSTree};
 use pyrat::{Direction, GameState};
 
@@ -128,6 +128,30 @@ fn compute_fpu(half: &HalfNode, node_value: f32, value_scale: f32, fpu_reduction
 }
 
 // ---------------------------------------------------------------------------
+// puct_score — shared PUCT score computation
+// ---------------------------------------------------------------------------
+
+/// PUCT score for a single outcome: Q (or FPU) normalized by value_scale,
+/// plus exploration bonus. Returns `(score, q_norm)` so callers that need
+/// the raw utility (e.g. `estimated_visits_to_change_best_half`) don't
+/// recompute it.
+#[inline]
+fn puct_score(
+    edge: &HalfEdge,
+    prior: f32,
+    fpu: f32,
+    value_scale: f32,
+    c_puct: f32,
+    sqrt_total: f32,
+    nstarted: f32,
+) -> (f32, f32) {
+    let q = if edge.visits > 0 { edge.q } else { fpu };
+    let q_norm = q / value_scale;
+    let exploration = c_puct * prior * sqrt_total / (1.0 + nstarted);
+    (q_norm + exploration, q_norm)
+}
+
+// ---------------------------------------------------------------------------
 // select_actions
 // ---------------------------------------------------------------------------
 
@@ -172,13 +196,9 @@ fn select_half(
     argmax_tiebreak(n, rng, |i| {
         let edge = half.edge(i);
         let prior = half.prior(i);
+        let nstarted = edge.visits as f32 + edge.n_in_flight() as f32;
 
-        let q = if edge.visits > 0 { edge.q } else { fpu };
-        let q_norm = q / value_scale;
-
-        let exploration =
-            config.c_puct * prior * sqrt_total / (1.0 + edge.visits as f32 + edge.n_in_flight() as f32);
-        let mut score = q_norm + exploration;
+        let (mut score, _) = puct_score(edge, prior, fpu, value_scale, config.c_puct, sqrt_total, nstarted);
 
         // Forced playouts: at root, boost undervisited outcomes.
         if is_root && config.force_k > 0.0 && prior > 0.0 {
@@ -468,10 +488,7 @@ fn estimated_visits_to_change_best_half(
     for i in 0..n {
         let edge = half.edge(i);
         let prior = half.prior(i);
-        let q = if edge.visits > 0 { edge.q } else { fpu };
-        let q_norm = q / value_scale;
-        let exploration = c_puct * prior * sqrt_total / (1.0 + nstarted[i] as f32);
-        let mut score = q_norm + exploration;
+        let (mut score, q_norm) = puct_score(edge, prior, fpu, value_scale, c_puct, sqrt_total, nstarted[i] as f32);
 
         if is_root && config.force_k > 0.0 && prior > 0.0 {
             let threshold = (config.force_k * prior * children_visits as f32).sqrt();
@@ -498,10 +515,7 @@ fn estimated_visits_to_change_best_half(
         }
         let edge = half.edge(i);
         let prior = half.prior(i);
-        let q = if edge.visits > 0 { edge.q } else { fpu };
-        let q_norm = q / value_scale;
-        let exploration = c_puct * prior * sqrt_total / (1.0 + nstarted[i] as f32);
-        let mut score = q_norm + exploration;
+        let (mut score, q_norm) = puct_score(edge, prior, fpu, value_scale, c_puct, sqrt_total, nstarted[i] as f32);
         if is_root && config.force_k > 0.0 && prior > 0.0 {
             let threshold = (config.force_k * prior * children_visits as f32).sqrt();
             if (edge.visits as f32) < threshold {
@@ -740,7 +754,9 @@ fn build_gather_level(
     let v1 = node_ref.v1();
     let v2 = node_ref.v2();
 
-    // Initialize nstarted from current edge state.
+    // Initialize nstarted from current edge state. Snapshot originals so the
+    // delta computation below doesn't need to re-read through node_ref
+    // (which would alias the later &mut).
     let mut ns_p1 = [0u32; 5];
     let mut ns_p2 = [0u32; 5];
     for i in 0..n1 {
@@ -749,6 +765,8 @@ fn build_gather_level(
     for j in 0..n2 {
         ns_p2[j] = node_ref.p2.edge(j).n_started();
     }
+    let orig_ns_p1 = ns_p1;
+    let orig_ns_p2 = ns_p2;
 
     let mut vtp = [0u32; 25];
     let mut remaining = cur_limit;
@@ -756,12 +774,14 @@ fn build_gather_level(
 
     while remaining > 0 {
         // Select best outcome for each player.
+        // children_visits is frozen for the loop (LC0 computes puct_mult once
+        // before the allocation loop). Per-edge nstarted tracks allocated visits.
         let (best1, vtcb1) = estimated_visits_to_change_best_half(
-            &node_ref.p1, v1, value_scale, children_visits + (cur_limit - remaining),
+            &node_ref.p1, v1, value_scale, children_visits,
             config, is_root, &ns_p1, rng,
         );
         let (best2, vtcb2) = estimated_visits_to_change_best_half(
-            &node_ref.p2, v2, value_scale, children_visits + (cur_limit - remaining),
+            &node_ref.p2, v2, value_scale, children_visits,
             config, is_root, &ns_p2, rng,
         );
 
@@ -778,15 +798,16 @@ fn build_gather_level(
     }
 
     // Apply edge virtual loss: compute delta per edge and write back.
+    // node_ref is not used past this point — safe to create &mut.
     let node_mut = unsafe { node.as_mut() };
     for i in 0..n1 {
-        let delta = ns_p1[i] - node_ref.p1.edge(i).n_started();
+        let delta = ns_p1[i] - orig_ns_p1[i];
         if delta > 0 {
             node_mut.p1.edge_mut(i).add_virtual_loss_multi(delta);
         }
     }
     for j in 0..n2 {
-        let delta = ns_p2[j] - node_ref.p2.edge(j).n_started();
+        let delta = ns_p2[j] - orig_ns_p2[j];
         if delta > 0 {
             node_mut.p2.edge_mut(j).add_virtual_loss_multi(delta);
         }
@@ -3550,6 +3571,87 @@ mod tests {
                 );
             }
         });
+    }
+
+    // ---- calculate_collisions_left ----
+
+    #[test]
+    fn collisions_left_below_start_returns_min() {
+        let config = SearchConfig {
+            collision_limit_min: 2,
+            collision_limit_max: 128,
+            collision_scaling_start: 800,
+            collision_scaling_end: 50_000,
+            collision_scaling_power: 1.0,
+            ..SearchConfig::default()
+        };
+        assert_eq!(calculate_collisions_left(0, &config), 2);
+        assert_eq!(calculate_collisions_left(799, &config), 2);
+        assert_eq!(calculate_collisions_left(800, &config), 2); // at start boundary
+    }
+
+    #[test]
+    fn collisions_left_above_end_returns_max() {
+        let config = SearchConfig {
+            collision_limit_min: 2,
+            collision_limit_max: 128,
+            collision_scaling_start: 800,
+            collision_scaling_end: 50_000,
+            collision_scaling_power: 1.0,
+            ..SearchConfig::default()
+        };
+        assert_eq!(calculate_collisions_left(50_000, &config), 128);
+        assert_eq!(calculate_collisions_left(100_000, &config), 128);
+    }
+
+    #[test]
+    fn collisions_left_interpolates_linearly() {
+        let config = SearchConfig {
+            collision_limit_min: 0,
+            collision_limit_max: 100,
+            collision_scaling_start: 0,
+            collision_scaling_end: 100,
+            collision_scaling_power: 1.0,
+            ..SearchConfig::default()
+        };
+        // Linear: ratio=0.5 → scaled=50.
+        assert_eq!(calculate_collisions_left(50, &config), 50);
+        // ratio=0.25 → scaled=25.
+        assert_eq!(calculate_collisions_left(25, &config), 25);
+    }
+
+    #[test]
+    fn collisions_left_power_law() {
+        let config = SearchConfig {
+            collision_limit_min: 0,
+            collision_limit_max: 100,
+            collision_scaling_start: 0,
+            collision_scaling_end: 100,
+            collision_scaling_power: 2.0,
+            ..SearchConfig::default()
+        };
+        // ratio=0.5, power=2.0 → 0.5^2 = 0.25 → scaled=25.
+        assert_eq!(calculate_collisions_left(50, &config), 25);
+        // ratio=1.0 → 1.0^2 = 1.0 → scaled=100 (at boundary, returns max).
+        assert_eq!(calculate_collisions_left(100, &config), 100);
+    }
+
+    #[test]
+    fn collisions_left_equal_start_end() {
+        // Edge case: start == end. All node counts <= start return min,
+        // all >= end return max. Since start == end, everything returns one
+        // of the two.
+        let config = SearchConfig {
+            collision_limit_min: 5,
+            collision_limit_max: 200,
+            collision_scaling_start: 1000,
+            collision_scaling_end: 1000,
+            collision_scaling_power: 1.0,
+            ..SearchConfig::default()
+        };
+        assert_eq!(calculate_collisions_left(999, &config), 5);
+        assert_eq!(calculate_collisions_left(1000, &config), 200); // >= end
+        assert_eq!(calculate_collisions_left(1001, &config), 200);
     }
 
     // ---- LC0-parity regression tests ----

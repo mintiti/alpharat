@@ -10,10 +10,7 @@ pub(crate) mod test_util;
 
 pub use backend::{Backend, BackendError, EvalResult, SmartUniformBackend};
 pub use node::{HalfEdge, HalfNode, Node, NodePtr};
-pub use search::{
-    backup, compute_pruned_visits, run_search, select_actions, SearchConfig, SearchPath,
-    SearchResult,
-};
+pub use search::{run_search, SearchConfig, SearchResult};
 pub use tree::{
     compute_rewards, extend_node, find_child, find_or_extend_child, populate_node,
     smart_uniform_prior, MCTSTree,
