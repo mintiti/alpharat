@@ -4,7 +4,7 @@ import numpy as np
 from pyrat_engine.core.game import PyRat
 
 class SearchResult:
-    """Result of an MCTS search: policies and values for both players."""
+    """Result of an MCGS search: policies and values for both players."""
 
     @property
     def policy_p1(self) -> np.ndarray[tuple[int], np.dtype[np.float32]]: ...
@@ -34,9 +34,11 @@ class SearchResult:
     def terminals(self) -> int: ...
     @property
     def collisions(self) -> int: ...
+    @property
+    def tt_stop_hits(self) -> int: ...
     def __repr__(self) -> str: ...
 
-def rust_mcts_search(
+def rust_mcgs_search(
     game: PyRat,
     *,
     predict_fn: Callable[..., tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]] | None = None,

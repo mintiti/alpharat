@@ -7,7 +7,9 @@ MCTSConfig is an alias for RustMCTSConfig.
 from __future__ import annotations
 
 from abc import abstractmethod
-from typing import TYPE_CHECKING, Literal, Self
+from typing import TYPE_CHECKING, Annotated, Literal, Self
+
+from pydantic import Field
 
 from alpharat.config.base import StrictBaseModel
 
@@ -135,4 +137,71 @@ class RustMCTSConfig(MCTSConfigBase):
         )
 
 
-MCTSConfig = RustMCTSConfig
+class RustMCGSConfig(MCTSConfigBase):
+    """Configuration for the Rust MCGS backend (DAG search with transpositions).
+
+    Collision budget uses LC0-style power-law scaling (configured at the Rust
+    binding level via collision_limit_min/max/scaling params). Unlike MCTS,
+    there is no single max_collisions knob.
+    """
+
+    backend: Literal["mcgs"] = "mcgs"
+    simulations: int = 100
+    c_puct: float = 1.5
+    force_k: float = 2.0
+    fpu_reduction: float = 0.2
+    batch_size: int = 8
+    noise_epsilon: float = 0.0
+    noise_concentration: float = 10.83
+
+    def for_evaluation(self) -> Self:
+        """Return a copy with Dirichlet noise disabled."""
+        if self.noise_epsilon == 0.0:
+            return self
+        return self.model_copy(update={"noise_epsilon": 0.0})
+
+    def build_searcher(
+        self,
+        checkpoint: str | None = None,
+        device: str = "cpu",
+    ) -> Searcher:
+        from alpharat.mcts.searcher import RustMCGSSearcher
+
+        predict_fn = None
+        if checkpoint is not None:
+            from alpharat.ai.predict_batch import make_batched_predict_fn
+
+            predict_fn = make_batched_predict_fn(checkpoint, device=device)
+
+        return RustMCGSSearcher(
+            simulations=self.simulations,
+            c_puct=self.c_puct,
+            force_k=self.force_k,
+            fpu_reduction=self.fpu_reduction,
+            batch_size=self.batch_size,
+            noise_epsilon=self.noise_epsilon,
+            noise_concentration=self.noise_concentration,
+            predict_fn=predict_fn,
+        )
+
+    def build_agent(
+        self,
+        checkpoint: str | None = None,
+        temperature: float = 1.0,
+        device: str = "cpu",
+    ) -> Agent:
+        from alpharat.ai.searcher_agent import SearcherAgent
+
+        searcher = self.build_searcher(checkpoint=checkpoint, device=device)
+        return SearcherAgent(
+            searcher=searcher,
+            temperature=temperature,
+            simulations=self.simulations,
+            checkpoint=checkpoint,
+        )
+
+
+MCTSConfig = Annotated[
+    RustMCTSConfig | RustMCGSConfig,
+    Field(discriminator="backend"),
+]

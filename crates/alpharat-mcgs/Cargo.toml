@@ -1,26 +1,26 @@
 [package]
-name = "alpharat-mcts"
+name = "alpharat-mcgs"
 version = "0.1.0"
 edition = "2021"
 
 [lib]
-name = "alpharat_mcts"
-# rlib only (default) — the cdylib lives in alpharat-mcts-python
+name = "alpharat_mcgs"
 
 [dependencies]
 alpharat-eval-core = { path = "../alpharat-eval-core" }
 pyrat = { package = "pyrat-rust", git = "https://github.com/mintiti/pyrat-rust", branch = "main", default-features = false }
 rand = { version = "0.8", features = ["small_rng"] }
 rand_distr = "0.4"
+rustc-hash = "2"
 pyo3 = { version = "0.25", optional = true }
 numpy = { version = "0.25", optional = true }
 
 [dev-dependencies]
 criterion = { version = "0.5", features = ["html_reports"] }
 
-[features]
-python = ["dep:pyo3", "dep:numpy", "pyrat/python"]
-
 [[bench]]
 name = "search"
 harness = false
+
+[features]
+python = ["dep:pyo3", "dep:numpy", "pyrat/python"]

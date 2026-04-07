@@ -184,6 +184,8 @@ def make_mock_search_result(**overrides: Any) -> SearchResult:
         "visit_counts_p2": np.ones(5, dtype=np.float64),
         "prior_p1": np.ones(5, dtype=np.float64) / 5,
         "prior_p2": np.ones(5, dtype=np.float64) / 5,
+        "q_values_p1": np.zeros(5, dtype=np.float64),
+        "q_values_p2": np.zeros(5, dtype=np.float64),
         "total_visits": 5,
     }
     defaults.update(overrides)
@@ -576,6 +578,8 @@ class TestRoundtrip:
             visit_counts_p2=visits_p2.astype(np.float64),
             prior_p1=prior_p1,
             prior_p2=prior_p2,
+            q_values_p1=np.zeros(5, dtype=np.float64),
+            q_values_p2=np.zeros(5, dtype=np.float64),
             total_visits=30,
         )
 
@@ -1021,6 +1025,8 @@ class TestBundleLoading:
                     visit_counts_p2=visits_p2,
                     prior_p1=np.ones(5, dtype=np.float64) / 5,
                     prior_p2=np.ones(5, dtype=np.float64) / 5,
+                    q_values_p1=np.zeros(5, dtype=np.float64),
+                    q_values_p2=np.zeros(5, dtype=np.float64),
                     total_visits=30,
                 )
                 recorder.record_position(game, result, 2, 3)

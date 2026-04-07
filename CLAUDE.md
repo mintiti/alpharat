@@ -56,7 +56,9 @@ alpharat/
 └── experiments/    # Experiment management: ExperimentManager, manifest
 
 crates/
-├── alpharat-mcts/          # Rust MCTS: Backend trait, tree, search
+├── alpharat-eval-core/     # Shared evaluation interface: Backend trait, EvalResult, SmartUniformBackend
+├── alpharat-mcts/          # Rust MCTS: tree search (re-exports eval-core types)
+├── alpharat-mcgs/          # Rust MCGS: DAG search with transposition sharing (WIP)
 ├── alpharat-sampling/      # Self-play pipeline: ONNX/TRT backends, encoder, mux, NPZ writer
 ├── alpharat-mcts-python/   # PyO3 bindings (cdylib), alpharat_sampling Python package
 └── alpharat-bot/           # Standalone PyRat bot (pyrat-sdk, ONNX inference)
@@ -64,6 +66,19 @@ scripts/            # Entry points: rust_sample.py, train.py, iterate.py, benchm
 configs/            # YAML config templates for sampling, training, evaluation
 tests/              # Mirrors alpharat/ structure
 experiments/        # Data folder (NOT in git): batches, shards, runs, benchmarks
+```
+
+### Rust crate dependency graph
+
+`alpharat-eval-core` is the shared interface between search backends. Both `alpharat-mcts` (tree) and `alpharat-mcgs` (DAG) depend on it for `Backend`, `EvalResult`, `BackendError`, and `SmartUniformBackend`. Downstream crates (`alpharat-sampling`, `alpharat-bot`) import these types from `alpharat-mcts`, which re-exports them. This lets both search crates share the same evaluation interface without downstream migration.
+
+```
+alpharat-eval-core          (Backend trait, EvalResult, SmartUniformBackend)
+├── alpharat-mcts           (tree search, re-exports eval-core)
+│   ├── alpharat-sampling   (self-play pipeline, implements Backend for ONNX/TRT)
+│   ├── alpharat-bot        (standalone bot)
+│   └── alpharat-mcts-python (PyO3 bindings)
+└── alpharat-mcgs           (DAG search, WIP)
 ```
 
 ### alpharat/mcts/

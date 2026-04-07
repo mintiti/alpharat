@@ -25,6 +25,90 @@ class Searcher(Protocol):
     def search(self, game: PyRat) -> SearchResult: ...
 
 
+class RustMCGSSearcher:
+    """Wraps Rust MCGS — calls rust_mcgs_search, packages canonical result.
+
+    Same interface as RustSearcher but backed by the MCGS DAG search
+    with transposition sharing.
+
+    Args:
+        simulations: Number of MCGS simulations.
+        c_puct: Exploration constant.
+        force_k: Forced playout coefficient.
+        fpu_reduction: First-play urgency penalty.
+        batch_size: Within-tree batching size.
+        noise_epsilon: Dirichlet noise mixing weight (0 = disabled).
+        noise_concentration: Total Dirichlet concentration (KataGo-style).
+        predict_fn: Optional batched predict_fn for NN priors.
+        seed: Optional RNG seed for deterministic search.
+    """
+
+    def __init__(
+        self,
+        simulations: int,
+        c_puct: float,
+        force_k: float,
+        fpu_reduction: float,
+        batch_size: int = 8,
+        noise_epsilon: float = 0.0,
+        noise_concentration: float = 10.83,
+        predict_fn: Callable[..., Any] | None = None,
+        seed: int | None = None,
+    ) -> None:
+        self._simulations = simulations
+        self._c_puct = c_puct
+        self._force_k = force_k
+        self._fpu_reduction = fpu_reduction
+        self._batch_size = batch_size
+        self._noise_epsilon = noise_epsilon
+        self._noise_concentration = noise_concentration
+        self._predict_fn = predict_fn
+        self._seed = seed
+
+    def search(self, game: PyRat) -> SearchResult:
+        """Run Rust MCGS search on the given game state."""
+        from alpharat_mcgs import rust_mcgs_search
+
+        rust_result = rust_mcgs_search(
+            game,
+            predict_fn=self._predict_fn,
+            simulations=self._simulations,
+            batch_size=self._batch_size,
+            c_puct=self._c_puct,
+            fpu_reduction=self._fpu_reduction,
+            force_k=self._force_k,
+            noise_epsilon=self._noise_epsilon,
+            noise_concentration=self._noise_concentration,
+            seed=self._seed,
+        )
+
+        policy_p1 = np.asarray(rust_result.policy_p1, dtype=np.float64)
+        policy_p2 = np.asarray(rust_result.policy_p2, dtype=np.float64)
+        s1, s2 = policy_p1.sum(), policy_p2.sum()
+        if s1 > 0:
+            policy_p1 /= s1
+        if s2 > 0:
+            policy_p2 /= s2
+
+        return SearchResult(
+            policy_p1=policy_p1,
+            policy_p2=policy_p2,
+            value_p1=float(rust_result.value_p1),
+            value_p2=float(rust_result.value_p2),
+            visit_counts_p1=np.asarray(rust_result.visit_counts_p1, dtype=np.float64),
+            visit_counts_p2=np.asarray(rust_result.visit_counts_p2, dtype=np.float64),
+            prior_p1=np.asarray(rust_result.prior_p1, dtype=np.float64),
+            prior_p2=np.asarray(rust_result.prior_p2, dtype=np.float64),
+            q_values_p1=np.asarray(rust_result.q_values_p1, dtype=np.float64),
+            q_values_p2=np.asarray(rust_result.q_values_p2, dtype=np.float64),
+            total_visits=int(rust_result.total_visits),
+            nn_evals=int(rust_result.nn_evals),
+            collisions=int(rust_result.collisions),
+            terminals=int(rust_result.terminals),
+            tt_stop_hits=int(rust_result.tt_stop_hits),
+        )
+
+
 class RustSearcher:
     """Wraps Rust MCTS — calls rust_mcts_search, packages canonical result.
 
@@ -113,5 +197,10 @@ class RustSearcher:
             visit_counts_p2=np.asarray(rust_result.visit_counts_p2, dtype=np.float64),
             prior_p1=np.asarray(rust_result.prior_p1, dtype=np.float64),
             prior_p2=np.asarray(rust_result.prior_p2, dtype=np.float64),
+            q_values_p1=np.asarray(rust_result.q_values_p1, dtype=np.float64),
+            q_values_p2=np.asarray(rust_result.q_values_p2, dtype=np.float64),
             total_visits=int(rust_result.total_visits),
+            nn_evals=int(rust_result.nn_evals),
+            collisions=int(rust_result.collisions),
+            terminals=int(rust_result.terminals),
         )

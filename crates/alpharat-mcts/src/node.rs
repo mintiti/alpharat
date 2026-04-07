@@ -1,3 +1,4 @@
+use alpharat_eval_core::compute_outcomes;
 use std::ptr::NonNull;
 
 // ---------------------------------------------------------------------------
@@ -238,48 +239,6 @@ impl HalfNode {
         }
         out
     }
-}
-
-// ---------------------------------------------------------------------------
-// compute_outcomes — effective actions → deduplicated outcome mapping
-// ---------------------------------------------------------------------------
-
-/// Given the effective-action array (action → outcome action), compute:
-/// - `outcomes`: sorted unique outcome actions (padded with 0)
-/// - `n_outcomes`: how many unique outcomes
-/// - `action_to_idx`: for each action 0..5, the index into `outcomes`
-fn compute_outcomes(effective: [u8; 5]) -> ([u8; 5], u8, [u8; 5]) {
-    // Collect unique values via a small sorted buffer.
-    let mut unique = [0u8; 5];
-    let mut n = 0u8;
-
-    for &val in &effective {
-        // Insert into sorted position if not already present.
-        let pos = unique[..n as usize].partition_point(|&v| v < val);
-        if pos < n as usize && unique[pos] == val {
-            continue; // already present
-        }
-        // Shift right to make room.
-        let mut i = n as usize;
-        while i > pos {
-            unique[i] = unique[i - 1];
-            i -= 1;
-        }
-        unique[pos] = val;
-        n += 1;
-    }
-
-    // Build reverse map.
-    let mut action_to_idx = [0u8; 5];
-    for action in 0..5 {
-        let outcome = effective[action];
-        // Binary search in the sorted unique array.
-        let idx = unique[..n as usize].partition_point(|&v| v < outcome);
-        debug_assert!(idx < n as usize && unique[idx] == outcome);
-        action_to_idx[action] = idx as u8;
-    }
-
-    (unique, n, action_to_idx)
 }
 
 // ---------------------------------------------------------------------------

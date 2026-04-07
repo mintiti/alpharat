@@ -1,6 +1,6 @@
-//! Python bindings for the Rust MCTS search.
+//! Python bindings for the Rust MCGS search.
 //!
-//! Gated behind the `python` feature. Exposes `register_mcts_module()` for
+//! Gated behind the `python` feature. Exposes `register_mcgs_module()` for
 //! the combined extension crate to call — no `#[pymodule]` here.
 
 use numpy::{PyArray1, PyReadonlyArray1, PyReadonlyArray2};
@@ -9,27 +9,27 @@ use pyo3::types::PyTuple;
 use rand::rngs::SmallRng;
 use rand::SeedableRng;
 
-use crate::backend::{Backend, BackendError, EvalResult, SmartUniformBackend};
 use crate::search::{run_search, SearchConfig, SearchResult};
-use crate::tree::MCTSTree;
+use crate::tree::MCGSTree;
+use crate::{Backend, BackendError, EvalResult, SmartUniformBackend};
 
 use pyrat::{GameBuilder, GameState, PyRat};
 
 // ---------------------------------------------------------------------------
-// PySearchResult
+// PyMCGSSearchResult
 // ---------------------------------------------------------------------------
 
-/// MCTS search result exposed to Python.
+/// MCGS search result exposed to Python.
 ///
 /// Policies are numpy arrays in 5-action space (UP, RIGHT, DOWN, LEFT, STAY).
 /// Blocked actions have probability 0.
 #[pyclass(name = "SearchResult")]
-pub struct PySearchResult {
+pub struct PyMCGSSearchResult {
     inner: SearchResult,
 }
 
 #[pymethods]
-impl PySearchResult {
+impl PyMCGSSearchResult {
     #[getter]
     fn policy_p1<'py>(&self, py: Python<'py>) -> Bound<'py, PyArray1<f32>> {
         PyArray1::from_slice(py, &self.inner.policy_p1)
@@ -100,6 +100,11 @@ impl PySearchResult {
         self.inner.collisions
     }
 
+    #[getter]
+    fn tt_stop_hits(&self) -> u32 {
+        self.inner.tt_stop_hits
+    }
+
     fn __repr__(&self) -> String {
         format!(
             "SearchResult(value_p1={:.4}, value_p2={:.4}, total_visits={})",
@@ -114,24 +119,10 @@ impl PySearchResult {
 
 /// Backend that delegates evaluation to a Python callable.
 ///
-/// The callable signature:
-/// ```python
-/// def predict_fn(games: list[PyRat]) -> tuple[
-///     np.ndarray,  # policy_p1 [N, 5] float32
-///     np.ndarray,  # policy_p2 [N, 5] float32
-///     np.ndarray,  # value_p1  [N]    float32
-///     np.ndarray,  # value_p2  [N]    float32
-/// ]: ...
-/// ```
-///
-/// One GIL acquisition per batch. Within-tree batching amortizes the
-/// Python round-trip cost.
+/// Same interface as the MCTS PyCallbackBackend — the Backend trait is shared.
 struct PyCallbackBackend {
     predict_fn: PyObject,
 }
-
-// Py<PyAny> is Send + Sync, so this is auto-derived.
-// The GIL is acquired inside evaluate_batch when needed.
 
 impl Backend for PyCallbackBackend {
     fn evaluate(&self, game: &GameState) -> Result<EvalResult, BackendError> {
@@ -140,14 +131,10 @@ impl Backend for PyCallbackBackend {
 
     fn evaluate_batch(&self, games: &[&GameState]) -> Result<Vec<EvalResult>, BackendError> {
         Python::with_gil(|py| {
-            // Wrap each GameState as a PyRat Python object.
             let py_games: Vec<Py<PyRat>> = games
                 .iter()
                 .map(|gs| {
                     let game = (*gs).clone();
-                    // Build a lightweight config to satisfy the PyRat wrapper.
-                    // The actual maze/cheese layout lives in the GameState;
-                    // the config is only metadata the wrapper stores.
                     let config = GameBuilder::new(game.width, game.height)
                         .with_max_turns(game.max_turns)
                         .with_open_maze()
@@ -159,7 +146,6 @@ impl Backend for PyCallbackBackend {
                 })
                 .collect();
 
-            // Call predict_fn(list[PyRat]) -> 4-tuple of numpy arrays
             let result = self
                 .predict_fn
                 .call1(py, (py_games,))
@@ -225,10 +211,10 @@ fn parse_eval_results(result: &Bound<'_, PyAny>, n: usize) -> Vec<EvalResult> {
 }
 
 // ---------------------------------------------------------------------------
-// rust_mcts_search
+// rust_mcgs_search
 // ---------------------------------------------------------------------------
 
-/// Run MCTS search on a PyRat game state.
+/// Run MCGS search on a PyRat game state.
 ///
 /// Returns a `SearchResult` with policies and values for both players.
 /// When `predict_fn` is None, uses smart uniform priors (no neural network).
@@ -237,7 +223,7 @@ fn parse_eval_results(result: &Bound<'_, PyAny>, n: usize) -> Vec<EvalResult> {
 /// Without `predict_fn`, the GIL is released for pure Rust computation.
 #[pyfunction]
 #[pyo3(signature = (game, *, predict_fn=None, simulations=100, batch_size=8, c_puct=1.5, fpu_reduction=0.2, force_k=2.0, noise_epsilon=0.0, noise_concentration=10.83, collision_limit_min=1, collision_limit_max=256, collision_scaling_start=800, collision_scaling_end=50000, collision_scaling_power=1.0, seed=None))]
-fn rust_mcts_search(
+fn rust_mcgs_search(
     py: Python<'_>,
     game: PyRef<'_, PyRat>,
     predict_fn: Option<PyObject>,
@@ -254,7 +240,7 @@ fn rust_mcts_search(
     collision_scaling_end: u32,
     collision_scaling_power: f32,
     seed: Option<u64>,
-) -> PyResult<PySearchResult> {
+) -> PyResult<PyMCGSSearchResult> {
     let game_state = game.game_state().clone();
 
     let config = SearchConfig {
@@ -276,10 +262,8 @@ fn rust_mcts_search(
 
     let result = match predict_fn {
         Some(pf) => {
-            // GIL held — PyCallbackBackend re-acquires it internally via
-            // Python::with_gil, which is a no-op when already held.
             let backend = PyCallbackBackend { predict_fn: pf };
-            let mut tree = MCTSTree::new(&game_state);
+            let mut tree = MCGSTree::new(&game_state);
             run_search(
                 &mut tree,
                 &game_state,
@@ -291,9 +275,8 @@ fn rust_mcts_search(
             )
         }
         None => {
-            // GIL released — pure Rust computation.
             py.allow_threads(|| {
-                let mut tree = MCTSTree::new(&game_state);
+                let mut tree = MCGSTree::new(&game_state);
                 run_search(
                     &mut tree,
                     &game_state,
@@ -308,7 +291,7 @@ fn rust_mcts_search(
     };
 
     match result {
-        Ok(r) => Ok(PySearchResult { inner: r }),
+        Ok(r) => Ok(PyMCGSSearchResult { inner: r }),
         Err(e) => Err(pyo3::exceptions::PyRuntimeError::new_err(e.to_string())),
     }
 }
@@ -317,11 +300,11 @@ fn rust_mcts_search(
 // Module registration
 // ---------------------------------------------------------------------------
 
-/// Register MCTS types and functions on the given module.
+/// Register MCGS types and functions on the given module.
 ///
 /// Called by the combined extension crate — not a standalone pymodule.
-pub fn register_mcts_module(m: &Bound<'_, PyModule>) -> PyResult<()> {
-    m.add_function(wrap_pyfunction!(rust_mcts_search, m)?)?;
-    m.add_class::<PySearchResult>()?;
+pub fn register_mcgs_module(m: &Bound<'_, PyModule>) -> PyResult<()> {
+    m.add_function(wrap_pyfunction!(rust_mcgs_search, m)?)?;
+    m.add_class::<PyMCGSSearchResult>()?;
     Ok(())
 }

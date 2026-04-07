@@ -1,0 +1,10 @@
+[package]
+name = "alpharat-eval-core"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+name = "alpharat_eval_core"
+
+[dependencies]
+pyrat = { package = "pyrat-rust", git = "https://github.com/mintiti/pyrat-rust", branch = "main", default-features = false }

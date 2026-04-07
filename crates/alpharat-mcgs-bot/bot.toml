@@ -1,0 +1,10 @@
+[settings]
+name = "AlphaRat-MCGS"
+agent_id = "alpharat/mcgs"
+run_command = "cargo run --release --features onnx-coreml"
+
+[details]
+description = "MCGS with decoupled PUCT search over a DAG with transposition sharing"
+developer = "mintiti"
+language = "Rust"
+tags = ["mcgs", "dag-search", "transpositions", "alphazero", "reinforcement-learning"]

@@ -29,7 +29,13 @@ class SearchResult:
         visit_counts_p2: Pruned visit counts for P2 [5].
         prior_p1: NN/uniform prior at root for P1 [5].
         prior_p2: NN/uniform prior at root for P2 [5].
+        q_values_p1: Per-action Q-values for P1 [5].
+        q_values_p2: Per-action Q-values for P2 [5].
         total_visits: Root visit count after search.
+        nn_evals: Descents that required NN evaluation.
+        terminals: Descents that hit terminal nodes (free).
+        collisions: Descents that collided (wasted).
+        tt_stop_hits: Transposition stops (edge initialized from shared aggregate).
     """
 
     policy_p1: np.ndarray
@@ -40,4 +46,10 @@ class SearchResult:
     visit_counts_p2: np.ndarray
     prior_p1: np.ndarray
     prior_p2: np.ndarray
+    q_values_p1: np.ndarray
+    q_values_p2: np.ndarray
     total_visits: int
+    nn_evals: int = 0
+    collisions: int = 0
+    terminals: int = 0
+    tt_stop_hits: int = 0
