@@ -7,8 +7,8 @@ use pyrat_sdk::{Coordinates, Direction, GameSim};
 pub struct PvLine {
     /// Sequence of moves for the subject player along this line.
     pub moves: Vec<Direction>,
-    /// First cheese the subject player collects along this PV, as (x, y).
-    pub target: Option<(u8, u8)>,
+    /// First cheese the subject player collects along this PV.
+    pub target: Option<Coordinates>,
     /// Marginal Q-value of the root action (expected remaining cheese).
     pub score: f32,
 }
@@ -251,13 +251,13 @@ fn check_edge_reward(
     edge: &Edge,
     is_player1: bool,
     pos: Coordinates,
-    target: &mut Option<(u8, u8)>,
+    target: &mut Option<Coordinates>,
 ) {
     if target.is_some() {
         return;
     }
     let reward = if is_player1 { edge.r1() } else { edge.r2() };
     if reward > 0.0 {
-        *target = Some((pos.x, pos.y));
+        *target = Some(pos);
     }
 }
