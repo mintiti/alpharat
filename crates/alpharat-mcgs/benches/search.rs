@@ -126,7 +126,7 @@ fn bench_search_reuse(c: &mut Criterion) {
                         game.make_move(d1, d2);
 
                         tree.advance_root(&game, a1, a2);
-                        tree.tt_mut().evict_expired();
+                        tree.evict_expired();
 
                         (tree, game, SmallRng::seed_from_u64(123))
                     },

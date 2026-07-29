@@ -24,6 +24,7 @@ impl TranspositionTable {
         }
     }
 
+    #[allow(dead_code)]
     pub fn with_capacity(cap: usize) -> Self {
         Self {
             map: FxHashMap::with_capacity_and_hasher(cap, Default::default()),

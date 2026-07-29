@@ -2,7 +2,9 @@ mod pv;
 
 use std::time::Instant;
 
-use alpharat_mcgs::{run_search, Backend, MCGSTree, SearchConfig, SmartUniformBackend};
+use alpharat_mcgs::{
+    run_search, Backend, MCGSTree, SearchConfig, SearchPlayer, SmartUniformBackend,
+};
 use pyrat_sdk::{
     Bot, Context, DeriveOptions, Direction, GameResult, GameSim, GameState, InfoParams, Player,
 };
@@ -12,7 +14,7 @@ use rand::{Rng, SeedableRng};
 #[cfg(feature = "onnx")]
 use alpharat_sampling::{CachedBackend, ExecutionProvider, FlatEncoder, OnnxBackend};
 
-use pv::{best_p1_outcome_idx, best_p2_outcome_idx, extract_pvs};
+use pv::{best_p1_outcome, best_p2_outcome, extract_pvs};
 
 const MAX_PV_LINES: usize = 3;
 
@@ -124,7 +126,9 @@ impl McgsBot {
             {
                 let tree = self.tree.as_mut().expect("tree not initialized");
                 let sim = self.sim.as_ref().expect("sim not initialized");
-                let visits = tree.root().get().total_edge_visits();
+                let visits = tree.observe(|view| {
+                    view.with_root(|root| root.stats().total_edge_visits)
+                });
                 if visits >= min_sims && ctx.should_stop() {
                     break;
                 }
@@ -149,19 +153,15 @@ impl McgsBot {
             let now = Instant::now();
             let (total, current_best, best_direction) = {
                 let tree = self.tree.as_ref().expect("tree not initialized");
-                let low = tree.root().get();
-                let best = if is_player1 {
-                    best_p1_outcome_idx(low)
-                } else {
-                    best_p2_outcome_idx(low)
-                };
-                let action = if is_player1 {
-                    low.p1_outcome_action(best as usize)
-                } else {
-                    low.p2_outcome_action(best as usize)
-                };
-                let dir = Direction::try_from(action).unwrap_or(Direction::Stay);
-                (low.total_edge_visits(), best, dir)
+                tree.observe(|view| view.with_root(|root| {
+                    let best = if is_player1 {
+                        best_p1_outcome(root)
+                    } else {
+                        best_p2_outcome(root)
+                    };
+                    let dir = Direction::try_from(best.action).unwrap_or(Direction::Stay);
+                    (root.stats().total_edge_visits, best.index, dir)
+                }))
             };
 
             let best_changed = last_info_best != Some(current_best);
@@ -184,7 +184,9 @@ impl McgsBot {
         let now = Instant::now();
         let total = {
             let tree = self.tree.as_ref().expect("tree not initialized");
-            tree.root().get().total_edge_visits()
+            tree.observe(|view| {
+                view.with_root(|root| root.stats().total_edge_visits)
+            })
         };
         let nps = compute_nps(total, nps_start, now);
         self.send_info(ctx, total, nps);
@@ -229,39 +231,35 @@ impl McgsBot {
     /// Extract the best move from the current tree.
     fn pick_move(&mut self) -> Direction {
         let tree = self.tree.as_ref().expect("tree not initialized");
-        let low = tree.root().get();
-
-        if self.argmax {
-            // Deterministic: most-visited outcome, tiebreak by Q then prior.
-            let best_idx = if self.is_player1 {
-                best_p1_outcome_idx(low)
-            } else {
-                best_p2_outcome_idx(low)
-            };
-            let action = if self.is_player1 {
-                low.p1_outcome_action(best_idx as usize)
-            } else {
-                low.p2_outcome_action(best_idx as usize)
-            };
-            Direction::try_from(action).expect("invalid direction from outcome_action")
+        let player = if self.is_player1 {
+            SearchPlayer::Player1
         } else {
-            // Stochastic: sample from visit-proportional distribution.
-            let visits = if self.is_player1 {
-                low.expand_p1_visits()
-            } else {
-                low.expand_p2_visits()
-            };
-            let total: f32 = visits.iter().sum();
-            if total == 0.0 {
-                return Direction::Stay;
-            }
-            let mut policy = [0.0f32; 5];
-            for (i, v) in visits.iter().enumerate() {
-                policy[i] = v / total;
-            }
-            let action = sample_from_policy(&policy, &mut self.rng);
-            Direction::try_from(action as u8).expect("invalid direction")
-        }
+            SearchPlayer::Player2
+        };
+        let argmax = self.argmax;
+        let rng = &mut self.rng;
+
+        tree.observe(|view| {
+            view.with_root(|root| {
+                if argmax {
+                    // Deterministic: most-visited outcome, tiebreak by Q then prior.
+                    let best = if player == SearchPlayer::Player1 {
+                        best_p1_outcome(root)
+                    } else {
+                        best_p2_outcome(root)
+                    };
+                    Direction::try_from(best.action)
+                        .expect("invalid direction from outcome_action")
+                } else {
+                    // Stochastic: sample from visit-proportional distribution.
+                    let Some(policy) = normalize_visit_policy(root.action_visits(player)) else {
+                        return Direction::Stay;
+                    };
+                    let action = sample_from_policy(&policy, rng);
+                    Direction::try_from(action as u8).expect("invalid direction")
+                }
+            })
+        })
     }
 }
 
@@ -326,8 +324,20 @@ fn compute_nps(total_visits: u32, nps_start: Option<Instant>, now: Instant) -> u
     })
 }
 
+fn normalize_visit_policy(visits: [f32; 5]) -> Option<[f32; 5]> {
+    let total: f32 = visits.iter().sum();
+    if total == 0.0 {
+        return None;
+    }
+    let mut policy = [0.0f32; 5];
+    for (index, visits) in visits.into_iter().enumerate() {
+        policy[index] = visits / total;
+    }
+    Some(policy)
+}
+
 /// Weighted random sample from a probability distribution.
-fn sample_from_policy(policy: &[f32; 5], rng: &mut SmallRng) -> usize {
+fn sample_from_policy(policy: &[f32; 5], rng: &mut impl Rng) -> usize {
     let r: f32 = rng.gen();
     let mut cum = 0.0;
     for (i, &p) in policy.iter().enumerate() {
@@ -338,4 +348,25 @@ fn sample_from_policy(policy: &[f32; 5], rng: &mut SmallRng) -> usize {
     }
     // Fallback to last non-zero action.
     policy.iter().rposition(|&p| p > 0.0).unwrap_or(4)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn visit_policy_normalizes_reachable_actions_and_rejects_zero_visits() {
+        let policy = normalize_visit_policy([3.0, 5.0, 0.0, 0.0, 7.0]).unwrap();
+        assert_eq!(policy, [0.2, 1.0 / 3.0, 0.0, 0.0, 7.0 / 15.0]);
+        assert_eq!(normalize_visit_policy([0.0; 5]), None);
+    }
+
+    #[test]
+    fn sampling_never_selects_an_action_outside_policy_support() {
+        let policy = [0.0, 0.25, 0.0, 0.75, 0.0];
+        let mut rng = SmallRng::seed_from_u64(42);
+        for _ in 0..1_000 {
+            assert!(matches!(sample_from_policy(&policy, &mut rng), 1 | 3));
+        }
+    }
 }

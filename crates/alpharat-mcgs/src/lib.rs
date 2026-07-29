@@ -1,16 +1,58 @@
+//! Monte Carlo graph search with a scoped public observation surface.
+//!
+//! The raw DAG and transposition-table implementation types are intentionally
+//! crate-private. These compiler checks protect that boundary:
+//!
+//! ```compile_fail
+//! use alpharat_mcgs::SharedNode;
+//! ```
+//!
+//! ```compile_fail
+//! use alpharat_mcgs::LowNode;
+//! ```
+//!
+//! ```compile_fail
+//! use alpharat_mcgs::Edge;
+//! ```
+//!
+//! ```compile_fail
+//! use alpharat_mcgs::TranspositionTable;
+//! ```
+//!
+//! ```compile_fail
+//! use alpharat_mcgs::node;
+//! ```
+//!
+//! ```compile_fail
+//! let _ = alpharat_mcgs::MCGSTree::root;
+//! ```
+//!
+//! ```compile_fail
+//! let _ = alpharat_mcgs::MCGSTree::tt;
+//! ```
+//!
+//! ```compile_fail
+//! let _ = alpharat_mcgs::MCGSTree::tt_mut;
+//! ```
+
 #[cfg(feature = "python")]
 pub mod bindings;
 pub mod gc;
-pub mod node;
-pub mod search;
-pub mod tree;
-pub mod tt;
+#[cfg_attr(not(test), allow(dead_code))]
+mod node;
+mod observer;
+mod search;
+mod tree;
+#[cfg_attr(not(test), allow(dead_code))]
+mod tt;
 
 pub use alpharat_eval_core::{
     smart_uniform_prior, Backend, BackendError, ConstantValueBackend, EvalResult,
     SmartUniformBackend,
 };
-pub use node::{Edge, HalfEdge, LowNode, SharedNode};
-pub use search::{SearchConfig, SearchResult, run_search};
-pub use tree::{MCGSTree, compute_rewards, find_or_create_child, populate_node};
-pub use tt::TranspositionTable;
+pub use observer::{
+    ChildEdges, EdgeTransition, EdgeView, NodeHandle, NodeStats, NodeView, OutcomeStats, Outcomes,
+    SearchPlayer, TranspositionEviction, TranspositionStats, TreeStats, TreeView,
+};
+pub use search::{run_search, SearchConfig, SearchResult};
+pub use tree::MCGSTree;

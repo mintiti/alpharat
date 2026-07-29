@@ -66,6 +66,7 @@ version = "0.1.0"
 dependencies = [
  "alpharat-mcgs",
  "alpharat-sampling",
+ "pyrat-rust",
  "pyrat-sdk",
  "rand 0.8.5",
 ]
@@ -1088,7 +1089,7 @@ dependencies = [
 [[package]]
 name = "pyrat-bot-api"
 version = "0.1.0"
-source = "git+https://github.com/mintiti/pyrat-rust?branch=main#38c847a5428ecaae12c5bec2113fb93d60892b1e"
+source = "git+https://github.com/mintiti/pyrat-rust?branch=main#ccb8b57f324189850dd28997b62a7707f3be0d7a"
 dependencies = [
  "pyrat-protocol",
  "pyrat-rust",
@@ -1098,7 +1099,7 @@ dependencies = [
 [[package]]
 name = "pyrat-engine-interface"
 version = "0.1.0"
-source = "git+https://github.com/mintiti/pyrat-rust?branch=main#38c847a5428ecaae12c5bec2113fb93d60892b1e"
+source = "git+https://github.com/mintiti/pyrat-rust?branch=main#ccb8b57f324189850dd28997b62a7707f3be0d7a"
 dependencies = [
  "pyrat-rust",
 ]
@@ -1106,7 +1107,7 @@ dependencies = [
 [[package]]
 name = "pyrat-protocol"
 version = "0.1.0"
-source = "git+https://github.com/mintiti/pyrat-rust?branch=main#38c847a5428ecaae12c5bec2113fb93d60892b1e"
+source = "git+https://github.com/mintiti/pyrat-rust?branch=main#ccb8b57f324189850dd28997b62a7707f3be0d7a"
 dependencies = [
  "flatbuffers",
  "pyrat-rust",
@@ -1117,7 +1118,7 @@ dependencies = [
 [[package]]
 name = "pyrat-rust"
 version = "0.2.0"
-source = "git+https://github.com/mintiti/pyrat-rust?branch=main#38c847a5428ecaae12c5bec2113fb93d60892b1e"
+source = "git+https://github.com/mintiti/pyrat-rust?branch=main#ccb8b57f324189850dd28997b62a7707f3be0d7a"
 dependencies = [
  "ndarray 0.16.1",
  "numpy",
@@ -1129,7 +1130,7 @@ dependencies = [
 [[package]]
 name = "pyrat-sdk"
 version = "0.1.0"
-source = "git+https://github.com/mintiti/pyrat-rust?branch=main#38c847a5428ecaae12c5bec2113fb93d60892b1e"
+source = "git+https://github.com/mintiti/pyrat-rust?branch=main#ccb8b57f324189850dd28997b62a7707f3be0d7a"
 dependencies = [
  "flatbuffers",
  "pyrat-bot-api",
@@ -1144,7 +1145,7 @@ dependencies = [
 [[package]]
 name = "pyrat-sdk-derive"
 version = "0.1.0"
-source = "git+https://github.com/mintiti/pyrat-rust?branch=main#38c847a5428ecaae12c5bec2113fb93d60892b1e"
+source = "git+https://github.com/mintiti/pyrat-rust?branch=main#ccb8b57f324189850dd28997b62a7707f3be0d7a"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -1154,7 +1155,7 @@ dependencies = [
 [[package]]
 name = "pyrat-wire"
 version = "0.1.0"
-source = "git+https://github.com/mintiti/pyrat-rust?branch=main#38c847a5428ecaae12c5bec2113fb93d60892b1e"
+source = "git+https://github.com/mintiti/pyrat-rust?branch=main#ccb8b57f324189850dd28997b62a7707f3be0d7a"
 dependencies = [
  "flatbuffers",
  "thiserror",
