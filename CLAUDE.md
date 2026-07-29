@@ -355,7 +355,7 @@ Nodes don't store full game states. The tree owns one PyRat simulator and naviga
 
 The search uses decoupled PUCT (`crates/alpharat-mcts/src/search.rs`): each player selects actions independently via the PUCT formula, maximizing Q + exploration bonus. The final policy is visit-proportional (actions selected proportional to visit counts).
 
-This is theoretically justified because PyRat is approximately constant-sum. In constant-sum games, all Nash equilibria are interchangeable — any combination of equilibrium strategies is also an equilibrium. This means independent per-player optimization (decoupled PUCT) converges to the same solution as joint optimization, without the cost of computing full Nash equilibria.
+Decoupled PUCT is a computationally efficient heuristic. In an exact two-player constant-sum game, independently obtained equilibrium marginals are compatible. That property does not show that this PUCT procedure learns those marginals, so convergence is not assumed. Validate the selector empirically through exploitability diagnostics and end-to-end play.
 
 ### Value Formulation
 
@@ -363,7 +363,7 @@ Values store **expected remaining cheese** for each player:
 - `v1` = expected cheese P1 will collect from this position
 - `v2` = expected cheese P2 will collect from this position
 
-PyRat is approximately **constant-sum** (not zero-sum): P1 + P2 ≈ remaining_cheese. Exact under infinite horizon; approximate under turn limits (wasted moves reduce total collection). This constant-sum property is what justifies the decoupled PUCT approach — see above.
+PyRat can be approximately **constant-sum** in settings where nearly all cheese is collected, but it is not structurally constant-sum. Majority and turn-limit termination can leave cheese uncollected, and the amount depends on play. Treat near-constant-sum behavior as an empirical property of a regime, not an algorithmic guarantee.
 
 ---
 

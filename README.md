@@ -4,7 +4,7 @@ AlphaZero-style MCTS for simultaneous two-player games.
 
 Standard MCTS assumes players take turns. PyRat (the target game here) has both players moving at the same time, which breaks that assumption. This project uses decoupled PUCT selection with scalar value heads and visit-proportional policies.
 
-PyRat is approximately constant-sum (total cheese collected is roughly fixed), which means Nash equilibria are interchangeable — each player can optimize independently without coordination. That's what makes decoupled PUCT work: independent per-player action selection converges to the same result as joint optimization.
+PyRat's score payoff is close to constant-sum in some of the settings measured so far. AlphaRat therefore uses decoupled PUCT as a computationally efficient simultaneous-move heuristic. Constant-sum structure makes independently computed equilibrium strategies compatible; it does not prove that decoupled PUCT finds them. Strategic quality has to be established empirically.
 
 ## Getting started
 
