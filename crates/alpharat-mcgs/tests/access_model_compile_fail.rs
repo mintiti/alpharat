@@ -48,6 +48,22 @@ fn lifetime_misuse_is_rejected_by_the_compiler() {
             "access_model_fail_wrong_tree",
             &["borrowed data escapes", "invariant"],
         ),
+        (
+            "access_model_fail_exclusive_handle_escape",
+            &["lifetime", "borrowed data escapes"],
+        ),
+        (
+            "access_model_fail_exclusive_view_escape",
+            &["does not live long enough", "lifetime may not live long enough"],
+        ),
+        (
+            "access_model_fail_exclusive_alias",
+            &["cannot borrow `access` as mutable", "already borrowed"],
+        ),
+        (
+            "access_model_fail_exclusive_wrong_tree",
+            &["borrowed data escapes", "invariant"],
+        ),
     ] {
         let result = compile(&source, &output_dir.join(cfg), Some(cfg));
         let stderr = String::from_utf8_lossy(&result.stderr);

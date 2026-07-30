@@ -1,10 +1,10 @@
-use std::sync::Arc;
-
 use rand::Rng;
 use rand_distr::Gamma;
 
-use crate::node::SharedNode;
-use crate::tree::{compute_rewards, find_or_create_child, populate_node, MCGSTree};
+use crate::access::ExclusiveAccess;
+use crate::node::LowNode;
+use crate::observer::NodeHandle;
+use crate::tree::{compute_rewards, MCGSTree};
 use crate::{Backend, BackendError};
 use pyrat::{Direction, GameState, MoveUndo};
 
@@ -60,13 +60,13 @@ impl Default for SearchConfig {
 
 /// A single step on the search path.
 #[derive(Clone)]
-struct PathEntry {
-    node: Arc<SharedNode>,
+struct PathEntry<'session> {
+    node: NodeHandle<'session>,
     p1_outcome: u8,
     p2_outcome: u8,
 }
 
-type SearchPath = Vec<PathEntry>;
+type SearchPath<'session> = Vec<PathEntry<'session>>;
 
 /// Result of an MCGS search: policies and values for both players.
 #[derive(Clone, Debug)]
@@ -121,13 +121,42 @@ pub fn run_search(
     batch_size: u32,
     rng: &mut impl Rng,
 ) -> Result<SearchResult, BackendError> {
+    tree.with_exclusive(|mut access| {
+        run_search_exclusive(
+            &mut access,
+            game,
+            backend,
+            config,
+            n_sims,
+            batch_size,
+            rng,
+        )
+    })
+}
+
+fn run_search_exclusive<'session>(
+    access: &mut ExclusiveAccess<'_, 'session>,
+    game: &GameState,
+    backend: &dyn Backend,
+    config: &SearchConfig,
+    n_sims: u32,
+    batch_size: u32,
+    rng: &mut impl Rng,
+) -> Result<SearchResult, BackendError> {
     let mut remaining = n_sims;
     let mut total_nn_evals = 0u32;
     let mut total_terminals = 0u32;
     let mut total_collisions = 0u32;
     let mut total_tt_stop_hits = 0u32;
     while remaining > 0 {
-        let batch = simulate_batch(tree, game, backend, config, remaining.min(batch_size), rng)?;
+        let batch = simulate_batch(
+            access,
+            game,
+            backend,
+            config,
+            remaining.min(batch_size),
+            rng,
+        )?;
         total_nn_evals += batch.nn_evals;
         total_terminals += batch.terminals;
         total_collisions += batch.collisions;
@@ -139,8 +168,8 @@ pub fn run_search(
         remaining = remaining.saturating_sub(produced.max(1));
     }
 
-    let root = Arc::clone(tree.root());
-    let mut result = extract_result(&root, config, rng);
+    let root = access.root();
+    let mut result = extract_result(access, &root, config, rng);
     result.nn_evals = total_nn_evals;
     result.terminals = total_terminals;
     result.collisions = total_collisions;
@@ -156,13 +185,13 @@ pub fn run_search(
 ///
 /// Each player independently picks the outcome with the highest PUCT score.
 /// Q and visits come from marginals over the joint matrix.
+#[cfg(test)]
 fn select_actions(
-    node: &SharedNode,
+    low: &LowNode,
     config: &SearchConfig,
     is_root: bool,
     rng: &mut impl Rng,
 ) -> (u8, u8) {
-    let low = node.get();
     let a1 = select_p1(low, config, is_root, rng);
     let a2 = select_p2(low, config, is_root, rng);
     (a1, a2)
@@ -195,6 +224,7 @@ fn compute_fpu_p2(low: &crate::node::LowNode, config: &SearchConfig) -> f32 {
 }
 
 /// PUCT selection for player 1 — marginalizes over j.
+#[cfg(test)]
 fn select_p1(
     low: &crate::node::LowNode,
     config: &SearchConfig,
@@ -243,6 +273,7 @@ fn select_p1(
 }
 
 /// PUCT selection for player 2 — marginalizes over i.
+#[cfg(test)]
 fn select_p2(
     low: &crate::node::LowNode,
     config: &SearchConfig,
@@ -327,6 +358,7 @@ fn marginal_q_p2(low: &crate::node::LowNode, j: usize) -> f32 {
 }
 
 /// Argmax with reservoir-sampling tie-breaking.
+#[cfg(test)]
 fn argmax_tiebreak(n: usize, rng: &mut impl Rng, score_fn: impl Fn(usize) -> f32) -> u8 {
     let mut best_idx = 0u8;
     let mut best_score = f32::NEG_INFINITY;
@@ -356,8 +388,12 @@ fn argmax_tiebreak(n: usize, rng: &mut impl Rng, score_fn: impl Fn(usize) -> f32
 /// Mix Dirichlet noise into a LowNode's priors for one player.
 ///
 /// Uses KataGo's total-concentration approach: per-move alpha = concentration / n_outcomes.
-fn apply_dirichlet_noise_p1(node: &SharedNode, epsilon: f32, concentration: f32, rng: &mut impl Rng) {
-    let low = node.get_mut();
+fn apply_dirichlet_noise_p1(
+    low: &mut LowNode,
+    epsilon: f32,
+    concentration: f32,
+    rng: &mut impl Rng,
+) {
     let n = low.n1();
     if n <= 1 {
         return;
@@ -386,8 +422,12 @@ fn apply_dirichlet_noise_p1(node: &SharedNode, epsilon: f32, concentration: f32,
     }
 }
 
-fn apply_dirichlet_noise_p2(node: &SharedNode, epsilon: f32, concentration: f32, rng: &mut impl Rng) {
-    let low = node.get_mut();
+fn apply_dirichlet_noise_p2(
+    low: &mut LowNode,
+    epsilon: f32,
+    concentration: f32,
+    rng: &mut impl Rng,
+) {
     let n = low.n2();
     if n <= 1 {
         return;
@@ -607,8 +647,8 @@ fn estimated_visits_to_change_best_p2(
 // ---------------------------------------------------------------------------
 
 /// Gather-phase state for one level of the iterative tree traversal.
-struct GatherLevel {
-    node: Arc<SharedNode>,
+struct GatherLevel<'session> {
+    node: NodeHandle<'session>,
     /// Flat [i * 5 + j] → allocated visits for that (i, j) child.
     vtp: [u32; 25],
     /// Next flat index to process.
@@ -618,25 +658,26 @@ struct GatherLevel {
 }
 
 /// Distribute `cur_limit` visits at `node` using decoupled VTC.
-fn build_gather_level(
-    node: &Arc<SharedNode>,
+fn build_gather_level<'session>(
+    access: &mut ExclusiveAccess<'_, 'session>,
+    node: &NodeHandle<'session>,
     cur_limit: u32,
     config: &SearchConfig,
     is_root: bool,
     rng: &mut impl Rng,
-) -> GatherLevel {
-    let low = node.get();
+) -> GatherLevel<'session> {
+    let low = access.node_mut(node);
     let n1 = low.n1();
     let n2 = low.n2();
 
     // Initialize n_started from current state.
     let mut ns_p1 = [0u32; 5];
     let mut ns_p2 = [0u32; 5];
-    for i in 0..n1 {
-        ns_p1[i] = low.marginal_n_started_p1(i);
+    for (i, started) in ns_p1.iter_mut().enumerate().take(n1) {
+        *started = low.marginal_n_started_p1(i);
     }
-    for j in 0..n2 {
-        ns_p2[j] = low.marginal_n_started_p2(j);
+    for (j, started) in ns_p2.iter_mut().enumerate().take(n2) {
+        *started = low.marginal_n_started_p2(j);
     }
 
     let mut vtp = [0u32; 25];
@@ -644,8 +685,10 @@ fn build_gather_level(
     let mut last_idx = 0usize;
 
     while remaining > 0 {
-        let (best1, vtcb1) = estimated_visits_to_change_best_p1(low, config, is_root, &ns_p1, rng);
-        let (best2, vtcb2) = estimated_visits_to_change_best_p2(low, config, is_root, &ns_p2, rng);
+        let (best1, vtcb1) =
+            estimated_visits_to_change_best_p1(low, config, is_root, &ns_p1, rng);
+        let (best2, vtcb2) =
+            estimated_visits_to_change_best_p2(low, config, is_root, &ns_p2, rng);
 
         let k = remaining.min(vtcb1).min(vtcb2).max(1);
 
@@ -660,18 +703,17 @@ fn build_gather_level(
     }
 
     // Apply edge virtual loss for all allocated visits.
-    let low_mut = node.get_mut();
     for i in 0..n1 {
         for j in 0..n2 {
             let delta = vtp[i * 5 + j];
             if delta > 0 {
-                low_mut.add_virtual_loss_multi(i, j, delta);
+                low.add_virtual_loss_multi(i, j, delta);
             }
         }
     }
 
     GatherLevel {
-        node: Arc::clone(node),
+        node: node.clone(),
         vtp,
         next_idx: 0,
         last_idx,
@@ -694,49 +736,56 @@ enum NodeKind {
 }
 
 /// A single entry from the batch gather phase.
-struct NodeToProcess {
-    leaf: Arc<SharedNode>,
-    path: SearchPath,
+struct NodeToProcess<'session> {
+    leaf: NodeHandle<'session>,
+    path: SearchPath<'session>,
     kind: NodeKind,
     multivisit: u32,
 }
 
 /// A shared collision: path + multivisit to cancel after backup.
-struct SharedCollision {
-    path: SearchPath,
+struct SharedCollision<'session> {
+    path: SearchPath<'session>,
     multivisit: u32,
 }
 
 /// LC0's PickNodesToExtendTask adapted for MCGS DAG with 2-player joint matrix.
-fn pick_nodes_to_extend(
-    tree: &mut MCGSTree,
+fn pick_nodes_to_extend<'session>(
+    access: &mut ExclusiveAccess<'_, 'session>,
     game: &GameState,
     config: &SearchConfig,
     budget: u32,
     rng: &mut impl Rng,
-) -> (Vec<NodeToProcess>, Vec<SharedCollision>) {
-    let root = Arc::clone(tree.root());
-    let mut to_process: Vec<NodeToProcess> = Vec::with_capacity(budget as usize);
-    let mut shared_collisions: Vec<SharedCollision> = Vec::new();
+) -> (
+    Vec<NodeToProcess<'session>>,
+    Vec<SharedCollision<'session>>,
+) {
+    let root = access.root();
+    let mut to_process: Vec<NodeToProcess<'session>> =
+        Vec::with_capacity(budget as usize);
+    let mut shared_collisions: Vec<SharedCollision<'session>> = Vec::new();
     let mut work_game = game.clone();
     let mut undos: Vec<MoveUndo> = Vec::new();
 
-    // Handle root: unvisited or terminal.
-    let root_low = root.get();
-    if root_low.total_visits() == 0 || root_low.is_terminal() {
-        if root_low.total_visits() == 0 && !root_low.is_terminal() {
-            if root.get_mut().try_start_score_update() {
+    // Handle root: copy the decision facts before opening a mutation epoch.
+    let (root_visits, root_terminal) = {
+        let root_low = access.node(&root);
+        (root_low.total_visits(), root_low.is_terminal())
+    };
+    if root_visits == 0 || root_terminal {
+        if root_visits == 0 && !root_terminal {
+            if access.node_mut(&root).try_start_score_update() {
                 if work_game.check_game_over() {
-                    populate_node(&root, None);
+                    access.populate_node(&root, None);
                     to_process.push(NodeToProcess {
-                        leaf: Arc::clone(&root),
+                        leaf: root.clone(),
                         path: Vec::new(),
                         kind: NodeKind::Terminal,
                         multivisit: 1,
                     });
                 } else {
                     to_process.push(NodeToProcess {
-                        leaf: Arc::clone(&root),
+                        leaf: root.clone(),
                         path: Vec::new(),
                         kind: NodeKind::NeedsEval { game_state: work_game.clone() },
                         multivisit: 1,
@@ -752,12 +801,12 @@ fn pick_nodes_to_extend(
             // Terminal root: one real visit + rest as collisions (LC0 pattern).
             // Every pick does one real visit, matching dag_classic's
             // ShouldStopPickingHere + TryStartScoreUpdate path.
-            if root_low.total_visits() == 0 {
-                populate_node(&root, None);
+            if root_visits == 0 {
+                access.populate_node(&root, None);
             }
-            root.get_mut().increment_n_in_flight(1);
+            access.node_mut(&root).increment_n_in_flight(1);
             to_process.push(NodeToProcess {
-                leaf: Arc::clone(&root),
+                leaf: root.clone(),
                 path: Vec::new(),
                 kind: NodeKind::Terminal,
                 multivisit: 1,
@@ -773,11 +822,11 @@ fn pick_nodes_to_extend(
     }
 
     // Root is interior: increment n_in_flight for all visits.
-    root.get_mut().increment_n_in_flight(budget);
+    access.node_mut(&root).increment_n_in_flight(budget);
 
-    let first_level = build_gather_level(&root, budget, config, true, rng);
-    let mut levels: Vec<GatherLevel> = vec![first_level];
-    let mut path_prefix: SearchPath = Vec::new();
+    let first_level = build_gather_level(access, &root, budget, config, true, rng);
+    let mut levels: Vec<GatherLevel<'session>> = vec![first_level];
+    let mut path_prefix: SearchPath<'session> = Vec::new();
 
     while let Some(level) = levels.last_mut() {
         let mut found_child = false;
@@ -792,46 +841,50 @@ fn pick_nodes_to_extend(
             let k = level.vtp[idx];
 
             // Convert outcome indices to canonical actions.
-            let low = level.node.get();
-            let act1 = low.p1_outcome_action(i as usize);
-            let act2 = low.p2_outcome_action(j as usize);
+            let (act1, act2) = {
+                let low = access.node(&level.node);
+                (
+                    low.p1_outcome_action(i as usize),
+                    low.p2_outcome_action(j as usize),
+                )
+            };
             let d1 = Direction::try_from(act1).expect("valid direction");
             let d2 = Direction::try_from(act2).expect("valid direction");
             let scores_before = (work_game.player1_score(), work_game.player2_score());
             let undo = work_game.make_move(d1, d2);
             let (r1, r2) = compute_rewards(&work_game, scores_before);
 
-            let (child, is_new) =
-                find_or_create_child(&level.node, i, j, &work_game, tree.tt_mut(), r1, r2);
-            if is_new {
-                tree.increment_node_count();
-            }
+            let child =
+                access.find_or_create_child(&level.node, i, j, &work_game, r1, r2);
 
             // Build the path to this child.
             let mut child_path = path_prefix.clone();
             child_path.push(PathEntry {
-                node: Arc::clone(&level.node),
+                node: level.node.clone(),
                 p1_outcome: i,
                 p2_outcome: j,
             });
 
-            let child_low = child.get();
-            if child_low.total_visits() == 0 || child_low.is_terminal() {
+            let (child_visits, child_terminal) = {
+                let child_low = access.node(&child);
+                (child_low.total_visits(), child_low.is_terminal())
+            };
+            if child_visits == 0 || child_terminal {
                 // Leaf or terminal.
-                if child.get_mut().try_start_score_update() {
-                    if child_low.is_terminal() || work_game.check_game_over() {
-                        if child_low.total_visits() == 0 {
-                            populate_node(&child, None);
+                if access.node_mut(&child).try_start_score_update() {
+                    if child_terminal || work_game.check_game_over() {
+                        if child_visits == 0 {
+                            access.populate_node(&child, None);
                         }
                         to_process.push(NodeToProcess {
-                            leaf: Arc::clone(&child),
+                            leaf: child.clone(),
                             path: child_path.clone(),
                             kind: NodeKind::Terminal,
                             multivisit: 1,
                         });
                     } else {
                         to_process.push(NodeToProcess {
-                            leaf: Arc::clone(&child),
+                            leaf: child.clone(),
                             path: child_path.clone(),
                             kind: NodeKind::NeedsEval { game_state: work_game.clone() },
                             multivisit: 1,
@@ -847,11 +900,10 @@ fn pick_nodes_to_extend(
                 work_game.unmake_move(undo);
             } else {
                 // Interior child: check transposition stopping.
-                let parent_low = level.node.get();
-                let edge_vis = parent_low.edge_visits(i as usize, j as usize);
-                if child.num_parents() > 1
-                    && edge_vis < child_low.total_visits()
-                {
+                let edge_vis = access
+                    .node(&level.node)
+                    .edge_visits(i as usize, j as usize);
+                if access.num_parents(&child) > 1 && edge_vis < child_visits {
                     // TT stop: edge is behind the shared aggregate.
                     // Covers both first-hit (edge_vis == 0) and stale
                     // (edge_vis > 0) cases. One productive stop that
@@ -861,7 +913,7 @@ fn pick_nodes_to_extend(
                     // Don't increment child's n_in_flight — we're reading,
                     // not visiting.
                     to_process.push(NodeToProcess {
-                        leaf: Arc::clone(&child),
+                        leaf: child.clone(),
                         path: child_path.clone(),
                         kind: NodeKind::TranspositionHit,
                         multivisit: 1,
@@ -875,11 +927,11 @@ fn pick_nodes_to_extend(
                     work_game.unmake_move(undo);
                 } else {
                     // Normal interior: descend with k visits.
-                    child.get_mut().increment_n_in_flight(k);
+                    access.node_mut(&child).increment_n_in_flight(k);
                     undos.push(undo);
                     path_prefix = child_path;
                     let child_level =
-                        build_gather_level(&child, k, config, false, rng);
+                        build_gather_level(access, &child, k, config, false, rng);
                     levels.push(child_level);
                     found_child = true;
                     break;
@@ -906,14 +958,17 @@ fn pick_nodes_to_extend(
 
 /// Walk leaf→root, updating values with multivisit Welford and reverting VL.
 /// Applies delta correction for transposition staleness.
-fn backup_and_finalize(
-    path: &[PathEntry],
-    leaf: &SharedNode,
+fn backup_and_finalize<'session>(
+    access: &mut ExclusiveAccess<'_, 'session>,
+    path: &[PathEntry<'session>],
+    leaf: &NodeHandle<'session>,
     g1: f32,
     g2: f32,
     multivisit: u32,
 ) {
-    leaf.get_mut().finalize_score_update_multi(g1, g2, multivisit);
+    access
+        .node_mut(leaf)
+        .finalize_score_update_multi(g1, g2, multivisit);
 
     let mut v1 = g1;
     let mut v2 = g2;
@@ -925,38 +980,28 @@ fn backup_and_finalize(
         let i = entry.p1_outcome as usize;
         let j = entry.p2_outcome as usize;
 
-        let edge = entry
-            .node
-            .get()
-            .find_child(entry.p1_outcome, entry.p2_outcome)
-            .expect("backup: edge must exist");
-        let r1 = edge.r1();
-        let r2 = edge.r2();
-        let child = Arc::clone(edge.low_node());
+        let snapshot =
+            access.backup_snapshot(&entry.node, entry.p1_outcome, entry.p2_outcome);
 
-        let mut q1 = r1 + v1;
-        let mut q2 = r2 + v2;
+        let mut q1 = snapshot.r1 + v1;
+        let mut q2 = snapshot.r2 + v2;
         let mut q1_delta = v1_delta;
         let mut q2_delta = v2_delta;
 
         // Delta detection (unchanged from Tier 1).
+        if snapshot.child_num_parents > 1
+            || snapshot.edge_visits < snapshot.child_visits
         {
-            let child_low = child.get();
-            let parent_low = entry.node.get();
-            let edge_vis = parent_low.edge_visits(i, j);
-
-            if child.num_parents() > 1 || edge_vis < child_low.total_visits() {
-                let correct_q1 = r1 + child_low.v1();
-                let correct_q2 = r2 + child_low.v2();
-                q1_delta = correct_q1 - parent_low.edge_q_p1(i, j);
-                q2_delta = correct_q2 - parent_low.edge_q_p2(i, j);
-                n_to_fix = edge_vis;
-                q1 = correct_q1;
-                q2 = correct_q2;
-            }
+            let correct_q1 = snapshot.r1 + snapshot.child_v1;
+            let correct_q2 = snapshot.r2 + snapshot.child_v2;
+            q1_delta = correct_q1 - snapshot.edge_q1;
+            q2_delta = correct_q2 - snapshot.edge_q2;
+            n_to_fix = snapshot.edge_visits;
+            q1 = correct_q1;
+            q2 = correct_q2;
         }
 
-        let node = entry.node.get_mut();
+        let node = access.node_mut(&entry.node);
 
         node.finalize_edge_update_multi(i, j, q1, q2, multivisit);
         if n_to_fix > 0 {
@@ -982,14 +1027,17 @@ fn backup_and_finalize(
 ///
 /// Same path walk as `backup_and_finalize` but skips leaf finalization.
 /// Reads v1/v2 from the leaf at processing time (not gather time).
-fn backup_transposition_stop(
-    path: &[PathEntry],
-    leaf: &SharedNode,
+fn backup_transposition_stop<'session>(
+    access: &mut ExclusiveAccess<'_, 'session>,
+    path: &[PathEntry<'session>],
+    leaf: &NodeHandle<'session>,
     multivisit: u32,
 ) {
     // Read the leaf's current aggregate — not frozen at gather time.
-    let mut v1 = leaf.get().v1();
-    let mut v2 = leaf.get().v2();
+    let (mut v1, mut v2) = {
+        let leaf = access.node(leaf);
+        (leaf.v1(), leaf.v2())
+    };
     let mut n_to_fix: u32 = 0;
     let mut v1_delta: f32 = 0.0;
     let mut v2_delta: f32 = 0.0;
@@ -998,38 +1046,28 @@ fn backup_transposition_stop(
         let i = entry.p1_outcome as usize;
         let j = entry.p2_outcome as usize;
 
-        let edge = entry
-            .node
-            .get()
-            .find_child(entry.p1_outcome, entry.p2_outcome)
-            .expect("backup: edge must exist");
-        let r1 = edge.r1();
-        let r2 = edge.r2();
-        let child = Arc::clone(edge.low_node());
+        let snapshot =
+            access.backup_snapshot(&entry.node, entry.p1_outcome, entry.p2_outcome);
 
-        let mut q1 = r1 + v1;
-        let mut q2 = r2 + v2;
+        let mut q1 = snapshot.r1 + v1;
+        let mut q2 = snapshot.r2 + v2;
         let mut q1_delta = v1_delta;
         let mut q2_delta = v2_delta;
 
         // Delta detection (same as backup_and_finalize).
+        if snapshot.child_num_parents > 1
+            || snapshot.edge_visits < snapshot.child_visits
         {
-            let child_low = child.get();
-            let parent_low = entry.node.get();
-            let edge_vis = parent_low.edge_visits(i, j);
-
-            if child.num_parents() > 1 || edge_vis < child_low.total_visits() {
-                let correct_q1 = r1 + child_low.v1();
-                let correct_q2 = r2 + child_low.v2();
-                q1_delta = correct_q1 - parent_low.edge_q_p1(i, j);
-                q2_delta = correct_q2 - parent_low.edge_q_p2(i, j);
-                n_to_fix = edge_vis;
-                q1 = correct_q1;
-                q2 = correct_q2;
-            }
+            let correct_q1 = snapshot.r1 + snapshot.child_v1;
+            let correct_q2 = snapshot.r2 + snapshot.child_v2;
+            q1_delta = correct_q1 - snapshot.edge_q1;
+            q2_delta = correct_q2 - snapshot.edge_q2;
+            n_to_fix = snapshot.edge_visits;
+            q1 = correct_q1;
+            q2 = correct_q2;
         }
 
-        let node = entry.node.get_mut();
+        let node = access.node_mut(&entry.node);
 
         node.finalize_edge_update_multi(i, j, q1, q2, multivisit);
         if n_to_fix > 0 {
@@ -1054,10 +1092,13 @@ fn backup_transposition_stop(
 // ---------------------------------------------------------------------------
 
 /// Walk each collision's stored path, reverting VL and n_in_flight.
-fn cancel_shared_collisions(collisions: &[SharedCollision]) {
+fn cancel_shared_collisions<'session>(
+    access: &mut ExclusiveAccess<'_, 'session>,
+    collisions: &[SharedCollision<'session>],
+) {
     for coll in collisions {
         for entry in &coll.path {
-            let low = entry.node.get_mut();
+            let low = access.node_mut(&entry.node);
             low.revert_virtual_loss_multi(
                 entry.p1_outcome as usize,
                 entry.p2_outcome as usize,
@@ -1096,19 +1137,31 @@ fn calculate_collisions_left(tree_node_count: u32, config: &SearchConfig) -> u32
 /// Drop guard that reverts virtual loss and n_in_flight for gathered-but-not-backed-up
 /// entries if simulate_batch exits early (e.g., backend error). Call `disarm()` on
 /// the success path to skip cleanup.
-struct GatherCleanupGuard<'a> {
-    to_process: &'a [NodeToProcess],
-    collisions: &'a [SharedCollision],
+struct GatherCleanupGuard<'access, 'entries, 'tree, 'session> {
+    access: &'access mut ExclusiveAccess<'tree, 'session>,
+    to_process: &'entries [NodeToProcess<'session>],
+    collisions: &'entries [SharedCollision<'session>],
     armed: bool,
 }
 
-impl<'a> GatherCleanupGuard<'a> {
-    fn new(to_process: &'a [NodeToProcess], collisions: &'a [SharedCollision]) -> Self {
+impl<'access, 'entries, 'tree, 'session>
+    GatherCleanupGuard<'access, 'entries, 'tree, 'session>
+{
+    fn new(
+        access: &'access mut ExclusiveAccess<'tree, 'session>,
+        to_process: &'entries [NodeToProcess<'session>],
+        collisions: &'entries [SharedCollision<'session>],
+    ) -> Self {
         Self {
+            access,
             to_process,
             collisions,
             armed: true,
         }
+    }
+
+    fn access_mut(&mut self) -> &mut ExclusiveAccess<'tree, 'session> {
+        self.access
     }
 
     fn disarm(&mut self) {
@@ -1116,15 +1169,16 @@ impl<'a> GatherCleanupGuard<'a> {
     }
 }
 
-impl Drop for GatherCleanupGuard<'_> {
+impl Drop for GatherCleanupGuard<'_, '_, '_, '_> {
     fn drop(&mut self) {
         if !self.armed {
             return;
         }
+        let access = &mut *self.access;
         // Revert each NeedsEval entry: VL on path entries + n_in_flight on path + leaf.
         for entry in self.to_process {
             for pe in &entry.path {
-                let low = pe.node.get_mut();
+                let low = access.node_mut(&pe.node);
                 low.revert_virtual_loss_multi(
                     pe.p1_outcome as usize,
                     pe.p2_outcome as usize,
@@ -1132,9 +1186,11 @@ impl Drop for GatherCleanupGuard<'_> {
                 );
                 low.cancel_score_update_multi(entry.multivisit);
             }
-            entry.leaf.get_mut().cancel_score_update_multi(entry.multivisit);
+            access
+                .node_mut(&entry.leaf)
+                .cancel_score_update_multi(entry.multivisit);
         }
-        cancel_shared_collisions(self.collisions);
+        cancel_shared_collisions(access, self.collisions);
     }
 }
 
@@ -1142,19 +1198,20 @@ impl Drop for GatherCleanupGuard<'_> {
 // simulate_batch — LC0-style gather/eval/backup cycle
 // ---------------------------------------------------------------------------
 
-fn simulate_batch(
-    tree: &mut MCGSTree,
+fn simulate_batch<'session>(
+    access: &mut ExclusiveAccess<'_, 'session>,
     game: &GameState,
     backend: &dyn Backend,
     config: &SearchConfig,
     batch_size: u32,
     rng: &mut impl Rng,
 ) -> Result<BatchStats, BackendError> {
-    let root = Arc::clone(tree.root());
-    let mut collisions_left = calculate_collisions_left(tree.node_count(), config) as i32;
+    let root = access.root();
+    let mut collisions_left = calculate_collisions_left(access.node_count(), config) as i32;
 
-    let mut all_to_process: Vec<NodeToProcess> = Vec::with_capacity(batch_size as usize);
-    let mut all_collisions: Vec<SharedCollision> = Vec::new();
+    let mut all_to_process: Vec<NodeToProcess<'session>> =
+        Vec::with_capacity(batch_size as usize);
+    let mut all_collisions: Vec<SharedCollision<'session>> = Vec::new();
     let mut minibatch_size = 0u32;
     let mut terminals = 0u32;
     let mut tt_stop_hits = 0u32;
@@ -1163,17 +1220,25 @@ fn simulate_batch(
     while minibatch_size < batch_size && collisions_left > 0 {
         let budget = (collisions_left as u32).min(batch_size - minibatch_size);
         let (to_process, shared_collisions) =
-            pick_nodes_to_extend(tree, game, config, budget, rng);
+            pick_nodes_to_extend(access, game, config, budget, rng);
 
         for entry in to_process {
             match entry.kind {
                 NodeKind::Terminal => {
-                    backup_and_finalize(&entry.path, &entry.leaf, 0.0, 0.0, entry.multivisit);
+                    backup_and_finalize(
+                        access,
+                        &entry.path,
+                        &entry.leaf,
+                        0.0,
+                        0.0,
+                        entry.multivisit,
+                    );
                     terminals += entry.multivisit;
                     minibatch_size += 1;
                 }
                 NodeKind::TranspositionHit => {
                     backup_transposition_stop(
+                        access,
                         &entry.path,
                         &entry.leaf,
                         entry.multivisit,
@@ -1197,7 +1262,8 @@ fn simulate_batch(
     let nn_evals = all_to_process.len() as u32;
 
     // Guard: if evaluate_batch fails, revert all gathered VL/n_in_flight.
-    let mut cleanup_guard = GatherCleanupGuard::new(&all_to_process, &all_collisions);
+    let mut cleanup_guard =
+        GatherCleanupGuard::new(access, &all_to_process, &all_collisions);
 
     // ---- Eval Phase: batch NN evaluation ----
     let game_states: Vec<&GameState> = all_to_process
@@ -1221,22 +1287,45 @@ fn simulate_batch(
             let eval = &eval_results[eval_idx];
             eval_idx += 1;
 
-            populate_node(&entry.leaf, Some(eval));
+            cleanup_guard
+                .access_mut()
+                .populate_node(&entry.leaf, Some(eval));
 
-            if Arc::ptr_eq(&entry.leaf, &root) && config.noise_epsilon > 0.0 {
-                apply_dirichlet_noise_p1(&entry.leaf, config.noise_epsilon, config.noise_concentration, rng);
-                apply_dirichlet_noise_p2(&entry.leaf, config.noise_epsilon, config.noise_concentration, rng);
+            if config.noise_epsilon > 0.0
+                && cleanup_guard.access_mut().same_node(&entry.leaf, &root)
+            {
+                let low = cleanup_guard.access_mut().node_mut(&entry.leaf);
+                apply_dirichlet_noise_p1(
+                    low,
+                    config.noise_epsilon,
+                    config.noise_concentration,
+                    rng,
+                );
+                apply_dirichlet_noise_p2(
+                    low,
+                    config.noise_epsilon,
+                    config.noise_concentration,
+                    rng,
+                );
             }
 
-            backup_and_finalize(&entry.path, &entry.leaf, eval.value_p1, eval.value_p2, entry.multivisit);
+            backup_and_finalize(
+                cleanup_guard.access_mut(),
+                &entry.path,
+                &entry.leaf,
+                eval.value_p1,
+                eval.value_p2,
+                entry.multivisit,
+            );
         }
     }
 
     // Success: disarm guard before normal collision cancellation.
     cleanup_guard.disarm();
+    drop(cleanup_guard);
 
     // ---- Cancel all accumulated shared collisions ----
-    cancel_shared_collisions(&all_collisions);
+    cancel_shared_collisions(access, &all_collisions);
     let total_collisions: u32 = all_collisions.iter().map(|c| c.multivisit).sum();
 
     Ok(BatchStats {
@@ -1251,12 +1340,13 @@ fn simulate_batch(
 // extract_result — policies and values from root
 // ---------------------------------------------------------------------------
 
-fn extract_result(
-    root: &SharedNode,
+fn extract_result<'session>(
+    access: &ExclusiveAccess<'_, 'session>,
+    root: &NodeHandle<'session>,
     config: &SearchConfig,
     _rng: &mut impl Rng,
 ) -> SearchResult {
-    let low = root.get();
+    let low = access.node(root);
     let total_visits = low.total_visits();
 
     let (policy_p1, visit_counts_p1, value_p1, q_values_p1) = extract_p1(low, config);
@@ -1473,38 +1563,71 @@ fn compute_pruned_visits(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::node::{Edge, LowNode};
+    use crate::node::LowNode;
     use crate::{BackendError, SmartUniformBackend, ConstantValueBackend};
     use pyrat::{Coordinates, Direction, GameBuilder};
     use rand::rngs::SmallRng;
     use rand::SeedableRng;
     use std::collections::{HashMap, HashSet};
 
+    fn with_test_access<R>(
+        test: impl for<'tree, 'session> FnOnce(
+            &mut ExclusiveAccess<'tree, 'session>,
+        ) -> R,
+    ) -> R {
+        let game = open_5x5_game(
+            Coordinates::new(0, 0),
+            Coordinates::new(4, 4),
+            &[Coordinates::new(2, 2)],
+        );
+        let mut tree = MCGSTree::new(&game);
+        tree.with_exclusive(|mut access| test(&mut access))
+    }
+
     /// Test-only shim: old single-visit backup without VL handling.
     /// Pre-increments n_in_flight and adds VL on path entries so that
     /// backup_and_finalize's decrements work correctly.
-    fn backup(path: &[PathEntry], leaf: &SharedNode, g1: f32, g2: f32) {
-        leaf.get_mut().increment_n_in_flight(1);
+    fn backup<'session>(
+        access: &mut ExclusiveAccess<'_, 'session>,
+        path: &[PathEntry<'session>],
+        leaf: &NodeHandle<'session>,
+        g1: f32,
+        g2: f32,
+    ) {
+        access.node_mut(leaf).increment_n_in_flight(1);
+        reserve_path(access, path, 1);
+        backup_and_finalize(access, path, leaf, g1, g2, 1);
+    }
+
+    fn reserve_path<'session>(
+        access: &mut ExclusiveAccess<'_, 'session>,
+        path: &[PathEntry<'session>],
+        count: u32,
+    ) {
         for entry in path {
-            entry.node.get_mut().increment_n_in_flight(1);
-            entry.node.get_mut().add_virtual_loss(
+            access.node_mut(&entry.node).increment_n_in_flight(count);
+            access.node_mut(&entry.node).add_virtual_loss_multi(
                 entry.p1_outcome as usize,
                 entry.p2_outcome as usize,
+                count,
             );
         }
-        backup_and_finalize(path, leaf, g1, g2, 1);
     }
 
     /// Test-only shim: old cleanup_descent for tests that still use it.
-    fn cleanup_descent(path: &[PathEntry], leaf_claimed: Option<&SharedNode>) {
+    fn cleanup_descent<'session>(
+        access: &mut ExclusiveAccess<'_, 'session>,
+        path: &[PathEntry<'session>],
+        leaf_claimed: Option<&NodeHandle<'session>>,
+    ) {
         for entry in path {
-            entry.node.get_mut().revert_virtual_loss(
+            access.node_mut(&entry.node).revert_virtual_loss(
                 entry.p1_outcome as usize,
                 entry.p2_outcome as usize,
             );
         }
         if let Some(leaf) = leaf_claimed {
-            leaf.get_mut().cancel_score_update();
+            access.node_mut(leaf).cancel_score_update();
         }
     }
 
@@ -1561,45 +1684,37 @@ mod tests {
     fn select_actions_uniform_prior() {
         // With uniform priors and no visits, PUCT should select via FPU.
         // With forced playouts, all outcomes start unvisited → first one wins.
-        let game = open_5x5_game(
-            Coordinates::new(2, 2),
-            Coordinates::new(2, 2),
-            &[Coordinates::new(0, 0)],
-        );
-        let mut tt = crate::tt::TranspositionTable::new();
-        let root = crate::tree::create_root_node(&game, &mut tt);
+        let mut root = LowNode::new_shell([0, 1, 2, 3, 4], [0, 1, 2, 3, 4]);
+        root.set_prior([0.2; 5], [0.2; 5]);
+        root.set_value_scale(1.0);
         let config = default_config();
         let mut r = rng();
 
         let (a1, a2) = select_actions(&root, &config, true, &mut r);
         // Should be valid outcome indices
-        assert!((a1 as usize) < root.get().n1());
-        assert!((a2 as usize) < root.get().n2());
+        assert!((a1 as usize) < root.n1());
+        assert!((a2 as usize) < root.n2());
     }
 
     #[test]
     fn select_actions_after_visits() {
-        let game = open_5x5_game(
-            Coordinates::new(2, 2),
-            Coordinates::new(2, 2),
-            &[Coordinates::new(0, 0)],
-        );
-        let mut tt = crate::tt::TranspositionTable::new();
-        let root = crate::tree::create_root_node(&game, &mut tt);
+        let mut root = LowNode::new_shell([0, 1, 2, 3, 4], [0, 1, 2, 3, 4]);
+        root.set_prior([0.2; 5], [0.2; 5]);
+        root.set_value_scale(1.0);
 
         // Add some visits to (0, 0)
-        root.get_mut().finalize_edge_update(0, 0, 1.0, 1.0);
-        root.get_mut().finalize_edge_update(0, 0, 1.0, 1.0);
-        root.get_mut().finalize_score_update(1.0, 1.0);
-        root.get_mut().finalize_score_update(1.0, 1.0);
+        root.finalize_edge_update(0, 0, 1.0, 1.0);
+        root.finalize_edge_update(0, 0, 1.0, 1.0);
+        root.finalize_score_update(1.0, 1.0);
+        root.finalize_score_update(1.0, 1.0);
 
         let config = default_config();
         let mut r = rng();
 
         // With visits on (0,0), PUCT should explore other outcomes
         let (a1, a2) = select_actions(&root, &config, true, &mut r);
-        assert!((a1 as usize) < root.get().n1());
-        assert!((a2 as usize) < root.get().n2());
+        assert!((a1 as usize) < root.n1());
+        assert!((a2 as usize) < root.n2());
     }
 
     #[test]
@@ -1624,7 +1739,6 @@ mod tests {
         assert_eq!(low.total_visits(), 1);
         assert_eq!(low.total_edge_visits(), 0);
 
-        let root = Arc::new(SharedNode::new(low));
         let config = SearchConfig {
             force_k: 0.0, // disable forced playouts to test pure PUCT
             ..default_config()
@@ -1633,7 +1747,7 @@ mod tests {
 
         // With total_visits() used, sqrt(1)=1 gives exploration a non-zero term.
         // The high prior on outcome 2 should make it the preferred selection.
-        let (a1, _a2) = select_actions(&root, &config, false, &mut r);
+        let (a1, _a2) = select_actions(&low, &config, false, &mut r);
         assert_eq!(a1, 2, "should select outcome with highest prior");
     }
 
@@ -1667,141 +1781,157 @@ mod tests {
 
     #[test]
     fn backup_single_level() {
-        let root = Arc::new(SharedNode::new(LowNode::new_shell(
-            [0, 1, 2, 3, 4],
-            [0, 1, 2, 3, 4],
-        )));
-        root.get_mut().set_value_scale(5.0);
-        root.get_mut().set_prior([0.2; 5], [0.2; 5]);
+        with_test_access(|access| {
+            let root = access.test_node(LowNode::new_shell(
+                [0, 1, 2, 3, 4],
+                [0, 1, 2, 3, 4],
+            ));
+            access.node_mut(&root).set_value_scale(5.0);
+            access.node_mut(&root).set_prior([0.2; 5], [0.2; 5]);
 
-        // Create a child via edge
-        let child = Arc::new(SharedNode::new(LowNode::new_shell(
-            [0, 1, 2, 3, 4],
-            [0, 1, 2, 3, 4],
-        )));
-        child.get_mut().set_value_scale(5.0);
+            let child = access.test_node(LowNode::new_shell(
+                [0, 1, 2, 3, 4],
+                [0, 1, 2, 3, 4],
+            ));
+            access.node_mut(&child).set_value_scale(5.0);
+            access.test_connect(&root, &child, (0, 1), 1.0, 0.5);
 
-        let edge = Box::new(crate::node::Edge::new(Arc::clone(&child), (0, 1), 1.0, 0.5));
-        root.get_mut().prepend_child(edge);
+            let path = vec![PathEntry {
+                node: root.clone(),
+                p1_outcome: 0,
+                p2_outcome: 1,
+            }];
 
-        let path = vec![PathEntry {
-            node: Arc::clone(&root),
-            p1_outcome: 0,
-            p2_outcome: 1,
-        }];
+            backup(access, &path, &child, 3.0, 2.0);
 
-        backup(&path, &child, 3.0, 2.0);
+            // Leaf: v=(3.0, 2.0), visits=1
+            let child_low = access.node(&child);
+            assert_eq!(child_low.total_visits(), 1);
+            assert!((child_low.v1() - 3.0).abs() < 1e-6);
+            assert!((child_low.v2() - 2.0).abs() < 1e-6);
 
-        // Leaf: v=(3.0, 2.0), visits=1
-        assert_eq!(child.get().total_visits(), 1);
-        assert!((child.get().v1() - 3.0).abs() < 1e-6);
-        assert!((child.get().v2() - 2.0).abs() < 1e-6);
+            // Root: q1 = r1 + leaf_v1 = 1.0 + 3.0 = 4.0
+            //       q2 = r2 + leaf_v2 = 0.5 + 2.0 = 2.5
+            let root_low = access.node(&root);
+            assert_eq!(root_low.total_visits(), 1);
+            assert!((root_low.v1() - 4.0).abs() < 1e-6);
+            assert!((root_low.v2() - 2.5).abs() < 1e-6);
 
-        // Root: q1 = r1 + leaf_v1 = 1.0 + 3.0 = 4.0
-        //       q2 = r2 + leaf_v2 = 0.5 + 2.0 = 2.5
-        assert_eq!(root.get().total_visits(), 1);
-        assert!((root.get().v1() - 4.0).abs() < 1e-6);
-        assert!((root.get().v2() - 2.5).abs() < 1e-6);
-
-        // Joint matrix: edge at (0, 1)
-        assert_eq!(root.get().edge_visits(0, 1), 1);
-        assert!((root.get().edge_q_p1(0, 1) - 4.0).abs() < 1e-6);
-        assert!((root.get().edge_q_p2(0, 1) - 2.5).abs() < 1e-6);
+            // Joint matrix: edge at (0, 1)
+            assert_eq!(root_low.edge_visits(0, 1), 1);
+            assert!((root_low.edge_q_p1(0, 1) - 4.0).abs() < 1e-6);
+            assert!((root_low.edge_q_p2(0, 1) - 2.5).abs() < 1e-6);
+        });
     }
 
     #[test]
     fn backup_stale_edge_delta_catchup() {
-        // A child has total_visits=5, but the parent's edge only has 2 visits
-        // and num_parents=1. This simulates a stale edge after root advancement
-        // pruned another parent. The delta correction should still trigger.
-        let root = Arc::new(SharedNode::new(LowNode::new_shell(
-            [0, 1, 2, 3, 4],
-            [0, 1, 2, 3, 4],
-        )));
-        root.get_mut().set_value_scale(5.0);
-        root.get_mut().set_prior([0.2; 5], [0.2; 5]);
+        with_test_access(|access| {
+            // A child has total_visits=5, but the parent's edge only has 2 visits
+            // and num_parents=1. This simulates a stale edge after root advancement
+            // pruned another parent. The delta correction should still trigger.
+            let root = access.test_node(LowNode::new_shell(
+                [0, 1, 2, 3, 4],
+                [0, 1, 2, 3, 4],
+            ));
+            access.node_mut(&root).set_value_scale(5.0);
+            access.node_mut(&root).set_prior([0.2; 5], [0.2; 5]);
 
-        let child = Arc::new(SharedNode::new(LowNode::new_shell(
-            [0, 1, 2, 3, 4],
-            [0, 1, 2, 3, 4],
-        )));
-        child.get_mut().set_value_scale(5.0);
+            let child = access.test_node(LowNode::new_shell(
+                [0, 1, 2, 3, 4],
+                [0, 1, 2, 3, 4],
+            ));
+            access.node_mut(&child).set_value_scale(5.0);
 
-        // Simulate child having been visited 5 times from another (now-pruned) parent
-        // with Q that drifted from what our edge knows.
-        for _ in 0..5 {
-            child.get_mut().finalize_score_update(3.0, 2.0);
-        }
-        assert_eq!(child.get().total_visits(), 5);
-        assert_eq!(child.num_parents(), 0); // no edge yet
+            // Simulate child having been visited 5 times from another (now-pruned) parent
+            // with Q that drifted from what our edge knows.
+            for _ in 0..5 {
+                access
+                    .node_mut(&child)
+                    .finalize_score_update(3.0, 2.0);
+            }
+            assert_eq!(access.node(&child).total_visits(), 5);
+            assert_eq!(access.num_parents(&child), 0); // no edge yet
 
-        // Wire edge: root --(0,1)--> child, with r=(1.0, 0.5)
-        let edge = Box::new(Edge::new(Arc::clone(&child), (0, 1), 1.0, 0.5));
-        root.get_mut().prepend_child(edge);
-        assert_eq!(child.num_parents(), 1);
+            // Wire edge: root --(0,1)--> child, with r=(1.0, 0.5)
+            access.test_connect(&root, &child, (0, 1), 1.0, 0.5);
+            assert_eq!(access.num_parents(&child), 1);
 
-        // Add 2 stale visits on the edge with outdated Q values
-        root.get_mut().finalize_edge_update(0, 1, 2.0, 1.0);
-        root.get_mut().finalize_edge_update(0, 1, 2.0, 1.0);
-        root.get_mut().finalize_score_update(2.0, 1.0);
-        root.get_mut().finalize_score_update(2.0, 1.0);
-        assert_eq!(root.get().edge_visits(0, 1), 2);
+            // Add 2 stale visits on the edge with outdated Q values
+            access
+                .node_mut(&root)
+                .finalize_edge_update(0, 1, 2.0, 1.0);
+            access
+                .node_mut(&root)
+                .finalize_edge_update(0, 1, 2.0, 1.0);
+            access
+                .node_mut(&root)
+                .finalize_score_update(2.0, 1.0);
+            access
+                .node_mut(&root)
+                .finalize_score_update(2.0, 1.0);
+            assert_eq!(access.node(&root).edge_visits(0, 1), 2);
 
-        // Now backup a new visit through this path.
-        let path = vec![PathEntry {
-            node: Arc::clone(&root),
-            p1_outcome: 0,
-            p2_outcome: 1,
-        }];
-        backup(&path, &child, 3.0, 2.0);
+            // Now backup a new visit through this path.
+            let path = vec![PathEntry {
+                node: root.clone(),
+                p1_outcome: 0,
+                p2_outcome: 1,
+            }];
+            backup(access, &path, &child, 3.0, 2.0);
 
-        // The correct Q for the edge is r + child.v = (1+3, 0.5+2) = (4.0, 2.5).
-        // Before the fix, num_parents=1 would skip delta correction, leaving
-        // the edge Q based only on the new visit + stale visits.
-        // With the fix, edge_visits(2) < child.total_visits(6) triggers correction.
-        let edge_q1 = root.get().edge_q_p1(0, 1);
-        let edge_q2 = root.get().edge_q_p2(0, 1);
-        assert!(
-            (edge_q1 - 4.0).abs() < 0.5,
-            "edge Q1 should be corrected toward 4.0, got {edge_q1}"
-        );
-        assert!(
-            (edge_q2 - 2.5).abs() < 0.5,
-            "edge Q2 should be corrected toward 2.5, got {edge_q2}"
-        );
+            // The correct Q for the edge is r + child.v = (1+3, 0.5+2) = (4.0, 2.5).
+            // Before the fix, num_parents=1 would skip delta correction, leaving
+            // the edge Q based only on the new visit + stale visits.
+            // With the fix, edge_visits(2) < child.total_visits(6) triggers correction.
+            let edge_q1 = access.node(&root).edge_q_p1(0, 1);
+            let edge_q2 = access.node(&root).edge_q_p2(0, 1);
+            assert!(
+                (edge_q1 - 4.0).abs() < 0.5,
+                "edge Q1 should be corrected toward 4.0, got {edge_q1}"
+            );
+            assert!(
+                (edge_q2 - 2.5).abs() < 0.5,
+                "edge Q2 should be corrected toward 2.5, got {edge_q2}"
+            );
+        });
     }
 
     // ---- cleanup_descent ----
 
     #[test]
     fn cleanup_reverts_virtual_loss() {
-        let node = Arc::new(SharedNode::new(LowNode::new_shell(
-            [0, 1, 2, 3, 4],
-            [0, 1, 2, 3, 4],
-        )));
-        node.get_mut().add_virtual_loss(1, 2);
+        with_test_access(|access| {
+            let node = access.test_node(LowNode::new_shell(
+                [0, 1, 2, 3, 4],
+                [0, 1, 2, 3, 4],
+            ));
+            access.node_mut(&node).add_virtual_loss(1, 2);
 
-        let path = vec![PathEntry {
-            node: Arc::clone(&node),
-            p1_outcome: 1,
-            p2_outcome: 2,
-        }];
+            let path = vec![PathEntry {
+                node: node.clone(),
+                p1_outcome: 1,
+                p2_outcome: 2,
+            }];
 
-        cleanup_descent(&path, None);
-        assert_eq!(node.get().edge_in_flight(1, 2), 0);
+            cleanup_descent(access, &path, None);
+            assert_eq!(access.node(&node).edge_in_flight(1, 2), 0);
+        });
     }
 
     #[test]
     fn cleanup_cancels_leaf_claim() {
-        let leaf = SharedNode::new(LowNode::new_shell(
-            [0, 1, 2, 3, 4],
-            [0, 1, 2, 3, 4],
-        ));
-        assert!(leaf.get_mut().try_start_score_update());
-        assert_eq!(leaf.get().n_in_flight(), 1);
+        with_test_access(|access| {
+            let leaf = access.test_node(LowNode::new_shell(
+                [0, 1, 2, 3, 4],
+                [0, 1, 2, 3, 4],
+            ));
+            assert!(access.node_mut(&leaf).try_start_score_update());
+            assert_eq!(access.node(&leaf).n_in_flight(), 1);
 
-        cleanup_descent(&[], Some(&leaf));
-        assert_eq!(leaf.get().n_in_flight(), 0);
+            cleanup_descent(access, &[], Some(&leaf));
+            assert_eq!(access.node(&leaf).n_in_flight(), 0);
+        });
     }
 
     // ---- run_search integration ----
@@ -1850,13 +1980,17 @@ mod tests {
 
         // Terminal root: one real visit per pick, total = n_sims.
         // Before fix: quadratic blowup (multivisit=budget per pick, counts as 1).
-        let root_visits = tree.root().get().total_visits();
+        let (root_visits, root_in_flight) = tree.with_exclusive(|access| {
+            let root = access.root();
+            let root = access.node(&root);
+            (root.total_visits(), root.n_in_flight())
+        });
         assert_eq!(
             root_visits, n_sims,
             "terminal root should have exactly {n_sims} visits, got {root_visits}"
         );
         assert_eq!(result.terminals, n_sims);
-        assert_eq!(tree.root().get().n_in_flight(), 0, "root n_in_flight leak");
+        assert_eq!(root_in_flight, 0, "root n_in_flight leak");
     }
 
     #[test]
@@ -1942,25 +2076,35 @@ mod tests {
             .create(None)
             .unwrap()
     }
-
-
-    /// DFS walk collecting all SharedNode pointers reachable from a root.
-    fn walk_dag(root: &Arc<SharedNode>) -> HashSet<*const SharedNode> {
-        let mut visited = HashSet::new();
-        let mut stack = vec![Arc::clone(root)];
-        while let Some(node) = stack.pop() {
-            let ptr = Arc::as_ptr(&node) as *const SharedNode;
-            if !visited.insert(ptr) {
-                continue;
+    /// Verify reservation cleanup across every node reachable from the root.
+    fn assert_no_in_flight(tree: &mut MCGSTree) {
+        tree.with_exclusive(|access| {
+            let mut visited = HashSet::new();
+            let mut stack = vec![access.root()];
+            while let Some(node) = stack.pop() {
+                if !visited.insert(access.test_node_id(&node)) {
+                    continue;
+                }
+                let low = access.node(&node);
+                assert_eq!(
+                    low.n_in_flight(),
+                    0,
+                    "Node still has n_in_flight={}",
+                    low.n_in_flight()
+                );
+                for i in 0..low.n1() {
+                    for j in 0..low.n2() {
+                        assert_eq!(
+                            low.edge_in_flight(i, j),
+                            0,
+                            "edge_in_flight[{i}][{j}] = {}",
+                            low.edge_in_flight(i, j)
+                        );
+                    }
+                }
+                stack.extend(access.test_children(&node));
             }
-            let low = node.get();
-            let mut cur = low.first_child();
-            while let Some(edge) = cur {
-                stack.push(Arc::clone(edge.low_node()));
-                cur = edge.next_sibling();
-            }
-        }
-        visited
+        });
     }
 
     struct FailingBackend;
@@ -1980,406 +2124,400 @@ mod tests {
 
     #[test]
     fn backup_two_level_q_chain() {
-        // root --edge(r=1,0.5)--> mid --edge(r=0.5,1.0)--> leaf
-        let root = Arc::new(SharedNode::new(LowNode::new_shell(
-            [0, 1, 2, 3, 4],
-            [0, 1, 2, 3, 4],
-        )));
-        root.get_mut().set_value_scale(5.0);
-        root.get_mut().set_prior([0.2; 5], [0.2; 5]);
+        with_test_access(|access| {
+            // root --edge(r=1,0.5)--> mid --edge(r=0.5,1.0)--> leaf
+            let root = access.test_node(LowNode::new_shell(
+                [0, 1, 2, 3, 4],
+                [0, 1, 2, 3, 4],
+            ));
+            access.node_mut(&root).set_value_scale(5.0);
+            access.node_mut(&root).set_prior([0.2; 5], [0.2; 5]);
 
-        let mid = Arc::new(SharedNode::new(LowNode::new_shell(
-            [0, 1, 2, 3, 4],
-            [0, 1, 2, 3, 4],
-        )));
-        mid.get_mut().set_value_scale(5.0);
-        mid.get_mut().set_prior([0.2; 5], [0.2; 5]);
+            let mid = access.test_node(LowNode::new_shell(
+                [0, 1, 2, 3, 4],
+                [0, 1, 2, 3, 4],
+            ));
+            access.node_mut(&mid).set_value_scale(5.0);
+            access.node_mut(&mid).set_prior([0.2; 5], [0.2; 5]);
 
-        let leaf = Arc::new(SharedNode::new(LowNode::new_shell(
-            [0, 1, 2, 3, 4],
-            [0, 1, 2, 3, 4],
-        )));
-        leaf.get_mut().set_value_scale(5.0);
+            let leaf = access.test_node(LowNode::new_shell(
+                [0, 1, 2, 3, 4],
+                [0, 1, 2, 3, 4],
+            ));
+            access.node_mut(&leaf).set_value_scale(5.0);
 
-        // Wire edges
-        let edge_mid_leaf = Box::new(Edge::new(Arc::clone(&leaf), (2, 3), 0.5, 1.0));
-        mid.get_mut().prepend_child(edge_mid_leaf);
+            access.test_connect(&mid, &leaf, (2, 3), 0.5, 1.0);
+            access.test_connect(&root, &mid, (0, 0), 1.0, 0.5);
 
-        let edge_root_mid = Box::new(Edge::new(Arc::clone(&mid), (0, 0), 1.0, 0.5));
-        root.get_mut().prepend_child(edge_root_mid);
+            let path = vec![
+                PathEntry {
+                    node: root.clone(),
+                    p1_outcome: 0,
+                    p2_outcome: 0,
+                },
+                PathEntry {
+                    node: mid.clone(),
+                    p1_outcome: 2,
+                    p2_outcome: 3,
+                },
+            ];
 
-        let path = vec![
-            PathEntry {
-                node: Arc::clone(&root),
-                p1_outcome: 0,
-                p2_outcome: 0,
-            },
-            PathEntry {
-                node: Arc::clone(&mid),
-                p1_outcome: 2,
-                p2_outcome: 3,
-            },
-        ];
+            // g = (2.0, 3.0) at leaf
+            backup(access, &path, &leaf, 2.0, 3.0);
 
-        // g = (2.0, 3.0) at leaf
-        backup(&path, &leaf, 2.0, 3.0);
+            // leaf: v=(2.0, 3.0)
+            assert!((access.node(&leaf).v1() - 2.0).abs() < 1e-6);
+            assert!((access.node(&leaf).v2() - 3.0).abs() < 1e-6);
 
-        // leaf: v=(2.0, 3.0)
-        assert!((leaf.get().v1() - 2.0).abs() < 1e-6);
-        assert!((leaf.get().v2() - 3.0).abs() < 1e-6);
+            // mid: q1 = edge_r1(0.5) + leaf_v1(2.0) = 2.5
+            //       q2 = edge_r2(1.0) + leaf_v2(3.0) = 4.0
+            assert!((access.node(&mid).v1() - 2.5).abs() < 1e-6);
+            assert!((access.node(&mid).v2() - 4.0).abs() < 1e-6);
 
-        // mid: q1 = edge_r1(0.5) + leaf_v1(2.0) = 2.5
-        //       q2 = edge_r2(1.0) + leaf_v2(3.0) = 4.0
-        assert!((mid.get().v1() - 2.5).abs() < 1e-6);
-        assert!((mid.get().v2() - 4.0).abs() < 1e-6);
+            // root: q1 = edge_r1(1.0) + mid_q1(2.5) = 3.5
+            //        q2 = edge_r2(0.5) + mid_q2(4.0) = 4.5
+            let root_low = access.node(&root);
+            assert!((root_low.v1() - 3.5).abs() < 1e-6);
+            assert!((root_low.v2() - 4.5).abs() < 1e-6);
 
-        // root: q1 = edge_r1(1.0) + mid_q1(2.5) = 3.5
-        //        q2 = edge_r2(0.5) + mid_q2(4.0) = 4.5
-        assert!((root.get().v1() - 3.5).abs() < 1e-6);
-        assert!((root.get().v2() - 4.5).abs() < 1e-6);
-
-        // Joint matrix at root
-        assert!((root.get().edge_q_p1(0, 0) - 3.5).abs() < 1e-6);
+            // Joint matrix at root
+            assert!((root_low.edge_q_p1(0, 0) - 3.5).abs() < 1e-6);
+        });
     }
 
     #[test]
     fn backup_three_level_reward_chain() {
-        let root = Arc::new(SharedNode::new(LowNode::new_shell(
-            [0, 1, 2, 3, 4],
-            [0, 1, 2, 3, 4],
-        )));
-        root.get_mut().set_value_scale(10.0);
-        root.get_mut().set_prior([0.2; 5], [0.2; 5]);
+        with_test_access(|access| {
+            let root = access.test_node(LowNode::new_shell(
+                [0, 1, 2, 3, 4],
+                [0, 1, 2, 3, 4],
+            ));
+            access.node_mut(&root).set_value_scale(10.0);
+            access.node_mut(&root).set_prior([0.2; 5], [0.2; 5]);
 
-        let a = Arc::new(SharedNode::new(LowNode::new_shell(
-            [0, 1, 2, 3, 4],
-            [0, 1, 2, 3, 4],
-        )));
-        a.get_mut().set_value_scale(10.0);
-        a.get_mut().set_prior([0.2; 5], [0.2; 5]);
+            let a = access.test_node(LowNode::new_shell(
+                [0, 1, 2, 3, 4],
+                [0, 1, 2, 3, 4],
+            ));
+            access.node_mut(&a).set_value_scale(10.0);
+            access.node_mut(&a).set_prior([0.2; 5], [0.2; 5]);
 
-        let b = Arc::new(SharedNode::new(LowNode::new_shell(
-            [0, 1, 2, 3, 4],
-            [0, 1, 2, 3, 4],
-        )));
-        b.get_mut().set_value_scale(10.0);
-        b.get_mut().set_prior([0.2; 5], [0.2; 5]);
+            let b = access.test_node(LowNode::new_shell(
+                [0, 1, 2, 3, 4],
+                [0, 1, 2, 3, 4],
+            ));
+            access.node_mut(&b).set_value_scale(10.0);
+            access.node_mut(&b).set_prior([0.2; 5], [0.2; 5]);
 
-        let leaf = Arc::new(SharedNode::new(LowNode::new_shell(
-            [0, 1, 2, 3, 4],
-            [0, 1, 2, 3, 4],
-        )));
-        leaf.get_mut().set_value_scale(10.0);
+            let leaf = access.test_node(LowNode::new_shell(
+                [0, 1, 2, 3, 4],
+                [0, 1, 2, 3, 4],
+            ));
+            access.node_mut(&leaf).set_value_scale(10.0);
 
-        // Wire: root--(1,0)-->a--(1,0)-->b--(1,0)-->leaf, all edge_r = (1.0, 0.5)
-        b.get_mut()
-            .prepend_child(Box::new(Edge::new(Arc::clone(&leaf), (1, 0), 1.0, 0.5)));
-        a.get_mut()
-            .prepend_child(Box::new(Edge::new(Arc::clone(&b), (1, 0), 1.0, 0.5)));
-        root.get_mut()
-            .prepend_child(Box::new(Edge::new(Arc::clone(&a), (1, 0), 1.0, 0.5)));
+            // Wire: root--(1,0)-->a--(1,0)-->b--(1,0)-->leaf.
+            access.test_connect(&b, &leaf, (1, 0), 1.0, 0.5);
+            access.test_connect(&a, &b, (1, 0), 1.0, 0.5);
+            access.test_connect(&root, &a, (1, 0), 1.0, 0.5);
 
-        let path = vec![
-            PathEntry {
-                node: Arc::clone(&root),
-                p1_outcome: 1,
-                p2_outcome: 0,
-            },
-            PathEntry {
-                node: Arc::clone(&a),
-                p1_outcome: 1,
-                p2_outcome: 0,
-            },
-            PathEntry {
-                node: Arc::clone(&b),
-                p1_outcome: 1,
-                p2_outcome: 0,
-            },
-        ];
+            let path = vec![
+                PathEntry {
+                    node: root.clone(),
+                    p1_outcome: 1,
+                    p2_outcome: 0,
+                },
+                PathEntry {
+                    node: a.clone(),
+                    p1_outcome: 1,
+                    p2_outcome: 0,
+                },
+                PathEntry {
+                    node: b.clone(),
+                    p1_outcome: 1,
+                    p2_outcome: 0,
+                },
+            ];
 
-        // First backup: g=(4.0, 2.0)
-        backup(&path, &leaf, 4.0, 2.0);
-        // leaf: v1=4.0
-        // b: q1 = 1+4=5
-        // a: q1 = 1+5=6
-        // root: q1 = 1+6=7
-        assert!((leaf.get().v1() - 4.0).abs() < 1e-5);
-        assert!((b.get().v1() - 5.0).abs() < 1e-5);
-        assert!((a.get().v1() - 6.0).abs() < 1e-5);
-        assert!((root.get().v1() - 7.0).abs() < 1e-5);
+            // First backup: g=(4.0, 2.0)
+            backup(access, &path, &leaf, 4.0, 2.0);
+            assert!((access.node(&leaf).v1() - 4.0).abs() < 1e-5);
+            assert!((access.node(&b).v1() - 5.0).abs() < 1e-5);
+            assert!((access.node(&a).v1() - 6.0).abs() < 1e-5);
+            assert!((access.node(&root).v1() - 7.0).abs() < 1e-5);
 
-        // Second backup: g=(2.0, 1.0) — Welford averages
-        backup(&path, &leaf, 2.0, 1.0);
-        // leaf: v1 = mean(4, 2) = 3.0
-        // b: backups are (5, 3), mean = 4.0
-        // a: backups are (6, 4), mean = 5.0
-        // root: backups are (7, 5), mean = 6.0
-        assert!((leaf.get().v1() - 3.0).abs() < 1e-5);
-        assert!((b.get().v1() - 4.0).abs() < 1e-5);
-        assert!((a.get().v1() - 5.0).abs() < 1e-5);
-        assert!((root.get().v1() - 6.0).abs() < 1e-5);
+            // Second backup: g=(2.0, 1.0) — Welford averages
+            backup(access, &path, &leaf, 2.0, 1.0);
+            assert!((access.node(&leaf).v1() - 3.0).abs() < 1e-5);
+            assert!((access.node(&b).v1() - 4.0).abs() < 1e-5);
+            assert!((access.node(&a).v1() - 5.0).abs() < 1e-5);
+            assert!((access.node(&root).v1() - 6.0).abs() < 1e-5);
+        });
     }
 
     #[test]
     fn backup_multiple_same_edge() {
-        let root = Arc::new(SharedNode::new(LowNode::new_shell(
-            [0, 1, 2, 3, 4],
-            [0, 1, 2, 3, 4],
-        )));
-        root.get_mut().set_value_scale(5.0);
-        root.get_mut().set_prior([0.2; 5], [0.2; 5]);
+        with_test_access(|access| {
+            let root = access.test_node(LowNode::new_shell(
+                [0, 1, 2, 3, 4],
+                [0, 1, 2, 3, 4],
+            ));
+            access.node_mut(&root).set_value_scale(5.0);
+            access.node_mut(&root).set_prior([0.2; 5], [0.2; 5]);
 
-        let child = Arc::new(SharedNode::new(LowNode::new_shell(
-            [0, 1, 2, 3, 4],
-            [0, 1, 2, 3, 4],
-        )));
-        child.get_mut().set_value_scale(5.0);
+            let child = access.test_node(LowNode::new_shell(
+                [0, 1, 2, 3, 4],
+                [0, 1, 2, 3, 4],
+            ));
+            access.node_mut(&child).set_value_scale(5.0);
+            access.test_connect(&root, &child, (0, 0), 0.0, 0.0);
 
-        root.get_mut()
-            .prepend_child(Box::new(Edge::new(Arc::clone(&child), (0, 0), 0.0, 0.0)));
+            let path = vec![PathEntry {
+                node: root.clone(),
+                p1_outcome: 0,
+                p2_outcome: 0,
+            }];
 
-        let path = vec![PathEntry {
-            node: Arc::clone(&root),
-            p1_outcome: 0,
-            p2_outcome: 0,
-        }];
+            backup(access, &path, &child, 2.0, 1.0);
+            backup(access, &path, &child, 4.0, 3.0);
+            backup(access, &path, &child, 6.0, 5.0);
 
-        backup(&path, &child, 2.0, 1.0);
-        backup(&path, &child, 4.0, 3.0);
-        backup(&path, &child, 6.0, 5.0);
+            // edge_r = 0, so edge_q = g values
+            // Joint matrix: 3 visits, Q = mean(2,4,6) = 4.0 for p1
+            let root_low = access.node(&root);
+            assert_eq!(root_low.edge_visits(0, 0), 3);
+            assert!((root_low.edge_q_p1(0, 0) - 4.0).abs() < 1e-5);
+            assert!((root_low.edge_q_p2(0, 0) - 3.0).abs() < 1e-5);
 
-        // edge_r = 0, so edge_q = g values
-        // Joint matrix: 3 visits, Q = mean(2,4,6) = 4.0 for p1
-        assert_eq!(root.get().edge_visits(0, 0), 3);
-        assert!((root.get().edge_q_p1(0, 0) - 4.0).abs() < 1e-5);
-        assert!((root.get().edge_q_p2(0, 0) - 3.0).abs() < 1e-5);
-
-        // child: v1 = mean(2,4,6) = 4.0
-        assert_eq!(child.get().total_visits(), 3);
-        assert!((child.get().v1() - 4.0).abs() < 1e-5);
+            // child: v1 = mean(2,4,6) = 4.0
+            assert_eq!(access.node(&child).total_visits(), 3);
+            assert!((access.node(&child).v1() - 4.0).abs() < 1e-5);
+        });
     }
 
     #[test]
     fn backup_multiple_different_edges() {
-        let root = Arc::new(SharedNode::new(LowNode::new_shell(
-            [0, 1, 2, 3, 4],
-            [0, 1, 2, 3, 4],
-        )));
-        root.get_mut().set_value_scale(10.0);
-        root.get_mut().set_prior([0.2; 5], [0.2; 5]);
+        with_test_access(|access| {
+            let root = access.test_node(LowNode::new_shell(
+                [0, 1, 2, 3, 4],
+                [0, 1, 2, 3, 4],
+            ));
+            access.node_mut(&root).set_value_scale(10.0);
+            access.node_mut(&root).set_prior([0.2; 5], [0.2; 5]);
 
-        let child_a = Arc::new(SharedNode::new(LowNode::new_shell(
-            [0, 1, 2, 3, 4],
-            [0, 1, 2, 3, 4],
-        )));
-        child_a.get_mut().set_value_scale(10.0);
+            let child_a = access.test_node(LowNode::new_shell(
+                [0, 1, 2, 3, 4],
+                [0, 1, 2, 3, 4],
+            ));
+            access.node_mut(&child_a).set_value_scale(10.0);
+            let child_b = access.test_node(LowNode::new_shell(
+                [0, 1, 2, 3, 4],
+                [0, 1, 2, 3, 4],
+            ));
+            access.node_mut(&child_b).set_value_scale(10.0);
 
-        let child_b = Arc::new(SharedNode::new(LowNode::new_shell(
-            [0, 1, 2, 3, 4],
-            [0, 1, 2, 3, 4],
-        )));
-        child_b.get_mut().set_value_scale(10.0);
+            access.test_connect(&root, &child_a, (0, 0), 0.0, 0.0);
+            access.test_connect(&root, &child_b, (1, 1), 0.0, 0.0);
 
-        root.get_mut()
-            .prepend_child(Box::new(Edge::new(Arc::clone(&child_a), (0, 0), 0.0, 0.0)));
-        root.get_mut()
-            .prepend_child(Box::new(Edge::new(Arc::clone(&child_b), (1, 1), 0.0, 0.0)));
+            let path_a = vec![PathEntry {
+                node: root.clone(),
+                p1_outcome: 0,
+                p2_outcome: 0,
+            }];
+            let path_b = vec![PathEntry {
+                node: root.clone(),
+                p1_outcome: 1,
+                p2_outcome: 1,
+            }];
 
-        let path_a = vec![PathEntry {
-            node: Arc::clone(&root),
-            p1_outcome: 0,
-            p2_outcome: 0,
-        }];
-        let path_b = vec![PathEntry {
-            node: Arc::clone(&root),
-            p1_outcome: 1,
-            p2_outcome: 1,
-        }];
+            backup(access, &path_a, &child_a, 5.0, 5.0);
+            backup(access, &path_b, &child_b, 1.0, 1.0);
 
-        backup(&path_a, &child_a, 5.0, 5.0);
-        backup(&path_b, &child_b, 1.0, 1.0);
-
-        assert!((root.get().edge_q_p1(0, 0) - 5.0).abs() < 1e-5);
-        assert!((root.get().edge_q_p1(1, 1) - 1.0).abs() < 1e-5);
-        assert_eq!(root.get().edge_visits(0, 0), 1);
-        assert_eq!(root.get().edge_visits(1, 1), 1);
+            let root_low = access.node(&root);
+            assert!((root_low.edge_q_p1(0, 0) - 5.0).abs() < 1e-5);
+            assert!((root_low.edge_q_p1(1, 1) - 1.0).abs() < 1e-5);
+            assert_eq!(root_low.edge_visits(0, 0), 1);
+            assert_eq!(root_low.edge_visits(1, 1), 1);
+        });
     }
 
     #[test]
     fn backup_terminal_leaf() {
-        let root = Arc::new(SharedNode::new(LowNode::new_shell(
-            [0, 1, 2, 3, 4],
-            [0, 1, 2, 3, 4],
-        )));
-        root.get_mut().set_value_scale(5.0);
-        root.get_mut().set_prior([0.2; 5], [0.2; 5]);
+        with_test_access(|access| {
+            let root = access.test_node(LowNode::new_shell(
+                [0, 1, 2, 3, 4],
+                [0, 1, 2, 3, 4],
+            ));
+            access.node_mut(&root).set_value_scale(5.0);
+            access.node_mut(&root).set_prior([0.2; 5], [0.2; 5]);
 
-        let child = Arc::new(SharedNode::new(LowNode::new_shell(
-            [0, 1, 2, 3, 4],
-            [0, 1, 2, 3, 4],
-        )));
-        child.get_mut().set_terminal();
+            let child = access.test_node(LowNode::new_shell(
+                [0, 1, 2, 3, 4],
+                [0, 1, 2, 3, 4],
+            ));
+            access.node_mut(&child).set_terminal();
+            access.test_connect(&root, &child, (0, 0), 1.0, 0.5);
 
-        root.get_mut()
-            .prepend_child(Box::new(Edge::new(Arc::clone(&child), (0, 0), 1.0, 0.5)));
+            let path = vec![PathEntry {
+                node: root.clone(),
+                p1_outcome: 0,
+                p2_outcome: 0,
+            }];
 
-        let path = vec![PathEntry {
-            node: Arc::clone(&root),
-            p1_outcome: 0,
-            p2_outcome: 0,
-        }];
+            // Terminal backup: g = (0, 0)
+            backup(access, &path, &child, 0.0, 0.0);
 
-        // Terminal backup: g = (0, 0)
-        backup(&path, &child, 0.0, 0.0);
-
-        // Root: q1 = r1(1.0) + 0 = 1.0, q2 = r2(0.5) + 0 = 0.5
-        assert!((root.get().v1() - 1.0).abs() < 1e-6);
-        assert!((root.get().v2() - 0.5).abs() < 1e-6);
+            // Root: q1 = r1(1.0) + 0 = 1.0, q2 = r2(0.5) + 0 = 0.5
+            assert!((access.node(&root).v1() - 1.0).abs() < 1e-6);
+            assert!((access.node(&root).v2() - 0.5).abs() < 1e-6);
+        });
     }
 
     #[test]
     fn backup_empty_path() {
-        let root = Arc::new(SharedNode::new(LowNode::new_shell(
-            [0, 1, 2, 3, 4],
-            [0, 1, 2, 3, 4],
-        )));
-        root.get_mut().set_value_scale(5.0);
-        root.get_mut().set_prior([0.2; 5], [0.2; 5]);
+        with_test_access(|access| {
+            let root = access.test_node(LowNode::new_shell(
+                [0, 1, 2, 3, 4],
+                [0, 1, 2, 3, 4],
+            ));
+            access.node_mut(&root).set_value_scale(5.0);
+            access.node_mut(&root).set_prior([0.2; 5], [0.2; 5]);
 
-        let path: Vec<PathEntry> = vec![];
-        backup(&path, &root, 3.0, 2.0);
+            let path: Vec<PathEntry<'_>> = vec![];
+            backup(access, &path, &root, 3.0, 2.0);
 
-        assert_eq!(root.get().total_visits(), 1);
-        assert!((root.get().v1() - 3.0).abs() < 1e-6);
-        assert_eq!(root.get().total_edge_visits(), 0);
+            let root_low = access.node(&root);
+            assert_eq!(root_low.total_visits(), 1);
+            assert!((root_low.v1() - 3.0).abs() < 1e-6);
+            assert_eq!(root_low.total_edge_visits(), 0);
+        });
     }
 
     #[test]
     fn backup_same_edge_raw_propagation() {
-        let root = Arc::new(SharedNode::new(LowNode::new_shell(
-            [0, 1, 2, 3, 4],
-            [0, 1, 2, 3, 4],
-        )));
-        root.get_mut().set_value_scale(10.0);
-        root.get_mut().set_prior([0.2; 5], [0.2; 5]);
+        with_test_access(|access| {
+            let root = access.test_node(LowNode::new_shell(
+                [0, 1, 2, 3, 4],
+                [0, 1, 2, 3, 4],
+            ));
+            access.node_mut(&root).set_value_scale(10.0);
+            access.node_mut(&root).set_prior([0.2; 5], [0.2; 5]);
 
-        let child = Arc::new(SharedNode::new(LowNode::new_shell(
-            [0, 1, 2, 3, 4],
-            [0, 1, 2, 3, 4],
-        )));
-        child.get_mut().set_value_scale(10.0);
+            let child = access.test_node(LowNode::new_shell(
+                [0, 1, 2, 3, 4],
+                [0, 1, 2, 3, 4],
+            ));
+            access.node_mut(&child).set_value_scale(10.0);
+            access.test_connect(&root, &child, (0, 0), 2.0, 0.0);
 
-        root.get_mut()
-            .prepend_child(Box::new(Edge::new(Arc::clone(&child), (0, 0), 2.0, 0.0)));
+            let path = vec![PathEntry {
+                node: root.clone(),
+                p1_outcome: 0,
+                p2_outcome: 0,
+            }];
 
-        let path = vec![PathEntry {
-            node: Arc::clone(&root),
-            p1_outcome: 0,
-            p2_outcome: 0,
-        }];
+            backup(access, &path, &child, 10.0, 0.0); // q = 2 + 10 = 12
+            backup(access, &path, &child, 4.0, 0.0); // q = 2 + 4 = 6
+            backup(access, &path, &child, 7.0, 0.0); // q = 2 + 7 = 9
 
-        backup(&path, &child, 10.0, 0.0); // q = 2 + 10 = 12
-        backup(&path, &child, 4.0, 0.0); // q = 2 + 4 = 6
-        backup(&path, &child, 7.0, 0.0); // q = 2 + 7 = 9
-
-        // Edge Q = Welford mean of (12, 6, 9) = 9.0
-        assert!((root.get().edge_q_p1(0, 0) - 9.0).abs() < 1e-5);
+            // Edge Q = Welford mean of (12, 6, 9) = 9.0
+            assert!((access.node(&root).edge_q_p1(0, 0) - 9.0).abs() < 1e-5);
+        });
     }
 
     #[test]
     fn backup_asymmetric_rewards() {
-        let root = Arc::new(SharedNode::new(LowNode::new_shell(
-            [0, 1, 2, 3, 4],
-            [0, 1, 2, 3, 4],
-        )));
-        root.get_mut().set_value_scale(10.0);
-        root.get_mut().set_prior([0.2; 5], [0.2; 5]);
+        with_test_access(|access| {
+            let root = access.test_node(LowNode::new_shell(
+                [0, 1, 2, 3, 4],
+                [0, 1, 2, 3, 4],
+            ));
+            access.node_mut(&root).set_value_scale(10.0);
+            access.node_mut(&root).set_prior([0.2; 5], [0.2; 5]);
 
-        let child = Arc::new(SharedNode::new(LowNode::new_shell(
-            [0, 1, 2, 3, 4],
-            [0, 1, 2, 3, 4],
-        )));
-        child.get_mut().set_value_scale(10.0);
+            let child = access.test_node(LowNode::new_shell(
+                [0, 1, 2, 3, 4],
+                [0, 1, 2, 3, 4],
+            ));
+            access.node_mut(&child).set_value_scale(10.0);
+            access.test_connect(&root, &child, (0, 0), 2.0, 0.5);
 
-        root.get_mut()
-            .prepend_child(Box::new(Edge::new(Arc::clone(&child), (0, 0), 2.0, 0.5)));
+            let path = vec![PathEntry {
+                node: root.clone(),
+                p1_outcome: 0,
+                p2_outcome: 0,
+            }];
 
-        let path = vec![PathEntry {
-            node: Arc::clone(&root),
-            p1_outcome: 0,
-            p2_outcome: 0,
-        }];
+            backup(access, &path, &child, 3.0, 4.0);
 
-        backup(&path, &child, 3.0, 4.0);
-
-        // root v1 = r1(2) + g1(3) = 5.0, v2 = r2(0.5) + g2(4) = 4.5
-        assert!((root.get().v1() - 5.0).abs() < 1e-6);
-        assert!((root.get().v2() - 4.5).abs() < 1e-6);
+            // root v1 = r1(2) + g1(3) = 5.0, v2 = r2(0.5) + g2(4) = 4.5
+            assert!((access.node(&root).v1() - 5.0).abs() < 1e-6);
+            assert!((access.node(&root).v2() - 4.5).abs() < 1e-6);
+        });
     }
 
     #[test]
     fn backup_edge_visit_sum() {
-        let root = Arc::new(SharedNode::new(LowNode::new_shell(
-            [0, 1, 2, 3, 4],
-            [0, 1, 2, 3, 4],
-        )));
-        root.get_mut().set_value_scale(5.0);
-        root.get_mut().set_prior([0.2; 5], [0.2; 5]);
+        with_test_access(|access| {
+            let root = access.test_node(LowNode::new_shell(
+                [0, 1, 2, 3, 4],
+                [0, 1, 2, 3, 4],
+            ));
+            access.node_mut(&root).set_value_scale(5.0);
+            access.node_mut(&root).set_prior([0.2; 5], [0.2; 5]);
 
-        let child = Arc::new(SharedNode::new(LowNode::new_shell(
-            [0, 1, 2, 3, 4],
-            [0, 1, 2, 3, 4],
-        )));
-        child.get_mut().set_value_scale(5.0);
+            let child = access.test_node(LowNode::new_shell(
+                [0, 1, 2, 3, 4],
+                [0, 1, 2, 3, 4],
+            ));
+            access.node_mut(&child).set_value_scale(5.0);
+            access.test_connect(&root, &child, (0, 0), 0.0, 0.0);
 
-        root.get_mut()
-            .prepend_child(Box::new(Edge::new(Arc::clone(&child), (0, 0), 0.0, 0.0)));
+            let path = vec![PathEntry {
+                node: root.clone(),
+                p1_outcome: 0,
+                p2_outcome: 0,
+            }];
 
-        let path = vec![PathEntry {
-            node: Arc::clone(&root),
-            p1_outcome: 0,
-            p2_outcome: 0,
-        }];
+            for i in 0..5 {
+                backup(access, &path, &child, i as f32, 0.0);
+            }
 
-        for i in 0..5 {
-            backup(&path, &child, i as f32, 0.0);
-        }
-
-        assert_eq!(root.get().total_edge_visits(), 5);
-        assert_eq!(root.get().total_visits(), 5);
+            assert_eq!(access.node(&root).total_edge_visits(), 5);
+            assert_eq!(access.node(&root).total_visits(), 5);
+        });
     }
 
     #[test]
     fn backup_p2_independent_propagation() {
-        let root = Arc::new(SharedNode::new(LowNode::new_shell(
-            [0, 1, 2, 3, 4],
-            [0, 1, 2, 3, 4],
-        )));
-        root.get_mut().set_value_scale(10.0);
-        root.get_mut().set_prior([0.2; 5], [0.2; 5]);
+        with_test_access(|access| {
+            let root = access.test_node(LowNode::new_shell(
+                [0, 1, 2, 3, 4],
+                [0, 1, 2, 3, 4],
+            ));
+            access.node_mut(&root).set_value_scale(10.0);
+            access.node_mut(&root).set_prior([0.2; 5], [0.2; 5]);
 
-        let child = Arc::new(SharedNode::new(LowNode::new_shell(
-            [0, 1, 2, 3, 4],
-            [0, 1, 2, 3, 4],
-        )));
-        child.get_mut().set_value_scale(10.0);
+            let child = access.test_node(LowNode::new_shell(
+                [0, 1, 2, 3, 4],
+                [0, 1, 2, 3, 4],
+            ));
+            access.node_mut(&child).set_value_scale(10.0);
+            access.test_connect(&root, &child, (0, 0), 2.0, 0.5);
 
-        root.get_mut()
-            .prepend_child(Box::new(Edge::new(Arc::clone(&child), (0, 0), 2.0, 0.5)));
+            let path = vec![PathEntry {
+                node: root.clone(),
+                p1_outcome: 0,
+                p2_outcome: 0,
+            }];
 
-        let path = vec![PathEntry {
-            node: Arc::clone(&root),
-            p1_outcome: 0,
-            p2_outcome: 0,
-        }];
+            backup(access, &path, &child, 10.0, 1.0); // q1=12, q2=1.5
+            backup(access, &path, &child, 4.0, 8.0); // q1=6, q2=8.5
 
-        backup(&path, &child, 10.0, 1.0); // q1=12, q2=1.5
-        backup(&path, &child, 4.0, 8.0); // q1=6, q2=8.5
-
-        // p1 edge Q = mean(12, 6) = 9.0
-        // p2 edge Q = mean(1.5, 8.5) = 5.0
-        assert!((root.get().edge_q_p1(0, 0) - 9.0).abs() < 1e-5);
-        assert!((root.get().edge_q_p2(0, 0) - 5.0).abs() < 1e-5);
+            // p1 edge Q = mean(12, 6) = 9.0
+            // p2 edge Q = mean(1.5, 8.5) = 5.0
+            assert!((access.node(&root).edge_q_p1(0, 0) - 9.0).abs() < 1e-5);
+            assert!((access.node(&root).edge_q_p2(0, 0) - 5.0).abs() < 1e-5);
+        });
     }
 
     // =====================================================================
@@ -2388,53 +2526,46 @@ mod tests {
 
     #[test]
     fn puct_monotonic_q() {
-        let node = Arc::new(SharedNode::new(LowNode::new_shell(
-            [0, 1, 2, 3, 4],
-            [0, 1, 2, 3, 4],
-        )));
-        node.get_mut().set_value_scale(10.0);
-        node.get_mut().set_prior([0.2; 5], [0.2; 5]);
+        let mut node = LowNode::new_shell([0, 1, 2, 3, 4], [0, 1, 2, 3, 4]);
+        node.set_value_scale(10.0);
+        node.set_prior([0.2; 5], [0.2; 5]);
 
         // Give outcome 2 high Q, all outcomes some visits
         for i in 0..5 {
             for j in 0..5 {
                 let q = if i == 2 { 10.0 } else { 1.0 };
                 for _ in 0..10 {
-                    node.get_mut().finalize_edge_update(i, j, q, q);
+                    node.finalize_edge_update(i, j, q, q);
                 }
             }
         }
         // Need some total_visits for value to be nonzero
         for _ in 0..250 {
-            node.get_mut().finalize_score_update(1.0, 1.0);
+            node.finalize_score_update(1.0, 1.0);
         }
 
         let config = default_config();
         let mut r = rng();
-        let selected = select_p1(node.get(), &config, false, &mut r);
+        let selected = select_p1(&node, &config, false, &mut r);
         assert_eq!(selected, 2, "Highest Q should win");
     }
 
     #[test]
     fn puct_monotonic_prior() {
-        let node = Arc::new(SharedNode::new(LowNode::new_shell(
-            [0, 1, 2, 3, 4],
-            [0, 1, 2, 3, 4],
-        )));
-        node.get_mut().set_value_scale(5.0);
-        node.get_mut()
-            .set_prior([0.05, 0.05, 0.7, 0.1, 0.1], [0.2; 5]);
+        let mut node = LowNode::new_shell([0, 1, 2, 3, 4], [0, 1, 2, 3, 4]);
+        node.set_value_scale(5.0);
+        node.set_prior([0.05, 0.05, 0.7, 0.1, 0.1], [0.2; 5]);
 
         // Give 1 visit at (0,0) so total_edge_visits > 0
-        node.get_mut().finalize_edge_update(0, 0, 1.0, 1.0);
-        node.get_mut().finalize_score_update(1.0, 1.0);
+        node.finalize_edge_update(0, 0, 1.0, 1.0);
+        node.finalize_score_update(1.0, 1.0);
 
         let config = SearchConfig {
             force_k: 0.0,
             ..default_config()
         };
         let mut r = rng();
-        let selected = select_p1(node.get(), &config, false, &mut r);
+        let selected = select_p1(&node, &config, false, &mut r);
         // Outcome 2 has highest prior (0.7) and is unvisited
         assert_eq!(
             selected, 2,
@@ -2444,18 +2575,15 @@ mod tests {
 
     #[test]
     fn puct_unvisited_selected() {
-        let node = Arc::new(SharedNode::new(LowNode::new_shell(
-            [0, 1, 2, 3, 4],
-            [0, 1, 2, 3, 4],
-        )));
-        node.get_mut().set_value_scale(5.0);
-        node.get_mut().set_prior([0.2; 5], [0.2; 5]);
+        let mut node = LowNode::new_shell([0, 1, 2, 3, 4], [0, 1, 2, 3, 4]);
+        node.set_value_scale(5.0);
+        node.set_prior([0.2; 5], [0.2; 5]);
 
         // Give 100 visits to outcomes 0-3, leave outcome 4 unvisited
         for i in 0..4 {
             for _ in 0..100 {
-                node.get_mut().finalize_edge_update(i, 0, 1.0, 1.0);
-                node.get_mut().finalize_score_update(1.0, 1.0);
+                node.finalize_edge_update(i, 0, 1.0, 1.0);
+                node.finalize_score_update(1.0, 1.0);
             }
         }
 
@@ -2464,34 +2592,28 @@ mod tests {
             ..default_config()
         };
         let mut r = rng();
-        let selected = select_p1(node.get(), &config, false, &mut r);
+        let selected = select_p1(&node, &config, false, &mut r);
         assert_eq!(selected, 4, "Unvisited outcome should be selected");
     }
 
     #[test]
     fn puct_fpu_pessimism() {
         // Higher visited prior mass → stronger FPU penalty → less willingness to explore
-        let node_lo = Arc::new(SharedNode::new(LowNode::new_shell(
-            [0, 1, 2, 3, 4],
-            [0, 1, 2, 3, 4],
-        )));
-        node_lo.get_mut().set_value_scale(5.0);
-        node_lo.get_mut().set_prior([0.2; 5], [0.2; 5]);
-        node_lo.get_mut().finalize_score_update(5.0, 5.0);
+        let mut node_lo = LowNode::new_shell([0, 1, 2, 3, 4], [0, 1, 2, 3, 4]);
+        node_lo.set_value_scale(5.0);
+        node_lo.set_prior([0.2; 5], [0.2; 5]);
+        node_lo.finalize_score_update(5.0, 5.0);
         // Visit 1 outcome → visited_mass = 0.2
-        node_lo.get_mut().finalize_edge_update(0, 0, 5.0, 5.0);
+        node_lo.finalize_edge_update(0, 0, 5.0, 5.0);
 
-        let node_hi = Arc::new(SharedNode::new(LowNode::new_shell(
-            [0, 1, 2, 3, 4],
-            [0, 1, 2, 3, 4],
-        )));
-        node_hi.get_mut().set_value_scale(5.0);
-        node_hi.get_mut().set_prior([0.2; 5], [0.2; 5]);
-        node_hi.get_mut().finalize_score_update(5.0, 5.0);
+        let mut node_hi = LowNode::new_shell([0, 1, 2, 3, 4], [0, 1, 2, 3, 4]);
+        node_hi.set_value_scale(5.0);
+        node_hi.set_prior([0.2; 5], [0.2; 5]);
+        node_hi.finalize_score_update(5.0, 5.0);
         // Visit 3 outcomes → visited_mass = 0.6
-        node_hi.get_mut().finalize_edge_update(0, 0, 5.0, 5.0);
-        node_hi.get_mut().finalize_edge_update(1, 0, 5.0, 5.0);
-        node_hi.get_mut().finalize_edge_update(2, 0, 5.0, 5.0);
+        node_hi.finalize_edge_update(0, 0, 5.0, 5.0);
+        node_hi.finalize_edge_update(1, 0, 5.0, 5.0);
+        node_hi.finalize_edge_update(2, 0, 5.0, 5.0);
 
         // FPU = v1 - fpu_reduction * value_scale * sqrt(visited_mass)
         // node_lo: FPU = 5 - 0.2 * 5 * sqrt(0.2) ~ 4.553
@@ -2501,55 +2623,48 @@ mod tests {
             ..default_config()
         };
         let mut r = rng();
-        let sel_lo = select_p1(node_lo.get(), &config, false, &mut r);
-        let sel_hi = select_p1(node_hi.get(), &config, false, &mut r);
+        let sel_lo = select_p1(&node_lo, &config, false, &mut r);
+        let sel_hi = select_p1(&node_hi, &config, false, &mut r);
         assert!((sel_lo as usize) < 5);
         assert!((sel_hi as usize) < 5);
     }
 
     #[test]
     fn puct_fpu_no_visits() {
-        let node = Arc::new(SharedNode::new(LowNode::new_shell(
-            [0, 1, 2, 3, 4],
-            [0, 1, 2, 3, 4],
-        )));
-        node.get_mut().set_value_scale(5.0);
-        node.get_mut()
-            .set_prior([0.05, 0.05, 0.7, 0.1, 0.1], [0.2; 5]);
+        let mut node = LowNode::new_shell([0, 1, 2, 3, 4], [0, 1, 2, 3, 4]);
+        node.set_value_scale(5.0);
+        node.set_prior([0.05, 0.05, 0.7, 0.1, 0.1], [0.2; 5]);
 
         // Give 1 visit so sqrt_total > 0
-        node.get_mut().finalize_edge_update(0, 0, 0.0, 0.0);
-        node.get_mut().finalize_score_update(0.0, 0.0);
+        node.finalize_edge_update(0, 0, 0.0, 0.0);
+        node.finalize_score_update(0.0, 0.0);
 
         let config = SearchConfig {
             force_k: 0.0,
             ..default_config()
         };
         let mut r = rng();
-        let selected = select_p1(node.get(), &config, false, &mut r);
+        let selected = select_p1(&node, &config, false, &mut r);
         assert_eq!(selected, 2, "Highest prior should win via exploration");
     }
 
     #[test]
     fn puct_forced_fires_at_root() {
-        let node = Arc::new(SharedNode::new(LowNode::new_shell(
-            [0, 1, 2, 3, 4],
-            [0, 1, 2, 3, 4],
-        )));
-        node.get_mut().set_value_scale(5.0);
-        node.get_mut().set_prior([0.2; 5], [0.2; 5]);
+        let mut node = LowNode::new_shell([0, 1, 2, 3, 4], [0, 1, 2, 3, 4]);
+        node.set_value_scale(5.0);
+        node.set_prior([0.2; 5], [0.2; 5]);
 
         // Give 100 visits to outcomes 0 and 1
         for _ in 0..50 {
-            node.get_mut().finalize_edge_update(0, 0, 1.0, 1.0);
-            node.get_mut().finalize_edge_update(1, 0, 1.0, 1.0);
-            node.get_mut().finalize_score_update(1.0, 1.0);
-            node.get_mut().finalize_score_update(1.0, 1.0);
+            node.finalize_edge_update(0, 0, 1.0, 1.0);
+            node.finalize_edge_update(1, 0, 1.0, 1.0);
+            node.finalize_score_update(1.0, 1.0);
+            node.finalize_score_update(1.0, 1.0);
         }
         // Outcomes 2,3,4 have 1 visit each
         for i in 2..5 {
-            node.get_mut().finalize_edge_update(i, 0, 1.0, 1.0);
-            node.get_mut().finalize_score_update(1.0, 1.0);
+            node.finalize_edge_update(i, 0, 1.0, 1.0);
+            node.finalize_score_update(1.0, 1.0);
         }
 
         // total_edge_visits = 103
@@ -2557,7 +2672,7 @@ mod tests {
         // Outcomes 2,3,4 have 1 visit < 6.4 → FORCED
         let config = default_config(); // force_k = 2.0
         let mut r = rng();
-        let selected = select_p1(node.get(), &config, true, &mut r);
+        let selected = select_p1(&node, &config, true, &mut r);
         assert!(
             selected >= 2,
             "Forced playout should select an undervisited outcome, got {selected}"
@@ -2566,27 +2681,24 @@ mod tests {
 
     #[test]
     fn puct_forced_not_at_nonroot() {
-        let node = Arc::new(SharedNode::new(LowNode::new_shell(
-            [0, 1, 2, 3, 4],
-            [0, 1, 2, 3, 4],
-        )));
-        node.get_mut().set_value_scale(5.0);
-        node.get_mut().set_prior([0.2; 5], [0.2; 5]);
+        let mut node = LowNode::new_shell([0, 1, 2, 3, 4], [0, 1, 2, 3, 4]);
+        node.set_value_scale(5.0);
+        node.set_prior([0.2; 5], [0.2; 5]);
 
         // Give many visits and high Q to outcome 0, few visits to others
         for _ in 0..100 {
-            node.get_mut().finalize_edge_update(0, 0, 10.0, 10.0);
-            node.get_mut().finalize_score_update(10.0, 10.0);
+            node.finalize_edge_update(0, 0, 10.0, 10.0);
+            node.finalize_score_update(10.0, 10.0);
         }
         for i in 1..5 {
-            node.get_mut().finalize_edge_update(i, 0, 1.0, 1.0);
-            node.get_mut().finalize_score_update(1.0, 1.0);
+            node.finalize_edge_update(i, 0, 1.0, 1.0);
+            node.finalize_score_update(1.0, 1.0);
         }
 
         let config = default_config();
         let mut r = rng();
         // At non-root, forced playouts don't fire
-        let selected = select_p1(node.get(), &config, false, &mut r);
+        let selected = select_p1(&node, &config, false, &mut r);
         // Outcome 0 has 100 visits with Q=10 vs others with 1 visit Q=1.
         // Without forced playouts, Q dominates.
         assert_eq!(selected, 0, "Without forced playouts, high-Q should win");
@@ -2602,23 +2714,19 @@ mod tests {
         // Small scale: Q gap dominates → outcome 0 selected.
         // Large scale: Q gap shrinks, exploration from prior dominates → outcome 3 selected.
         let make_node = |scale: f32| {
-            let node = Arc::new(SharedNode::new(LowNode::new_shell(
-                [0, 1, 2, 3, 4],
-                [0, 1, 2, 3, 4],
-            )));
-            node.get_mut().set_value_scale(scale);
-            node.get_mut()
-                .set_prior([0.05, 0.05, 0.05, 0.6, 0.25], [0.2; 5]);
+            let mut node = LowNode::new_shell([0, 1, 2, 3, 4], [0, 1, 2, 3, 4]);
+            node.set_value_scale(scale);
+            node.set_prior([0.05, 0.05, 0.05, 0.6, 0.25], [0.2; 5]);
             // Outcome 0: high Q, many visits
             for _ in 0..100 {
-                node.get_mut().finalize_edge_update(0, 0, 10.0, 10.0);
-                node.get_mut().finalize_score_update(10.0, 10.0);
+                node.finalize_edge_update(0, 0, 10.0, 10.0);
+                node.finalize_score_update(10.0, 10.0);
             }
             // Outcomes 1-4: low Q, few visits
             for i in 1..5 {
                 for _ in 0..5 {
-                    node.get_mut().finalize_edge_update(i, 0, 0.1, 0.1);
-                    node.get_mut().finalize_score_update(0.1, 0.1);
+                    node.finalize_edge_update(i, 0, 0.1, 0.1);
+                    node.finalize_score_update(0.1, 0.1);
                 }
             }
             node
@@ -2632,11 +2740,11 @@ mod tests {
 
         // Small scale: Q=10 / scale=1 = 10, gap to others = ~9.9 → exploitation
         let node_small = make_node(1.0);
-        let sel_small = select_p1(node_small.get(), &config, false, &mut r);
+        let sel_small = select_p1(&node_small, &config, false, &mut r);
 
         // Large scale: Q=10 / scale=10000 ≈ 0 → exploration dominates (outcome 3, prior=0.6)
         let node_large = make_node(10000.0);
-        let sel_large = select_p1(node_large.get(), &config, false, &mut r);
+        let sel_large = select_p1(&node_large, &config, false, &mut r);
 
         assert_eq!(sel_small, 0, "Small scale -> exploitation -> outcome 0");
         assert_eq!(
@@ -2648,29 +2756,23 @@ mod tests {
     #[test]
     fn puct_decoupled() {
         // Two nodes: same P1 structure, different P2 priors
-        let node_a = Arc::new(SharedNode::new(LowNode::new_shell(
-            [0, 1, 2, 3, 4],
-            [0, 1, 2, 3, 4],
-        )));
-        node_a.get_mut().set_value_scale(5.0);
-        node_a.get_mut().set_prior(
+        let mut node_a = LowNode::new_shell([0, 1, 2, 3, 4], [0, 1, 2, 3, 4]);
+        node_a.set_value_scale(5.0);
+        node_a.set_prior(
             [0.1, 0.3, 0.2, 0.15, 0.25],
             [0.8, 0.05, 0.05, 0.05, 0.05],
         );
-        node_a.get_mut().finalize_edge_update(0, 0, 2.0, 2.0);
-        node_a.get_mut().finalize_score_update(2.0, 2.0);
+        node_a.finalize_edge_update(0, 0, 2.0, 2.0);
+        node_a.finalize_score_update(2.0, 2.0);
 
-        let node_b = Arc::new(SharedNode::new(LowNode::new_shell(
-            [0, 1, 2, 3, 4],
-            [0, 1, 2, 3, 4],
-        )));
-        node_b.get_mut().set_value_scale(5.0);
-        node_b.get_mut().set_prior(
+        let mut node_b = LowNode::new_shell([0, 1, 2, 3, 4], [0, 1, 2, 3, 4]);
+        node_b.set_value_scale(5.0);
+        node_b.set_prior(
             [0.1, 0.3, 0.2, 0.15, 0.25],
             [0.05, 0.05, 0.05, 0.05, 0.8],
         );
-        node_b.get_mut().finalize_edge_update(0, 0, 2.0, 2.0);
-        node_b.get_mut().finalize_score_update(2.0, 2.0);
+        node_b.finalize_edge_update(0, 0, 2.0, 2.0);
+        node_b.finalize_score_update(2.0, 2.0);
 
         let config = SearchConfig {
             force_k: 0.0,
@@ -2679,8 +2781,8 @@ mod tests {
         let mut r1 = SmallRng::seed_from_u64(99);
         let mut r2 = SmallRng::seed_from_u64(99);
 
-        let sel_a = select_p1(node_a.get(), &config, false, &mut r1);
-        let sel_b = select_p1(node_b.get(), &config, false, &mut r2);
+        let sel_a = select_p1(&node_a, &config, false, &mut r1);
+        let sel_b = select_p1(&node_b, &config, false, &mut r2);
 
         assert_eq!(sel_a, sel_b, "P2 priors should not affect P1 selection");
     }
@@ -2688,31 +2790,25 @@ mod tests {
     #[test]
     fn puct_single_outcome() {
         // Mud-stuck: all actions → STAY, n1=1
-        let node = Arc::new(SharedNode::new(LowNode::new_shell(
-            [4, 4, 4, 4, 4],
-            [0, 1, 2, 3, 4],
-        )));
-        node.get_mut().set_value_scale(5.0);
-        node.get_mut().set_prior([0.2; 5], [0.2; 5]);
+        let mut node = LowNode::new_shell([4, 4, 4, 4, 4], [0, 1, 2, 3, 4]);
+        node.set_value_scale(5.0);
+        node.set_prior([0.2; 5], [0.2; 5]);
 
         let config = default_config();
         let mut r = rng();
-        let selected = select_p1(node.get(), &config, false, &mut r);
+        let selected = select_p1(&node, &config, false, &mut r);
         assert_eq!(selected, 0, "Single outcome should return 0");
     }
 
     #[test]
     fn puct_virtual_loss_diversifies() {
-        let node = Arc::new(SharedNode::new(LowNode::new_shell(
-            [0, 1, 2, 3, 4],
-            [0, 1, 2, 3, 4],
-        )));
-        node.get_mut().set_value_scale(5.0);
-        node.get_mut().set_prior([0.2; 5], [0.2; 5]);
+        let mut node = LowNode::new_shell([0, 1, 2, 3, 4], [0, 1, 2, 3, 4]);
+        node.set_value_scale(5.0);
+        node.set_prior([0.2; 5], [0.2; 5]);
         // Give some visits so selection isn't degenerate
         for i in 0..5 {
-            node.get_mut().finalize_edge_update(i, 0, 2.0, 2.0);
-            node.get_mut().finalize_score_update(2.0, 2.0);
+            node.finalize_edge_update(i, 0, 2.0, 2.0);
+            node.finalize_score_update(2.0, 2.0);
         }
 
         let config = SearchConfig {
@@ -2722,15 +2818,15 @@ mod tests {
         let mut r = rng();
 
         // Select without virtual loss
-        let baseline = select_p1(node.get(), &config, false, &mut r);
+        let baseline = select_p1(&node, &config, false, &mut r);
 
         // Add heavy virtual loss on baseline outcome
         for _ in 0..100 {
-            node.get_mut().add_virtual_loss(baseline as usize, 0);
+            node.add_virtual_loss(baseline as usize, 0);
         }
 
         let mut r2 = rng();
-        let shifted = select_p1(node.get(), &config, false, &mut r2);
+        let shifted = select_p1(&node, &config, false, &mut r2);
         assert_ne!(
             baseline, shifted,
             "Virtual loss should shift selection away from {baseline}"
@@ -2738,22 +2834,19 @@ mod tests {
 
         // Clean up
         for _ in 0..100 {
-            node.get_mut().revert_virtual_loss(baseline as usize, 0);
+            node.revert_virtual_loss(baseline as usize, 0);
         }
     }
 
     #[test]
     fn puct_multi_descent_diversification() {
-        let node = Arc::new(SharedNode::new(LowNode::new_shell(
-            [0, 1, 2, 3, 4],
-            [0, 1, 2, 3, 4],
-        )));
-        node.get_mut().set_value_scale(5.0);
-        node.get_mut().set_prior([0.2; 5], [0.2; 5]);
+        let mut node = LowNode::new_shell([0, 1, 2, 3, 4], [0, 1, 2, 3, 4]);
+        node.set_value_scale(5.0);
+        node.set_prior([0.2; 5], [0.2; 5]);
 
         // Give 1 visit so total_edge_visits > 0
-        node.get_mut().finalize_edge_update(0, 0, 1.0, 1.0);
-        node.get_mut().finalize_score_update(1.0, 1.0);
+        node.finalize_edge_update(0, 0, 1.0, 1.0);
+        node.finalize_score_update(1.0, 1.0);
 
         let config = SearchConfig {
             force_k: 0.0,
@@ -2763,9 +2856,9 @@ mod tests {
 
         let mut selected = HashSet::new();
         for _ in 0..3 {
-            let s = select_p1(node.get(), &config, false, &mut r);
+            let s = select_p1(&node, &config, false, &mut r);
             // Add virtual loss to force next selection elsewhere
-            node.get_mut().add_virtual_loss(s as usize, 0);
+            node.add_virtual_loss(s as usize, 0);
             selected.insert(s);
         }
 
@@ -2777,7 +2870,7 @@ mod tests {
 
         // Cleanup
         for &s in &selected {
-            node.get_mut().revert_virtual_loss(s as usize, 0);
+            node.revert_virtual_loss(s as usize, 0);
         }
     }
 
@@ -2799,29 +2892,7 @@ mod tests {
 
         let _result = run_search(&mut tree, &game, &backend, &config, 100, 16, &mut r).unwrap();
 
-        // Walk DAG: every node should have n_in_flight=0
-        for &ptr in &walk_dag(tree.root()) {
-            let node_ref = unsafe { &*ptr };
-            let low = node_ref.get();
-            assert_eq!(
-                low.n_in_flight(),
-                0,
-                "Node still has n_in_flight={}",
-                low.n_in_flight()
-            );
-
-            // Also check per-edge in_flight matrix
-            for i in 0..low.n1() {
-                for j in 0..low.n2() {
-                    assert_eq!(
-                        low.edge_in_flight(i, j),
-                        0,
-                        "edge_in_flight[{i}][{j}] = {}",
-                        low.edge_in_flight(i, j)
-                    );
-                }
-            }
-        }
+        assert_no_in_flight(&mut tree);
     }
 
     #[test]
@@ -2989,21 +3060,17 @@ mod tests {
 
     #[test]
     fn noise_disabled_priors_unchanged() {
-        let node = Arc::new(SharedNode::new(LowNode::new_shell(
-            [0, 1, 2, 3, 4],
-            [0, 1, 2, 3, 4],
-        )));
-        node.get_mut()
-            .set_prior([0.1, 0.2, 0.3, 0.15, 0.25], [0.2; 5]);
+        let mut node = LowNode::new_shell([0, 1, 2, 3, 4], [0, 1, 2, 3, 4]);
+        node.set_prior([0.1, 0.2, 0.3, 0.15, 0.25], [0.2; 5]);
 
-        let priors_before: Vec<f32> = (0..5).map(|i| node.get().p1_prior(i)).collect();
+        let priors_before: Vec<f32> = (0..5).map(|i| node.p1_prior(i)).collect();
 
         let mut r = rng();
-        apply_dirichlet_noise_p1(&node, 0.0, 10.83, &mut r);
+        apply_dirichlet_noise_p1(&mut node, 0.0, 10.83, &mut r);
 
         for i in 0..5 {
             assert!(
-                (node.get().p1_prior(i) - priors_before[i]).abs() < 1e-10,
+                (node.p1_prior(i) - priors_before[i]).abs() < 1e-10,
                 "Prior {i} changed with epsilon=0"
             );
         }
@@ -3011,22 +3078,19 @@ mod tests {
 
     #[test]
     fn noise_enabled_priors_modified() {
-        let node = Arc::new(SharedNode::new(LowNode::new_shell(
-            [0, 1, 2, 3, 4],
-            [0, 1, 2, 3, 4],
-        )));
-        node.get_mut().set_prior([0.2; 5], [0.2; 5]);
+        let mut node = LowNode::new_shell([0, 1, 2, 3, 4], [0, 1, 2, 3, 4]);
+        node.set_prior([0.2; 5], [0.2; 5]);
 
-        let priors_before: Vec<f32> = (0..5).map(|i| node.get().p1_prior(i)).collect();
+        let priors_before: Vec<f32> = (0..5).map(|i| node.p1_prior(i)).collect();
 
         let mut r = rng();
-        apply_dirichlet_noise_p1(&node, 0.25, 10.83, &mut r);
+        apply_dirichlet_noise_p1(&mut node, 0.25, 10.83, &mut r);
 
         let mut any_changed = false;
         let mut sum = 0.0f32;
         for i in 0..5 {
-            sum += node.get().p1_prior(i);
-            if (node.get().p1_prior(i) - priors_before[i]).abs() > 1e-6 {
+            sum += node.p1_prior(i);
+            if (node.p1_prior(i) - priors_before[i]).abs() > 1e-6 {
                 any_changed = true;
             }
         }
@@ -3043,25 +3107,22 @@ mod tests {
     #[test]
     fn noise_deterministic_with_seed() {
         let make = || {
-            let node = Arc::new(SharedNode::new(LowNode::new_shell(
-                [0, 1, 2, 3, 4],
-                [0, 1, 2, 3, 4],
-            )));
-            node.get_mut().set_prior([0.2; 5], [0.2; 5]);
+            let mut node = LowNode::new_shell([0, 1, 2, 3, 4], [0, 1, 2, 3, 4]);
+            node.set_prior([0.2; 5], [0.2; 5]);
             node
         };
 
-        let node1 = make();
+        let mut node1 = make();
         let mut r1 = SmallRng::seed_from_u64(777);
-        apply_dirichlet_noise_p1(&node1, 0.25, 10.83, &mut r1);
+        apply_dirichlet_noise_p1(&mut node1, 0.25, 10.83, &mut r1);
 
-        let node2 = make();
+        let mut node2 = make();
         let mut r2 = SmallRng::seed_from_u64(777);
-        apply_dirichlet_noise_p1(&node2, 0.25, 10.83, &mut r2);
+        apply_dirichlet_noise_p1(&mut node2, 0.25, 10.83, &mut r2);
 
         for i in 0..5 {
             assert!(
-                (node1.get().p1_prior(i) - node2.get().p1_prior(i)).abs() < 1e-10,
+                (node1.p1_prior(i) - node2.p1_prior(i)).abs() < 1e-10,
                 "Same seed should produce same noise at outcome {i}"
             );
         }
@@ -3069,20 +3130,17 @@ mod tests {
 
     #[test]
     fn noise_single_outcome_noop() {
-        let node = Arc::new(SharedNode::new(LowNode::new_shell(
-            [4, 4, 4, 4, 4],
-            [0, 1, 2, 3, 4],
-        )));
-        node.get_mut().set_prior([0.2; 5], [0.2; 5]);
+        let mut node = LowNode::new_shell([4, 4, 4, 4, 4], [0, 1, 2, 3, 4]);
+        node.set_prior([0.2; 5], [0.2; 5]);
 
-        assert_eq!(node.get().n1(), 1);
-        let prior_before = node.get().p1_prior(0);
+        assert_eq!(node.n1(), 1);
+        let prior_before = node.p1_prior(0);
 
         let mut r = rng();
-        apply_dirichlet_noise_p1(&node, 0.25, 10.83, &mut r);
+        apply_dirichlet_noise_p1(&mut node, 0.25, 10.83, &mut r);
 
         assert!(
-            (node.get().p1_prior(0) - prior_before).abs() < 1e-10,
+            (node.p1_prior(0) - prior_before).abs() < 1e-10,
             "Single outcome should not be modified by noise"
         );
     }
@@ -3174,27 +3232,8 @@ mod tests {
         let result = run_search(&mut tree, &game, &FailingBackend, &config, 100, 16, &mut r);
         assert!(result.is_err());
 
-        // Phase 3: verify the tree is clean — all n_in_flight and edge_in_flight = 0.
-        for &ptr in &walk_dag(tree.root()) {
-            let node_ref = unsafe { &*ptr };
-            let low = node_ref.get();
-            assert_eq!(
-                low.n_in_flight(),
-                0,
-                "n_in_flight={} after backend error",
-                low.n_in_flight()
-            );
-            for i in 0..low.n1() {
-                for j in 0..low.n2() {
-                    assert_eq!(
-                        low.edge_in_flight(i, j),
-                        0,
-                        "edge_in_flight[{i}][{j}]={} after backend error",
-                        low.edge_in_flight(i, j)
-                    );
-                }
-            }
-        }
+        // Phase 3: verify the tree is clean — all reservations are zero.
+        assert_no_in_flight(&mut tree);
 
         // Phase 4: rerun with good backend — tree should be usable.
         let result2 =
@@ -3296,44 +3335,49 @@ mod tests {
     /// No transposition: delta stays 0, backup produces identical results to before.
     #[test]
     fn delta_no_transposition_baseline() {
-        let root = Arc::new(SharedNode::new(LowNode::new_shell(
-            [0, 1, 2, 3, 4],
-            [0, 1, 2, 3, 4],
-        )));
-        root.get_mut().set_value_scale(5.0);
-        root.get_mut().set_prior([0.2; 5], [0.2; 5]);
+        with_test_access(|access| {
+            let mut root_low = LowNode::new_shell(
+                [0, 1, 2, 3, 4],
+                [0, 1, 2, 3, 4],
+            );
+            root_low.set_value_scale(5.0);
+            root_low.set_prior([0.2; 5], [0.2; 5]);
+            let root = access.test_node(root_low);
 
-        let child = Arc::new(SharedNode::new(LowNode::new_shell(
-            [0, 1, 2, 3, 4],
-            [0, 1, 2, 3, 4],
-        )));
-        child.get_mut().set_value_scale(5.0);
+            let mut child_low = LowNode::new_shell(
+                [0, 1, 2, 3, 4],
+                [0, 1, 2, 3, 4],
+            );
+            child_low.set_value_scale(5.0);
+            let child = access.test_node(child_low);
 
-        // Only one parent edge → num_parents == 1, no delta correction.
-        let edge = Box::new(Edge::new(Arc::clone(&child), (0, 1), 1.0, 0.5));
-        root.get_mut().prepend_child(edge);
-        assert_eq!(child.num_parents(), 1);
+            // Only one parent edge → num_parents == 1, no delta correction.
+            access.test_connect(&root, &child, (0, 1), 1.0, 0.5);
+            assert_eq!(access.num_parents(&child), 1);
 
-        let path = vec![PathEntry {
-            node: Arc::clone(&root),
-            p1_outcome: 0,
-            p2_outcome: 1,
-        }];
+            let path = vec![PathEntry {
+                node: root.clone(),
+                p1_outcome: 0,
+                p2_outcome: 1,
+            }];
 
-        backup(&path, &child, 3.0, 2.0);
+            backup(access, &path, &child, 3.0, 2.0);
 
-        // Same results as non-delta-correction backup.
-        assert_eq!(child.get().total_visits(), 1);
-        assert!((child.get().v1() - 3.0).abs() < 1e-6);
-        assert!((child.get().v2() - 2.0).abs() < 1e-6);
+            // Same results as non-delta-correction backup.
+            let child_low = access.node(&child);
+            assert_eq!(child_low.total_visits(), 1);
+            assert!((child_low.v1() - 3.0).abs() < 1e-6);
+            assert!((child_low.v2() - 2.0).abs() < 1e-6);
 
-        // q1 = 1.0 + 3.0 = 4.0, q2 = 0.5 + 2.0 = 2.5
-        assert_eq!(root.get().total_visits(), 1);
-        assert!((root.get().v1() - 4.0).abs() < 1e-6);
-        assert!((root.get().v2() - 2.5).abs() < 1e-6);
-        assert_eq!(root.get().edge_visits(0, 1), 1);
-        assert!((root.get().edge_q_p1(0, 1) - 4.0).abs() < 1e-6);
-        assert!((root.get().edge_q_p2(0, 1) - 2.5).abs() < 1e-6);
+            // q1 = 1.0 + 3.0 = 4.0, q2 = 0.5 + 2.0 = 2.5
+            let root_low = access.node(&root);
+            assert_eq!(root_low.total_visits(), 1);
+            assert!((root_low.v1() - 4.0).abs() < 1e-6);
+            assert!((root_low.v2() - 2.5).abs() < 1e-6);
+            assert_eq!(root_low.edge_visits(0, 1), 1);
+            assert!((root_low.edge_q_p1(0, 1) - 4.0).abs() < 1e-6);
+            assert!((root_low.edge_q_p2(0, 1) - 2.5).abs() < 1e-6);
+        });
     }
 
     /// Simple transposition correction.
@@ -3342,167 +3386,144 @@ mod tests {
     /// single visit that went through A).
     #[test]
     fn delta_simple_transposition_correction() {
-        // Shared child C (the transposition).
-        let child_c = Arc::new(SharedNode::new(LowNode::new_shell(
-            [0, 1, 2, 3, 4],
-            [0, 1, 2, 3, 4],
-        )));
-        child_c.get_mut().set_value_scale(5.0);
+        with_test_access(|access| {
+            // Shared child C (the transposition).
+            let mut child_low = LowNode::new_shell(
+                [0, 1, 2, 3, 4],
+                [0, 1, 2, 3, 4],
+            );
+            child_low.set_value_scale(5.0);
+            let child_c = access.test_node(child_low);
 
-        // Parent A, with edge to C.
-        let parent_a = Arc::new(SharedNode::new(LowNode::new_shell(
-            [0, 1, 2, 3, 4],
-            [0, 1, 2, 3, 4],
-        )));
-        parent_a.get_mut().set_value_scale(5.0);
-        parent_a.get_mut().set_prior([0.2; 5], [0.2; 5]);
-        let edge_a_c = Box::new(Edge::new(Arc::clone(&child_c), (0, 0), 1.0, 0.5));
-        parent_a.get_mut().prepend_child(edge_a_c);
+            let mut parent_a_low = LowNode::new_shell(
+                [0, 1, 2, 3, 4],
+                [0, 1, 2, 3, 4],
+            );
+            parent_a_low.set_value_scale(5.0);
+            parent_a_low.set_prior([0.2; 5], [0.2; 5]);
+            let parent_a = access.test_node(parent_a_low);
+            access.test_connect(&parent_a, &child_c, (0, 0), 1.0, 0.5);
 
-        // Parent B, with edge to C.
-        let parent_b = Arc::new(SharedNode::new(LowNode::new_shell(
-            [0, 1, 2, 3, 4],
-            [0, 1, 2, 3, 4],
-        )));
-        parent_b.get_mut().set_value_scale(5.0);
-        parent_b.get_mut().set_prior([0.2; 5], [0.2; 5]);
-        let edge_b_c = Box::new(Edge::new(Arc::clone(&child_c), (0, 0), 0.0, 0.0));
-        parent_b.get_mut().prepend_child(edge_b_c);
+            let mut parent_b_low = LowNode::new_shell(
+                [0, 1, 2, 3, 4],
+                [0, 1, 2, 3, 4],
+            );
+            parent_b_low.set_value_scale(5.0);
+            parent_b_low.set_prior([0.2; 5], [0.2; 5]);
+            let parent_b = access.test_node(parent_b_low);
+            access.test_connect(&parent_b, &child_c, (0, 0), 0.0, 0.0);
 
-        assert_eq!(child_c.num_parents(), 2);
+            assert_eq!(access.num_parents(&child_c), 2);
 
-        // Backup 1: through A with leaf value (2.0, 3.0).
-        let path_a = vec![PathEntry {
-            node: Arc::clone(&parent_a),
-            p1_outcome: 0,
-            p2_outcome: 0,
-        }];
-        backup(&path_a, &child_c, 2.0, 3.0);
+            let path_a = vec![PathEntry {
+                node: parent_a.clone(),
+                p1_outcome: 0,
+                p2_outcome: 0,
+            }];
+            backup(access, &path_a, &child_c, 2.0, 3.0);
 
-        // After backup 1: C.v = (2.0, 3.0), A.edge_q = (1+2, 0.5+3) = (3.0, 3.5).
-        assert_eq!(child_c.get().total_visits(), 1);
-        assert!((child_c.get().v1() - 2.0).abs() < 1e-6);
-        assert!((parent_a.get().edge_q_p1(0, 0) - 3.0).abs() < 1e-6);
-        assert!((parent_a.get().edge_q_p2(0, 0) - 3.5).abs() < 1e-6);
+            let child_low = access.node(&child_c);
+            assert_eq!(child_low.total_visits(), 1);
+            assert!((child_low.v1() - 2.0).abs() < 1e-6);
+            let parent_a_low = access.node(&parent_a);
+            assert!((parent_a_low.edge_q_p1(0, 0) - 3.0).abs() < 1e-6);
+            assert!((parent_a_low.edge_q_p2(0, 0) - 3.5).abs() < 1e-6);
 
-        // Backup 2: through B with leaf value (4.0, 5.0).
-        let path_b = vec![PathEntry {
-            node: Arc::clone(&parent_b),
-            p1_outcome: 0,
-            p2_outcome: 0,
-        }];
-        backup(&path_b, &child_c, 4.0, 5.0);
+            let path_b = vec![PathEntry {
+                node: parent_b.clone(),
+                p1_outcome: 0,
+                p2_outcome: 0,
+            }];
+            backup(access, &path_b, &child_c, 4.0, 5.0);
 
-        // After backup 2: C.v = mean(2, 4) = 3.0, mean(3, 5) = 4.0.
-        assert_eq!(child_c.get().total_visits(), 2);
-        assert!((child_c.get().v1() - 3.0).abs() < 1e-6);
-        assert!((child_c.get().v2() - 4.0).abs() < 1e-6);
+            let child_low = access.node(&child_c);
+            assert_eq!(child_low.total_visits(), 2);
+            assert!((child_low.v1() - 3.0).abs() < 1e-6);
+            assert!((child_low.v2() - 4.0).abs() < 1e-6);
+            let parent_b_low = access.node(&parent_b);
+            assert_eq!(parent_b_low.edge_visits(0, 0), 1);
+            assert!((parent_b_low.edge_q_p1(0, 0) - 3.0).abs() < 1e-6);
+            assert!((parent_b_low.edge_q_p2(0, 0) - 4.0).abs() < 1e-6);
 
-        // B's edge sees C as a transposition (num_parents > 1).
-        // correct_q1 = r1(0) + C.v1(3.0) = 3.0
-        // correct_q2 = r2(0) + C.v2(4.0) = 4.0
-        // B had no prior visits, so the Welford new-visit gets correct_q directly.
-        assert_eq!(parent_b.get().edge_visits(0, 0), 1);
-        assert!((parent_b.get().edge_q_p1(0, 0) - 3.0).abs() < 1e-6);
-        assert!((parent_b.get().edge_q_p2(0, 0) - 4.0).abs() < 1e-6);
+            backup(access, &path_a, &child_c, 6.0, 7.0);
 
-        // Now backup through A again with leaf value (6.0, 7.0).
-        // C.v becomes mean(2, 4, 6) = 4.0, mean(3, 5, 7) = 5.0.
-        let path_a2 = vec![PathEntry {
-            node: Arc::clone(&parent_a),
-            p1_outcome: 0,
-            p2_outcome: 0,
-        }];
-        backup(&path_a2, &child_c, 6.0, 7.0);
+            let child_low = access.node(&child_c);
+            assert_eq!(child_low.total_visits(), 3);
+            assert!((child_low.v1() - 4.0).abs() < 1e-6);
+            assert!((child_low.v2() - 5.0).abs() < 1e-6);
 
-        assert_eq!(child_c.get().total_visits(), 3);
-        assert!((child_c.get().v1() - 4.0).abs() < 1e-6);
-        assert!((child_c.get().v2() - 5.0).abs() < 1e-6);
-
-        // A's edge_q should now be corrected.
-        // correct_q1 = r1(1.0) + C.v1(4.0) = 5.0
-        // correct_q2 = r2(0.5) + C.v2(5.0) = 5.5
-        //
-        // Before this backup, A had 1 visit with edge_q = (3.0, 3.5).
-        // Delta detection: correct_q1(5.0) - old_edge_q1(3.0) = 2.0, n_to_fix=1.
-        // FinalizeEdge adds visit 2 with Welford(5.0): (3.0 + (5.0-3.0)/2) = 4.0.
-        // AdjustEdge: 4.0 + 1*2.0/2 = 5.0. (exact catch-up)
-        assert_eq!(parent_a.get().edge_visits(0, 0), 2);
-        assert!((parent_a.get().edge_q_p1(0, 0) - 5.0).abs() < 1e-5);
-        assert!((parent_a.get().edge_q_p2(0, 0) - 5.5).abs() < 1e-5);
+            // The stale visit is corrected exactly to r + the shared aggregate.
+            let parent_a_low = access.node(&parent_a);
+            assert_eq!(parent_a_low.edge_visits(0, 0), 2);
+            assert!((parent_a_low.edge_q_p1(0, 0) - 5.0).abs() < 1e-5);
+            assert!((parent_a_low.edge_q_p2(0, 0) - 5.5).abs() < 1e-5);
+        });
     }
 
     /// Exact catch-up: when all prior visits are stale, adjustment should
     /// bring edge_q exactly to r + child.v.
     #[test]
     fn delta_exact_catchup() {
-        let child = Arc::new(SharedNode::new(LowNode::new_shell(
-            [0, 1, 2, 3, 4],
-            [0, 1, 2, 3, 4],
-        )));
-        child.get_mut().set_value_scale(5.0);
+        with_test_access(|access| {
+            let mut child_low = LowNode::new_shell(
+                [0, 1, 2, 3, 4],
+                [0, 1, 2, 3, 4],
+            );
+            child_low.set_value_scale(5.0);
+            let child = access.test_node(child_low);
 
-        let parent = Arc::new(SharedNode::new(LowNode::new_shell(
-            [0, 1, 2, 3, 4],
-            [0, 1, 2, 3, 4],
-        )));
-        parent.get_mut().set_value_scale(5.0);
-        parent.get_mut().set_prior([0.2; 5], [0.2; 5]);
+            let mut parent_low = LowNode::new_shell(
+                [0, 1, 2, 3, 4],
+                [0, 1, 2, 3, 4],
+            );
+            parent_low.set_value_scale(5.0);
+            parent_low.set_prior([0.2; 5], [0.2; 5]);
+            let parent = access.test_node(parent_low);
 
-        // Parent needs 2 edges to child so num_parents > 1.
-        let other_parent = Arc::new(SharedNode::new(LowNode::new_shell(
-            [0, 1, 2, 3, 4],
-            [0, 1, 2, 3, 4],
-        )));
-        other_parent.get_mut().set_value_scale(5.0);
-        other_parent.get_mut().set_prior([0.2; 5], [0.2; 5]);
+            let mut other_low = LowNode::new_shell(
+                [0, 1, 2, 3, 4],
+                [0, 1, 2, 3, 4],
+            );
+            other_low.set_value_scale(5.0);
+            other_low.set_prior([0.2; 5], [0.2; 5]);
+            let other_parent = access.test_node(other_low);
 
-        let edge1 = Box::new(Edge::new(Arc::clone(&child), (0, 0), 2.0, 1.0));
-        parent.get_mut().prepend_child(edge1);
-        let edge2 = Box::new(Edge::new(Arc::clone(&child), (0, 0), 0.0, 0.0));
-        other_parent.get_mut().prepend_child(edge2);
+            access.test_connect(&parent, &child, (0, 0), 2.0, 1.0);
+            access.test_connect(&other_parent, &child, (0, 0), 0.0, 0.0);
+            assert_eq!(access.num_parents(&child), 2);
 
-        assert_eq!(child.num_parents(), 2);
-
-        // 5 backups through other_parent updating child but not parent.
-        for val in [1.0, 2.0, 3.0, 4.0, 5.0] {
             let path_other = vec![PathEntry {
-                node: Arc::clone(&other_parent),
+                node: other_parent.clone(),
                 p1_outcome: 0,
                 p2_outcome: 0,
             }];
-            backup(&path_other, &child, val, val * 0.5);
-        }
+            for val in [1.0, 2.0, 3.0, 4.0, 5.0] {
+                backup(access, &path_other, &child, val, val * 0.5);
+            }
 
-        // child.v1 = mean(1,2,3,4,5) = 3.0, child.v2 = mean(0.5,1,1.5,2,2.5) = 1.5
-        assert_eq!(child.get().total_visits(), 5);
-        assert!((child.get().v1() - 3.0).abs() < 1e-5);
-        assert!((child.get().v2() - 1.5).abs() < 1e-5);
+            let child_low = access.node(&child);
+            assert_eq!(child_low.total_visits(), 5);
+            assert!((child_low.v1() - 3.0).abs() < 1e-5);
+            assert!((child_low.v2() - 1.5).abs() < 1e-5);
 
-        // parent has 0 edge visits to child. Now backup through parent.
-        let path = vec![PathEntry {
-            node: Arc::clone(&parent),
-            p1_outcome: 0,
-            p2_outcome: 0,
-        }];
-        backup(&path, &child, 10.0, 5.0);
+            let path = vec![PathEntry {
+                node: parent.clone(),
+                p1_outcome: 0,
+                p2_outcome: 0,
+            }];
+            backup(access, &path, &child, 10.0, 5.0);
 
-        // child.v after 6th visit: mean(1,2,3,4,5,10) = 25/6 ≈ 4.1667
-        // But for parent's edge_q, the delta detection reads child.v AFTER
-        // finalize_score_update on the leaf.
-        // correct_q1 = r(2.0) + child.v1 ≈ 2.0 + 4.1667 = 6.1667
-        // correct_q2 = r(1.0) + child.v2 ≈ 1.0 + 2.0833 = 3.0833
-        //
-        // n_to_fix = 0 (parent had no visits), so no adjustment needed.
-        // First visit just gets the correct value directly.
-        let expected_child_v1 = 25.0 / 6.0;
-        let expected_child_v2 = (0.5 + 1.0 + 1.5 + 2.0 + 2.5 + 5.0) / 6.0;
-        let expected_q1 = 2.0 + expected_child_v1;
-        let expected_q2 = 1.0 + expected_child_v2;
+            let expected_child_v1 = 25.0 / 6.0;
+            let expected_child_v2 =
+                (0.5 + 1.0 + 1.5 + 2.0 + 2.5 + 5.0) / 6.0;
+            let expected_q1 = 2.0 + expected_child_v1;
+            let expected_q2 = 1.0 + expected_child_v2;
 
-        assert_eq!(parent.get().edge_visits(0, 0), 1);
-        assert!((parent.get().edge_q_p1(0, 0) - expected_q1).abs() < 1e-4);
-        assert!((parent.get().edge_q_p2(0, 0) - expected_q2).abs() < 1e-4);
+            let parent_low = access.node(&parent);
+            assert_eq!(parent_low.edge_visits(0, 0), 1);
+            assert!((parent_low.edge_q_p1(0, 0) - expected_q1).abs() < 1e-4);
+            assert!((parent_low.edge_q_p2(0, 0) - expected_q2).abs() < 1e-4);
+        });
     }
 
     /// Cascading correction: A → B → C, D → B.
@@ -3510,187 +3531,138 @@ mod tests {
     /// both B's and A's edge_q.
     #[test]
     fn delta_cascading_correction() {
-        // C (leaf)
-        let node_c = Arc::new(SharedNode::new(LowNode::new_shell(
-            [0, 1, 2, 3, 4],
-            [0, 1, 2, 3, 4],
-        )));
-        node_c.get_mut().set_value_scale(5.0);
+        with_test_access(|access| {
+            let mut make_node = |with_prior: bool| {
+                let mut low = LowNode::new_shell(
+                    [0, 1, 2, 3, 4],
+                    [0, 1, 2, 3, 4],
+                );
+                low.set_value_scale(5.0);
+                if with_prior {
+                    low.set_prior([0.2; 5], [0.2; 5]);
+                }
+                access.test_node(low)
+            };
+            let node_c = make_node(false);
+            let node_b = make_node(true);
+            let node_a = make_node(true);
+            let node_d = make_node(true);
 
-        // B (intermediate, shared by A and D)
-        let node_b = Arc::new(SharedNode::new(LowNode::new_shell(
-            [0, 1, 2, 3, 4],
-            [0, 1, 2, 3, 4],
-        )));
-        node_b.get_mut().set_value_scale(5.0);
-        node_b.get_mut().set_prior([0.2; 5], [0.2; 5]);
-        let edge_b_c = Box::new(Edge::new(Arc::clone(&node_c), (0, 0), 0.5, 0.5));
-        node_b.get_mut().prepend_child(edge_b_c);
+            access.test_connect(&node_b, &node_c, (0, 0), 0.5, 0.5);
+            access.test_connect(&node_a, &node_b, (0, 0), 1.0, 1.0);
+            access.test_connect(&node_d, &node_b, (0, 0), 0.0, 0.0);
+            assert_eq!(access.num_parents(&node_b), 2);
 
-        // A (root-like, single path through B to C)
-        let node_a = Arc::new(SharedNode::new(LowNode::new_shell(
-            [0, 1, 2, 3, 4],
-            [0, 1, 2, 3, 4],
-        )));
-        node_a.get_mut().set_value_scale(5.0);
-        node_a.get_mut().set_prior([0.2; 5], [0.2; 5]);
-        let edge_a_b = Box::new(Edge::new(Arc::clone(&node_b), (0, 0), 1.0, 1.0));
-        node_a.get_mut().prepend_child(edge_a_b);
+            let path_abc = vec![
+                PathEntry {
+                    node: node_a.clone(),
+                    p1_outcome: 0,
+                    p2_outcome: 0,
+                },
+                PathEntry {
+                    node: node_b.clone(),
+                    p1_outcome: 0,
+                    p2_outcome: 0,
+                },
+            ];
+            backup(access, &path_abc, &node_c, 2.0, 1.0);
+            assert!((access.node(&node_c).v1() - 2.0).abs() < 1e-6);
+            assert!((access.node(&node_b).v1() - 2.5).abs() < 1e-6);
+            assert!((access.node(&node_a).v1() - 3.5).abs() < 1e-6);
 
-        // D (another parent of B, creating the transposition)
-        let node_d = Arc::new(SharedNode::new(LowNode::new_shell(
-            [0, 1, 2, 3, 4],
-            [0, 1, 2, 3, 4],
-        )));
-        node_d.get_mut().set_value_scale(5.0);
-        node_d.get_mut().set_prior([0.2; 5], [0.2; 5]);
-        let edge_d_b = Box::new(Edge::new(Arc::clone(&node_b), (0, 0), 0.0, 0.0));
-        node_d.get_mut().prepend_child(edge_d_b);
+            let path_dbc = vec![
+                PathEntry {
+                    node: node_d.clone(),
+                    p1_outcome: 0,
+                    p2_outcome: 0,
+                },
+                PathEntry {
+                    node: node_b.clone(),
+                    p1_outcome: 0,
+                    p2_outcome: 0,
+                },
+            ];
+            backup(access, &path_dbc, &node_c, 6.0, 5.0);
+            assert!((access.node(&node_c).v1() - 4.0).abs() < 1e-6);
+            assert!((access.node(&node_c).v2() - 3.0).abs() < 1e-6);
+            assert_eq!(access.node(&node_b).edge_visits(0, 0), 2);
 
-        assert_eq!(node_b.num_parents(), 2); // B is a transposition
+            backup(access, &path_abc, &node_c, 8.0, 7.0);
+            assert!((access.node(&node_c).v1() - 16.0 / 3.0).abs() < 1e-4);
 
-        // Step 1: backup A → B → C with leaf value (2.0, 1.0).
-        let path_abc = vec![
-            PathEntry { node: Arc::clone(&node_a), p1_outcome: 0, p2_outcome: 0 },
-            PathEntry { node: Arc::clone(&node_b), p1_outcome: 0, p2_outcome: 0 },
-        ];
-        backup(&path_abc, &node_c, 2.0, 1.0);
-
-        // C.v = (2.0, 1.0), B.v = (0.5+2.0, 0.5+1.0) = (2.5, 1.5)
-        // A.v = (1+2.5, 1+1.5) = (3.5, 2.5)
-        assert!((node_c.get().v1() - 2.0).abs() < 1e-6);
-        assert!((node_b.get().v1() - 2.5).abs() < 1e-6);
-        assert!((node_a.get().v1() - 3.5).abs() < 1e-6);
-
-        // Step 2: backup D → B → C with leaf value (6.0, 5.0).
-        // This updates C and B but not A.
-        let path_dbc = vec![
-            PathEntry { node: Arc::clone(&node_d), p1_outcome: 0, p2_outcome: 0 },
-            PathEntry { node: Arc::clone(&node_b), p1_outcome: 0, p2_outcome: 0 },
-        ];
-        backup(&path_dbc, &node_c, 6.0, 5.0);
-
-        // C.v = mean(2, 6) = 4.0, mean(1, 5) = 3.0
-        assert!((node_c.get().v1() - 4.0).abs() < 1e-6);
-        assert!((node_c.get().v2() - 3.0).abs() < 1e-6);
-
-        // B now has 2 visits. B's edge_q should reflect corrected C.v.
-        // At step 2, B saw C as transposition → used correct_q = 0.5 + 4.0 = 4.5.
-        // B's edge_q should be corrected from the first stale visit.
-        assert_eq!(node_b.get().edge_visits(0, 0), 2);
-
-        // Step 3: backup A → B → C with leaf value (8.0, 7.0).
-        // A should see B as transposition and correct its stale visit.
-        let path_abc2 = vec![
-            PathEntry { node: Arc::clone(&node_a), p1_outcome: 0, p2_outcome: 0 },
-            PathEntry { node: Arc::clone(&node_b), p1_outcome: 0, p2_outcome: 0 },
-        ];
-        backup(&path_abc2, &node_c, 8.0, 7.0);
-
-        // C.v = mean(2, 6, 8) = 16/3 ≈ 5.333
-        assert!((node_c.get().v1() - 16.0 / 3.0).abs() < 1e-4);
-
-        // A should have corrected edge_q. The key property: A's edge_q
-        // should be close to r(1,1) + B.v, not stuck at the old stale value.
-        // B.v after 3 visits reflects all information through C.
-        let b_v1 = node_b.get().v1();
-        let b_v2 = node_b.get().v2();
-        let a_correct_q1 = 1.0 + b_v1;
-        let a_correct_q2 = 1.0 + b_v2;
-
-        // A has 2 edge visits. The corrected edge_q should be close to the correct value.
-        assert_eq!(node_a.get().edge_visits(0, 0), 2);
-        assert!(
-            (node_a.get().edge_q_p1(0, 0) - a_correct_q1).abs() < 0.5,
-            "A.edge_q_p1 = {}, expected near {}", node_a.get().edge_q_p1(0, 0), a_correct_q1,
-        );
-        assert!(
-            (node_a.get().edge_q_p2(0, 0) - a_correct_q2).abs() < 0.5,
-            "A.edge_q_p2 = {}, expected near {}", node_a.get().edge_q_p2(0, 0), a_correct_q2,
-        );
+            let (b_v1, b_v2) = {
+                let node_b = access.node(&node_b);
+                (node_b.v1(), node_b.v2())
+            };
+            let node_a = access.node(&node_a);
+            assert_eq!(node_a.edge_visits(0, 0), 2);
+            assert!(
+                (node_a.edge_q_p1(0, 0) - (1.0 + b_v1)).abs() < 0.5
+            );
+            assert!(
+                (node_a.edge_q_p2(0, 0) - (1.0 + b_v2)).abs() < 0.5
+            );
+        });
     }
 
     /// Non-transposition child with transposition grandchild: delta
     /// propagates through the intermediate node.
     #[test]
     fn delta_propagates_through_non_transposition() {
-        // grandchild (transposition, shared by mid and other_parent)
-        let grandchild = Arc::new(SharedNode::new(LowNode::new_shell(
-            [0, 1, 2, 3, 4],
-            [0, 1, 2, 3, 4],
-        )));
-        grandchild.get_mut().set_value_scale(5.0);
+        with_test_access(|access| {
+            let mut make_node = |with_prior: bool| {
+                let mut low = LowNode::new_shell(
+                    [0, 1, 2, 3, 4],
+                    [0, 1, 2, 3, 4],
+                );
+                low.set_value_scale(5.0);
+                if with_prior {
+                    low.set_prior([0.2; 5], [0.2; 5]);
+                }
+                access.test_node(low)
+            };
+            let grandchild = make_node(false);
+            let mid = make_node(true);
+            let root = make_node(true);
+            let other = make_node(true);
 
-        // mid (non-transposition, single parent: root)
-        let mid = Arc::new(SharedNode::new(LowNode::new_shell(
-            [0, 1, 2, 3, 4],
-            [0, 1, 2, 3, 4],
-        )));
-        mid.get_mut().set_value_scale(5.0);
-        mid.get_mut().set_prior([0.2; 5], [0.2; 5]);
-        let edge_mid_gc = Box::new(Edge::new(Arc::clone(&grandchild), (0, 0), 0.5, 0.5));
-        mid.get_mut().prepend_child(edge_mid_gc);
+            access.test_connect(&mid, &grandchild, (0, 0), 0.5, 0.5);
+            access.test_connect(&root, &mid, (0, 0), 1.0, 1.0);
+            access.test_connect(&other, &grandchild, (0, 0), 0.0, 0.0);
 
-        // root
-        let root = Arc::new(SharedNode::new(LowNode::new_shell(
-            [0, 1, 2, 3, 4],
-            [0, 1, 2, 3, 4],
-        )));
-        root.get_mut().set_value_scale(5.0);
-        root.get_mut().set_prior([0.2; 5], [0.2; 5]);
-        let edge_root_mid = Box::new(Edge::new(Arc::clone(&mid), (0, 0), 1.0, 1.0));
-        root.get_mut().prepend_child(edge_root_mid);
+            assert_eq!(access.num_parents(&mid), 1);
+            assert_eq!(access.num_parents(&grandchild), 2);
 
-        // other_parent (creates transposition at grandchild)
-        let other = Arc::new(SharedNode::new(LowNode::new_shell(
-            [0, 1, 2, 3, 4],
-            [0, 1, 2, 3, 4],
-        )));
-        other.get_mut().set_value_scale(5.0);
-        other.get_mut().set_prior([0.2; 5], [0.2; 5]);
-        let edge_other_gc = Box::new(Edge::new(Arc::clone(&grandchild), (0, 0), 0.0, 0.0));
-        other.get_mut().prepend_child(edge_other_gc);
+            let root_path = vec![
+                PathEntry {
+                    node: root.clone(),
+                    p1_outcome: 0,
+                    p2_outcome: 0,
+                },
+                PathEntry {
+                    node: mid.clone(),
+                    p1_outcome: 0,
+                    p2_outcome: 0,
+                },
+            ];
+            backup(access, &root_path, &grandchild, 1.0, 1.0);
+            let root_q1_after_1 = access.node(&root).edge_q_p1(0, 0);
 
-        assert_eq!(mid.num_parents(), 1);       // not a transposition
-        assert_eq!(grandchild.num_parents(), 2); // transposition
+            let other_path = vec![PathEntry {
+                node: other.clone(),
+                p1_outcome: 0,
+                p2_outcome: 0,
+            }];
+            backup(access, &other_path, &grandchild, 10.0, 10.0);
+            assert!((access.node(&grandchild).v1() - 5.5).abs() < 1e-5);
 
-        // Backup 1: root → mid → grandchild, leaf = (1.0, 1.0).
-        let path1 = vec![
-            PathEntry { node: Arc::clone(&root), p1_outcome: 0, p2_outcome: 0 },
-            PathEntry { node: Arc::clone(&mid), p1_outcome: 0, p2_outcome: 0 },
-        ];
-        backup(&path1, &grandchild, 1.0, 1.0);
-
-        let root_q1_after_1 = root.get().edge_q_p1(0, 0);
-
-        // Backup 2: other → grandchild, leaf = (10.0, 10.0).
-        // Updates grandchild but not mid or root.
-        let path_other = vec![PathEntry {
-            node: Arc::clone(&other),
-            p1_outcome: 0,
-            p2_outcome: 0,
-        }];
-        backup(&path_other, &grandchild, 10.0, 10.0);
-
-        // grandchild.v1 = mean(1, 10) = 5.5
-        assert!((grandchild.get().v1() - 5.5).abs() < 1e-5);
-
-        // Backup 3: root → mid → grandchild, leaf = (4.0, 4.0).
-        // Mid sees grandchild as transposition → delta detected.
-        // Root sees mid as non-transposition → delta from below propagates.
-        let path3 = vec![
-            PathEntry { node: Arc::clone(&root), p1_outcome: 0, p2_outcome: 0 },
-            PathEntry { node: Arc::clone(&mid), p1_outcome: 0, p2_outcome: 0 },
-        ];
-        backup(&path3, &grandchild, 4.0, 4.0);
-
-        // Root's edge_q should have changed significantly from the first value.
-        // The delta from the grandchild transposition should have propagated up.
-        let root_q1_after_3 = root.get().edge_q_p1(0, 0);
-        assert!(
-            (root_q1_after_3 - root_q1_after_1).abs() > 0.5,
-            "Delta should propagate: before={root_q1_after_1}, after={root_q1_after_3}",
-        );
+            backup(access, &root_path, &grandchild, 4.0, 4.0);
+            let root_q1_after_3 = access.node(&root).edge_q_p1(0, 0);
+            assert!(
+                (root_q1_after_3 - root_q1_after_1).abs() > 0.5,
+                "Delta should propagate: before={root_q1_after_1}, after={root_q1_after_3}",
+            );
+        });
     }
 
     // =====================================================================
@@ -3715,9 +3687,11 @@ mod tests {
         let mut r = rng();
 
         let result = run_search(&mut tree, &game, &backend, &config, 50, 8, &mut r).unwrap();
-        let root_low = tree.root().get();
-        let total = root_low.total_visits();
-        let edge = root_low.total_edge_visits();
+        let (total, edge) = tree.with_exclusive(|access| {
+            let root = access.root();
+            let root = access.node(&root);
+            (root.total_visits(), root.total_edge_visits())
+        });
 
         // Root's first visit is its own NN eval. Every subsequent visit
         // is a child visit (edge update). So edge_visits == total - 1.
@@ -3787,17 +3761,7 @@ mod tests {
 
         let result = run_search(&mut tree, &game, &backend, &config, 200, 16, &mut r).unwrap();
 
-        // No leaked virtual losses.
-        let root_low = tree.root().get();
-        for i in 0..root_low.n1() {
-            for j in 0..root_low.n2() {
-                assert_eq!(
-                    root_low.edge_in_flight(i, j), 0,
-                    "VL leak at ({i},{j})"
-                );
-            }
-        }
-        assert_eq!(root_low.n_in_flight(), 0, "root n_in_flight leak");
+        assert_no_in_flight(&mut tree);
 
         // Collisions should be bounded — not exploding.
         let useful = result.nn_evals + result.terminals;
@@ -3810,93 +3774,69 @@ mod tests {
 
     #[test]
     fn tt_stop_initializes_edge_from_aggregate() {
-        // Manual DAG: child C has visits via parent A.
-        // Parent B has an edge to C but no visits on it.
-        // backup_transposition_stop should initialize B's edge from C's aggregate
-        // without incrementing C's total_visits.
-        let child_c = Arc::new(SharedNode::new(LowNode::new_shell(
-            [0, 1, 2, 3, 4],
-            [0, 1, 2, 3, 4],
-        )));
-        child_c.get_mut().set_value_scale(5.0);
-
-        // Parent A with edge to C at (0,0), reward (1.0, 0.5).
-        let parent_a = Arc::new(SharedNode::new(LowNode::new_shell(
-            [0, 1, 2, 3, 4],
-            [0, 1, 2, 3, 4],
-        )));
-        parent_a.get_mut().set_value_scale(5.0);
-        parent_a.get_mut().set_prior([0.2; 5], [0.2; 5]);
-        let edge_a = Box::new(Edge::new(Arc::clone(&child_c), (0, 0), 1.0, 0.5));
-        parent_a.get_mut().prepend_child(edge_a);
-
-        // Backup through A to give C some visits.
-        let path_a = vec![PathEntry {
-            node: Arc::clone(&parent_a),
-            p1_outcome: 0,
-            p2_outcome: 0,
-        }];
-        backup(&path_a, &child_c, 2.0, 3.0);
-        assert_eq!(child_c.get().total_visits(), 1);
-        assert!((child_c.get().v1() - 2.0).abs() < 1e-6);
-        assert!((child_c.get().v2() - 3.0).abs() < 1e-6);
-
-        // Parent B with edge to C at (1,2), reward (0.5, 1.0).
-        let parent_b = Arc::new(SharedNode::new(LowNode::new_shell(
-            [0, 1, 2, 3, 4],
-            [0, 1, 2, 3, 4],
-        )));
-        parent_b.get_mut().set_value_scale(5.0);
-        parent_b.get_mut().set_prior([0.2; 5], [0.2; 5]);
-        let edge_b = Box::new(Edge::new(Arc::clone(&child_c), (1, 2), 0.5, 1.0));
-        parent_b.get_mut().prepend_child(edge_b);
-
-        assert_eq!(child_c.num_parents(), 2);
-
-        // B's edge visits = 0, C has visits from A.
-        // This is exactly the first-hit transposition scenario.
-        assert_eq!(parent_b.get().edge_visits(1, 2), 0);
-
-        let child_visits_before = child_c.get().total_visits();
-
-        // Simulate gather: VL + n_in_flight on path entries (but NOT on child).
-        let path_b = vec![PathEntry {
-            node: Arc::clone(&parent_b),
-            p1_outcome: 1,
-            p2_outcome: 2,
-        }];
-        for entry in &path_b {
-            entry.node.get_mut().increment_n_in_flight(1);
-            entry.node.get_mut().add_virtual_loss(
-                entry.p1_outcome as usize,
-                entry.p2_outcome as usize,
+        with_test_access(|access| {
+            let mut child_low = LowNode::new_shell(
+                [0, 1, 2, 3, 4],
+                [0, 1, 2, 3, 4],
             );
-        }
+            child_low.set_value_scale(5.0);
+            let child_c = access.test_node(child_low);
 
-        // Run backup_transposition_stop through B's path.
-        backup_transposition_stop(&path_b, &child_c, 1);
+            let mut parent_a_low = LowNode::new_shell(
+                [0, 1, 2, 3, 4],
+                [0, 1, 2, 3, 4],
+            );
+            parent_a_low.set_value_scale(5.0);
+            parent_a_low.set_prior([0.2; 5], [0.2; 5]);
+            let parent_a = access.test_node(parent_a_low);
+            access.test_connect(&parent_a, &child_c, (0, 0), 1.0, 0.5);
 
-        // Child C's total_visits should NOT change.
-        assert_eq!(
-            child_c.get().total_visits(),
-            child_visits_before,
-            "transposition stop should not increment child visits"
-        );
+            let path_a = vec![PathEntry {
+                node: parent_a.clone(),
+                p1_outcome: 0,
+                p2_outcome: 0,
+            }];
+            backup(access, &path_a, &child_c, 2.0, 3.0);
 
-        // B's edge should be initialized from C's aggregate.
-        // Expected: edge_q = r + child.v = (0.5+2.0, 1.0+3.0) = (2.5, 4.0).
-        let b_low = parent_b.get();
-        assert_eq!(b_low.edge_visits(1, 2), 1, "B's edge should have 1 visit");
-        assert!(
-            (b_low.edge_q_p1(1, 2) - 2.5).abs() < 1e-5,
-            "B's edge Q p1 = {}, expected 2.5",
-            b_low.edge_q_p1(1, 2)
-        );
-        assert!(
-            (b_low.edge_q_p2(1, 2) - 4.0).abs() < 1e-5,
-            "B's edge Q p2 = {}, expected 4.0",
-            b_low.edge_q_p2(1, 2)
-        );
+            let mut parent_b_low = LowNode::new_shell(
+                [0, 1, 2, 3, 4],
+                [0, 1, 2, 3, 4],
+            );
+            parent_b_low.set_value_scale(5.0);
+            parent_b_low.set_prior([0.2; 5], [0.2; 5]);
+            let parent_b = access.test_node(parent_b_low);
+            access.test_connect(&parent_b, &child_c, (1, 2), 0.5, 1.0);
+
+            assert_eq!(access.num_parents(&child_c), 2);
+            assert_eq!(access.node(&parent_b).edge_visits(1, 2), 0);
+            let child_visits_before = access.node(&child_c).total_visits();
+            assert_eq!(child_visits_before, 1);
+
+            let path_b = vec![PathEntry {
+                node: parent_b.clone(),
+                p1_outcome: 1,
+                p2_outcome: 2,
+            }];
+            for entry in &path_b {
+                let node = access.node_mut(&entry.node);
+                node.increment_n_in_flight(1);
+                node.add_virtual_loss(
+                    entry.p1_outcome as usize,
+                    entry.p2_outcome as usize,
+                );
+            }
+            backup_transposition_stop(access, &path_b, &child_c, 1);
+
+            assert_eq!(
+                access.node(&child_c).total_visits(),
+                child_visits_before,
+                "transposition stop should not increment child visits"
+            );
+            let parent_b = access.node(&parent_b);
+            assert_eq!(parent_b.edge_visits(1, 2), 1);
+            assert!((parent_b.edge_q_p1(1, 2) - 2.5).abs() < 1e-5);
+            assert!((parent_b.edge_q_p2(1, 2) - 4.0).abs() < 1e-5);
+        });
     }
 
     #[test]
@@ -3907,114 +3847,77 @@ mod tests {
         // A second backup_transposition_stop should correct B's edge Q toward
         // the new aggregate, without incrementing C's total_visits.
 
-        // -- Setup: shared child C --
-        let child_c = Arc::new(SharedNode::new(LowNode::new_shell(
-            [0, 1, 2, 3, 4],
-            [0, 1, 2, 3, 4],
-        )));
-        child_c.get_mut().set_value_scale(5.0);
+        with_test_access(|access| {
+            let mut child_low = LowNode::new_shell(
+                [0, 1, 2, 3, 4],
+                [0, 1, 2, 3, 4],
+            );
+            child_low.set_value_scale(5.0);
+            let child_c = access.test_node(child_low);
 
-        // -- Parent A: edge to C at (0,0), reward (1.0, 0.5) --
-        let parent_a = Arc::new(SharedNode::new(LowNode::new_shell(
-            [0, 1, 2, 3, 4],
-            [0, 1, 2, 3, 4],
-        )));
-        parent_a.get_mut().set_value_scale(5.0);
-        parent_a.get_mut().set_prior([0.2; 5], [0.2; 5]);
-        let edge_a = Box::new(Edge::new(Arc::clone(&child_c), (0, 0), 1.0, 0.5));
-        parent_a.get_mut().prepend_child(edge_a);
+            let mut parent_a_low = LowNode::new_shell(
+                [0, 1, 2, 3, 4],
+                [0, 1, 2, 3, 4],
+            );
+            parent_a_low.set_value_scale(5.0);
+            parent_a_low.set_prior([0.2; 5], [0.2; 5]);
+            let parent_a = access.test_node(parent_a_low);
+            access.test_connect(&parent_a, &child_c, (0, 0), 1.0, 0.5);
 
-        // -- Parent B: edge to C at (1,2), reward (0.5, 1.0) --
-        let parent_b = Arc::new(SharedNode::new(LowNode::new_shell(
-            [0, 1, 2, 3, 4],
-            [0, 1, 2, 3, 4],
-        )));
-        parent_b.get_mut().set_value_scale(5.0);
-        parent_b.get_mut().set_prior([0.2; 5], [0.2; 5]);
-        let edge_b = Box::new(Edge::new(Arc::clone(&child_c), (1, 2), 0.5, 1.0));
-        parent_b.get_mut().prepend_child(edge_b);
+            let mut parent_b_low = LowNode::new_shell(
+                [0, 1, 2, 3, 4],
+                [0, 1, 2, 3, 4],
+            );
+            parent_b_low.set_value_scale(5.0);
+            parent_b_low.set_prior([0.2; 5], [0.2; 5]);
+            let parent_b = access.test_node(parent_b_low);
+            access.test_connect(&parent_b, &child_c, (1, 2), 0.5, 1.0);
+            assert_eq!(access.num_parents(&child_c), 2);
 
-        assert_eq!(child_c.num_parents(), 2);
+            let path_a = vec![PathEntry {
+                node: parent_a.clone(),
+                p1_outcome: 0,
+                p2_outcome: 0,
+            }];
+            let path_b = vec![PathEntry {
+                node: parent_b.clone(),
+                p1_outcome: 1,
+                p2_outcome: 2,
+            }];
 
-        // -- Step 1: Give C one visit through A with values (2.0, 3.0) --
-        let path_a = vec![PathEntry {
-            node: Arc::clone(&parent_a),
-            p1_outcome: 0,
-            p2_outcome: 0,
-        }];
-        backup(&path_a, &child_c, 2.0, 3.0);
-        assert_eq!(child_c.get().total_visits(), 1);
+            backup(access, &path_a, &child_c, 2.0, 3.0);
+            reserve_path(access, &path_b, 1);
+            backup_transposition_stop(access, &path_b, &child_c, 1);
+            assert_eq!(access.node(&parent_b).edge_visits(1, 2), 1);
+            assert!(
+                (access.node(&parent_b).edge_q_p1(1, 2) - 2.5).abs()
+                    < 1e-5
+            );
 
-        // -- Step 2: First-hit TT stop through B (edge_vis == 0) --
-        let path_b = vec![PathEntry {
-            node: Arc::clone(&parent_b),
-            p1_outcome: 1,
-            p2_outcome: 2,
-        }];
-        for entry in &path_b {
-            entry.node.get_mut().increment_n_in_flight(1);
-            entry
-                .node
-                .get_mut()
-                .add_virtual_loss(entry.p1_outcome as usize, entry.p2_outcome as usize);
-        }
-        backup_transposition_stop(&path_b, &child_c, 1);
+            backup(access, &path_a, &child_c, 6.0, 1.0);
+            let child_low = access.node(&child_c);
+            assert_eq!(child_low.total_visits(), 2);
+            assert!((child_low.v1() - 4.0).abs() < 1e-5);
+            assert!((child_low.v2() - 2.0).abs() < 1e-5);
+            assert!(
+                access.node(&parent_b).edge_visits(1, 2)
+                    < access.node(&child_c).total_visits()
+            );
+            let child_visits_before = access.node(&child_c).total_visits();
 
-        // B's edge now has 1 visit, Q = r + child.v = (0.5+2.0, 1.0+3.0) = (2.5, 4.0).
-        assert_eq!(parent_b.get().edge_visits(1, 2), 1);
-        assert!((parent_b.get().edge_q_p1(1, 2) - 2.5).abs() < 1e-5);
+            reserve_path(access, &path_b, 1);
+            backup_transposition_stop(access, &path_b, &child_c, 1);
 
-        // -- Step 3: C gets more visits through A, shifting C's aggregate --
-        // New values (6.0, 1.0): C.v goes from (2.0, 3.0) to mean(2.0, 6.0) = (4.0, 2.0).
-        backup(&path_a, &child_c, 6.0, 1.0);
-        assert_eq!(child_c.get().total_visits(), 2);
-        assert!((child_c.get().v1() - 4.0).abs() < 1e-5);
-        assert!((child_c.get().v2() - 2.0).abs() < 1e-5);
-
-        // B's edge is now stale: edge_vis(1) < child.total_visits(2).
-        assert!(parent_b.get().edge_visits(1, 2) < child_c.get().total_visits());
-
-        let child_visits_before = child_c.get().total_visits();
-
-        // -- Step 4: Stale TT stop through B --
-        for entry in &path_b {
-            entry.node.get_mut().increment_n_in_flight(1);
-            entry
-                .node
-                .get_mut()
-                .add_virtual_loss(entry.p1_outcome as usize, entry.p2_outcome as usize);
-        }
-        backup_transposition_stop(&path_b, &child_c, 1);
-
-        // Child C's total_visits should NOT change.
-        assert_eq!(
-            child_c.get().total_visits(),
-            child_visits_before,
-            "stale TT stop should not increment child visits"
-        );
-
-        // B's edge should now have 2 visits.
-        assert_eq!(
-            parent_b.get().edge_visits(1, 2),
-            2,
-            "B's edge should have 2 visits after stale stop"
-        );
-
-        // B's edge Q should be corrected toward the new aggregate.
-        // Delta correction: correct_q = r + child.v = (0.5+4.0, 1.0+2.0) = (4.5, 3.0).
-        // n_to_fix = 1 (one prior visit to correct), so the edge gets adjusted
-        // to the correct aggregate-derived value.
-        let b_low = parent_b.get();
-        assert!(
-            (b_low.edge_q_p1(1, 2) - 4.5).abs() < 1e-4,
-            "stale stop should correct edge Q p1 to 4.5, got {}",
-            b_low.edge_q_p1(1, 2)
-        );
-        assert!(
-            (b_low.edge_q_p2(1, 2) - 3.0).abs() < 1e-4,
-            "stale stop should correct edge Q p2 to 3.0, got {}",
-            b_low.edge_q_p2(1, 2)
-        );
+            assert_eq!(
+                access.node(&child_c).total_visits(),
+                child_visits_before,
+                "stale TT stop should not increment child visits"
+            );
+            let parent_b = access.node(&parent_b);
+            assert_eq!(parent_b.edge_visits(1, 2), 2);
+            assert!((parent_b.edge_q_p1(1, 2) - 4.5).abs() < 1e-4);
+            assert!((parent_b.edge_q_p2(1, 2) - 3.0).abs() < 1e-4);
+        });
     }
 
     #[test]

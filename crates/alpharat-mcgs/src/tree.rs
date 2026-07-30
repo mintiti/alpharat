@@ -5,12 +5,16 @@ use pyrat::GameState;
 #[cfg(test)]
 use pyrat::Coordinates;
 
-use crate::node::{Edge, LowNode, SharedNode};
+use crate::access::ExclusiveAccess;
+use crate::node::{LowNode, OwnerToken, SharedNode};
 use crate::observer::{
     TranspositionEviction, TranspositionStats, TreeStats, TreeView,
 };
 use crate::tt::TranspositionTable;
-use crate::{smart_uniform_prior, EvalResult};
+use crate::smart_uniform_prior;
+
+#[cfg(test)]
+use crate::EvalResult;
 
 // ---------------------------------------------------------------------------
 // Utilities
@@ -35,12 +39,17 @@ pub(crate) fn compute_rewards(game: &GameState, scores_before: (f32, f32)) -> (f
 /// Checks TT first — if the position already exists (e.g. from a prior search),
 /// returns the existing node. Otherwise creates a fresh node with smart uniform
 /// priors and `value_scale = max(remaining_cheese, 1)`, inserts into TT.
-pub(crate) fn create_root_node(
+fn create_root_node_with_owner(
     game: &GameState,
     tt: &mut TranspositionTable,
+    owner: &Arc<OwnerToken>,
 ) -> Arc<SharedNode> {
     let hash = game.state_hash();
     if let Some(existing) = tt.lookup(hash) {
+        assert!(
+            Arc::ptr_eq(owner, existing.owner()),
+            "transposition table contains a node from a different MCGS tree"
+        );
         return existing;
     }
 
@@ -54,80 +63,9 @@ pub(crate) fn create_root_node(
     node.set_prior(prior_p1, prior_p2);
     node.set_value_scale(game.cheese.remaining_cheese().max(1) as f32);
 
-    let shared = Arc::new(SharedNode::new(node));
+    let shared = Arc::new(SharedNode::with_owner(node, Arc::clone(owner)));
     tt.insert(hash, &shared);
     shared
-}
-
-/// Set priors on a shell node after batch NN evaluation.
-///
-/// - `Some(result)`: reduces NN policies into outcome-indexed priors.
-/// - `None`: marks the node as terminal (no priors needed).
-pub(crate) fn populate_node(node: &SharedNode, eval_result: Option<&EvalResult>) {
-    let low = node.get_mut();
-    debug_assert!(
-        low.total_visits() == 0,
-        "populate_node: node already has {} visits",
-        low.total_visits()
-    );
-
-    match eval_result {
-        Some(result) => {
-            low.set_prior(result.policy_p1, result.policy_p2);
-        }
-        None => {
-            low.set_terminal();
-        }
-    }
-}
-
-/// Find existing child or create one, using TT for transposition detection.
-///
-/// Three cases:
-/// 1. Edge at (i,j) already exists → return its LowNode, `false`
-/// 2. No edge, TT hit → create Edge → existing LowNode, `false`
-/// 3. No edge, TT miss → create shell LowNode, insert in TT, create Edge, `true`
-///
-/// `game` must already be advanced to the child position.
-/// Always prepends Edge to parent's child list when creating new edge.
-///
-/// Returns (child_node, is_new_lownode).
-pub(crate) fn find_or_create_child(
-    parent: &SharedNode,
-    i: u8,
-    j: u8,
-    game: &GameState,
-    tt: &mut TranspositionTable,
-    r1: f32,
-    r2: f32,
-) -> (Arc<SharedNode>, bool) {
-    // Case 1: edge already exists
-    if let Some(edge) = parent.get().find_child(i, j) {
-        return (Arc::clone(edge.low_node()), false);
-    }
-
-    let hash = game.state_hash();
-
-    // Case 2: TT hit — reuse existing LowNode
-    if let Some(existing) = tt.lookup(hash) {
-        let edge = Box::new(Edge::new(Arc::clone(&existing), (i, j), r1, r2));
-        parent.get_mut().prepend_child(edge);
-        return (existing, false);
-    }
-
-    // Case 3: TT miss — create new shell LowNode
-    let eff_p1 = game.effective_actions_p1();
-    let eff_p2 = game.effective_actions_p2();
-    let mut child_node = LowNode::new_shell(eff_p1, eff_p2);
-    child_node.set_value_scale(game.cheese.remaining_cheese().max(1) as f32);
-
-    let child = Arc::new(SharedNode::new(child_node));
-    tt.insert(hash, &child);
-
-    let edge = Box::new(Edge::new(Arc::clone(&child), (i, j), r1, r2));
-    parent.get_mut().prepend_child(edge);
-
-    (child, true)
 }
 
 // ---------------------------------------------------------------------------
@@ -138,6 +76,7 @@ pub(crate) fn find_or_create_child(
 ///
 /// Bundles root + TT. Search logic operates through the accessors.
 pub struct MCGSTree {
+    owner: Arc<OwnerToken>,
     root: Arc<SharedNode>,
     tt: TranspositionTable,
     node_count: u32,
@@ -146,13 +85,23 @@ pub struct MCGSTree {
 impl MCGSTree {
     /// Create a new tree with a root node derived from `game`.
     pub fn new(game: &GameState) -> Self {
+        let owner = Arc::new(OwnerToken);
         let mut tt = TranspositionTable::new();
-        let root = create_root_node(game, &mut tt);
-        Self { root, tt, node_count: 1 }
+        let root = create_root_node_with_owner(game, &mut tt, &owner);
+        Self {
+            owner,
+            root,
+            tt,
+            node_count: 1,
+        }
     }
 
     pub(crate) fn root(&self) -> &Arc<SharedNode> {
         &self.root
+    }
+
+    pub(crate) fn owner(&self) -> &Arc<OwnerToken> {
+        &self.owner
     }
 
     #[allow(dead_code)]
@@ -170,6 +119,30 @@ impl MCGSTree {
 
     pub(crate) fn increment_node_count(&mut self) {
         self.node_count += 1;
+    }
+
+    pub(crate) fn create_root_for_owner(&mut self, game: &GameState) -> Arc<SharedNode> {
+        create_root_node_with_owner(game, &mut self.tt, &self.owner)
+    }
+
+    pub(crate) fn install_root(&mut self, root: Arc<SharedNode>) {
+        assert!(
+            Arc::ptr_eq(&self.owner, root.owner()),
+            "cannot install a root from a different MCGS tree"
+        );
+        self.root = root;
+    }
+
+    pub(crate) fn recount_nodes(&mut self) {
+        self.node_count = self.tt.live_count() as u32;
+    }
+
+    /// Enter a fresh branded, lock-free exclusive access session.
+    pub(crate) fn with_exclusive<'tree, R>(
+        &'tree mut self,
+        use_access: impl for<'session> FnOnce(ExclusiveAccess<'tree, 'session>) -> R,
+    ) -> R {
+        use_access(ExclusiveAccess::new(self))
     }
 
     /// Observe the tree through a fresh, non-escaping read-only session.
@@ -258,43 +231,9 @@ impl MCGSTree {
     ///
     /// `game` must already reflect the state after the move.
     pub fn advance_root(&mut self, game: &GameState, p1_action: u8, p2_action: u8) {
-        let old_root = &self.root;
-        let old_low = old_root.get();
-
-        // Map raw actions to outcome indices
-        let i = old_low.p1_action_to_outcome_idx(p1_action);
-        let j = old_low.p2_action_to_outcome_idx(p2_action);
-
-        // Detach the child list from the old root
-        let mut cursor = old_root.get_mut().take_first_child();
-        let mut new_root: Option<Arc<SharedNode>> = None;
-
-        // Walk the linked list: find the matching edge, queue the rest
-        while let Some(mut edge) = cursor {
-            // Detach next sibling before we consume this edge
-            cursor = edge.take_next_sibling();
-
-            let (ei, ej) = edge.parent_outcome();
-            if ei == i && ej == j && new_root.is_none() {
-                new_root = Some(Arc::clone(edge.low_node()));
-                // Drop the edge (decrements num_parents), don't queue it
-                drop(edge);
-            } else {
-                crate::gc::queue(edge);
-            }
-        }
-
-        // Flush thread-local GC batch so edges are visible to the GC thread
-        crate::gc::flush();
-
-        // Set the new root
-        self.root = match new_root {
-            Some(node) => node,
-            None => create_root_node(game, &mut self.tt),
-        };
-
-        // Recount after pruning (TT live_count is O(n) but advance_root is infrequent).
-        self.node_count = self.tt.live_count() as u32;
+        self.with_exclusive(|mut access| {
+            access.advance_root(game, p1_action, p2_action);
+        });
     }
 }
 
@@ -389,17 +328,26 @@ mod tests {
             Coordinates::new(2, 2),
             &[Coordinates::new(0, 0)],
         );
-        let mut tt = TranspositionTable::new();
-        let root = create_root_node(&game, &mut tt);
+        let mut tree = MCGSTree::new(&game);
+        let root = tree.observe(|view| view.with_root(|root| root.stats()));
 
-        assert!(root.get().is_evaluated());
-        assert_eq!(root.get().total_visits(), 0);
-        assert_eq!(tt.live_count(), 1);
-
-        // TT lookup returns the same node
-        let hash = game.state_hash();
-        let found = tt.lookup(hash).unwrap();
-        assert!(Arc::ptr_eq(&found, &root));
+        assert!(root.is_evaluated);
+        assert_eq!(root.total_visits, 0);
+        assert_eq!(
+            tree.stats().transpositions,
+            TranspositionStats {
+                entries: 1,
+                live_entries: 1,
+                expired_entries: 0,
+            }
+        );
+        tree.with_exclusive(|access| {
+            let root = access.root();
+            let stored = access
+                .test_tt_lookup(game.state_hash())
+                .expect("root must be stored under its state hash");
+            assert!(access.same_node(&root, &stored));
+        });
     }
 
     #[test]
@@ -409,32 +357,60 @@ mod tests {
             Coordinates::new(4, 4),
             &[Coordinates::new(1, 0), Coordinates::new(2, 0), Coordinates::new(3, 0)],
         );
-        let mut tt = TranspositionTable::new();
-        let root = create_root_node(&game, &mut tt);
-        assert_eq!(root.get().value_scale(), 3.0);
+        let tree = MCGSTree::new(&game);
+        let value_scale = tree.observe(|view| view.with_root(|root| root.stats().value_scale));
+        assert_eq!(value_scale, 3.0);
     }
 
     // ---- populate_node ----
 
     #[test]
     fn populate_node_with_eval() {
-        let node = SharedNode::new(LowNode::new_shell([0, 1, 2, 3, 4], [0, 1, 2, 3, 4]));
+        let game = open_5x5_game(
+            Coordinates::new(0, 0),
+            Coordinates::new(4, 4),
+            &[Coordinates::new(2, 2)],
+        );
+        let mut tree = MCGSTree::new(&game);
         let eval = EvalResult {
             policy_p1: [0.1, 0.3, 0.2, 0.15, 0.25],
             policy_p2: [0.2; 5],
             value_p1: 1.0,
             value_p2: 2.0,
         };
-        populate_node(&node, Some(&eval));
-        assert!(node.get().is_evaluated());
-        assert!(!node.get().is_terminal());
+        tree.with_exclusive(|mut access| {
+            let node = access.test_node(LowNode::new_shell(
+                [0, 1, 2, 3, 4],
+                [0, 1, 2, 3, 4],
+            ));
+            access.populate_node(&node, Some(&eval));
+            access.test_install_root(&node);
+        });
+
+        let node = tree.observe(|view| view.with_root(|root| root.stats()));
+        assert!(node.is_evaluated);
+        assert!(!node.is_terminal);
     }
 
     #[test]
     fn populate_node_terminal() {
-        let node = SharedNode::new(LowNode::new_shell([0, 1, 2, 3, 4], [0, 1, 2, 3, 4]));
-        populate_node(&node, None);
-        assert!(node.get().is_terminal());
+        let game = open_5x5_game(
+            Coordinates::new(0, 0),
+            Coordinates::new(4, 4),
+            &[Coordinates::new(2, 2)],
+        );
+        let mut tree = MCGSTree::new(&game);
+        tree.with_exclusive(|mut access| {
+            let node = access.test_node(LowNode::new_shell(
+                [0, 1, 2, 3, 4],
+                [0, 1, 2, 3, 4],
+            ));
+            access.populate_node(&node, None);
+            access.test_install_root(&node);
+        });
+
+        let node = tree.observe(|view| view.with_root(|root| root.stats()));
+        assert!(node.is_terminal);
     }
 
     // ---- find_or_create_child ----
@@ -446,8 +422,7 @@ mod tests {
             Coordinates::new(2, 2),
             &[Coordinates::new(0, 0)],
         );
-        let mut tt = TranspositionTable::new();
-        let root = create_root_node(&game, &mut tt);
+        let mut tree = MCGSTree::new(&game);
 
         // Advance game
         use pyrat::Direction;
@@ -456,17 +431,35 @@ mod tests {
         let _undo = child_game.make_move(Direction::Up, Direction::Down);
         let (r1, r2) = compute_rewards(&child_game, scores_before);
 
-        let i = root.get().p1_action_to_outcome_idx(0); // UP
-        let j = root.get().p2_action_to_outcome_idx(2); // DOWN
+        let (i, j, is_new, parents) = tree.with_exclusive(|mut access| {
+            let root = access.root();
+            let (i, j) = {
+                let root = access.node(&root);
+                (
+                    root.p1_action_to_outcome_idx(0), // UP
+                    root.p2_action_to_outcome_idx(2), // DOWN
+                )
+            };
+            let before = access.node_count();
+            let child = access.find_or_create_child(&root, i, j, &child_game, r1, r2);
+            (
+                i,
+                j,
+                access.node_count() == before + 1,
+                access.num_parents(&child),
+            )
+        });
 
-        let (child, is_new) = find_or_create_child(&root, i, j, &child_game, &mut tt, r1, r2);
         assert!(is_new);
-        assert!(!child.get().is_evaluated());
-        assert_eq!(child.num_parents(), 1);
-        assert_eq!(tt.live_count(), 2); // root + child
-
-        // Edge exists on root
-        assert!(root.get().find_child(i, j).is_some());
+        assert_eq!(parents, 1);
+        assert_eq!(tree.stats().transpositions.live_entries, 2);
+        let child = tree.observe(|view| {
+            view.with_root(|root| {
+                let child = root.edge(i, j).expect("new child edge").child();
+                view.with_node(&child, |child| child.stats())
+            })
+        });
+        assert!(!child.is_evaluated);
     }
 
     #[test]
@@ -476,25 +469,33 @@ mod tests {
             Coordinates::new(2, 2),
             &[Coordinates::new(0, 0)],
         );
-        let mut tt = TranspositionTable::new();
-        let root = create_root_node(&game, &mut tt);
+        let mut tree = MCGSTree::new(&game);
 
         use pyrat::Direction;
         let mut child_game = game.clone();
         let _undo = child_game.make_move(Direction::Up, Direction::Down);
 
-        let i = root.get().p1_action_to_outcome_idx(0);
-        let j = root.get().p2_action_to_outcome_idx(2);
+        tree.with_exclusive(|mut access| {
+            let root = access.root();
+            let (i, j) = {
+                let root = access.node(&root);
+                (
+                    root.p1_action_to_outcome_idx(0),
+                    root.p2_action_to_outcome_idx(2),
+                )
+            };
 
-        let (child1, is_new1) =
-            find_or_create_child(&root, i, j, &child_game, &mut tt, 0.0, 0.0);
-        assert!(is_new1);
+            let before = access.node_count();
+            let child1 =
+                access.find_or_create_child(&root, i, j, &child_game, 0.0, 0.0);
+            assert_eq!(access.node_count(), before + 1);
 
-        // Second call with same (i, j) — reuses existing edge
-        let (child2, is_new2) =
-            find_or_create_child(&root, i, j, &child_game, &mut tt, 0.0, 0.0);
-        assert!(!is_new2);
-        assert!(Arc::ptr_eq(&child1, &child2));
+            // Second call with same (i, j) — reuses existing edge.
+            let child2 =
+                access.find_or_create_child(&root, i, j, &child_game, 0.0, 0.0);
+            assert_eq!(access.node_count(), before + 1);
+            assert!(access.same_node(&child1, &child2));
+        });
     }
 
     #[test]
@@ -504,27 +505,46 @@ mod tests {
             Coordinates::new(2, 2),
             &[Coordinates::new(0, 0)],
         );
-        let mut tt = TranspositionTable::new();
-        let root = create_root_node(&game, &mut tt);
+        let mut tree = MCGSTree::new(&game);
 
         use pyrat::Direction;
         let mut child_game = game.clone();
         let _undo = child_game.make_move(Direction::Up, Direction::Down);
 
-        // Pre-insert the child in TT at its hash
-        let child_hash = child_game.state_hash();
-        let eff_p1 = child_game.effective_actions_p1();
-        let eff_p2 = child_game.effective_actions_p2();
-        let existing = Arc::new(SharedNode::new(LowNode::new_shell(eff_p1, eff_p2)));
-        tt.insert(child_hash, &existing);
+        tree.with_exclusive(|mut access| {
+            let root = access.root();
+            let (i, j) = {
+                let root = access.node(&root);
+                (
+                    root.p1_action_to_outcome_idx(0),
+                    root.p2_action_to_outcome_idx(2),
+                )
+            };
 
-        let i = root.get().p1_action_to_outcome_idx(0);
-        let j = root.get().p2_action_to_outcome_idx(2);
+            // Publish the canonical child through the first parent.
+            let existing =
+                access.find_or_create_child(&root, i, j, &child_game, 0.0, 0.0);
+            let count_after_insert = access.node_count();
 
-        let (child, is_new) = find_or_create_child(&root, i, j, &child_game, &mut tt, 0.0, 0.0);
-        assert!(!is_new);
-        assert!(Arc::ptr_eq(&child, &existing));
-        assert_eq!(existing.num_parents(), 1); // edge incremented it
+            // A detached, owner-consistent second parent has no edge yet, so
+            // this call must take the TT-hit path and reuse `existing`.
+            let second_parent = access.test_node(LowNode::new_shell(
+                [0, 1, 2, 3, 4],
+                [0, 1, 2, 3, 4],
+            ));
+            let child = access.find_or_create_child(
+                &second_parent,
+                i,
+                j,
+                &child_game,
+                0.0,
+                0.0,
+            );
+
+            assert_eq!(access.node_count(), count_after_insert);
+            assert!(access.same_node(&child, &existing));
+            assert_eq!(access.num_parents(&existing), 2);
+        });
     }
 
     // ---- MCGSTree ----
@@ -537,8 +557,9 @@ mod tests {
             &[Coordinates::new(2, 2)],
         );
         let tree = MCGSTree::new(&game);
-        assert!(tree.root().get().is_evaluated());
-        assert_eq!(tree.tt().live_count(), 1);
+        let root = tree.observe(|view| view.with_root(|root| root.stats()));
+        assert!(root.is_evaluated);
+        assert_eq!(tree.stats().transpositions.live_entries, 1);
     }
 
     // ---- Additional helpers ----
@@ -629,30 +650,41 @@ mod tests {
             Coordinates::new(2, 2),
             &[Coordinates::new(0, 0)],
         );
-        let mut tt = TranspositionTable::new();
-        let root = create_root_node(&game, &mut tt);
+        let mut tree = MCGSTree::new(&game);
 
         use pyrat::Direction;
         let mut child_game = game.clone();
         let _undo = child_game.make_move(Direction::Up, Direction::Down);
 
-        let i = root.get().p1_action_to_outcome_idx(0);
-        let j = root.get().p2_action_to_outcome_idx(2);
+        let (r1, r2) = tree.with_exclusive(|mut access| {
+            let root = access.root();
+            let (i, j) = {
+                let root = access.node(&root);
+                (
+                    root.p1_action_to_outcome_idx(0),
+                    root.p2_action_to_outcome_idx(2),
+                )
+            };
 
-        // First call: creates edge with r1=1.0, r2=0.5
-        let (_child1, is_new1) =
-            find_or_create_child(&root, i, j, &child_game, &mut tt, 1.0, 0.5);
-        assert!(is_new1);
+            // First call creates the edge with r1=1.0, r2=0.5.
+            let before = access.node_count();
+            let child1 =
+                access.find_or_create_child(&root, i, j, &child_game, 1.0, 0.5);
+            assert_eq!(access.node_count(), before + 1);
 
-        // Second call: same (i,j) — edge already exists, r values ignored
-        let (_child2, is_new2) =
-            find_or_create_child(&root, i, j, &child_game, &mut tt, 9.0, 9.0);
-        assert!(!is_new2);
+            // The existing edge wins; replacement rewards are ignored.
+            let child2 =
+                access.find_or_create_child(&root, i, j, &child_game, 9.0, 9.0);
+            assert_eq!(access.node_count(), before + 1);
+            assert!(access.same_node(&child1, &child2));
 
-        // Verify original rewards preserved
-        let edge = root.get().find_child(i, j).unwrap();
-        assert!((edge.r1() - 1.0).abs() < 1e-6);
-        assert!((edge.r2() - 0.5).abs() < 1e-6);
+            let edge = access.child(&root, i, j).expect("fixture child edge");
+            let (_, r1, r2) = edge.into_parts();
+            (r1, r2)
+        });
+
+        assert!((r1 - 1.0).abs() < 1e-6);
+        assert!((r2 - 0.5).abs() < 1e-6);
     }
 
     #[test]
@@ -662,8 +694,7 @@ mod tests {
             Coordinates::new(2, 2),
             &[Coordinates::new(0, 0)],
         );
-        let mut tt = TranspositionTable::new();
-        let root = create_root_node(&game, &mut tt);
+        let mut tree = MCGSTree::new(&game);
 
         use pyrat::Direction;
         let mut child_game = game.clone();
@@ -671,15 +702,23 @@ mod tests {
         let _undo = child_game.make_move(Direction::Up, Direction::Down);
         let (r1, r2) = compute_rewards(&child_game, scores_before);
 
-        let i = root.get().p1_action_to_outcome_idx(0);
-        let j = root.get().p2_action_to_outcome_idx(2);
+        let stored = tree.with_exclusive(|mut access| {
+            let root = access.root();
+            let (i, j) = {
+                let root = access.node(&root);
+                (
+                    root.p1_action_to_outcome_idx(0),
+                    root.p2_action_to_outcome_idx(2),
+                )
+            };
+            access.find_or_create_child(&root, i, j, &child_game, r1, r2);
+            let edge = access.child(&root, i, j).expect("fixture child edge");
+            let (_, r1, r2) = edge.into_parts();
+            (r1, r2)
+        });
 
-        let (_child, _is_new) =
-            find_or_create_child(&root, i, j, &child_game, &mut tt, r1, r2);
-
-        let edge = root.get().find_child(i, j).unwrap();
-        assert!((edge.r1() - r1).abs() < 1e-6);
-        assert!((edge.r2() - r2).abs() < 1e-6);
+        assert!((stored.0 - r1).abs() < 1e-6);
+        assert!((stored.1 - r2).abs() < 1e-6);
     }
 
     // ---- populate_node ----
@@ -687,15 +726,28 @@ mod tests {
     #[test]
     #[should_panic(expected = "populate_node: node already has")]
     fn populate_node_on_visited_panics() {
-        let node = SharedNode::new(LowNode::new_shell([0, 1, 2, 3, 4], [0, 1, 2, 3, 4]));
-        node.get_mut().finalize_score_update(1.0, 1.0);
+        let game = open_5x5_game(
+            Coordinates::new(0, 0),
+            Coordinates::new(4, 4),
+            &[Coordinates::new(2, 2)],
+        );
+        let mut tree = MCGSTree::new(&game);
         let eval = crate::EvalResult {
             policy_p1: [0.2; 5],
             policy_p2: [0.2; 5],
             value_p1: 1.0,
             value_p2: 1.0,
         };
-        populate_node(&node, Some(&eval));
+        tree.with_exclusive(|mut access| {
+            let node = access.test_node(LowNode::new_shell(
+                [0, 1, 2, 3, 4],
+                [0, 1, 2, 3, 4],
+            ));
+            access
+                .node_mut(&node)
+                .finalize_score_update(1.0, 1.0);
+            access.populate_node(&node, Some(&eval));
+        });
     }
 
     // ---- advance_root ----
@@ -749,12 +801,6 @@ mod tests {
         let mut rng = SmallRng::seed_from_u64(42);
         run_search(&mut tree, &game, &backend, &config, 50, 8, &mut rng).unwrap();
 
-        // Keep the internal identity assertion exact while separately proving
-        // the public observer preserves the child's complete state.
-        let expected_child_identity = {
-            let root = tree.root().get();
-            Arc::clone(root.find_child(0, 0).unwrap().low_node())
-        };
         let (p1_action, p2_action, expected_child) = tree.observe(|view| {
             view.with_root(|root| {
                 let p1_action = root
@@ -776,9 +822,17 @@ mod tests {
             Direction::try_from(p1_action).unwrap(),
             Direction::try_from(p2_action).unwrap(),
         );
-        tree.advance_root(&game, p1_action, p2_action);
+        tree.with_exclusive(|mut access| {
+            let old_root = access.root();
+            let expected_child = access
+                .child(&old_root, 0, 0)
+                .expect("searched root child")
+                .into_child();
+            access.advance_root(&game, p1_action, p2_action);
+            let promoted = access.root();
+            assert!(access.same_node(&promoted, &expected_child));
+        });
 
-        assert!(Arc::ptr_eq(tree.root(), &expected_child_identity));
         let promoted = tree.observe(|view| view.with_root(|root| root.stats()));
         assert_eq!(promoted, expected_child);
     }
@@ -793,19 +847,30 @@ mod tests {
             &[Coordinates::new(0, 0)],
         );
         let mut tree = MCGSTree::new(&game);
-        let old_root = Arc::clone(tree.root());
 
         use pyrat::Direction;
         let _undo = game.make_move(Direction::Up, Direction::Down);
-        tree.advance_root(&game, 0, 2);
+        tree.with_exclusive(|mut access| {
+            let old_root = access.root();
+            let old_root_id = access.test_node_id(&old_root);
+            drop(old_root);
+            access.advance_root(&game, 0, 2);
+            let new_root = access.root();
+            assert_ne!(old_root_id, access.test_node_id(&new_root));
+            let stored = access
+                .test_tt_lookup(game.state_hash())
+                .expect("fresh root must be stored under the advanced state hash");
+            assert!(access.same_node(&new_root, &stored));
+        });
 
         let root = tree.observe(|view| view.with_root(|root| root.stats()));
         assert!(root.is_evaluated); // create_root_node sets smart-uniform priors
         assert!(!root.is_terminal);
         assert_eq!(root.total_visits, 0);
         assert_eq!(root.total_edge_visits, 0);
-        assert!(!Arc::ptr_eq(tree.root(), &old_root));
-        assert!(tree.tt().lookup(game.state_hash()).is_some());
+        let stats = tree.stats();
+        assert_eq!(stats.node_count, 1);
+        assert_eq!(stats.transpositions.live_entries, 1);
     }
 
     #[test]
@@ -879,9 +944,18 @@ mod tests {
         assert!(tt_before > 1, "should have explored multiple nodes");
 
         // Advance
-        let root_low = tree.root().get();
-        let p1_action = root_low.p1_outcome_action(0);
-        let p2_action = root_low.p2_outcome_action(0);
+        let (p1_action, p2_action) = tree.observe(|view| {
+            view.with_root(|root| {
+                (
+                    root.outcome(crate::SearchPlayer::Player1, 0)
+                        .unwrap()
+                        .action,
+                    root.outcome(crate::SearchPlayer::Player2, 0)
+                        .unwrap()
+                        .action,
+                )
+            })
+        });
 
         use pyrat::Direction;
         let _undo = game.make_move(
@@ -926,8 +1000,9 @@ mod tests {
         }
 
         // No crash, tree is still functional
-        assert!(tree.root().get().is_evaluated());
-        assert!(tree.tt().live_count() >= 1);
+        let root = tree.observe(|view| view.with_root(|root| root.stats()));
+        assert!(root.is_evaluated);
+        assert!(tree.stats().transpositions.live_entries >= 1);
     }
 
     #[test]
@@ -952,76 +1027,114 @@ mod tests {
         // Use enough sims to produce transpositions in this symmetric setup
         run_search(&mut tree, &game, &backend, &config, 1000, 8, &mut rng).unwrap();
 
-        // Advance to the most-visited child so we keep the largest subtree.
-        let root_low = tree.root().get();
-        let mut best_i = 0u8;
-        let mut best_visits = 0u32;
-        for i in 0..root_low.n1() as u8 {
-            let v = root_low.marginal_visits_p1(i as usize);
-            if v > best_visits {
-                best_visits = v;
-                best_i = i;
-            }
-        }
-        let mut best_j = 0u8;
-        best_visits = 0;
-        for j in 0..root_low.n2() as u8 {
-            let v = root_low.marginal_visits_p2(j as usize);
-            if v > best_visits {
-                best_visits = v;
-                best_j = j;
-            }
-        }
-        let p1_action = root_low.p1_outcome_action(best_i as usize);
-        let p2_action = root_low.p2_outcome_action(best_j as usize);
+        // Keep the exact identity check inside one branded access session.
+        // Return only the surviving edge coordinates for the post-GC observer
+        // assertion.
+        let surviving_edge = tree.with_exclusive(|mut access| {
+            let root = access.root();
+            let (best_i, best_j, p1_action, p2_action) = {
+                let root = access.node(&root);
+                let mut best_i = 0u8;
+                let mut best_visits = 0u32;
+                for i in 0..root.n1() as u8 {
+                    let visits = root.marginal_visits_p1(i as usize);
+                    if visits > best_visits {
+                        best_visits = visits;
+                        best_i = i;
+                    }
+                }
 
-        // Find a transposition reachable from the chosen child's subtree.
-        let target_edge = root_low.find_child(best_i, best_j)
-            .expect("best edge must exist");
-        let target_child = target_edge.low_node();
-        let mut transposition_weak: Option<std::sync::Weak<SharedNode>> = None;
-        let mut cursor = target_child.get().first_child();
-        while let Some(edge) = cursor {
-            let grandchild = edge.low_node();
-            if grandchild.num_parents() > 1 {
-                transposition_weak = Some(Arc::downgrade(grandchild));
-                break;
+                let mut best_j = 0u8;
+                best_visits = 0;
+                for j in 0..root.n2() as u8 {
+                    let visits = root.marginal_visits_p2(j as usize);
+                    if visits > best_visits {
+                        best_visits = visits;
+                        best_j = j;
+                    }
+                }
+
+                (
+                    best_i,
+                    best_j,
+                    root.p1_outcome_action(best_i as usize),
+                    root.p2_outcome_action(best_j as usize),
+                )
+            };
+
+            let target_child = access
+                .child(&root, best_i, best_j)
+                .expect("best edge must exist")
+                .into_child();
+            let (n1, n2) = {
+                let child = access.node(&target_child);
+                (child.n1() as u8, child.n2() as u8)
+            };
+
+            let mut transposition = None;
+            'children: for i in 0..n1 {
+                for j in 0..n2 {
+                    if let Some(edge) = access.child(&target_child, i, j) {
+                        let child = edge.into_child();
+                        if access.num_parents(&child) > 1 {
+                            transposition = Some((i, j, child));
+                            break 'children;
+                        }
+                    }
+                }
             }
-            cursor = edge.next_sibling();
-        }
+            let (transposition_i, transposition_j, transposition) = transposition.expect(
+                "search should produce at least one transposition with 1000 sims on symmetric setup",
+            );
 
-        let weak = transposition_weak.expect(
-            "search should produce at least one transposition with 1000 sims on symmetric setup",
-        );
+            use pyrat::Direction;
+            let _undo = game.make_move(
+                Direction::try_from(p1_action).unwrap(),
+                Direction::try_from(p2_action).unwrap(),
+            );
+            access.advance_root(&game, p1_action, p2_action);
 
-        use pyrat::Direction;
-        let _undo = game.make_move(
-            Direction::try_from(p1_action).unwrap(),
-            Direction::try_from(p2_action).unwrap(),
-        );
-        tree.advance_root(&game, p1_action, p2_action);
+            let promoted = access.root();
+            assert!(access.same_node(&promoted, &target_child));
+            let surviving = access
+                .child(&promoted, transposition_i, transposition_j)
+                .expect("transposition edge must survive root promotion")
+                .into_child();
+            assert!(access.same_node(&surviving, &transposition));
+
+            (transposition_i, transposition_j)
+        });
 
         // Let GC process pruned edges
         crate::gc::start();
         crate::gc::stop();
         crate::gc::wait();
 
-        // The transposed node should still be alive (kept by multiple parent edges
-        // in the surviving subtree, or by the TT)
-        assert!(
-            weak.upgrade().is_some(),
-            "transposition node should survive advance_root (still reachable from new subtree)"
-        );
+        let transposition_survives = tree.observe(|view| {
+            view.with_root(|root| {
+                root.edge(surviving_edge.0, surviving_edge.1)
+                    .is_some()
+            })
+        });
+        assert!(transposition_survives);
     }
 
     #[test]
     fn observer_preserves_fixed_node_edge_and_tt_statistics() {
         let open = [0, 1, 2, 3, 4];
+        let game = open_5x5_game(
+            Coordinates::new(0, 0),
+            Coordinates::new(4, 4),
+            &[Coordinates::new(2, 2)],
+        );
+        let initial_root_hash = game.state_hash();
+        let fixture_root_hash = initial_root_hash.wrapping_add(1);
+        let fixture_child_hash = initial_root_hash.wrapping_add(2);
+        let mut tree = MCGSTree::new(&game);
 
         let mut child_low = LowNode::new_shell(open, open);
         child_low.set_value_scale(3.0);
         child_low.set_terminal();
-        let child = Arc::new(SharedNode::new(child_low));
 
         let mut root_low = LowNode::new_shell(open, open);
         root_low.set_prior(
@@ -1033,26 +1146,19 @@ mod tests {
         root_low.finalize_edge_update(1, 3, 1.0, 2.0);
         root_low.finalize_score_update(2.0, 4.0);
         root_low.finalize_score_update(4.0, 6.0);
-        root_low.prepend_child(Box::new(Edge::new(
-            Arc::clone(&child),
-            (1, 2),
-            1.0,
-            -0.5,
-        )));
-        let root = Arc::new(SharedNode::new(root_low));
 
-        let mut tt = TranspositionTable::new();
-        tt.insert(1, &root);
-        tt.insert(2, &child);
-        let expired = Arc::new(SharedNode::new(LowNode::new_shell(open, open)));
-        tt.insert(3, &expired);
-        drop(expired);
-
-        let mut tree = MCGSTree {
-            root,
-            tt,
-            node_count: 2,
-        };
+        tree.with_exclusive(|mut access| {
+            let child = access.test_node(child_low);
+            let root = access.test_node(root_low);
+            access.test_connect(&root, &child, (1, 2), 1.0, -0.5);
+            assert!(access.test_insert_tt(fixture_root_hash, &root));
+            assert!(access.test_insert_tt(fixture_child_hash, &child));
+            access.test_install_root(&root);
+        });
+        // `test_node` deliberately leaves production accounting unchanged.
+        // The old constructor root's TT slot is now the one expired fixture
+        // entry, while the installed root and its child are the two live nodes.
+        tree.increment_node_count();
 
         let (root_stats, p1_outcomes, action_visits, transition, child_stats) =
             tree.observe(|view| {

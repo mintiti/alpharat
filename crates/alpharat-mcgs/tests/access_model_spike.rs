@@ -78,25 +78,17 @@ mod model {
             }
         }
 
-        /// SAFETY: callers must hold a read-like capability for the owning tree
-        /// and must tie the result to that capability's borrow.
-        unsafe fn data(&self) -> &NodeData {
-            // SAFETY: upheld by the private capability call sites.
-            unsafe { &*self.data.get() }
-        }
-
-        /// SAFETY: callers must hold the unique/exclusive capability for the
-        /// owning tree and must tie the result to that capability's borrow.
-        unsafe fn data_mut(&self) -> &mut NodeData {
-            // SAFETY: upheld by the private capability call sites.
-            unsafe { &mut *self.data.get() }
+        /// Producing the pointer is safe; capability call sites validate the
+        /// owner and establish the read/write epoch before dereferencing it.
+        fn data_ptr(&self) -> *mut NodeData {
+            self.data.get()
         }
     }
 
-    // SAFETY: `NodeInner::data` and `data_mut` are sealed behind this module's
-    // branded capabilities. Shared views exist only under a search read guard
-    // (or an immutable whole-tree observer), and mutable views exist only under
-    // the corresponding write guard or an exclusive `&mut PersistentTree`.
+    // SAFETY: payload dereferences are sealed behind this module's branded
+    // capabilities. Shared views exist only under a search read guard (or an
+    // immutable whole-tree observer), and mutable views exist only under the
+    // corresponding write guard or an exclusive `&mut PersistentTree`.
     unsafe impl Sync for NodeInner {}
 
     /// An owned liveness token. Its constructor and raw `Arc` are intentionally
@@ -295,7 +287,7 @@ mod model {
             );
             // SAFETY: the immutable access borrow covers the returned view, and
             // this capability owns the unique borrow of the whole tree.
-            unsafe { handle.inner().data() }
+            unsafe { &*handle.inner().data_ptr() }
         }
 
         fn data_mut<'access>(
@@ -308,7 +300,7 @@ mod model {
             );
             // SAFETY: `&mut self` serializes all payload access through this
             // unique whole-tree capability for the returned lifetime.
-            unsafe { handle.inner().data_mut() }
+            unsafe { &mut *handle.inner().data_ptr() }
         }
 
         pub(super) fn view<'access>(
@@ -416,7 +408,7 @@ mod model {
             );
             // SAFETY: the returned shared payload reference borrows this read
             // access, so the write guard cannot be acquired while it is live.
-            unsafe { handle.inner().data() }
+            unsafe { &*handle.inner().data_ptr() }
         }
 
         pub(super) fn view<'access>(
@@ -472,7 +464,7 @@ mod model {
             );
             // SAFETY: a write guard may also produce shared views, tied to its
             // borrow; Rust prevents mutable reborrowing while such a view lives.
-            unsafe { handle.inner().data() }
+            unsafe { &*handle.inner().data_ptr() }
         }
 
         fn data_mut<'access>(
@@ -485,7 +477,7 @@ mod model {
             );
             // SAFETY: the write guard excludes every read/write guard, and the
             // returned reference borrows the guard mutably for its lifetime.
-            unsafe { handle.inner().data_mut() }
+            unsafe { &mut *handle.inner().data_ptr() }
         }
 
         pub(super) fn view<'access>(
@@ -532,7 +524,7 @@ mod model {
             );
             // SAFETY: the whole persistent tree is immutably borrowed for this
             // observer callback, excluding exclusive/search-session creation.
-            unsafe { handle.inner().data() }
+            unsafe { &*handle.inner().data_ptr() }
         }
 
         /// The higher-ranked view callback makes each borrow epoch
@@ -1055,6 +1047,45 @@ fn handle_cannot_mix_across_nested_tree_sessions() {
         second.with_search_session(|second_session| {
             let read = second_session.read();
             let _ = read.view(&handle);
+        });
+    });
+}
+
+#[cfg(access_model_fail_exclusive_handle_escape)]
+fn exclusive_handle_cannot_escape_its_generative_session() {
+    let mut tree = PersistentTree::fixture();
+    let _escaped = tree.with_exclusive(|access| access.root_handle());
+}
+
+#[cfg(access_model_fail_exclusive_view_escape)]
+fn exclusive_view_cannot_escape_its_access_borrow() {
+    let mut tree = PersistentTree::fixture();
+    let _escaped = tree.with_exclusive(|access| {
+        let handle = access.root_handle();
+        access.view(&handle)
+    });
+}
+
+#[cfg(access_model_fail_exclusive_alias)]
+fn exclusive_read_prevents_overlapping_mutation() {
+    let mut tree = PersistentTree::fixture();
+    tree.with_exclusive(|mut access| {
+        let handle = access.root_handle();
+        let read = access.view(&handle);
+        access.set_label(&handle, 41);
+        let _ = read.label();
+    });
+}
+
+#[cfg(access_model_fail_exclusive_wrong_tree)]
+fn exclusive_handle_cannot_mix_across_nested_tree_sessions() {
+    let mut first = PersistentTree::fixture();
+    let mut second = PersistentTree::fixture();
+
+    first.with_exclusive(|first_access| {
+        let handle = first_access.root_handle();
+        second.with_exclusive(|second_access| {
+            let _ = second_access.view(&handle);
         });
     });
 }

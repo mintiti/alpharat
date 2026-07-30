@@ -12,7 +12,8 @@ use std::sync::Arc;
 use crate::node::{Edge, LowNode, SharedNode};
 use crate::tree::MCGSTree;
 
-type Invariant<'session> = PhantomData<fn(&'session mut ()) -> &'session mut ()>;
+pub(crate) type Invariant<'session> =
+    PhantomData<fn(&'session mut ()) -> &'session mut ()>;
 
 /// Which player's outcome-reduced statistics to inspect.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -121,10 +122,8 @@ impl<'tree, 'session> TreeView<'tree, 'session> {
         &self,
         inspect: impl for<'view> FnOnce(NodeView<'view, 'session>) -> R,
     ) -> R {
-        inspect(NodeView {
-            node: self.tree.root().get(),
-            brand: PhantomData,
-        })
+        let root = self.root();
+        self.with_node(&root, inspect)
     }
 
     /// Inspect a session handle for one non-escaping view epoch.
@@ -136,9 +135,11 @@ impl<'tree, 'session> TreeView<'tree, 'session> {
         handle: &NodeHandle<'session>,
         inspect: impl for<'view> FnOnce(NodeView<'view, 'session>) -> R,
     ) -> R {
-        inspect(NodeView {
-            node: handle.node.get(),
-            brand: PhantomData,
+        self.tree.with_observed_node(handle, |node| {
+            inspect(NodeView {
+                node,
+                brand: PhantomData,
+            })
         })
     }
 }
@@ -146,16 +147,24 @@ impl<'tree, 'session> TreeView<'tree, 'session> {
 /// Owned node identity confined to one observation session.
 #[derive(Clone)]
 pub struct NodeHandle<'session> {
-    node: Arc<SharedNode>,
-    brand: Invariant<'session>,
+    pub(crate) node: Arc<SharedNode>,
+    pub(crate) brand: Invariant<'session>,
 }
 
 impl<'session> NodeHandle<'session> {
-    fn new(node: Arc<SharedNode>) -> Self {
+    pub(crate) fn new(node: Arc<SharedNode>) -> Self {
         Self {
             node,
             brand: PhantomData,
         }
+    }
+
+    pub(crate) fn inner(&self) -> &SharedNode {
+        &self.node
+    }
+
+    pub(crate) fn arc(&self) -> &Arc<SharedNode> {
+        &self.node
     }
 }
 

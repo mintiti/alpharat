@@ -365,6 +365,8 @@ fn flush_gc_thread_local(gc: &GcInner) {
 mod tests {
     use super::*;
     use crate::node::{LowNode, SharedNode};
+    use crate::tree::MCGSTree;
+    use pyrat::{Coordinates, GameBuilder};
     use std::sync::{Arc, Mutex as StdMutex};
 
     const OPEN: [u8; 5] = [0, 1, 2, 3, 4];
@@ -373,8 +375,24 @@ mod tests {
     // tests that call start/stop/wait so they don't step on each other.
     static GC_TEST_LOCK: StdMutex<()> = StdMutex::new(());
 
+    fn fixture_tree() -> MCGSTree {
+        let game = GameBuilder::new(3, 3)
+            .with_open_maze()
+            .with_custom_positions(Coordinates::new(0, 0), Coordinates::new(2, 2))
+            .with_custom_cheese(vec![Coordinates::new(1, 1)])
+            .with_max_turns(10)
+            .build()
+            .create(None)
+            .unwrap();
+        MCGSTree::new(&game)
+    }
+
     fn make_shared() -> Arc<SharedNode> {
-        Arc::new(SharedNode::new(LowNode::new_shell(OPEN, OPEN)))
+        let mut tree = fixture_tree();
+        tree.with_exclusive(|mut access| {
+            let node = access.test_node(LowNode::new_shell(OPEN, OPEN));
+            Arc::clone(node.arc())
+        })
     }
 
     /// Bring GC to a known Sleeping state, regardless of prior test residue.
@@ -437,25 +455,28 @@ mod tests {
         let _lock = GC_TEST_LOCK.lock().unwrap();
         reset_gc();
 
-        let child1 = make_shared();
-        let child2 = make_shared();
-        let child3 = make_shared();
-        let weak1 = Arc::downgrade(&child1);
-        let weak2 = Arc::downgrade(&child2);
-        let weak3 = Arc::downgrade(&child3);
+        let mut tree = fixture_tree();
+        let (weak1, weak2, weak3, chain) = tree.with_exclusive(|mut access| {
+            let child1 = access.test_node(LowNode::new_shell(OPEN, OPEN));
+            let child2 = access.test_node(LowNode::new_shell(OPEN, OPEN));
+            let child3 = access.test_node(LowNode::new_shell(OPEN, OPEN));
+            let parent = access.test_node(LowNode::new_shell(OPEN, OPEN));
 
-        // Build a sibling chain via parent's child list
-        let edge3 = Box::new(Edge::new(child3, (2, 2), 0.0, 0.0));
-        let edge2 = Box::new(Edge::new(child2, (1, 1), 0.0, 0.0));
-        let parent = SharedNode::new(LowNode::new_shell(OPEN, OPEN));
-        parent.get_mut().prepend_child(edge3);
-        parent.get_mut().prepend_child(edge2);
-        parent
-            .get_mut()
-            .prepend_child(Box::new(Edge::new(child1, (0, 0), 0.0, 0.0)));
+            let weak1 = Arc::downgrade(child1.arc());
+            let weak2 = Arc::downgrade(child2.arc());
+            let weak3 = Arc::downgrade(child3.arc());
 
-        // Take the whole chain and queue just the head
-        let chain = parent.get_mut().take_first_child().unwrap();
+            access.test_connect(&parent, &child3, (2, 2), 0.0, 0.0);
+            access.test_connect(&parent, &child2, (1, 1), 0.0, 0.0);
+            access.test_connect(&parent, &child1, (0, 0), 0.0, 0.0);
+
+            let chain = access
+                .test_detach_children(&parent)
+                .expect("fixture child chain");
+            (weak1, weak2, weak3, chain)
+        });
+
+        // Queue just the head; dropping it cascades through the sibling chain.
         queue(chain);
         flush();
 

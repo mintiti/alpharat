@@ -96,12 +96,26 @@ impl TranspositionTable {
 mod tests {
     use super::*;
     use crate::node::{Edge, LowNode};
+    use crate::tree::MCGSTree;
+    use pyrat::{Coordinates, GameBuilder};
 
     /// All actions open — simplest effective-action mapping.
     const OPEN: [u8; 5] = [0, 1, 2, 3, 4];
 
     fn make_node() -> Arc<SharedNode> {
-        Arc::new(SharedNode::new(LowNode::new_shell(OPEN, OPEN)))
+        let game = GameBuilder::new(3, 3)
+            .with_open_maze()
+            .with_custom_positions(Coordinates::new(0, 0), Coordinates::new(2, 2))
+            .with_custom_cheese(vec![Coordinates::new(1, 1)])
+            .with_max_turns(10)
+            .build()
+            .create(None)
+            .unwrap();
+        let mut tree = MCGSTree::new(&game);
+        tree.with_exclusive(|mut access| {
+            let node = access.test_node(LowNode::new_shell(OPEN, OPEN));
+            Arc::clone(node.arc())
+        })
     }
 
     // ---- Basic operations ----

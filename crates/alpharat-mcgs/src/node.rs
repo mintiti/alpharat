@@ -661,43 +661,47 @@ impl Drop for Edge {
 }
 
 // ---------------------------------------------------------------------------
-// SharedNode — UnsafeCell wrapper for interior mutability
+// SharedNode — owner-tagged UnsafeCell storage
 // ---------------------------------------------------------------------------
 //
 // LowNode lives behind Arc (for TT Weak refs and Edge sharing). During search,
 // we need &mut LowNode for backup, populate, virtual loss. SharedNode wraps
 // LowNode in UnsafeCell for zero-cost interior mutability.
 //
-// Safety invariant: single-threaded search. All access to a SharedNode happens
-// on the same thread. This matches lc0's const_cast pattern.
+// Persistent storage is unbranded. Branded access sessions validate the
+// immutable owner token before dereferencing `inner`.
+
+/// Opaque identity shared by one tree and all nodes allocated for it.
+pub(crate) struct OwnerToken;
 
 pub struct SharedNode {
+    owner: Arc<OwnerToken>,
     inner: UnsafeCell<LowNode>,
     // Outside UnsafeCell — safe for concurrent atomic access (e.g. from GC thread).
     num_parents: AtomicU16,
 }
 
 impl SharedNode {
-    pub fn new(node: LowNode) -> Self {
+    pub(crate) fn with_owner(node: LowNode, owner: Arc<OwnerToken>) -> Self {
         Self {
+            owner,
             inner: UnsafeCell::new(node),
             num_parents: AtomicU16::new(0),
         }
     }
 
-    /// Immutable access to the inner LowNode.
-    #[inline]
-    pub fn get(&self) -> &LowNode {
-        // SAFETY: single-threaded search — no concurrent mutation.
-        unsafe { &*self.inner.get() }
+    pub(crate) fn owner(&self) -> &Arc<OwnerToken> {
+        &self.owner
     }
 
-    /// Mutable access to the inner LowNode.
+    /// Raw payload address for the sealed capability boundary.
+    ///
+    /// Producing the pointer is safe; dereferencing it is not. The access
+    /// capability must validate ownership and establish the appropriate
+    /// read/write epoch before forming a reference.
     #[inline]
-    #[allow(clippy::mut_from_ref)]
-    pub fn get_mut(&self) -> &mut LowNode {
-        // SAFETY: single-threaded search — no concurrent access.
-        unsafe { &mut *self.inner.get() }
+    pub(crate) fn low_node_ptr(&self) -> *mut LowNode {
+        self.inner.get()
     }
 
     // --- Transposition tracking (atomic, safe from any thread) ---
@@ -730,15 +734,12 @@ impl Drop for SharedNode {
     }
 }
 
-impl std::fmt::Debug for SharedNode {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        self.get().fmt(f)
-    }
-}
-
-// SAFETY: single-threaded search. SharedNode is only accessed from one thread.
-// Required because Arc<SharedNode> needs Send+Sync for Weak refs in the TT.
-unsafe impl Send for SharedNode {}
+// SAFETY: shared payload dereferences are sealed behind owner-checked access
+// capabilities. Concurrent observers hold only `&MCGSTree` and form shared
+// payload references; mutable access requires the exclusive whole-tree
+// capability. GC crosses threads only with owned, detached edges, and
+// `Drop for SharedNode` has true `&mut self`. `Send` remains auto-derived from
+// the fields; only shared access needs this explicit invariant.
 unsafe impl Sync for SharedNode {}
 
 // ---------------------------------------------------------------------------
@@ -748,9 +749,23 @@ unsafe impl Sync for SharedNode {}
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::tree::MCGSTree;
+    use pyrat::{Coordinates, GameBuilder};
 
     /// All actions open — simplest effective-action mapping.
     const OPEN: [u8; 5] = [0, 1, 2, 3, 4];
+
+    fn fixture_tree() -> MCGSTree {
+        let game = GameBuilder::new(3, 3)
+            .with_open_maze()
+            .with_custom_positions(Coordinates::new(0, 0), Coordinates::new(2, 2))
+            .with_custom_cheese(vec![Coordinates::new(1, 1)])
+            .with_max_turns(10)
+            .build()
+            .create(None)
+            .unwrap();
+        MCGSTree::new(&game)
+    }
 
     // ---- LowNode: creation and outcome mapping ----
 
@@ -876,7 +891,7 @@ mod tests {
 
     #[test]
     fn shared_node_num_parents() {
-        let shared = SharedNode::new(LowNode::new_shell([0, 1, 2, 3, 4], [0, 1, 2, 3, 4]));
+        let shared = make_shared(OPEN, OPEN);
         assert_eq!(shared.num_parents(), 0);
         assert!(!shared.is_transposition());
 
@@ -897,7 +912,11 @@ mod tests {
 
     /// Helper: wrap LowNode in SharedNode + Arc for Edge tests.
     fn make_shared(eff_p1: [u8; 5], eff_p2: [u8; 5]) -> Arc<SharedNode> {
-        Arc::new(SharedNode::new(LowNode::new_shell(eff_p1, eff_p2)))
+        let mut tree = fixture_tree();
+        tree.with_exclusive(|mut access| {
+            let node = access.test_node(LowNode::new_shell(eff_p1, eff_p2));
+            Arc::clone(node.arc())
+        })
     }
 
     fn make_shared_open() -> Arc<SharedNode> {
@@ -1056,45 +1075,42 @@ mod tests {
 
     #[test]
     fn child_list_prepend_and_find() {
-        let child1 = make_shared_open();
-        let child2 = make_shared_open();
+        let mut tree = fixture_tree();
+        tree.with_exclusive(|mut access| {
+            let child1 = access.test_node(LowNode::new_shell(OPEN, OPEN));
+            let child2 = access.test_node(LowNode::new_shell(OPEN, OPEN));
+            let parent = access.test_node(LowNode::new_shell(OPEN, OPEN));
 
-        // Use SharedNode for parent too — interior mutability via get_mut().
-        let parent = SharedNode::new(LowNode::new_shell(OPEN, OPEN));
+            access.test_connect(&parent, &child1, (0, 1), 1.0, 0.0);
+            access.test_connect(&parent, &child2, (2, 3), 0.0, 1.0);
 
-        let edge1 = Box::new(Edge::new(Arc::clone(&child1), (0, 1), 1.0, 0.0));
-        let edge2 = Box::new(Edge::new(Arc::clone(&child2), (2, 3), 0.0, 1.0));
+            {
+                let parent = access.node(&parent);
 
-        parent.get_mut().prepend_child(edge1);
-        parent.get_mut().prepend_child(edge2);
+                // child2 was prepended last, so it's first
+                let first = parent.first_child().unwrap();
+                assert_eq!(first.parent_outcome(), (2, 3));
 
-        // edge2 was prepended last, so it's first
-        let first = parent.get().first_child().unwrap();
-        assert_eq!(first.parent_outcome(), (2, 3));
+                let second = first.next_sibling().unwrap();
+                assert_eq!(second.parent_outcome(), (0, 1));
+                assert!(second.next_sibling().is_none());
 
-        let second = first.next_sibling().unwrap();
-        assert_eq!(second.parent_outcome(), (0, 1));
+                assert!(parent.find_child(0, 1).is_some());
+                assert_eq!(parent.find_child(0, 1).unwrap().parent_outcome(), (0, 1));
+                assert!(parent.find_child(2, 3).is_some());
+                assert_eq!(parent.find_child(2, 3).unwrap().parent_outcome(), (2, 3));
+                assert!(parent.find_child(4, 4).is_none());
 
-        assert!(second.next_sibling().is_none());
+                // Both edges retain distinct child identities.
+                assert!(!Arc::ptr_eq(
+                    parent.find_child(0, 1).unwrap().low_node(),
+                    parent.find_child(2, 3).unwrap().low_node()
+                ));
+            }
 
-        // find_child
-        assert!(parent.get().find_child(0, 1).is_some());
-        assert_eq!(parent.get().find_child(0, 1).unwrap().parent_outcome(), (0, 1));
-
-        assert!(parent.get().find_child(2, 3).is_some());
-        assert_eq!(parent.get().find_child(2, 3).unwrap().parent_outcome(), (2, 3));
-
-        assert!(parent.get().find_child(4, 4).is_none());
-
-        // Verify Arc sharing: both edges point to distinct child LowNodes
-        assert!(!Arc::ptr_eq(
-            parent.get().find_child(0, 1).unwrap().low_node(),
-            parent.get().find_child(2, 3).unwrap().low_node()
-        ));
-
-        // Verify parent counts
-        assert_eq!(child1.num_parents(), 1);
-        assert_eq!(child2.num_parents(), 1);
+            assert_eq!(access.num_parents(&child1), 1);
+            assert_eq!(access.num_parents(&child2), 1);
+        });
     }
 
     #[test]
@@ -1234,25 +1250,30 @@ mod tests {
     // ---- SharedNode ----
 
     #[test]
-    fn shared_node_get_and_get_mut() {
-        let shared = SharedNode::new(LowNode::new_shell(OPEN, OPEN));
-        assert_eq!(shared.get().n1(), 5);
-        assert_eq!(shared.get().total_visits(), 0);
+    fn shared_node_payload_uses_exclusive_access() {
+        let mut tree = fixture_tree();
+        tree.with_exclusive(|mut access| {
+            let shared = access.test_node(LowNode::new_shell(OPEN, OPEN));
+            assert_eq!(access.node(&shared).n1(), 5);
+            assert_eq!(access.node(&shared).total_visits(), 0);
 
-        shared.get_mut().finalize_score_update(3.0, 2.0);
-        assert_eq!(shared.get().total_visits(), 1);
-        assert!((shared.get().v1() - 3.0).abs() < 1e-6);
+            access.node_mut(&shared).finalize_score_update(3.0, 2.0);
+            assert_eq!(access.node(&shared).total_visits(), 1);
+            assert!((access.node(&shared).v1() - 3.0).abs() < 1e-6);
+        });
     }
 
     #[test]
-    fn shared_node_in_arc() {
-        let shared = Arc::new(SharedNode::new(LowNode::new_shell(OPEN, OPEN)));
-        let clone = Arc::clone(&shared);
+    fn cloned_handle_observes_same_shared_payload() {
+        let mut tree = fixture_tree();
+        tree.with_exclusive(|mut access| {
+            let shared = access.test_node(LowNode::new_shell(OPEN, OPEN));
+            let clone = shared.clone();
 
-        shared.get_mut().finalize_score_update(5.0, 5.0);
-        // Clone sees same data (same UnsafeCell behind Arc)
-        assert_eq!(clone.get().total_visits(), 1);
-        assert!((clone.get().v1() - 5.0).abs() < 1e-6);
+            access.node_mut(&shared).finalize_score_update(5.0, 5.0);
+            assert_eq!(access.node(&clone).total_visits(), 1);
+            assert!((access.node(&clone).v1() - 5.0).abs() < 1e-6);
+        });
     }
 
     // ---- Multivisit methods ----
