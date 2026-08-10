@@ -43,6 +43,8 @@ pub mod gc;
 mod node;
 mod observer;
 mod search;
+#[cfg(test)]
+mod search_invariants;
 mod tree;
 #[cfg_attr(not(test), allow(dead_code))]
 mod tt;

@@ -670,15 +670,8 @@ fn build_gather_level<'session>(
     let n1 = low.n1();
     let n2 = low.n2();
 
-    // Initialize n_started from current state.
-    let mut ns_p1 = [0u32; 5];
-    let mut ns_p2 = [0u32; 5];
-    for (i, started) in ns_p1.iter_mut().enumerate().take(n1) {
-        *started = low.marginal_n_started_p1(i);
-    }
-    for (j, started) in ns_p2.iter_mut().enumerate().take(n2) {
-        *started = low.marginal_n_started_p2(j);
-    }
+    // Initialize n_started through the exclusive reservation fast path.
+    let (mut ns_p1, mut ns_p2) = low.marginal_n_started_exclusive();
 
     let mut vtp = [0u32; 25];
     let mut remaining = cur_limit;
@@ -1198,6 +1191,32 @@ impl Drop for GatherCleanupGuard<'_, '_, '_, '_> {
 // simulate_batch — LC0-style gather/eval/backup cycle
 // ---------------------------------------------------------------------------
 
+fn validate_eval_batch(
+    expected: usize,
+    eval_results: &[crate::EvalResult],
+) -> Result<(), BackendError> {
+    if eval_results.len() != expected {
+        return Err(BackendError::msg(format!(
+            "backend result count mismatch: requested {expected}, received {}",
+            eval_results.len()
+        )));
+    }
+
+    for (index, eval) in eval_results.iter().enumerate() {
+        if !eval.policy_p1.iter().all(|value| value.is_finite())
+            || !eval.policy_p2.iter().all(|value| value.is_finite())
+            || !eval.value_p1.is_finite()
+            || !eval.value_p2.is_finite()
+        {
+            return Err(BackendError::msg(format!(
+                "backend result {index} contains a non-finite policy or value"
+            )));
+        }
+    }
+
+    Ok(())
+}
+
 fn simulate_batch<'session>(
     access: &mut ExclusiveAccess<'_, 'session>,
     game: &GameState,
@@ -1279,6 +1298,8 @@ fn simulate_batch<'session>(
     } else {
         backend.evaluate_batch(&game_states)?
     };
+
+    validate_eval_batch(game_states.len(), &eval_results)?;
 
     // ---- Backup Phase: NN eval results ----
     let mut eval_idx = 0;
