@@ -14,12 +14,15 @@ use pyrat::{Coordinates, Direction, GameBuilder, GameState};
 use rand::rngs::SmallRng;
 use rand::SeedableRng;
 
-use crate::access::ExclusiveAccess;
+use crate::access::{ExclusiveAccess, SearchSession};
 use crate::observer::NodeHandle;
+use crate::search::{
+    run_search_one_worker, run_search_one_worker_with_timings, run_search_session, SearchTimings,
+};
 use crate::tree::{compute_rewards, MCGSTree};
 use crate::{
     run_search, Backend, BackendError, ConstantValueBackend, EvalResult, SearchConfig,
-    SmartUniformBackend,
+    SearchResult, SmartUniformBackend,
 };
 
 const FLOAT_TOLERANCE: f32 = 1e-4;
@@ -567,8 +570,62 @@ fn open_game(max_turns: u16) -> GameState {
         .unwrap()
 }
 
+fn benchmark_game() -> GameState {
+    let mut cheese = Vec::new();
+    'outer: for y in 0..7 {
+        for x in 0..7 {
+            if (x + y) % 2 == 1 && (x, y) != (0, 0) && (x, y) != (6, 6) {
+                cheese.push(Coordinates::new(x, y));
+                if cheese.len() == 10 {
+                    break 'outer;
+                }
+            }
+        }
+    }
+
+    GameBuilder::new(7, 7)
+        .with_open_maze()
+        .with_custom_positions(Coordinates::new(0, 0), Coordinates::new(6, 6))
+        .with_custom_cheese(cheese)
+        .with_max_turns(50)
+        .build()
+        .create(None)
+        .unwrap()
+}
+
 fn root_visits(tree: &MCGSTree) -> u32 {
     tree.observe(|view| view.with_root(|root| root.stats().total_visits))
+}
+
+fn assert_result_bits_eq(left: &SearchResult, right: &SearchResult) {
+    for (left, right) in [
+        (&left.policy_p1, &right.policy_p1),
+        (&left.policy_p2, &right.policy_p2),
+        (&left.visit_counts_p1, &right.visit_counts_p1),
+        (&left.visit_counts_p2, &right.visit_counts_p2),
+        (&left.prior_p1, &right.prior_p1),
+        (&left.prior_p2, &right.prior_p2),
+        (&left.q_values_p1, &right.q_values_p1),
+        (&left.q_values_p2, &right.q_values_p2),
+    ] {
+        assert_eq!(left.map(f32::to_bits), right.map(f32::to_bits));
+    }
+    assert_eq!(left.value_p1.to_bits(), right.value_p1.to_bits());
+    assert_eq!(left.value_p2.to_bits(), right.value_p2.to_bits());
+    assert_eq!(left.total_visits, right.total_visits);
+    assert_eq!(left.nn_evals, right.nn_evals);
+    assert_eq!(left.terminals, right.terminals);
+    assert_eq!(left.collisions, right.collisions);
+    assert_eq!(left.tt_stop_hits, right.tt_stop_hits);
+}
+
+fn best_action(visits: &[f32; 5]) -> u8 {
+    visits
+        .iter()
+        .enumerate()
+        .max_by(|(_, left), (_, right)| left.partial_cmp(right).unwrap())
+        .unwrap()
+        .0 as u8
 }
 
 #[derive(Clone, Copy)]
@@ -670,6 +727,26 @@ impl Backend for PanicAfterOneBatchBackend {
     }
 }
 
+struct GateProbeBackend<'probe, 'tree, 'session> {
+    session: &'probe SearchSession<'tree, 'session>,
+    calls: AtomicUsize,
+}
+
+impl Backend for GateProbeBackend<'_, '_, '_> {
+    fn evaluate(&self, game: &GameState) -> Result<EvalResult, BackendError> {
+        SmartUniformBackend.evaluate(game)
+    }
+
+    fn evaluate_batch(&self, games: &[&GameState]) -> Result<Vec<EvalResult>, BackendError> {
+        assert!(
+            self.session.try_write_for_test(),
+            "backend inference must run after the graph write epoch is dropped"
+        );
+        self.calls.fetch_add(1, Ordering::Relaxed);
+        SmartUniformBackend.evaluate_batch(games)
+    }
+}
+
 struct NonFiniteTailBackend {
     requested: AtomicUsize,
 }
@@ -746,6 +823,280 @@ fn searched_tree_satisfies_quiescent_invariants() {
             "fixture should exercise a shared DAG node at batch size {batch_size}"
         );
     }
+}
+
+#[test]
+fn gated_one_worker_matches_direct_fresh_and_reuse_bit_for_bit() {
+    let mut game = benchmark_game();
+    let config = SearchConfig::default();
+    let mut direct_tree = MCGSTree::new(&game);
+    let mut gated_tree = MCGSTree::new(&game);
+
+    let mut direct_rng = SmallRng::seed_from_u64(42);
+    let direct_first = run_search(
+        &mut direct_tree,
+        &game,
+        &SmartUniformBackend,
+        &config,
+        8_000,
+        64,
+        &mut direct_rng,
+    )
+    .unwrap();
+    let mut gated_rng = SmallRng::seed_from_u64(42);
+    let gated_first = run_search_one_worker(
+        &mut gated_tree,
+        &game,
+        &SmartUniformBackend,
+        &config,
+        8_000,
+        64,
+        &mut gated_rng,
+    )
+    .unwrap();
+
+    assert_result_bits_eq(&direct_first, &gated_first.result);
+    assert_eq!(direct_tree.stats(), gated_tree.stats());
+    assert_eq!(gated_first.ledger.outstanding(), 0);
+    assert_eq!(
+        gated_first.ledger.committed,
+        u64::from(
+            gated_first.result.nn_evals
+                + gated_first.result.terminals
+                + gated_first.result.tt_stop_hits
+        )
+    );
+    assert_eq!(
+        gated_first.ledger.cancelled,
+        u64::from(gated_first.result.collisions)
+    );
+    assert!(gated_first.timings.batches > 0);
+
+    let p1_action = best_action(&direct_first.visit_counts_p1);
+    let p2_action = best_action(&direct_first.visit_counts_p2);
+    game.make_move(
+        Direction::try_from(p1_action).unwrap(),
+        Direction::try_from(p2_action).unwrap(),
+    );
+    direct_tree.advance_root(&game, p1_action, p2_action);
+    gated_tree.advance_root(&game, p1_action, p2_action);
+    direct_tree.evict_expired();
+    gated_tree.evict_expired();
+    assert_eq!(direct_tree.stats(), gated_tree.stats());
+
+    let mut direct_rng = SmallRng::seed_from_u64(123);
+    let direct_second = run_search(
+        &mut direct_tree,
+        &game,
+        &SmartUniformBackend,
+        &config,
+        8_000,
+        64,
+        &mut direct_rng,
+    )
+    .unwrap();
+    let mut gated_rng = SmallRng::seed_from_u64(123);
+    let gated_second = run_search_one_worker(
+        &mut gated_tree,
+        &game,
+        &SmartUniformBackend,
+        &config,
+        8_000,
+        64,
+        &mut gated_rng,
+    )
+    .unwrap();
+
+    assert_result_bits_eq(&direct_second, &gated_second.result);
+    assert_eq!(direct_tree.stats(), gated_tree.stats());
+    assert_eq!(gated_second.ledger.outstanding(), 0);
+}
+
+#[test]
+fn gated_inference_holds_no_graph_guard() {
+    let game = open_game(20);
+    let mut tree = MCGSTree::new(&game);
+    let config = SearchConfig::default();
+    let mut rng = SmallRng::seed_from_u64(0x6A7E);
+
+    tree.with_search_session(|session| {
+        let backend = GateProbeBackend {
+            session: &session,
+            calls: AtomicUsize::new(0),
+        };
+        let mut timings = SearchTimings::default();
+        let profile = run_search_session(
+            &session,
+            &game,
+            &backend,
+            &config,
+            64,
+            8,
+            &mut rng,
+            &mut timings,
+        )
+        .unwrap();
+
+        assert!(backend.calls.load(Ordering::Relaxed) > 0);
+        assert_eq!(profile.ledger.outstanding(), 0);
+    });
+    audit_quiescent_dag(&mut tree, &game, AuditMode::GcDrained).unwrap();
+}
+
+#[test]
+fn gated_backend_error_preserves_prior_commit_and_cancels_current_batch() {
+    let game = open_game(20);
+    let mut tree = MCGSTree::new(&game);
+    let mut rng = SmallRng::seed_from_u64(0xE2202);
+    let backend = ErrorAfterOneBatchBackend::new();
+    let mut timings = SearchTimings::default();
+
+    let error = run_search_one_worker_with_timings(
+        &mut tree,
+        &game,
+        &backend,
+        &SearchConfig::default(),
+        2,
+        1,
+        &mut rng,
+        &mut timings,
+    )
+    .unwrap_err();
+
+    assert!(error.to_string().contains("intentional backend failure"));
+    assert!(timings.cleanup_hold > std::time::Duration::ZERO);
+    assert_eq!(root_visits(&tree), 1);
+    audit_quiescent_dag(&mut tree, &game, AuditMode::GcDrained).unwrap();
+    run_search_one_worker(
+        &mut tree,
+        &game,
+        &SmartUniformBackend,
+        &SearchConfig::default(),
+        20,
+        8,
+        &mut rng,
+    )
+    .unwrap();
+}
+
+#[test]
+fn gated_backend_panic_cleans_up_before_resuming_unwind() {
+    use std::panic::{catch_unwind, AssertUnwindSafe};
+
+    let game = open_game(20);
+    let mut tree = MCGSTree::new(&game);
+    let mut rng = SmallRng::seed_from_u64(0xA11CE);
+    let backend = PanicAfterOneBatchBackend::new();
+    let mut timings = SearchTimings::default();
+
+    let panic = catch_unwind(AssertUnwindSafe(|| {
+        let _ = run_search_one_worker_with_timings(
+            &mut tree,
+            &game,
+            &backend,
+            &SearchConfig::default(),
+            2,
+            1,
+            &mut rng,
+            &mut timings,
+        );
+    }));
+
+    assert!(panic.is_err());
+    assert!(timings.cleanup_hold > std::time::Duration::ZERO);
+    assert_eq!(root_visits(&tree), 1);
+    audit_quiescent_dag(&mut tree, &game, AuditMode::GcDrained).unwrap();
+    run_search_one_worker(
+        &mut tree,
+        &game,
+        &SmartUniformBackend,
+        &SearchConfig::default(),
+        20,
+        8,
+        &mut rng,
+    )
+    .unwrap();
+}
+
+#[test]
+fn gated_multi_item_validation_cancels_before_any_eval_commit() {
+    let config = SearchConfig {
+        collision_limit_min: 64,
+        collision_limit_max: 64,
+        ..SearchConfig::default()
+    };
+
+    for (skew, seed) in [(BatchLengthSkew::Short, 0x5101), (BatchLengthSkew::Long, 0x5102)] {
+        let game = open_game(20);
+        let mut tree = MCGSTree::new(&game);
+        let mut rng = SmallRng::seed_from_u64(seed);
+        run_search_one_worker(
+            &mut tree,
+            &game,
+            &SmartUniformBackend,
+            &config,
+            1,
+            1,
+            &mut rng,
+        )
+        .unwrap();
+        let visits_before_error = root_visits(&tree);
+        let backend = WrongBatchLengthBackend::new(skew);
+        let mut timings = SearchTimings::default();
+
+        let error = run_search_one_worker_with_timings(
+            &mut tree,
+            &game,
+            &backend,
+            &config,
+            8,
+            8,
+            &mut rng,
+            &mut timings,
+        )
+        .unwrap_err();
+
+        assert!(backend.requested() > 1);
+        assert!(error.to_string().contains("result count"));
+        assert_eq!(root_visits(&tree), visits_before_error);
+        assert!(timings.cleanup_hold > std::time::Duration::ZERO);
+        audit_quiescent_dag(&mut tree, &game, AuditMode::GcDrained).unwrap();
+    }
+
+    let game = open_game(20);
+    let mut tree = MCGSTree::new(&game);
+    let mut rng = SmallRng::seed_from_u64(0x5103);
+    run_search_one_worker(
+        &mut tree,
+        &game,
+        &SmartUniformBackend,
+        &config,
+        1,
+        1,
+        &mut rng,
+    )
+    .unwrap();
+    let visits_before_error = root_visits(&tree);
+    let backend = NonFiniteTailBackend::new();
+    let mut timings = SearchTimings::default();
+
+    let error = run_search_one_worker_with_timings(
+        &mut tree,
+        &game,
+        &backend,
+        &config,
+        8,
+        8,
+        &mut rng,
+        &mut timings,
+    )
+    .unwrap_err();
+
+    assert!(backend.requested() > 1);
+    assert!(error.to_string().contains("non-finite"));
+    assert_eq!(root_visits(&tree), visits_before_error);
+    assert!(timings.cleanup_hold > std::time::Duration::ZERO);
+    audit_quiescent_dag(&mut tree, &game, AuditMode::GcDrained).unwrap();
 }
 
 #[test]

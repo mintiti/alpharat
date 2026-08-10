@@ -1,7 +1,10 @@
+use std::panic::{catch_unwind, resume_unwind, AssertUnwindSafe};
+use std::time::{Duration, Instant};
+
 use rand::Rng;
 use rand_distr::Gamma;
 
-use crate::access::ExclusiveAccess;
+use crate::access::{ExclusiveAccess, SearchSession};
 use crate::node::LowNode;
 use crate::observer::NodeHandle;
 use crate::tree::{compute_rewards, MCGSTree};
@@ -98,12 +101,87 @@ pub struct SearchResult {
     pub tt_stop_hits: u32,
 }
 
+/// Wall-clock phase timings for the gated one-worker protocol.
+///
+/// Wait and hold time are kept separate so later multi-worker measurements can
+/// distinguish graph contention from useful search work. SmartUniform
+/// benchmarks mostly expose protocol overhead; real NN backends expose how
+/// much inference can overlap once more workers are admitted.
+#[derive(Clone, Copy, Debug, Default)]
+#[allow(dead_code)]
+pub struct SearchTimings {
+    pub batches: u32,
+    pub gather_wait: Duration,
+    pub gather_hold: Duration,
+    pub inference: Duration,
+    pub settle_wait: Duration,
+    pub settle_hold: Duration,
+    pub cleanup_wait: Duration,
+    pub cleanup_hold: Duration,
+    pub extract_wait: Duration,
+    pub extract_hold: Duration,
+}
+
+/// Aggregate ownership ledger for a completed profiled search.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct SearchLedgerStats {
+    pub reserved: u64,
+    pub committed: u64,
+    pub cancelled: u64,
+}
+
+impl SearchLedgerStats {
+    pub fn outstanding(self) -> u64 {
+        self.reserved
+            .checked_sub(self.committed + self.cancelled)
+            .expect("search ledger released more work than it reserved")
+    }
+
+    fn reserve(&mut self, units: u32) {
+        self.reserved += u64::from(units);
+    }
+
+    fn commit(&mut self, units: u32) {
+        self.committed += u64::from(units);
+        debug_assert!(self.committed + self.cancelled <= self.reserved);
+    }
+
+    fn cancel(&mut self, units: u32) {
+        self.cancelled += u64::from(units);
+        debug_assert!(self.committed + self.cancelled <= self.reserved);
+    }
+
+    fn merge(&mut self, batch: Self) {
+        self.reserved += batch.reserved;
+        self.committed += batch.committed;
+        self.cancelled += batch.cancelled;
+    }
+
+    fn assert_settled(self) {
+        assert_eq!(
+            self.outstanding(),
+            0,
+            "owned search batch crossed a boundary with outstanding reservations"
+        );
+    }
+}
+
+/// Result and instrumentation from the gated one-worker protocol.
+#[derive(Clone, Debug)]
+#[allow(dead_code)]
+pub struct ProfiledSearchResult {
+    pub result: SearchResult,
+    pub timings: SearchTimings,
+    pub ledger: SearchLedgerStats,
+}
+
 /// Per-batch counters from simulate_batch.
 struct BatchStats {
     nn_evals: u32,
     terminals: u32,
     collisions: u32,
     tt_stop_hits: u32,
+    ledger: SearchLedgerStats,
 }
 
 
@@ -134,6 +212,205 @@ pub fn run_search(
     })
 }
 
+/// Run the transitional one-worker session protocol with phase instrumentation.
+///
+/// This narrow benchmark seam is feature-gated because the normal public
+/// single-worker API remains [`run_search`], whose whole-tree exclusive borrow
+/// is the zero-lock behavior oracle.
+#[cfg(feature = "bench-internals")]
+#[doc(hidden)]
+#[allow(clippy::too_many_arguments)]
+pub fn run_search_one_worker_profiled(
+    tree: &mut MCGSTree,
+    game: &GameState,
+    backend: &dyn Backend,
+    config: &SearchConfig,
+    n_sims: u32,
+    batch_size: u32,
+    rng: &mut impl Rng,
+    timings: &mut SearchTimings,
+) -> Result<ProfiledSearchResult, BackendError> {
+    run_search_one_worker_with_timings(
+        tree,
+        game,
+        backend,
+        config,
+        n_sims,
+        batch_size,
+        rng,
+        timings,
+    )
+}
+
+#[allow(dead_code)]
+pub(crate) fn run_search_one_worker(
+    tree: &mut MCGSTree,
+    game: &GameState,
+    backend: &dyn Backend,
+    config: &SearchConfig,
+    n_sims: u32,
+    batch_size: u32,
+    rng: &mut impl Rng,
+) -> Result<ProfiledSearchResult, BackendError> {
+    let mut timings = SearchTimings::default();
+    run_search_one_worker_with_timings(
+        tree,
+        game,
+        backend,
+        config,
+        n_sims,
+        batch_size,
+        rng,
+        &mut timings,
+    )
+}
+
+#[allow(dead_code)]
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn run_search_one_worker_with_timings(
+    tree: &mut MCGSTree,
+    game: &GameState,
+    backend: &dyn Backend,
+    config: &SearchConfig,
+    n_sims: u32,
+    batch_size: u32,
+    rng: &mut impl Rng,
+    timings: &mut SearchTimings,
+) -> Result<ProfiledSearchResult, BackendError> {
+    tree.with_search_session(|session| {
+        run_search_session(
+            &session,
+            game,
+            backend,
+            config,
+            n_sims,
+            batch_size,
+            rng,
+            timings,
+        )
+    })
+}
+
+#[allow(dead_code)]
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn run_search_session<'tree, 'session>(
+    session: &SearchSession<'tree, 'session>,
+    game: &GameState,
+    backend: &dyn Backend,
+    config: &SearchConfig,
+    n_sims: u32,
+    batch_size: u32,
+    rng: &mut impl Rng,
+    timings: &mut SearchTimings,
+) -> Result<ProfiledSearchResult, BackendError> {
+    *timings = SearchTimings::default();
+    let mut ledger = SearchLedgerStats::default();
+    let mut remaining = n_sims;
+    let mut total_nn_evals = 0u32;
+    let mut total_terminals = 0u32;
+    let mut total_collisions = 0u32;
+    let mut total_tt_stop_hits = 0u32;
+
+    while remaining > 0 {
+        let wait_started = Instant::now();
+        let mut epoch = session.write();
+        timings.gather_wait += wait_started.elapsed();
+        let hold_started = Instant::now();
+        let pending = {
+            let mut access = epoch.access();
+            gather_batch(
+                &mut access,
+                game,
+                config,
+                remaining.min(batch_size),
+                rng,
+            )
+        };
+        drop(epoch);
+        timings.gather_hold += hold_started.elapsed();
+        timings.batches += 1;
+
+        let inference_started = Instant::now();
+        let inference = infer_pending_batch_caught(&pending, backend);
+        timings.inference += inference_started.elapsed();
+
+        let batch = match inference {
+            Ok(Ok(eval_results)) => {
+                let wait_started = Instant::now();
+                let mut epoch = session.write();
+                timings.settle_wait += wait_started.elapsed();
+                let hold_started = Instant::now();
+                let batch = {
+                    let mut access = epoch.access();
+                    settle_pending_batch(&mut access, pending, eval_results, config, rng)
+                };
+                drop(epoch);
+                timings.settle_hold += hold_started.elapsed();
+                batch
+            }
+            Ok(Err(error)) => {
+                let wait_started = Instant::now();
+                let mut epoch = session.write();
+                timings.cleanup_wait += wait_started.elapsed();
+                let hold_started = Instant::now();
+                {
+                    let mut access = epoch.access();
+                    cancel_pending_batch(&mut access, pending);
+                }
+                drop(epoch);
+                timings.cleanup_hold += hold_started.elapsed();
+                return Err(error);
+            }
+            Err(payload) => {
+                let wait_started = Instant::now();
+                let mut epoch = session.write();
+                timings.cleanup_wait += wait_started.elapsed();
+                let hold_started = Instant::now();
+                {
+                    let mut access = epoch.access();
+                    cancel_pending_batch(&mut access, pending);
+                }
+                drop(epoch);
+                timings.cleanup_hold += hold_started.elapsed();
+                resume_unwind(payload);
+            }
+        };
+
+        total_nn_evals += batch.nn_evals;
+        total_terminals += batch.terminals;
+        total_collisions += batch.collisions;
+        total_tt_stop_hits += batch.tt_stop_hits;
+        ledger.merge(batch.ledger);
+
+        let produced = batch.nn_evals + batch.terminals + batch.tt_stop_hits;
+        remaining = remaining.saturating_sub(produced.max(1));
+    }
+
+    let wait_started = Instant::now();
+    let mut epoch = session.write();
+    timings.extract_wait += wait_started.elapsed();
+    let hold_started = Instant::now();
+    let mut result = {
+        let access = epoch.access();
+        let root = access.root();
+        extract_result(&access, &root, config, rng)
+    };
+    drop(epoch);
+    timings.extract_hold += hold_started.elapsed();
+
+    result.nn_evals = total_nn_evals;
+    result.terminals = total_terminals;
+    result.collisions = total_collisions;
+    result.tt_stop_hits = total_tt_stop_hits;
+    ledger.assert_settled();
+
+    Ok(ProfiledSearchResult {
+        result,
+        timings: *timings,
+        ledger,
+    })
+}
+
 fn run_search_exclusive<'session>(
     access: &mut ExclusiveAccess<'_, 'session>,
     game: &GameState,
@@ -148,6 +425,7 @@ fn run_search_exclusive<'session>(
     let mut total_terminals = 0u32;
     let mut total_collisions = 0u32;
     let mut total_tt_stop_hits = 0u32;
+    let mut total_ledger = SearchLedgerStats::default();
     while remaining > 0 {
         let batch = simulate_batch(
             access,
@@ -161,6 +439,7 @@ fn run_search_exclusive<'session>(
         total_terminals += batch.terminals;
         total_collisions += batch.collisions;
         total_tt_stop_hits += batch.tt_stop_hits;
+        total_ledger.merge(batch.ledger);
         // Count descents that produced useful information.
         // Collisions don't consume the sim budget — they're wasted work.
         // TT stops are productive: they initialize edges from shared aggregates.
@@ -174,6 +453,7 @@ fn run_search_exclusive<'session>(
     result.terminals = total_terminals;
     result.collisions = total_collisions;
     result.tt_stop_hits = total_tt_stop_hits;
+    total_ledger.assert_settled();
     Ok(result)
 }
 
@@ -730,16 +1010,135 @@ enum NodeKind {
 
 /// A single entry from the batch gather phase.
 struct NodeToProcess<'session> {
-    leaf: NodeHandle<'session>,
-    path: SearchPath<'session>,
+    reservations: NodeReservationPlan<'session>,
     kind: NodeKind,
-    multivisit: u32,
 }
 
-/// A shared collision: path + multivisit to cancel after backup.
+/// A shared collision and the exact reservations it owns.
 struct SharedCollision<'session> {
+    reservations: PathReservationPlan<'session>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ReservationLifecycle {
+    Reserved,
+    Committed,
+    Cancelled,
+}
+
+/// Exact path mutations acquired for one node item or shared collision.
+struct PathReservationPlan<'session> {
     path: SearchPath<'session>,
-    multivisit: u32,
+    units: u32,
+    lifecycle: ReservationLifecycle,
+}
+
+impl<'session> PathReservationPlan<'session> {
+    fn new(path: SearchPath<'session>, units: u32) -> Self {
+        Self {
+            path,
+            units,
+            lifecycle: ReservationLifecycle::Reserved,
+        }
+    }
+
+    fn path(&self) -> &[PathEntry<'session>] {
+        &self.path
+    }
+
+    fn units(&self) -> u32 {
+        self.units
+    }
+
+    fn commit(&mut self, ledger: &mut SearchLedgerStats) {
+        debug_assert_eq!(self.lifecycle, ReservationLifecycle::Reserved);
+        self.lifecycle = ReservationLifecycle::Committed;
+        ledger.commit(self.units);
+    }
+
+    fn release_path(&self, access: &mut ExclusiveAccess<'_, 'session>) {
+        for entry in &self.path {
+            let low = access.node_mut(&entry.node);
+            low.revert_virtual_loss_multi(
+                entry.p1_outcome as usize,
+                entry.p2_outcome as usize,
+                self.units,
+            );
+            low.cancel_score_update_multi(self.units);
+        }
+    }
+
+    fn mark_cancelled(&mut self, ledger: &mut SearchLedgerStats) {
+        debug_assert_eq!(self.lifecycle, ReservationLifecycle::Reserved);
+        self.lifecycle = ReservationLifecycle::Cancelled;
+        ledger.cancel(self.units);
+    }
+
+    fn cancel(
+        &mut self,
+        access: &mut ExclusiveAccess<'_, 'session>,
+        ledger: &mut SearchLedgerStats,
+    ) {
+        self.release_path(access);
+        self.mark_cancelled(ledger);
+    }
+}
+
+/// Exact reservation shape for work targeting a leaf.
+///
+/// `leaf_units` caches whether gather actually claimed the target leaf. Cleanup
+/// must not infer that decision from current visits, TT status, parent count, or
+/// topology: those facts can change while inference runs.
+struct NodeReservationPlan<'session> {
+    path: PathReservationPlan<'session>,
+    target: NodeHandle<'session>,
+    leaf_units: u32,
+}
+
+impl<'session> NodeReservationPlan<'session> {
+    fn new(
+        target: NodeHandle<'session>,
+        path: SearchPath<'session>,
+        units: u32,
+        leaf_units: u32,
+    ) -> Self {
+        debug_assert!(leaf_units <= units);
+        Self {
+            path: PathReservationPlan::new(path, units),
+            target,
+            leaf_units,
+        }
+    }
+
+    fn target(&self) -> &NodeHandle<'session> {
+        &self.target
+    }
+
+    fn path(&self) -> &[PathEntry<'session>] {
+        self.path.path()
+    }
+
+    fn units(&self) -> u32 {
+        self.path.units()
+    }
+
+    fn commit(&mut self, ledger: &mut SearchLedgerStats) {
+        self.path.commit(ledger);
+    }
+
+    fn cancel(
+        &mut self,
+        access: &mut ExclusiveAccess<'_, 'session>,
+        ledger: &mut SearchLedgerStats,
+    ) {
+        self.path.release_path(access);
+        if self.leaf_units > 0 {
+            access
+                .node_mut(&self.target)
+                .cancel_score_update_multi(self.leaf_units);
+        }
+        self.path.mark_cancelled(ledger);
+    }
 }
 
 /// LC0's PickNodesToExtendTask adapted for MCGS DAG with 2-player joint matrix.
@@ -771,24 +1170,36 @@ fn pick_nodes_to_extend<'session>(
                 if work_game.check_game_over() {
                     access.populate_node(&root, None);
                     to_process.push(NodeToProcess {
-                        leaf: root.clone(),
-                        path: Vec::new(),
+                        reservations: NodeReservationPlan::new(
+                            root.clone(),
+                            Vec::new(),
+                            1,
+                            1,
+                        ),
                         kind: NodeKind::Terminal,
-                        multivisit: 1,
                     });
                 } else {
                     to_process.push(NodeToProcess {
-                        leaf: root.clone(),
-                        path: Vec::new(),
-                        kind: NodeKind::NeedsEval { game_state: work_game.clone() },
-                        multivisit: 1,
+                        reservations: NodeReservationPlan::new(
+                            root.clone(),
+                            Vec::new(),
+                            1,
+                            1,
+                        ),
+                        kind: NodeKind::NeedsEval {
+                            game_state: work_game.clone(),
+                        },
                     });
                 }
                 if budget > 1 {
-                    shared_collisions.push(SharedCollision { path: Vec::new(), multivisit: budget - 1 });
+                    shared_collisions.push(SharedCollision {
+                        reservations: PathReservationPlan::new(Vec::new(), budget - 1),
+                    });
                 }
             } else {
-                shared_collisions.push(SharedCollision { path: Vec::new(), multivisit: budget });
+                shared_collisions.push(SharedCollision {
+                    reservations: PathReservationPlan::new(Vec::new(), budget),
+                });
             }
         } else {
             // Terminal root: one real visit + rest as collisions (LC0 pattern).
@@ -799,15 +1210,12 @@ fn pick_nodes_to_extend<'session>(
             }
             access.node_mut(&root).increment_n_in_flight(1);
             to_process.push(NodeToProcess {
-                leaf: root.clone(),
-                path: Vec::new(),
+                reservations: NodeReservationPlan::new(root.clone(), Vec::new(), 1, 1),
                 kind: NodeKind::Terminal,
-                multivisit: 1,
             });
             if budget > 1 {
                 shared_collisions.push(SharedCollision {
-                    path: Vec::new(),
-                    multivisit: budget - 1,
+                    reservations: PathReservationPlan::new(Vec::new(), budget - 1),
                 });
             }
         }
@@ -870,25 +1278,37 @@ fn pick_nodes_to_extend<'session>(
                             access.populate_node(&child, None);
                         }
                         to_process.push(NodeToProcess {
-                            leaf: child.clone(),
-                            path: child_path.clone(),
+                            reservations: NodeReservationPlan::new(
+                                child.clone(),
+                                child_path.clone(),
+                                1,
+                                1,
+                            ),
                             kind: NodeKind::Terminal,
-                            multivisit: 1,
                         });
                     } else {
                         to_process.push(NodeToProcess {
-                            leaf: child.clone(),
-                            path: child_path.clone(),
-                            kind: NodeKind::NeedsEval { game_state: work_game.clone() },
-                            multivisit: 1,
+                            reservations: NodeReservationPlan::new(
+                                child.clone(),
+                                child_path.clone(),
+                                1,
+                                1,
+                            ),
+                            kind: NodeKind::NeedsEval {
+                                game_state: work_game.clone(),
+                            },
                         });
                     }
                     if k > 1 {
-                        shared_collisions.push(SharedCollision { path: child_path, multivisit: k - 1 });
+                        shared_collisions.push(SharedCollision {
+                            reservations: PathReservationPlan::new(child_path, k - 1),
+                        });
                     }
                 } else {
                     // Collision: all k visits.
-                    shared_collisions.push(SharedCollision { path: child_path, multivisit: k });
+                    shared_collisions.push(SharedCollision {
+                        reservations: PathReservationPlan::new(child_path, k),
+                    });
                 }
                 work_game.unmake_move(undo);
             } else {
@@ -906,15 +1326,17 @@ fn pick_nodes_to_extend<'session>(
                     // Don't increment child's n_in_flight — we're reading,
                     // not visiting.
                     to_process.push(NodeToProcess {
-                        leaf: child.clone(),
-                        path: child_path.clone(),
+                        reservations: NodeReservationPlan::new(
+                            child.clone(),
+                            child_path.clone(),
+                            1,
+                            0,
+                        ),
                         kind: NodeKind::TranspositionHit,
-                        multivisit: 1,
                     });
                     if k > 1 {
                         shared_collisions.push(SharedCollision {
-                            path: child_path,
-                            multivisit: k - 1,
+                            reservations: PathReservationPlan::new(child_path, k - 1),
                         });
                     }
                     work_game.unmake_move(undo);
@@ -1084,21 +1506,14 @@ fn backup_transposition_stop<'session>(
 // cancel_shared_collisions — revert VL for unused visits
 // ---------------------------------------------------------------------------
 
-/// Walk each collision's stored path, reverting VL and n_in_flight.
+/// Cancel each collision from its immutable acquisition record.
 fn cancel_shared_collisions<'session>(
     access: &mut ExclusiveAccess<'_, 'session>,
-    collisions: &[SharedCollision<'session>],
+    collisions: &mut [SharedCollision<'session>],
+    ledger: &mut SearchLedgerStats,
 ) {
     for coll in collisions {
-        for entry in &coll.path {
-            let low = access.node_mut(&entry.node);
-            low.revert_virtual_loss_multi(
-                entry.p1_outcome as usize,
-                entry.p2_outcome as usize,
-                coll.multivisit,
-            );
-            low.cancel_score_update_multi(coll.multivisit);
-        }
+        coll.reservations.cancel(access, ledger);
     }
 }
 
@@ -1124,67 +1539,22 @@ fn calculate_collisions_left(tree_node_count: u32, config: &SearchConfig) -> u32
 }
 
 // ---------------------------------------------------------------------------
-// GatherCleanupGuard — RAII revert of VL/n_in_flight on early exit
+// PendingBatch — owned gather output crossing guard-free inference
 // ---------------------------------------------------------------------------
 
-/// Drop guard that reverts virtual loss and n_in_flight for gathered-but-not-backed-up
-/// entries if simulate_batch exits early (e.g., backend error). Call `disarm()` on
-/// the success path to skip cleanup.
-struct GatherCleanupGuard<'access, 'entries, 'tree, 'session> {
-    access: &'access mut ExclusiveAccess<'tree, 'session>,
-    to_process: &'entries [NodeToProcess<'session>],
-    collisions: &'entries [SharedCollision<'session>],
-    armed: bool,
-}
-
-impl<'access, 'entries, 'tree, 'session>
-    GatherCleanupGuard<'access, 'entries, 'tree, 'session>
-{
-    fn new(
-        access: &'access mut ExclusiveAccess<'tree, 'session>,
-        to_process: &'entries [NodeToProcess<'session>],
-        collisions: &'entries [SharedCollision<'session>],
-    ) -> Self {
-        Self {
-            access,
-            to_process,
-            collisions,
-            armed: true,
-        }
-    }
-
-    fn access_mut(&mut self) -> &mut ExclusiveAccess<'tree, 'session> {
-        self.access
-    }
-
-    fn disarm(&mut self) {
-        self.armed = false;
-    }
-}
-
-impl Drop for GatherCleanupGuard<'_, '_, '_, '_> {
-    fn drop(&mut self) {
-        if !self.armed {
-            return;
-        }
-        let access = &mut *self.access;
-        // Revert each NeedsEval entry: VL on path entries + n_in_flight on path + leaf.
-        for entry in self.to_process {
-            for pe in &entry.path {
-                let low = access.node_mut(&pe.node);
-                low.revert_virtual_loss_multi(
-                    pe.p1_outcome as usize,
-                    pe.p2_outcome as usize,
-                    entry.multivisit,
-                );
-                low.cancel_score_update_multi(entry.multivisit);
-            }
-            access
-                .node_mut(&entry.leaf)
-                .cancel_score_update_multi(entry.multivisit);
-        }
-        cancel_shared_collisions(access, self.collisions);
-    }
+/// Owned work admitted by one gather epoch and not yet fully settled.
+///
+/// This type deliberately contains no graph guard or borrowed payload. It must
+/// be consumed by success or cancellation settlement under a later exclusive
+/// epoch; `Drop` never reacquires the graph gate.
+#[must_use = "a gathered batch must be committed or cancelled explicitly"]
+struct PendingBatch<'session> {
+    root: NodeHandle<'session>,
+    evals: Vec<NodeToProcess<'session>>,
+    collisions: Vec<SharedCollision<'session>>,
+    ledger: SearchLedgerStats,
+    terminals: u32,
+    tt_stop_hits: u32,
 }
 
 // ---------------------------------------------------------------------------
@@ -1217,20 +1587,19 @@ fn validate_eval_batch(
     Ok(())
 }
 
-fn simulate_batch<'session>(
+fn gather_batch<'session>(
     access: &mut ExclusiveAccess<'_, 'session>,
     game: &GameState,
-    backend: &dyn Backend,
     config: &SearchConfig,
     batch_size: u32,
     rng: &mut impl Rng,
-) -> Result<BatchStats, BackendError> {
+) -> PendingBatch<'session> {
     let root = access.root();
     let mut collisions_left = calculate_collisions_left(access.node_count(), config) as i32;
 
-    let mut all_to_process: Vec<NodeToProcess<'session>> =
-        Vec::with_capacity(batch_size as usize);
-    let mut all_collisions: Vec<SharedCollision<'session>> = Vec::new();
+    let mut evals: Vec<NodeToProcess<'session>> = Vec::with_capacity(batch_size as usize);
+    let mut collisions: Vec<SharedCollision<'session>> = Vec::new();
+    let mut ledger = SearchLedgerStats::default();
     let mut minibatch_size = 0u32;
     let mut terminals = 0u32;
     let mut tt_stop_hits = 0u32;
@@ -1241,51 +1610,66 @@ fn simulate_batch<'session>(
         let (to_process, shared_collisions) =
             pick_nodes_to_extend(access, game, config, budget, rng);
 
-        for entry in to_process {
-            match entry.kind {
+        for mut entry in to_process {
+            let units = entry.reservations.units();
+            ledger.reserve(units);
+            match &entry.kind {
                 NodeKind::Terminal => {
                     backup_and_finalize(
                         access,
-                        &entry.path,
-                        &entry.leaf,
+                        entry.reservations.path(),
+                        entry.reservations.target(),
                         0.0,
                         0.0,
-                        entry.multivisit,
+                        units,
                     );
-                    terminals += entry.multivisit;
+                    entry.reservations.commit(&mut ledger);
+                    terminals += units;
                     minibatch_size += 1;
                 }
                 NodeKind::TranspositionHit => {
                     backup_transposition_stop(
                         access,
-                        &entry.path,
-                        &entry.leaf,
-                        entry.multivisit,
+                        entry.reservations.path(),
+                        entry.reservations.target(),
+                        units,
                     );
-                    tt_stop_hits += entry.multivisit;
+                    entry.reservations.commit(&mut ledger);
+                    tt_stop_hits += units;
                     minibatch_size += 1;
                 }
                 NodeKind::NeedsEval { .. } => {
                     minibatch_size += 1;
-                    all_to_process.push(entry);
+                    evals.push(entry);
                 }
             }
         }
 
-        for coll in &shared_collisions {
-            collisions_left -= coll.multivisit as i32;
+        for coll in shared_collisions {
+            let units = coll.reservations.units();
+            ledger.reserve(units);
+            collisions_left -= units as i32;
+            collisions.push(coll);
         }
-        all_collisions.extend(shared_collisions);
     }
 
-    let nn_evals = all_to_process.len() as u32;
+    PendingBatch {
+        root,
+        evals,
+        collisions,
+        ledger,
+        terminals,
+        tt_stop_hits,
+    }
+}
 
-    // Guard: if evaluate_batch fails, revert all gathered VL/n_in_flight.
-    let mut cleanup_guard =
-        GatherCleanupGuard::new(access, &all_to_process, &all_collisions);
-
-    // ---- Eval Phase: batch NN evaluation ----
-    let game_states: Vec<&GameState> = all_to_process
+/// Run inference and validate the whole returned batch without graph access.
+fn infer_pending_batch(
+    pending: &PendingBatch<'_>,
+    backend: &dyn Backend,
+) -> Result<Vec<crate::EvalResult>, BackendError> {
+    let game_states: Vec<&GameState> = pending
+        .evals
         .iter()
         .filter_map(|entry| match &entry.kind {
             NodeKind::NeedsEval { game_state } => Some(game_state),
@@ -1293,68 +1677,121 @@ fn simulate_batch<'session>(
         })
         .collect();
 
-    let eval_results = if game_states.is_empty() {
+    let results = if game_states.is_empty() {
         Vec::new()
     } else {
         backend.evaluate_batch(&game_states)?
     };
 
-    validate_eval_batch(game_states.len(), &eval_results)?;
+    validate_eval_batch(game_states.len(), &results)?;
+    Ok(results)
+}
 
-    // ---- Backup Phase: NN eval results ----
-    let mut eval_idx = 0;
-    for entry in &all_to_process {
-        if let NodeKind::NeedsEval { .. } = &entry.kind {
-            let eval = &eval_results[eval_idx];
-            eval_idx += 1;
+fn infer_pending_batch_caught(
+    pending: &PendingBatch<'_>,
+    backend: &dyn Backend,
+) -> std::thread::Result<Result<Vec<crate::EvalResult>, BackendError>> {
+    catch_unwind(AssertUnwindSafe(|| infer_pending_batch(pending, backend)))
+}
 
-            cleanup_guard
-                .access_mut()
-                .populate_node(&entry.leaf, Some(eval));
+/// Commit evaluated leaves and cancel collision reservations under one epoch.
+fn settle_pending_batch<'session>(
+    access: &mut ExclusiveAccess<'_, 'session>,
+    mut pending: PendingBatch<'session>,
+    eval_results: Vec<crate::EvalResult>,
+    config: &SearchConfig,
+    rng: &mut impl Rng,
+) -> BatchStats {
+    assert_eq!(pending.evals.len(), eval_results.len());
+    let nn_evals = pending.evals.len() as u32;
+    let total_collisions = pending
+        .collisions
+        .iter()
+        .map(|collision| collision.reservations.units())
+        .sum();
 
-            if config.noise_epsilon > 0.0
-                && cleanup_guard.access_mut().same_node(&entry.leaf, &root)
-            {
-                let low = cleanup_guard.access_mut().node_mut(&entry.leaf);
-                apply_dirichlet_noise_p1(
-                    low,
-                    config.noise_epsilon,
-                    config.noise_concentration,
-                    rng,
-                );
-                apply_dirichlet_noise_p2(
-                    low,
-                    config.noise_epsilon,
-                    config.noise_concentration,
-                    rng,
-                );
-            }
+    for (entry, eval) in pending.evals.iter_mut().zip(&eval_results) {
+        let leaf = entry.reservations.target();
+        access.populate_node(leaf, Some(eval));
 
-            backup_and_finalize(
-                cleanup_guard.access_mut(),
-                &entry.path,
-                &entry.leaf,
-                eval.value_p1,
-                eval.value_p2,
-                entry.multivisit,
+        if config.noise_epsilon > 0.0 && access.same_node(leaf, &pending.root) {
+            let low = access.node_mut(leaf);
+            apply_dirichlet_noise_p1(
+                low,
+                config.noise_epsilon,
+                config.noise_concentration,
+                rng,
+            );
+            apply_dirichlet_noise_p2(
+                low,
+                config.noise_epsilon,
+                config.noise_concentration,
+                rng,
             );
         }
+
+        backup_and_finalize(
+            access,
+            entry.reservations.path(),
+            leaf,
+            eval.value_p1,
+            eval.value_p2,
+            entry.reservations.units(),
+        );
+        entry.reservations.commit(&mut pending.ledger);
     }
 
-    // Success: disarm guard before normal collision cancellation.
-    cleanup_guard.disarm();
-    drop(cleanup_guard);
+    cancel_shared_collisions(access, &mut pending.collisions, &mut pending.ledger);
+    pending.ledger.assert_settled();
 
-    // ---- Cancel all accumulated shared collisions ----
-    cancel_shared_collisions(access, &all_collisions);
-    let total_collisions: u32 = all_collisions.iter().map(|c| c.multivisit).sum();
-
-    Ok(BatchStats {
+    BatchStats {
         nn_evals,
-        terminals,
+        terminals: pending.terminals,
         collisions: total_collisions,
-        tt_stop_hits,
-    })
+        tt_stop_hits: pending.tt_stop_hits,
+        ledger: pending.ledger,
+    }
+}
+
+/// Cancel every still-reserved item from its exact acquisition plan.
+fn cancel_pending_batch<'session>(
+    access: &mut ExclusiveAccess<'_, 'session>,
+    mut pending: PendingBatch<'session>,
+) -> SearchLedgerStats {
+    for entry in &mut pending.evals {
+        entry.reservations.cancel(access, &mut pending.ledger);
+    }
+    cancel_shared_collisions(access, &mut pending.collisions, &mut pending.ledger);
+    pending.ledger.assert_settled();
+    pending.ledger
+}
+
+fn simulate_batch<'session>(
+    access: &mut ExclusiveAccess<'_, 'session>,
+    game: &GameState,
+    backend: &dyn Backend,
+    config: &SearchConfig,
+    batch_size: u32,
+    rng: &mut impl Rng,
+) -> Result<BatchStats, BackendError> {
+    let pending = gather_batch(access, game, config, batch_size, rng);
+    match infer_pending_batch_caught(&pending, backend) {
+        Ok(Ok(eval_results)) => Ok(settle_pending_batch(
+            access,
+            pending,
+            eval_results,
+            config,
+            rng,
+        )),
+        Ok(Err(error)) => {
+            cancel_pending_batch(access, pending);
+            Err(error)
+        }
+        Err(payload) => {
+            cancel_pending_batch(access, pending);
+            resume_unwind(payload)
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -3961,6 +4398,50 @@ mod tests {
             result.tt_stop_hits > 0,
             "expected transposition stops on open maze, got 0"
         );
+    }
+
+    #[test]
+    fn cancellation_uses_cached_reservation_shape_after_parent_count_changes() {
+        with_test_access(|access| {
+            let root = access.root();
+            let target = access.test_node(LowNode::new_shell(
+                [0, 1, 2, 3, 4],
+                [0, 1, 2, 3, 4],
+            ));
+            let parent_a = access.test_node(LowNode::new_shell(
+                [0, 1, 2, 3, 4],
+                [0, 1, 2, 3, 4],
+            ));
+            let parent_b = access.test_node(LowNode::new_shell(
+                [0, 1, 2, 3, 4],
+                [0, 1, 2, 3, 4],
+            ));
+            let path = vec![PathEntry {
+                node: root.clone(),
+                p1_outcome: 0,
+                p2_outcome: 0,
+            }];
+
+            reserve_path(access, &path, 1);
+            assert!(access.node_mut(&target).try_start_score_update());
+            let mut plan = NodeReservationPlan::new(target.clone(), path, 1, 1);
+            let mut ledger = SearchLedgerStats::default();
+            ledger.reserve(1);
+
+            access.test_connect(&parent_a, &target, (0, 0), 0.0, 0.0);
+            access.test_connect(&parent_b, &target, (0, 0), 0.0, 0.0);
+            assert_eq!(access.num_parents(&target), 2);
+            drop(access.test_detach_children(&parent_b));
+            assert_eq!(access.num_parents(&target), 1);
+
+            plan.cancel(access, &mut ledger);
+
+            assert_eq!(access.node(&root).n_in_flight(), 0);
+            assert_eq!(access.node(&root).edge_in_flight(0, 0), 0);
+            assert_eq!(access.node(&target).n_in_flight(), 0);
+            assert_eq!(ledger.cancelled, 1);
+            ledger.assert_settled();
+        });
     }
 
     #[test]

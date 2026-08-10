@@ -25,7 +25,12 @@ loom = "0.7"
 name = "search"
 harness = false
 
+[[example]]
+name = "profile_one_worker"
+required-features = ["bench-internals"]
+
 [features]
+bench-internals = []
 python = ["dep:pyo3", "dep:numpy", "pyrat/python"]
 
 [lints.rust]

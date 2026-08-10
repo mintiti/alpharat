@@ -5,7 +5,7 @@ use pyrat::GameState;
 #[cfg(test)]
 use pyrat::Coordinates;
 
-use crate::access::ExclusiveAccess;
+use crate::access::{ExclusiveAccess, SearchSession};
 use crate::node::{LowNode, OwnerToken, SharedNode};
 use crate::observer::{
     TranspositionEviction, TranspositionStats, TreeStats, TreeView,
@@ -143,6 +143,16 @@ impl MCGSTree {
         use_access: impl for<'session> FnOnce(ExclusiveAccess<'tree, 'session>) -> R,
     ) -> R {
         use_access(ExclusiveAccess::new(self))
+    }
+
+    /// Enter a fresh branded search session whose graph access is split into
+    /// short exclusive epochs.
+    #[allow(dead_code)]
+    pub(crate) fn with_search_session<'tree, R>(
+        &'tree mut self,
+        run: impl for<'session> FnOnce(SearchSession<'tree, 'session>) -> R,
+    ) -> R {
+        run(SearchSession::new(self))
     }
 
     /// Observe the tree through a fresh, non-escaping read-only session.

@@ -7,7 +7,7 @@
 //! borrow that produced them.
 
 use std::marker::PhantomData;
-use std::sync::Arc;
+use std::sync::{Arc, RwLock, RwLockWriteGuard};
 
 use pyrat::GameState;
 
@@ -67,6 +67,63 @@ pub(crate) struct ExclusiveAccess<'tree, 'session> {
     tree: &'tree mut MCGSTree,
     owner: Arc<OwnerToken>,
     brand: Invariant<'session>,
+}
+
+/// Coarse graph gate for one search call.
+///
+/// Chunk 4B deliberately exposes only exclusive write epochs. Owned branded
+/// handles may cross those epochs, but neither the guard nor any borrowed node
+/// payload can. A future multi-worker search can add a measured shared gather
+/// capability without changing the session brand or the owned work protocol.
+#[allow(dead_code)]
+pub(crate) struct SearchSession<'tree, 'session> {
+    gate: RwLock<&'tree mut MCGSTree>,
+    brand: Invariant<'session>,
+}
+
+#[allow(dead_code)]
+impl<'tree, 'session> SearchSession<'tree, 'session> {
+    pub(crate) fn new(tree: &'tree mut MCGSTree) -> Self {
+        Self {
+            gate: RwLock::new(tree),
+            brand: PhantomData,
+        }
+    }
+
+    /// Acquire a fresh exclusive graph epoch.
+    ///
+    /// Poisoning is treated as an internal invariant failure. Backend errors
+    /// and panics happen without a graph guard, so their cleanup path does not
+    /// poison this lock.
+    pub(crate) fn write(&self) -> WriteEpoch<'_, 'tree, 'session> {
+        WriteEpoch {
+            guard: self
+                .gate
+                .write()
+                .expect("MCGS search graph gate poisoned"),
+            brand: PhantomData,
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn try_write_for_test(&self) -> bool {
+        self.gate.try_write().is_ok()
+    }
+}
+
+/// One short exclusive mutation epoch inside a [`SearchSession`].
+#[allow(dead_code)]
+pub(crate) struct WriteEpoch<'guard, 'tree, 'session> {
+    guard: RwLockWriteGuard<'guard, &'tree mut MCGSTree>,
+    brand: Invariant<'session>,
+}
+
+#[allow(dead_code)]
+impl<'tree, 'session> WriteEpoch<'_, 'tree, 'session> {
+    /// Derive the existing zero-lock capability for exactly this guard borrow.
+    pub(crate) fn access(&mut self) -> ExclusiveAccess<'_, 'session> {
+        ExclusiveAccess::new(&mut self.guard)
+    }
 }
 
 impl<'tree, 'session> ExclusiveAccess<'tree, 'session> {

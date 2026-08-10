@@ -58,4 +58,8 @@ pub use observer::{
     SearchPlayer, TranspositionEviction, TranspositionStats, TreeStats, TreeView,
 };
 pub use search::{run_search, SearchConfig, SearchResult};
+#[cfg(feature = "bench-internals")]
+pub use search::{
+    run_search_one_worker_profiled, ProfiledSearchResult, SearchLedgerStats, SearchTimings,
+};
 pub use tree::MCGSTree;
