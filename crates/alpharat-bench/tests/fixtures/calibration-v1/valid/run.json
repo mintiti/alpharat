@@ -1,0 +1,138 @@
+{
+  "protocol_version": 1,
+  "run_id": "synthetic-calibration-v1",
+  "created_at": "2026-08-11T12:00:00Z",
+  "context": {
+    "source": {
+      "revision": "fixture-revision",
+      "state": { "state": "clean" }
+    },
+    "build": {
+      "profile": "release",
+      "target": "aarch64-apple-darwin",
+      "rustc_version": "rustc fixture",
+      "features": ["mcgs-profile", "onnx"],
+      "binary_sha256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+      "command": ["cargo", "run", "--release", "-p", "alpharat-bench"]
+    },
+    "hardware": {
+      "operating_system": "macOS fixture",
+      "architecture": "aarch64",
+      "cpu": "fixture CPU",
+      "logical_cores": 4,
+      "memory_bytes": 17179869184,
+      "accelerators": [
+        { "kind": "gpu", "name": "fixture GPU", "memory_bytes": null }
+      ]
+    },
+    "runtime": {
+      "software": [
+        { "name": "alpharat-bench", "version": "fixture" },
+        { "name": "onnxruntime", "version": "fixture" }
+      ]
+    },
+    "model": {
+      "label": "fixture model",
+      "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "bytes": 1234,
+      "path_hint": "fixture.onnx"
+    }
+  },
+  "plan": {
+    "comparison_axes": [
+      "backend",
+      "batch_size",
+      "callers",
+      "workers",
+      "total_in_flight",
+      "mux_max_batch"
+    ],
+    "cases": [
+      {
+        "benchmark": "backend_capacity",
+        "id": "capacity-cpu-b8-c2",
+        "workload": {
+          "label": "capacity positions",
+          "sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "bytes": 512,
+          "path_hint": null
+        },
+        "requested": {
+          "backend": { "engine": "onnx", "provider": "cpu" },
+          "batch_size": 8,
+          "callers": 2,
+          "calls_per_caller": 4,
+          "warmup_trials": 1,
+          "measured_trials": 1
+        }
+      },
+      {
+        "benchmark": "search",
+        "id": "search-cpu-w2-cap128",
+        "workload": {
+          "label": "7x7 fixture",
+          "sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+          "bytes": 256,
+          "path_hint": null
+        },
+        "requested": {
+          "backend": { "engine": "onnx", "provider": "cpu" },
+          "workers": 2,
+          "total_in_flight": 128,
+          "mux_max_batch": null,
+          "productive_work": 100,
+          "warmup_trials": 1,
+          "measured_trials": 1
+        }
+      }
+    ]
+  },
+  "cases": [
+    {
+      "benchmark": "backend_capacity",
+      "id": "capacity-cpu-b8-c2",
+      "outcome": {
+        "state": "completed",
+        "resolved": {
+          "backend": {
+            "backend": { "engine": "onnx", "provider": "cpu" },
+            "serialization": "session_mutex"
+          },
+          "batch_size": 8,
+          "callers": 2,
+          "calls_per_caller": 4
+        }
+      }
+    },
+    {
+      "benchmark": "search",
+      "id": "search-cpu-w2-cap128",
+      "outcome": {
+        "state": "completed",
+        "resolved": {
+          "backend": {
+            "backend": { "engine": "onnx", "provider": "cpu" },
+            "serialization": "session_mutex"
+          },
+          "workers": 2,
+          "worker_batch": 64,
+          "total_in_flight": 128,
+          "mux_max_batch": null,
+          "productive_work": 100
+        }
+      }
+    }
+  ],
+  "trial_files": {
+    "backend_capacity": {
+      "path": "capacity-trials.csv",
+      "sha256": "5aa9a07334e233be6d679105e7522a8e0c4f0a917b32b8c06e1fdaed056de129",
+      "rows": 2
+    },
+    "search": {
+      "path": "search-trials.csv",
+      "sha256": "3111ae8c9058bc6a4632f93309da6bd29175eecc436cc2ccfce5c9efcb7e8434",
+      "rows": 2
+    }
+  }
+}

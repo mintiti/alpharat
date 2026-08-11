@@ -14,7 +14,15 @@ alpharat-mcgs = { path = "../alpharat-mcgs" }
 alpharat-eval-core = { path = "../alpharat-eval-core" }
 alpharat-sampling = { path = "../alpharat-sampling", optional = true, default-features = false }
 pyrat = { package = "pyrat-rust", git = "https://github.com/mintiti/pyrat-rust", branch = "main", default-features = false }
+csv = "1"
 rand = { version = "0.8", features = ["small_rng"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+thiserror = "2"
+
+[dev-dependencies]
+tempfile = "3"
 
 [features]
 default = []
