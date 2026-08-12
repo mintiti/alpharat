@@ -30,6 +30,7 @@ fn main() {
     let mut height: u8 = 7;
     let mut device = "cpu";
     let mut max_batch: usize = 262144;
+    let mut intra_threads: usize = 4;
     let mut i = 2;
     while i < args.len() {
         match args[i].as_str() {
@@ -49,6 +50,10 @@ fn main() {
                 max_batch = args[i + 1].parse().expect("invalid max-batch");
                 i += 2;
             }
+            "--intra-threads" => {
+                intra_threads = args[i + 1].parse().expect("invalid intra-threads");
+                i += 2;
+            }
             other => panic!("unknown arg: {other}"),
         }
     }
@@ -57,7 +62,7 @@ fn main() {
     let (_encoded_buf, obs_dim) = pre_encode_games(width, height, max_batch);
 
     println!(
-        "NN Inference Throughput — {width}x{height}, obs_dim={obs_dim}, device={device}",
+        "NN Inference Throughput — {width}x{height}, obs_dim={obs_dim}, device={device}, intra_threads={intra_threads}",
     );
 
     let mut batch_sizes: Vec<usize> = vec![
@@ -74,13 +79,42 @@ fn main() {
 
     match device {
         #[cfg(feature = "onnx")]
-        "cpu" => run_ort_benchmark(_model_path, &_encoded_buf, obs_dim, &batch_sizes, "cpu"),
+        "cpu" => run_ort_benchmark(
+            _model_path,
+            &_encoded_buf,
+            obs_dim,
+            &batch_sizes,
+            "cpu",
+            intra_threads,
+        ),
         #[cfg(feature = "onnx-cuda")]
-        "cuda" => run_ort_benchmark(_model_path, &_encoded_buf, obs_dim, &batch_sizes, "cuda"),
+        "cuda" => run_ort_benchmark(
+            _model_path,
+            &_encoded_buf,
+            obs_dim,
+            &batch_sizes,
+            "cuda",
+            intra_threads,
+        ),
         #[cfg(feature = "onnx-coreml")]
-        "coreml" => run_ort_benchmark(_model_path, &_encoded_buf, obs_dim, &batch_sizes, "coreml"),
+        "coreml" => run_ort_benchmark(
+            _model_path,
+            &_encoded_buf,
+            obs_dim,
+            &batch_sizes,
+            "coreml",
+            intra_threads,
+        ),
         #[cfg(feature = "tensorrt")]
-        "tensorrt" => run_trt_benchmark(_model_path, &_encoded_buf, obs_dim, &batch_sizes, max_batch, width, height),
+        "tensorrt" => run_trt_benchmark(
+            _model_path,
+            &_encoded_buf,
+            obs_dim,
+            &batch_sizes,
+            max_batch,
+            width,
+            height,
+        ),
         other => {
             let mut supported = vec![];
             if cfg!(feature = "onnx") {
@@ -95,9 +129,7 @@ fn main() {
             if cfg!(feature = "tensorrt") {
                 supported.push("tensorrt");
             }
-            eprintln!(
-                "Device '{other}' not available. Compiled with support for: {supported:?}",
-            );
+            eprintln!("Device '{other}' not available. Compiled with support for: {supported:?}",);
             std::process::exit(1);
         }
     }
@@ -188,6 +220,7 @@ fn run_ort_benchmark(
     obs_dim: usize,
     batch_sizes: &[usize],
     device: &str,
+    intra_threads: usize,
 ) {
     use ort::session::Session;
     use ort::value::Tensor;
@@ -195,7 +228,7 @@ fn run_ort_benchmark(
     let mut session = match device {
         "cpu" => Session::builder()
             .expect("session builder")
-            .with_intra_threads(4)
+            .with_intra_threads(intra_threads)
             .expect("set threads")
             .commit_from_file(model_path)
             .expect("load model"),
@@ -209,6 +242,8 @@ fn run_ort_benchmark(
             }
             Session::builder()
                 .expect("session builder")
+                .with_intra_threads(intra_threads)
+                .expect("set threads")
                 .with_execution_providers([cuda_ep.build().error_on_failure()])
                 .expect("register CUDA EP")
                 .commit_from_file(model_path)
@@ -219,6 +254,8 @@ fn run_ort_benchmark(
             eprintln!("Registering CoreML EP...");
             Session::builder()
                 .expect("session builder")
+                .with_intra_threads(intra_threads)
+                .expect("set threads")
                 .with_execution_providers([
                     ort::execution_providers::CoreMLExecutionProvider::default()
                         .with_profile_compute_plan(true)
@@ -241,7 +278,7 @@ fn run_ort_benchmark(
             break;
         }
 
-        let iters = (5000 / batch_size).max(10).min(500);
+        let iters = (5000 / batch_size).clamp(10, 500);
         let warmup = (iters / 10).max(5);
         let batch_data = &encoded_buf[..batch_size * obs_dim];
 
@@ -335,7 +372,7 @@ fn run_trt_benchmark(
             break;
         }
 
-        let iters = (5000 / batch_size).max(10).min(500);
+        let iters = (5000 / batch_size).clamp(10, 500);
         let warmup = (iters / 10).max(5);
         let batch_data = &encoded_buf[..batch_size * obs_dim];
 
@@ -370,7 +407,11 @@ fn run_trt_benchmark(
 
         println!(
             "  {:>6} {:>9.1} {:>9.1} {:>9.1} {:>9.1} {:>12} {:>9.0}%",
-            batch_size, h2d_us, infer_us, d2h_us, total_us,
+            batch_size,
+            h2d_us,
+            infer_us,
+            d2h_us,
+            total_us,
             format_throughput(pos_per_s),
             gpu_util,
         );
