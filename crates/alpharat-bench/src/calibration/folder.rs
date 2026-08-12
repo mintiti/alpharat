@@ -7,8 +7,8 @@ use thiserror::Error;
 
 use super::model::{
     ArtifactIdentity, BackendRequest, BenchmarkKind, CaseOutcome, CasePlan, CaseRecord, CaseState,
-    ComparisonAxis, RunRecord, SourceState, CAPACITY_TRIALS_FILE, PROTOCOL_VERSION,
-    RUN_RECORD_FILE, SEARCH_TRIALS_FILE,
+    ComparisonAxis, RunRecord, SourceState, CAPACITY_TRIALS_FILE, CAPACITY_WORKLOAD_FILE,
+    PROTOCOL_VERSION, RUN_RECORD_FILE, SEARCH_TRIALS_FILE, SEARCH_WORKLOAD_FILE,
 };
 use super::trials::{
     CapacityTrial, SearchTrial, TrialPhase, TrialStatus, CAPACITY_HEADERS, SEARCH_HEADERS,
@@ -49,6 +49,12 @@ pub enum ProtocolError {
         path: PathBuf,
         expected: String,
         actual: String,
+    },
+    #[error("size mismatch for {path}: expected {expected} bytes, found {actual}")]
+    SizeMismatch {
+        path: PathBuf,
+        expected: u64,
+        actual: u64,
     },
 }
 
@@ -101,24 +107,13 @@ fn validate_record(folder: &Path, record: &RunRecord) -> Result<(), ProtocolErro
     require_text("created_at", &record.created_at)?;
     validate_context(folder, record)?;
 
-    if record.plan.cases.is_empty() {
-        return Err(ProtocolError::invalid("the run plan has no cases"));
-    }
+    validate_run_plan(&record.plan)?;
+    validate_workload_files(folder, &record.plan)?;
 
     let mut planned = BTreeMap::new();
     for case in &record.plan.cases {
-        require_text("case id", case.id())?;
-        validate_artifact("case workload", case.workload())?;
-        validate_case_plan(case)?;
-        if planned.insert(case.id(), case).is_some() {
-            return Err(ProtocolError::invalid(format!(
-                "duplicate planned case id '{}'",
-                case.id()
-            )));
-        }
+        planned.insert(case.id(), case);
     }
-    validate_axes(record)?;
-    validate_plan_differences(record)?;
 
     let mut outcomes = BTreeMap::new();
     for case in &record.cases {
@@ -168,6 +163,67 @@ fn validate_record(folder: &Path, record: &RunRecord) -> Result<(), ProtocolErro
     Ok(())
 }
 
+fn validate_workload_files(
+    folder: &Path,
+    plan: &super::model::RunPlan,
+) -> Result<(), ProtocolError> {
+    for (kind, file) in [
+        (BenchmarkKind::BackendCapacity, CAPACITY_WORKLOAD_FILE),
+        (BenchmarkKind::Search, SEARCH_WORKLOAD_FILE),
+    ] {
+        if let Some(workload) = plan
+            .cases
+            .iter()
+            .find(|case| case.kind() == kind)
+            .map(CasePlan::workload)
+        {
+            verify_artifact_file(folder, file, workload)?;
+        }
+    }
+    Ok(())
+}
+
+fn verify_artifact_file(
+    folder: &Path,
+    relative: &str,
+    artifact: &ArtifactIdentity,
+) -> Result<(), ProtocolError> {
+    let path = folder.join(relative);
+    let bytes = read_file(&path)?;
+    let actual = u64::try_from(bytes.len())
+        .map_err(|_| ProtocolError::invalid(format!("'{}' is too large", path.display())))?;
+    if actual != artifact.bytes {
+        return Err(ProtocolError::SizeMismatch {
+            path,
+            expected: artifact.bytes,
+            actual,
+        });
+    }
+    verify_hash(&path, &bytes, &artifact.sha256)
+}
+
+/// Validate the frozen case plan before any expensive benchmark work starts.
+pub fn validate_run_plan(plan: &super::model::RunPlan) -> Result<(), ProtocolError> {
+    if plan.cases.is_empty() {
+        return Err(ProtocolError::invalid("the run plan has no cases"));
+    }
+
+    let mut planned = BTreeMap::new();
+    for case in &plan.cases {
+        require_text("case id", case.id())?;
+        validate_artifact("case workload", case.workload())?;
+        validate_case_plan(case)?;
+        if planned.insert(case.id(), case).is_some() {
+            return Err(ProtocolError::invalid(format!(
+                "duplicate planned case id '{}'",
+                case.id()
+            )));
+        }
+    }
+    validate_axes(plan)?;
+    validate_plan_differences(plan)
+}
+
 fn validate_context(folder: &Path, record: &RunRecord) -> Result<(), ProtocolError> {
     let context = &record.context;
     require_text("source revision", &context.source.revision)?;
@@ -193,7 +249,7 @@ fn validate_context(folder: &Path, record: &RunRecord) -> Result<(), ProtocolErr
     if context.build.command.is_empty() || context.build.command.iter().any(|part| part.is_empty())
     {
         return Err(ProtocolError::invalid(
-            "build command must contain non-empty arguments",
+            "recorded invocation must contain non-empty arguments",
         ));
     }
     if context
@@ -290,6 +346,12 @@ fn validate_case_plan(case: &CasePlan) -> Result<(), ProtocolError> {
                     case.id()
                 )));
             }
+            if !requested.total_in_flight.is_multiple_of(requested.workers) {
+                return Err(ProtocolError::invalid(format!(
+                    "search case '{}' requires total in-flight capacity to divide evenly across workers",
+                    case.id()
+                )));
+            }
             if requested
                 .mux_max_batch
                 .is_some_and(|max_batch| max_batch == 0)
@@ -304,19 +366,17 @@ fn validate_case_plan(case: &CasePlan) -> Result<(), ProtocolError> {
     Ok(())
 }
 
-fn validate_axes(record: &RunRecord) -> Result<(), ProtocolError> {
-    let has_capacity = record
-        .plan
+fn validate_axes(plan: &super::model::RunPlan) -> Result<(), ProtocolError> {
+    let has_capacity = plan
         .cases
         .iter()
         .any(|case| case.kind() == BenchmarkKind::BackendCapacity);
-    let has_search = record
-        .plan
+    let has_search = plan
         .cases
         .iter()
         .any(|case| case.kind() == BenchmarkKind::Search);
 
-    for axis in &record.plan.comparison_axes {
+    for axis in &plan.comparison_axes {
         let applicable = match axis {
             ComparisonAxis::BatchSize | ComparisonAxis::Callers => has_capacity,
             ComparisonAxis::Workers
@@ -337,9 +397,9 @@ fn validate_axes(record: &RunRecord) -> Result<(), ProtocolError> {
     Ok(())
 }
 
-fn validate_plan_differences(record: &RunRecord) -> Result<(), ProtocolError> {
-    for (index, left) in record.plan.cases.iter().enumerate() {
-        for right in &record.plan.cases[index + 1..] {
+fn validate_plan_differences(plan: &super::model::RunPlan) -> Result<(), ProtocolError> {
+    for (index, left) in plan.cases.iter().enumerate() {
+        for right in &plan.cases[index + 1..] {
             if left.kind() != right.kind() {
                 continue;
             }
@@ -352,7 +412,7 @@ fn validate_plan_differences(record: &RunRecord) -> Result<(), ProtocolError> {
             }
             let differences = case_plan_differences(left, right)?;
             let undeclared: Vec<_> = differences
-                .difference(&record.plan.comparison_axes)
+                .difference(&plan.comparison_axes)
                 .copied()
                 .collect();
             if !undeclared.is_empty() {

@@ -2,8 +2,9 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use alpharat_bench::calibration::{
-    check_comparable, load_run_folder, ComparisonAxis, ComparisonIssue, ProtocolError,
-    CAPACITY_TRIALS_FILE, RUN_RECORD_FILE, SEARCH_TRIALS_FILE,
+    check_comparable, compare_runs, load_run_folder, render_record_comparison, summarize_run,
+    ComparisonAxis, ComparisonIssue, ProtocolError, CAPACITY_TRIALS_FILE, CAPACITY_WORKLOAD_FILE,
+    RUN_RECORD_FILE, SEARCH_TRIALS_FILE, SEARCH_WORKLOAD_FILE,
 };
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
@@ -15,7 +16,13 @@ fn fixture_folder() -> PathBuf {
 
 fn copy_fixture() -> TempDir {
     let temporary = tempfile::tempdir().unwrap();
-    for file in [RUN_RECORD_FILE, CAPACITY_TRIALS_FILE, SEARCH_TRIALS_FILE] {
+    for file in [
+        RUN_RECORD_FILE,
+        CAPACITY_WORKLOAD_FILE,
+        SEARCH_WORKLOAD_FILE,
+        CAPACITY_TRIALS_FILE,
+        SEARCH_TRIALS_FILE,
+    ] {
         fs::copy(fixture_folder().join(file), temporary.path().join(file)).unwrap();
     }
     temporary
@@ -151,6 +158,30 @@ fn rejects_a_tampered_trial_file() {
 }
 
 #[test]
+fn rejects_a_missing_workload_file() {
+    let run = copy_fixture();
+    fs::remove_file(run.path().join(SEARCH_WORKLOAD_FILE)).unwrap();
+
+    let error = load_run_folder(run.path()).unwrap_err();
+
+    assert!(matches!(&error, ProtocolError::Io { .. }));
+    assert!(error_message(error).contains(SEARCH_WORKLOAD_FILE));
+}
+
+#[test]
+fn rejects_a_tampered_workload_file() {
+    let run = copy_fixture();
+    let path = run.path().join(CAPACITY_WORKLOAD_FILE);
+    let mut bytes = fs::read(&path).unwrap();
+    bytes[0] = b'[';
+    fs::write(path, bytes).unwrap();
+
+    let error = load_run_folder(run.path()).unwrap_err();
+
+    assert!(matches!(error, ProtocolError::HashMismatch { .. }));
+}
+
+#[test]
 fn rejects_an_incomplete_completed_case() {
     let run = copy_fixture();
     let path = run.path().join(CAPACITY_TRIALS_FILE);
@@ -207,6 +238,18 @@ fn rejects_search_work_that_does_not_balance() {
 }
 
 #[test]
+fn rejects_search_capacity_that_cannot_resolve_to_a_worker_batch() {
+    let run = copy_fixture();
+    update_record(run.path(), |record| {
+        record["plan"]["cases"][1]["requested"]["total_in_flight"] = json!(127);
+    });
+
+    let error = load_run_folder(run.path()).unwrap_err();
+
+    assert!(error_message(error).contains("divide evenly across workers"));
+}
+
+#[test]
 fn rejects_case_differences_that_the_plan_did_not_name() {
     let run = copy_fixture();
     update_record(run.path(), |record| {
@@ -247,6 +290,78 @@ fn accepts_two_equivalent_runs_for_comparison() {
         ["capacity-cpu-b8-c2", "search-cpu-w2-cap128"]
     );
     assert!(check.unavailable_cases.is_empty());
+}
+
+#[test]
+fn treats_execution_invocation_as_provenance_not_build_identity() {
+    let left = copy_fixture();
+    let right = copy_fixture();
+    update_record(right.path(), |record| {
+        record["run_id"] = json!("second-synthetic-run");
+        record["context"]["build"]["command"] = json!([
+            "/elsewhere/alpharat-calibrate",
+            "run",
+            "--output",
+            "/different/run-folder"
+        ]);
+    });
+    let left = load_run_folder(left.path()).unwrap();
+    let right = load_run_folder(right.path()).unwrap();
+
+    let check = check_comparable(&left, &right).unwrap();
+
+    assert!(check.differing_axes.is_empty());
+}
+
+#[test]
+fn still_treats_binary_content_as_build_identity() {
+    let left = copy_fixture();
+    let right = copy_fixture();
+    update_record(right.path(), |record| {
+        record["context"]["build"]["binary_sha256"] =
+            json!("eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee");
+    });
+    let left = load_run_folder(left.path()).unwrap();
+    let right = load_run_folder(right.path()).unwrap();
+
+    let issues = check_comparable(&left, &right).unwrap_err();
+
+    assert!(issues.iter().any(|issue| matches!(
+        issue,
+        ComparisonIssue::UndeclaredAxes { axes, .. }
+            if axes.contains(&ComparisonAxis::Build)
+    )));
+}
+
+#[test]
+fn derives_distributions_and_record_deltas_from_validated_trials() {
+    let left = copy_fixture();
+    let right = copy_fixture();
+    update_record(right.path(), |record| {
+        record["run_id"] = json!("second-synthetic-run");
+        record["created_at"] = json!("2026-08-11T13:00:00Z");
+    });
+    let left = load_run_folder(left.path()).unwrap();
+    let right = load_run_folder(right.path()).unwrap();
+
+    let summary = summarize_run(&left);
+    let capacity = summary
+        .cases
+        .iter()
+        .find(|case| case.id == "capacity-cpu-b8-c2")
+        .unwrap();
+    assert_eq!(capacity.measured_trials.completed, 1);
+    assert_eq!(capacity.metrics["positions_per_s"].median, 32_000.0);
+
+    let comparison = compare_runs(&left, &right).unwrap();
+    assert_eq!(comparison.cases.len(), 2);
+    assert_eq!(
+        comparison.cases[0].metrics["positions_per_s"].median_delta,
+        0.0
+    );
+    let markdown = render_record_comparison(&comparison);
+    assert!(markdown.contains("synthetic-calibration-v1 → second-synthetic-run"));
+    assert!(markdown.contains("no ranking or recommendation"));
 }
 
 #[test]

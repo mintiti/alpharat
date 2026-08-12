@@ -6,6 +6,11 @@ pub const PROTOCOL_VERSION: u32 = 1;
 pub const RUN_RECORD_FILE: &str = "run.json";
 pub const CAPACITY_TRIALS_FILE: &str = "capacity-trials.csv";
 pub const SEARCH_TRIALS_FILE: &str = "search-trials.csv";
+pub const CAPACITY_WORKLOAD_FILE: &str = "capacity-workload.json";
+pub const SEARCH_WORKLOAD_FILE: &str = "search-workload.json";
+pub const SUMMARY_FILE: &str = "summary.json";
+pub const COMPARISON_FILE: &str = "comparison.md";
+pub const COMPARISON_JSON_FILE: &str = "comparison.json";
 
 /// The durable record left by one execution of a calibration plan.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -108,7 +113,18 @@ pub struct BuildIdentity {
     pub rustc_version: String,
     pub features: BTreeSet<String>,
     pub binary_sha256: String,
+    /// The execution invocation retained for reconstruction, not build comparison identity.
     pub command: Vec<String>,
+}
+
+impl BuildIdentity {
+    pub(crate) fn has_same_content_as(&self, other: &Self) -> bool {
+        self.profile == other.profile
+            && self.target == other.target
+            && self.rustc_version == other.rustc_version
+            && self.features == other.features
+            && self.binary_sha256 == other.binary_sha256
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]

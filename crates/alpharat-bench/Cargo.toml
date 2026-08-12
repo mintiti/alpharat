@@ -8,6 +8,20 @@ publish = false
 name = "bench-compare"
 path = "src/main.rs"
 
+[[bin]]
+name = "bench-mcgs-parallel"
+path = "src/mcgs_parallel.rs"
+required-features = ["mcgs-profile"]
+
+[[bin]]
+name = "bench-backend-capacity"
+path = "src/backend_capacity.rs"
+
+[[bin]]
+name = "alpharat-calibrate"
+path = "src/calibrate.rs"
+required-features = ["mcgs-profile"]
+
 [dependencies]
 alpharat-mcts = { path = "../alpharat-mcts" }
 alpharat-mcgs = { path = "../alpharat-mcgs" }
@@ -15,6 +29,7 @@ alpharat-eval-core = { path = "../alpharat-eval-core" }
 alpharat-sampling = { path = "../alpharat-sampling", optional = true, default-features = false }
 pyrat = { package = "pyrat-rust", git = "https://github.com/mintiti/pyrat-rust", branch = "main", default-features = false }
 csv = "1"
+libc = "0.2"
 rand = { version = "0.8", features = ["small_rng"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
@@ -26,6 +41,8 @@ tempfile = "3"
 
 [features]
 default = []
+mcgs-profile = ["alpharat-mcgs/bench-internals"]
 onnx = ["dep:alpharat-sampling", "alpharat-sampling/onnx"]
 onnx-cuda = ["onnx", "alpharat-sampling/onnx-cuda"]
 onnx-coreml = ["onnx", "alpharat-sampling/onnx-coreml"]
+tensorrt = ["dep:alpharat-sampling", "alpharat-sampling/tensorrt"]

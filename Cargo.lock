@@ -26,6 +26,7 @@ dependencies = [
  "alpharat-mcts",
  "alpharat-sampling",
  "csv",
+ "libc",
  "pyrat-rust",
  "rand 0.8.5",
  "serde",

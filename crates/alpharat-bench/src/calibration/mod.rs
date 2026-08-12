@@ -8,9 +8,15 @@
 mod compare;
 mod folder;
 mod model;
+mod summary;
 mod trials;
 
 pub use compare::{check_comparable, ComparisonCheck, ComparisonIssue};
-pub use folder::{load_run_folder, LoadedRun, ProtocolError};
+pub use folder::{load_run_folder, validate_run_plan, LoadedRun, ProtocolError};
 pub use model::*;
+pub use summary::{
+    compare_runs, render_record_comparison, render_run_comparison, summarize_run, CaseComparison,
+    CaseSummary, Distribution, MetricDelta, RunComparison, RunSummary, SummaryBenchmark,
+    TrialCounts,
+};
 pub use trials::*;

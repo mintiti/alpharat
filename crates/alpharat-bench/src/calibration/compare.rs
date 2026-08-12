@@ -96,7 +96,11 @@ pub fn check_comparable(
         &mut issues,
     );
     context_difference(
-        left.record.context.build != right.record.context.build,
+        !left
+            .record
+            .context
+            .build
+            .has_same_content_as(&right.record.context.build),
         ComparisonAxis::Build,
         left,
         right,

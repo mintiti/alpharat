@@ -1,6 +1,7 @@
 use serde::{Deserialize, Serialize};
 
-pub(crate) const CAPACITY_HEADERS: &[&str] = &[
+/// Exact protocol-v1 CSV header for backend-capacity trials.
+pub const CAPACITY_HEADERS: &[&str] = &[
     "case_id",
     "phase",
     "trial",
@@ -19,7 +20,8 @@ pub(crate) const CAPACITY_HEADERS: &[&str] = &[
     "device_inference_ms",
 ];
 
-pub(crate) const SEARCH_HEADERS: &[&str] = &[
+/// Exact protocol-v1 CSV header for fixed-work search trials.
+pub const SEARCH_HEADERS: &[&str] = &[
     "case_id",
     "phase",
     "trial",

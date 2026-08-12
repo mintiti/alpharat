@@ -53,8 +53,8 @@
         "id": "capacity-cpu-b8-c2",
         "workload": {
           "label": "capacity positions",
-          "sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
-          "bytes": 512,
+          "sha256": "3a4256846808d7061fea0ab15e0e5db8cd8659c356fb7d6a4987602be219882f",
+          "bytes": 218,
           "path_hint": null
         },
         "requested": {
@@ -71,8 +71,8 @@
         "id": "search-cpu-w2-cap128",
         "workload": {
           "label": "7x7 fixture",
-          "sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
-          "bytes": 256,
+          "sha256": "68bd2ea759602692202bf413630ae0d4bb27f2dd721030e1f7552473bd8ef88a",
+          "bytes": 713,
           "path_hint": null
         },
         "requested": {
