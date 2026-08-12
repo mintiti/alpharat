@@ -7,7 +7,9 @@
 
 use std::collections::{HashMap, HashSet};
 use std::fmt;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::{Arc, Condvar, Mutex};
+use std::time::{Duration, Instant};
 
 use alpharat_eval_core::compute_outcomes;
 use pyrat::{Coordinates, Direction, GameBuilder, GameState};
@@ -17,12 +19,13 @@ use rand::SeedableRng;
 use crate::access::{ExclusiveAccess, SearchSession};
 use crate::observer::NodeHandle;
 use crate::search::{
-    run_search_one_worker, run_search_one_worker_with_timings, run_search_session, SearchTimings,
+    run_search_one_worker, run_search_one_worker_with_timings, run_search_parallel_with_control,
+    run_search_session, ParallelSearchControl, SearchTimings,
 };
 use crate::tree::{compute_rewards, MCGSTree};
 use crate::{
-    run_search, Backend, BackendError, ConstantValueBackend, EvalResult, SearchConfig,
-    SearchResult, SmartUniformBackend,
+    run_search, run_search_parallel, Backend, BackendError, ConstantValueBackend, EvalResult,
+    ParallelSearchError, SearchConfig, SearchResult, SearchTermination, SmartUniformBackend,
 };
 
 const FLOAT_TOLERANCE: f32 = 1e-4;
@@ -570,6 +573,17 @@ fn open_game(max_turns: u16) -> GameState {
         .unwrap()
 }
 
+fn one_move_terminal_game() -> GameState {
+    GameBuilder::new(5, 5)
+        .with_open_maze()
+        .with_custom_positions(Coordinates::new(2, 2), Coordinates::new(2, 2))
+        .with_custom_cheese(vec![Coordinates::new(2, 3)])
+        .with_max_turns(20)
+        .build()
+        .create(None)
+        .unwrap()
+}
+
 fn benchmark_game() -> GameState {
     let mut cheese = Vec::new();
     'outer: for y in 0..7 {
@@ -591,6 +605,35 @@ fn benchmark_game() -> GameState {
         .build()
         .create(None)
         .unwrap()
+}
+
+fn corridor_game() -> GameState {
+    let mut walls = HashMap::new();
+    for x in 0..5 {
+        walls
+            .entry(Coordinates::new(x, 0))
+            .or_insert_with(Vec::new)
+            .push(Coordinates::new(x, 1));
+        walls
+            .entry(Coordinates::new(x, 1))
+            .or_insert_with(Vec::new)
+            .push(Coordinates::new(x, 0));
+    }
+    GameBuilder::new(5, 5)
+        .with_custom_maze(walls, Default::default())
+        .with_custom_positions(Coordinates::new(0, 0), Coordinates::new(4, 0))
+        .with_custom_cheese(vec![Coordinates::new(2, 0)])
+        .with_max_turns(100)
+        .build()
+        .create(None)
+        .unwrap()
+}
+
+fn terminal_game() -> GameState {
+    let mut game = open_game(1);
+    let _undo = game.make_move(Direction::Stay, Direction::Stay);
+    assert!(game.check_game_over());
+    game
 }
 
 fn root_visits(tree: &MCGSTree) -> u32 {
@@ -779,6 +822,212 @@ impl Backend for NonFiniteTailBackend {
     }
 }
 
+#[derive(Clone, Copy)]
+enum CrossWorkerFault {
+    Error,
+    Panic,
+    ShortBatch,
+}
+
+/// A single-use barrier with a deadline, so a gather/admission regression
+/// fails the test instead of parking a scoped worker forever.
+struct TimedRendezvous {
+    parties: usize,
+    arrivals: Mutex<usize>,
+    ready: Condvar,
+}
+
+impl TimedRendezvous {
+    fn new(parties: usize) -> Self {
+        Self {
+            parties,
+            arrivals: Mutex::new(0),
+            ready: Condvar::new(),
+        }
+    }
+
+    fn wait(&self) {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let mut arrivals = self
+            .arrivals
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        *arrivals += 1;
+        self.ready.notify_all();
+
+        while *arrivals < self.parties {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            let (next, timeout) = self
+                .ready
+                .wait_timeout(arrivals, remaining)
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            arrivals = next;
+            assert!(
+                !timeout.timed_out() || *arrivals >= self.parties,
+                "timed out waiting for {} concurrent inference calls; observed {}",
+                self.parties,
+                *arrivals
+            );
+        }
+    }
+}
+
+fn wait_for_flag(flag: &AtomicBool, description: &str) {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while !flag.load(Ordering::SeqCst) {
+        assert!(
+            Instant::now() < deadline,
+            "timed out waiting for {description}"
+        );
+        std::thread::yield_now();
+    }
+}
+
+/// Hold two admitted inference calls at the same boundary, then make exactly
+/// one fail while the other succeeds. The successful call waits until the
+/// worker handling the fault has closed admission, so returned capacity cannot
+/// race into an unintended third inference.
+struct CrossWorkerFaultBackend {
+    fault: CrossWorkerFault,
+    rendezvous: TimedRendezvous,
+    close_observed: Arc<AtomicBool>,
+    calls: AtomicUsize,
+    faulty_requested: AtomicUsize,
+    successful_requested: AtomicUsize,
+}
+
+impl CrossWorkerFaultBackend {
+    fn new(fault: CrossWorkerFault, close_observed: Arc<AtomicBool>) -> Self {
+        Self {
+            fault,
+            rendezvous: TimedRendezvous::new(2),
+            close_observed,
+            calls: AtomicUsize::new(0),
+            faulty_requested: AtomicUsize::new(0),
+            successful_requested: AtomicUsize::new(0),
+        }
+    }
+}
+
+impl Backend for CrossWorkerFaultBackend {
+    fn evaluate(&self, game: &GameState) -> Result<EvalResult, BackendError> {
+        SmartUniformBackend.evaluate(game)
+    }
+
+    fn evaluate_batch(&self, games: &[&GameState]) -> Result<Vec<EvalResult>, BackendError> {
+        let call = self.calls.fetch_add(1, Ordering::SeqCst);
+        assert!(
+            call < 2,
+            "fault fixture admitted unexpected extra inference"
+        );
+        self.rendezvous.wait();
+
+        if call == 0 {
+            self.faulty_requested.store(games.len(), Ordering::SeqCst);
+            match self.fault {
+                CrossWorkerFault::Error => Err(BackendError::msg("cross-worker backend failure")),
+                CrossWorkerFault::Panic => panic!("cross-worker backend panic"),
+                CrossWorkerFault::ShortBatch => {
+                    let mut results = SmartUniformBackend.evaluate_batch(games)?;
+                    results.pop();
+                    Ok(results)
+                }
+            }
+        } else {
+            self.successful_requested
+                .store(games.len(), Ordering::SeqCst);
+            wait_for_flag(
+                self.close_observed.as_ref(),
+                "the faulty worker to close admission",
+            );
+            SmartUniformBackend.evaluate_batch(games)
+        }
+    }
+}
+
+struct StopAfterTwoInferencesBackend {
+    rendezvous: TimedRendezvous,
+    calls: AtomicUsize,
+    stop_requested: Arc<AtomicBool>,
+}
+
+impl StopAfterTwoInferencesBackend {
+    fn new(stop_requested: Arc<AtomicBool>) -> Self {
+        Self {
+            rendezvous: TimedRendezvous::new(2),
+            calls: AtomicUsize::new(0),
+            stop_requested,
+        }
+    }
+}
+
+impl Backend for StopAfterTwoInferencesBackend {
+    fn evaluate(&self, game: &GameState) -> Result<EvalResult, BackendError> {
+        SmartUniformBackend.evaluate(game)
+    }
+
+    fn evaluate_batch(&self, games: &[&GameState]) -> Result<Vec<EvalResult>, BackendError> {
+        let call = self.calls.fetch_add(1, Ordering::SeqCst);
+        assert!(call < 2, "stop fixture admitted work after closure");
+        self.rendezvous.wait();
+        self.stop_requested.store(true, Ordering::SeqCst);
+        SmartUniformBackend.evaluate_batch(games)
+    }
+}
+
+struct SlowFirstBackend {
+    calls: AtomicUsize,
+}
+
+impl SlowFirstBackend {
+    fn new() -> Self {
+        Self {
+            calls: AtomicUsize::new(0),
+        }
+    }
+}
+
+impl Backend for SlowFirstBackend {
+    fn evaluate(&self, game: &GameState) -> Result<EvalResult, BackendError> {
+        SmartUniformBackend.evaluate(game)
+    }
+
+    fn evaluate_batch(&self, games: &[&GameState]) -> Result<Vec<EvalResult>, BackendError> {
+        if self.calls.fetch_add(1, Ordering::SeqCst) == 0 {
+            std::thread::sleep(Duration::from_millis(40));
+        }
+        SmartUniformBackend.evaluate_batch(games)
+    }
+}
+
+struct FourWorkerOverlapBackend {
+    first_wave: TimedRendezvous,
+    calls: AtomicUsize,
+}
+
+impl FourWorkerOverlapBackend {
+    fn new() -> Self {
+        Self {
+            first_wave: TimedRendezvous::new(4),
+            calls: AtomicUsize::new(0),
+        }
+    }
+}
+
+impl Backend for FourWorkerOverlapBackend {
+    fn evaluate(&self, game: &GameState) -> Result<EvalResult, BackendError> {
+        SmartUniformBackend.evaluate(game)
+    }
+
+    fn evaluate_batch(&self, games: &[&GameState]) -> Result<Vec<EvalResult>, BackendError> {
+        let call = self.calls.fetch_add(1, Ordering::SeqCst);
+        if call < 4 {
+            self.first_wave.wait();
+        }
+        SmartUniformBackend.evaluate_batch(games)
+    }
+}
+
 #[test]
 fn fresh_tree_satisfies_quiescent_invariants() {
     let game = open_game(20);
@@ -823,6 +1072,486 @@ fn searched_tree_satisfies_quiescent_invariants() {
             "fixture should exercise a shared DAG node at batch size {batch_size}"
         );
     }
+}
+
+#[test]
+fn parallel_worker_matrix_satisfies_budget_ledger_and_dag_invariants() {
+    let fixtures = [
+        ("open", open_game(20), 241, 8),
+        ("corridor", corridor_game(), 160, 8),
+        ("terminal", terminal_game(), 48, 8),
+        ("transposition-heavy", benchmark_game(), 320, 16),
+    ];
+
+    for (fixture, game, n_sims, batch_size) in fixtures {
+        for worker_count in [1, 2, 4] {
+            let mut tree = MCGSTree::new(&game);
+            let before = root_visits(&tree);
+            let backend = ConstantValueBackend {
+                value_p1: 0.75,
+                value_p2: 0.125,
+            };
+            let mut rng =
+                SmallRng::seed_from_u64(0x5A17_0000 + u64::from(n_sims) + worker_count as u64);
+            let profile = run_search_parallel_with_control(
+                &mut tree,
+                &game,
+                &backend,
+                &SearchConfig::default(),
+                n_sims,
+                batch_size,
+                worker_count,
+                &mut rng,
+                ParallelSearchControl::new(None, None),
+            )
+            .unwrap();
+            let result = &profile.result;
+            let productive = result.nn_evals + result.terminals + result.tt_stop_hits;
+            let after = root_visits(&tree);
+
+            assert_eq!(
+                productive, n_sims,
+                "{fixture} with {worker_count} workers under-delivered productive work"
+            );
+            assert_eq!(after - before, productive);
+            assert_eq!(result.total_visits, after);
+            assert_eq!(profile.ledger.outstanding(), 0);
+            assert_eq!(profile.ledger.committed, u64::from(productive));
+            assert_eq!(profile.ledger.cancelled, u64::from(result.collisions));
+            assert!(profile.timings.batches > 0);
+            for policy in [&result.policy_p1, &result.policy_p2] {
+                assert!(policy.iter().all(|value| value.is_finite()));
+                assert!(policy.iter().all(|value| *value >= 0.0));
+                assert!(approx_eq(policy.iter().sum(), 1.0));
+            }
+            for values in [
+                &result.visit_counts_p1,
+                &result.visit_counts_p2,
+                &result.prior_p1,
+                &result.prior_p2,
+                &result.q_values_p1,
+                &result.q_values_p2,
+            ] {
+                assert!(values.iter().all(|value| value.is_finite()));
+            }
+            assert!(result.value_p1.is_finite());
+            assert!(result.value_p2.is_finite());
+
+            let report = audit_quiescent_dag(&mut tree, &game, AuditMode::GcDrained).unwrap();
+            assert!(report.nodes >= 1);
+            if fixture == "transposition-heavy" {
+                assert!(
+                    report.transposition_nodes > 0,
+                    "parallel fixture must exercise canonical cross-parent sharing"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn slow_inference_cannot_be_starved_by_collision_only_workers() {
+    let game = open_game(20);
+    let mut tree = MCGSTree::new(&game);
+    let backend = SlowFirstBackend::new();
+    let mut rng = SmallRng::seed_from_u64(0x5100_5100);
+    let before = root_visits(&tree);
+
+    let result = run_search_parallel(
+        &mut tree,
+        &game,
+        &backend,
+        &SearchConfig::default(),
+        64,
+        1,
+        2,
+        &mut rng,
+    )
+    .unwrap();
+
+    assert_eq!(result.nn_evals + result.terminals + result.tt_stop_hits, 64);
+    assert_eq!(root_visits(&tree) - before, 64);
+    assert!(
+        result.collisions > 0,
+        "the peer must complete collision-only work while the first inference is delayed"
+    );
+    assert!(backend.calls.load(Ordering::SeqCst) > 1);
+    audit_quiescent_dag(&mut tree, &game, AuditMode::GcDrained).unwrap();
+}
+
+#[test]
+fn globally_empty_gather_waves_stop_independently_of_the_sim_budget() {
+    let game = open_game(20);
+    let mut tree = MCGSTree::new(&game);
+    let config = SearchConfig {
+        collision_limit_min: 0,
+        collision_limit_max: 0,
+        ..SearchConfig::default()
+    };
+    let mut rng = SmallRng::seed_from_u64(0x0BAD_0000);
+
+    let profile = run_search_parallel_with_control(
+        &mut tree,
+        &game,
+        &SmartUniformBackend,
+        &config,
+        100_000,
+        8,
+        4,
+        &mut rng,
+        ParallelSearchControl::new(None, None),
+    )
+    .unwrap();
+
+    assert_eq!(profile.result.nn_evals, 0);
+    assert_eq!(profile.result.terminals, 0);
+    assert_eq!(profile.result.tt_stop_hits, 0);
+    assert_eq!(profile.result.total_visits, 0);
+    assert_eq!(profile.ledger.outstanding(), 0);
+    assert_eq!(profile.termination, SearchTermination::NoProgress);
+    assert!(
+        profile.timings.batches <= 4 * 3,
+        "three quiescent waves must bound empty work independently of n_sims"
+    );
+    audit_quiescent_dag(&mut tree, &game, AuditMode::GcDrained).unwrap();
+
+    let mut public_tree = MCGSTree::new(&game);
+    let error = run_search_parallel(
+        &mut public_tree,
+        &game,
+        &SmartUniformBackend,
+        &config,
+        100_000,
+        8,
+        4,
+        &mut rng,
+    )
+    .unwrap_err();
+    assert!(matches!(
+        error,
+        ParallelSearchError::Incomplete {
+            requested: 100_000,
+            completed: 0,
+            termination: SearchTermination::NoProgress,
+        }
+    ));
+    audit_quiescent_dag(&mut public_tree, &game, AuditMode::GcDrained).unwrap();
+}
+
+#[test]
+fn four_workers_overlap_inference_and_preserve_canonical_transpositions() {
+    let game = open_game(20);
+    let mut tree = MCGSTree::new(&game);
+    let mut rng = SmallRng::seed_from_u64(0x4A11_0A4E);
+    run_search(
+        &mut tree,
+        &game,
+        &SmartUniformBackend,
+        &SearchConfig::default(),
+        1,
+        1,
+        &mut rng,
+    )
+    .unwrap();
+    let before = root_visits(&tree);
+    let backend = FourWorkerOverlapBackend::new();
+
+    let result = run_search_parallel(
+        &mut tree,
+        &game,
+        &backend,
+        &SearchConfig::default(),
+        320,
+        1,
+        4,
+        &mut rng,
+    )
+    .unwrap();
+
+    assert!(backend.calls.load(Ordering::SeqCst) >= 4);
+    assert_eq!(
+        result.nn_evals + result.terminals + result.tt_stop_hits,
+        320
+    );
+    assert_eq!(root_visits(&tree) - before, 320);
+    let report = audit_quiescent_dag(&mut tree, &game, AuditMode::GcDrained).unwrap();
+    assert!(report.transposition_nodes > 0);
+}
+
+#[test]
+fn stop_closes_admission_but_finishes_both_admitted_batches() {
+    let game = open_game(20);
+    let mut tree = MCGSTree::new(&game);
+    let mut rng = SmallRng::seed_from_u64(0x5700_5700);
+    run_search(
+        &mut tree,
+        &game,
+        &SmartUniformBackend,
+        &SearchConfig::default(),
+        1,
+        1,
+        &mut rng,
+    )
+    .unwrap();
+    let before = root_visits(&tree);
+    let stop_requested = Arc::new(AtomicBool::new(false));
+    let backend = StopAfterTwoInferencesBackend::new(Arc::clone(&stop_requested));
+
+    let profile = run_search_parallel_with_control(
+        &mut tree,
+        &game,
+        &backend,
+        &SearchConfig::default(),
+        64,
+        1,
+        2,
+        &mut rng,
+        ParallelSearchControl::new(Some(stop_requested.as_ref()), None),
+    )
+    .unwrap();
+
+    assert_eq!(backend.calls.load(Ordering::SeqCst), 2);
+    assert_eq!(profile.result.nn_evals, 2);
+    assert_eq!(root_visits(&tree) - before, 2);
+    assert_eq!(profile.ledger.outstanding(), 0);
+    assert_eq!(profile.ledger.committed, 2);
+    audit_quiescent_dag(&mut tree, &game, AuditMode::GcDrained).unwrap();
+}
+
+#[test]
+fn one_worker_error_preserves_the_other_workers_admitted_success() {
+    let game = open_game(20);
+    let mut tree = MCGSTree::new(&game);
+    let mut rng = SmallRng::seed_from_u64(0xE220_220E);
+    run_search(
+        &mut tree,
+        &game,
+        &SmartUniformBackend,
+        &SearchConfig::default(),
+        1,
+        1,
+        &mut rng,
+    )
+    .unwrap();
+    let before = root_visits(&tree);
+    let close_observed = Arc::new(AtomicBool::new(false));
+    let backend =
+        CrossWorkerFaultBackend::new(CrossWorkerFault::Error, Arc::clone(&close_observed));
+
+    let error = run_search_parallel_with_control(
+        &mut tree,
+        &game,
+        &backend,
+        &SearchConfig::default(),
+        2,
+        1,
+        2,
+        &mut rng,
+        ParallelSearchControl::new(None, None).with_close_observer(close_observed.as_ref()),
+    )
+    .unwrap_err();
+
+    assert!(error.to_string().contains("cross-worker backend failure"));
+    assert_eq!(backend.calls.load(Ordering::SeqCst), 2);
+    assert_eq!(backend.faulty_requested.load(Ordering::SeqCst), 1);
+    assert_eq!(backend.successful_requested.load(Ordering::SeqCst), 1);
+    assert_eq!(root_visits(&tree) - before, 1);
+    audit_quiescent_dag(&mut tree, &game, AuditMode::GcDrained).unwrap();
+
+    run_search_parallel(
+        &mut tree,
+        &game,
+        &SmartUniformBackend,
+        &SearchConfig::default(),
+        20,
+        2,
+        2,
+        &mut rng,
+    )
+    .unwrap();
+}
+
+#[test]
+fn failed_worker_preserves_inline_terminal_commits_from_its_pending_batch() {
+    let game = one_move_terminal_game();
+    let mut tree = MCGSTree::new(&game);
+    let config = SearchConfig {
+        collision_limit_min: 64,
+        collision_limit_max: 64,
+        ..SearchConfig::default()
+    };
+    let mut rng = SmallRng::seed_from_u64(0x1A11_1E00);
+    run_search(
+        &mut tree,
+        &game,
+        &SmartUniformBackend,
+        &config,
+        1,
+        1,
+        &mut rng,
+    )
+    .unwrap();
+    let before = root_visits(&tree);
+    let close_observed = Arc::new(AtomicBool::new(false));
+    let cancelled_inline_productive = AtomicUsize::new(0);
+    let backend =
+        CrossWorkerFaultBackend::new(CrossWorkerFault::Error, Arc::clone(&close_observed));
+
+    let error = run_search_parallel_with_control(
+        &mut tree,
+        &game,
+        &backend,
+        &config,
+        16,
+        8,
+        2,
+        &mut rng,
+        ParallelSearchControl::new(None, None)
+            .with_close_observer(close_observed.as_ref())
+            .with_cancelled_inline_observer(&cancelled_inline_productive),
+    )
+    .unwrap_err();
+
+    let inline_productive = cancelled_inline_productive.load(Ordering::SeqCst);
+    let peer_evals = backend.successful_requested.load(Ordering::SeqCst);
+    assert!(error.to_string().contains("cross-worker backend failure"));
+    assert_eq!(backend.calls.load(Ordering::SeqCst), 2);
+    assert!(
+        inline_productive > 0,
+        "the failed pending batch must contain an already-committed terminal"
+    );
+    assert!(peer_evals > 0);
+    assert!(
+        root_visits(&tree) - before >= (inline_productive + peer_evals) as u32,
+        "failed-batch inline commits and peer evaluations must both remain visible"
+    );
+    audit_quiescent_dag(&mut tree, &game, AuditMode::GcDrained).unwrap();
+
+    run_search_parallel(
+        &mut tree,
+        &game,
+        &SmartUniformBackend,
+        &config,
+        20,
+        2,
+        2,
+        &mut rng,
+    )
+    .unwrap();
+}
+
+#[test]
+fn one_worker_panic_joins_and_cleans_before_resuming_unwind() {
+    use std::panic::{catch_unwind, AssertUnwindSafe};
+
+    let game = open_game(20);
+    let mut tree = MCGSTree::new(&game);
+    let mut rng = SmallRng::seed_from_u64(0xA11C_E510);
+    run_search(
+        &mut tree,
+        &game,
+        &SmartUniformBackend,
+        &SearchConfig::default(),
+        1,
+        1,
+        &mut rng,
+    )
+    .unwrap();
+    let before = root_visits(&tree);
+    let close_observed = Arc::new(AtomicBool::new(false));
+    let backend =
+        CrossWorkerFaultBackend::new(CrossWorkerFault::Panic, Arc::clone(&close_observed));
+
+    let panic = catch_unwind(AssertUnwindSafe(|| {
+        let _ = run_search_parallel_with_control(
+            &mut tree,
+            &game,
+            &backend,
+            &SearchConfig::default(),
+            2,
+            1,
+            2,
+            &mut rng,
+            ParallelSearchControl::new(None, None).with_close_observer(close_observed.as_ref()),
+        );
+    }));
+
+    let payload = panic.expect_err("backend panic must resume after every worker joins");
+    let message = if let Some(message) = payload.downcast_ref::<&'static str>() {
+        *message
+    } else if let Some(message) = payload.downcast_ref::<String>() {
+        message.as_str()
+    } else {
+        panic!("parallel search resumed an unexpected non-string panic payload");
+    };
+    assert_eq!(message, "cross-worker backend panic");
+    assert_eq!(backend.calls.load(Ordering::SeqCst), 2);
+    assert_eq!(root_visits(&tree) - before, 1);
+    audit_quiescent_dag(&mut tree, &game, AuditMode::GcDrained).unwrap();
+
+    run_search_parallel(
+        &mut tree,
+        &game,
+        &SmartUniformBackend,
+        &SearchConfig::default(),
+        20,
+        2,
+        2,
+        &mut rng,
+    )
+    .unwrap();
+}
+
+#[test]
+fn malformed_worker_batch_cancels_whole_batch_while_peer_commits() {
+    let game = open_game(20);
+    let mut tree = MCGSTree::new(&game);
+    let config = SearchConfig {
+        collision_limit_min: 64,
+        collision_limit_max: 64,
+        ..SearchConfig::default()
+    };
+    let mut rng = SmallRng::seed_from_u64(0xBAD0_BA7C);
+    run_search(
+        &mut tree,
+        &game,
+        &SmartUniformBackend,
+        &config,
+        1,
+        1,
+        &mut rng,
+    )
+    .unwrap();
+    let before = root_visits(&tree);
+    let close_observed = Arc::new(AtomicBool::new(false));
+    let backend =
+        CrossWorkerFaultBackend::new(CrossWorkerFault::ShortBatch, Arc::clone(&close_observed));
+
+    let error = run_search_parallel_with_control(
+        &mut tree,
+        &game,
+        &backend,
+        &config,
+        4,
+        2,
+        2,
+        &mut rng,
+        ParallelSearchControl::new(None, None).with_close_observer(close_observed.as_ref()),
+    )
+    .unwrap_err();
+
+    let faulty_requested = backend.faulty_requested.load(Ordering::SeqCst);
+    let successful_requested = backend.successful_requested.load(Ordering::SeqCst);
+    assert!(error.to_string().contains("result count"));
+    assert_eq!(backend.calls.load(Ordering::SeqCst), 2);
+    assert_eq!(faulty_requested, 2);
+    assert_eq!(successful_requested, 2);
+    assert_eq!(
+        root_visits(&tree) - before,
+        successful_requested as u32,
+        "no result from the malformed batch may commit"
+    );
+    audit_quiescent_dag(&mut tree, &game, AuditMode::GcDrained).unwrap();
 }
 
 #[test]

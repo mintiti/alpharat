@@ -42,6 +42,8 @@ pub mod gc;
 #[cfg_attr(not(test), allow(dead_code))]
 mod node;
 mod observer;
+#[cfg_attr(not(test), allow(dead_code))]
+mod scheduler;
 mod search;
 #[cfg(test)]
 mod search_invariants;
@@ -57,9 +59,13 @@ pub use observer::{
     ChildEdges, EdgeTransition, EdgeView, NodeHandle, NodeStats, NodeView, OutcomeStats, Outcomes,
     SearchPlayer, TranspositionEviction, TranspositionStats, TreeStats, TreeView,
 };
-pub use search::{run_search, SearchConfig, SearchResult};
+pub use search::{
+    run_search, run_search_parallel, ParallelSearchError, SearchConfig, SearchResult,
+    SearchTermination,
+};
 #[cfg(feature = "bench-internals")]
 pub use search::{
-    run_search_one_worker_profiled, ProfiledSearchResult, SearchLedgerStats, SearchTimings,
+    run_search_one_worker_profiled, run_search_parallel_profiled, ProfiledSearchResult,
+    SearchLedgerStats, SearchTimings,
 };
 pub use tree::MCGSTree;

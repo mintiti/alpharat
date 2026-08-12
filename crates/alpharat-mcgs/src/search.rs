@@ -1,12 +1,19 @@
+use std::any::Any;
+use std::fmt;
 use std::panic::{catch_unwind, resume_unwind, AssertUnwindSafe};
+#[cfg(test)]
+use std::sync::atomic::AtomicUsize;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
-use rand::Rng;
+use rand::rngs::SmallRng;
+use rand::{Rng, SeedableRng};
 use rand_distr::Gamma;
 
 use crate::access::{ExclusiveAccess, SearchSession};
 use crate::node::LowNode;
 use crate::observer::NodeHandle;
+use crate::scheduler::{AdmissionCloseReason, SearchCoordinator};
 use crate::tree::{compute_rewards, MCGSTree};
 use crate::{Backend, BackendError};
 use pyrat::{Direction, GameState, MoveUndo};
@@ -101,21 +108,25 @@ pub struct SearchResult {
     pub tt_stop_hits: u32,
 }
 
-/// Wall-clock phase timings for the gated one-worker protocol.
+/// Phase timings for a gated search protocol.
 ///
 /// Wait and hold time are kept separate so later multi-worker measurements can
 /// distinguish graph contention from useful search work. SmartUniform
 /// benchmarks mostly expose protocol overhead; real NN backends expose how
-/// much inference can overlap once more workers are admitted.
+/// much inference can overlap once more workers are admitted. Parallel
+/// profiles sum time across workers, so their phase totals may exceed elapsed
+/// wall time and should be read as aggregate worker occupancy.
 #[derive(Clone, Copy, Debug, Default)]
 #[allow(dead_code)]
 pub struct SearchTimings {
     pub batches: u32,
+    pub lease_wait: Duration,
     pub gather_wait: Duration,
     pub gather_hold: Duration,
     pub inference: Duration,
     pub settle_wait: Duration,
     pub settle_hold: Duration,
+    pub completion_wait: Duration,
     pub cleanup_wait: Duration,
     pub cleanup_hold: Duration,
     pub extract_wait: Duration,
@@ -166,13 +177,93 @@ impl SearchLedgerStats {
     }
 }
 
-/// Result and instrumentation from the gated one-worker protocol.
+impl SearchTimings {
+    fn merge(&mut self, worker: Self) {
+        self.batches += worker.batches;
+        self.lease_wait += worker.lease_wait;
+        self.gather_wait += worker.gather_wait;
+        self.gather_hold += worker.gather_hold;
+        self.inference += worker.inference;
+        self.settle_wait += worker.settle_wait;
+        self.settle_hold += worker.settle_hold;
+        self.completion_wait += worker.completion_wait;
+        self.cleanup_wait += worker.cleanup_wait;
+        self.cleanup_hold += worker.cleanup_hold;
+        self.extract_wait += worker.extract_wait;
+        self.extract_hold += worker.extract_hold;
+    }
+}
+
+/// Result and aggregate instrumentation from a gated search protocol.
 #[derive(Clone, Debug)]
 #[allow(dead_code)]
 pub struct ProfiledSearchResult {
     pub result: SearchResult,
     pub timings: SearchTimings,
     pub ledger: SearchLedgerStats,
+    pub termination: SearchTermination,
+}
+
+/// Why a persistent parallel-search session stopped admitting new work.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SearchTermination {
+    BudgetExhausted,
+    StopRequested,
+    Deadline,
+    NoProgress,
+}
+
+impl fmt::Display for SearchTermination {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Self::BudgetExhausted => "productive budget exhausted",
+            Self::StopRequested => "stop requested",
+            Self::Deadline => "deadline reached",
+            Self::NoProgress => "no progress",
+        })
+    }
+}
+
+/// Failure from the public fixed-budget parallel-search entry point.
+#[derive(Debug)]
+pub enum ParallelSearchError {
+    Backend(BackendError),
+    Incomplete {
+        requested: u32,
+        completed: u32,
+        termination: SearchTermination,
+    },
+}
+
+impl fmt::Display for ParallelSearchError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Backend(error) => error.fmt(f),
+            Self::Incomplete {
+                requested,
+                completed,
+                termination,
+            } => write!(
+                f,
+                "parallel search stopped because {termination} after completing {completed} of {requested} productive units"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for ParallelSearchError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Backend(error) => Some(error),
+            Self::Incomplete { .. } => None,
+        }
+    }
+}
+
+impl From<BackendError> for ParallelSearchError {
+    fn from(error: BackendError) -> Self {
+        Self::Backend(error)
+    }
 }
 
 /// Per-batch counters from simulate_batch.
@@ -183,7 +274,6 @@ struct BatchStats {
     tt_stop_hits: u32,
     ledger: SearchLedgerStats,
 }
-
 
 // ---------------------------------------------------------------------------
 // run_search — public API
@@ -210,6 +300,533 @@ pub fn run_search(
             rng,
         )
     })
+}
+
+/// Run MCGS with persistent scoped workers exploring one shared DAG.
+///
+/// Graph mutation remains serialized into short gather and settle epochs;
+/// backend evaluation runs without the graph guard, so workers can overlap
+/// inference with another worker's graph phase. Productive work is charged
+/// exactly and every worker joins before the result or first backend error is
+/// returned.
+///
+/// Worker RNG streams are derived deterministically from `rng`, but thread
+/// scheduling can change selection and commit order. Parallel results are
+/// therefore not promised to be bit-identical across runs.
+///
+/// `worker_batch_size` is a per-worker lease ceiling. The aggregate in-flight
+/// ceiling is therefore `worker_count * worker_batch_size`; callers comparing
+/// worker counts at a fixed total in-flight target should scale it down per
+/// worker. Workers call `Backend::evaluate_batch` directly and concurrently;
+/// backend muxing, serialization, and cache lifetime remain properties of the
+/// supplied backend wrapper.
+///
+/// A backend panic is caught long enough to cancel its pending batch and join
+/// every worker, then resumed. An unexpected panic inside a graph mutation
+/// epoch also stops and joins peers before resuming, but is an internal
+/// invariant failure and does not promise that the tree remains reusable.
+/// A bounded no-progress shutdown is returned as [`ParallelSearchError::Incomplete`]
+/// rather than silently presenting partial work as a completed fixed budget.
+#[allow(clippy::too_many_arguments)]
+pub fn run_search_parallel(
+    tree: &mut MCGSTree,
+    game: &GameState,
+    backend: &dyn Backend,
+    config: &SearchConfig,
+    n_sims: u32,
+    worker_batch_size: u32,
+    worker_count: usize,
+    rng: &mut impl Rng,
+) -> Result<SearchResult, ParallelSearchError> {
+    let profile = run_search_parallel_with_control(
+        tree,
+        game,
+        backend,
+        config,
+        n_sims,
+        worker_batch_size,
+        worker_count,
+        rng,
+        ParallelSearchControl::none(),
+    )?;
+    if profile.termination != SearchTermination::BudgetExhausted {
+        let completed =
+            profile.result.nn_evals + profile.result.terminals + profile.result.tt_stop_hits;
+        return Err(ParallelSearchError::Incomplete {
+            requested: n_sims,
+            completed,
+            termination: profile.termination,
+        });
+    }
+    Ok(profile.result)
+}
+
+/// Profile the persistent-worker protocol without changing its search result.
+#[cfg(feature = "bench-internals")]
+#[doc(hidden)]
+#[allow(clippy::too_many_arguments)]
+pub fn run_search_parallel_profiled(
+    tree: &mut MCGSTree,
+    game: &GameState,
+    backend: &dyn Backend,
+    config: &SearchConfig,
+    n_sims: u32,
+    worker_batch_size: u32,
+    worker_count: usize,
+    rng: &mut impl Rng,
+) -> Result<ProfiledSearchResult, BackendError> {
+    run_search_parallel_with_control(
+        tree,
+        game,
+        backend,
+        config,
+        n_sims,
+        worker_batch_size,
+        worker_count,
+        rng,
+        ParallelSearchControl::none(),
+    )
+}
+
+/// Search-call controls polled immediately before admission and after
+/// inference. A request racing the pre-admission poll may admit one additional
+/// batch per worker; successful work admitted before the request is observed
+/// is still settled. A bot-facing live-search API should expose one
+/// interruptible worker session rather than respawning this fixed-budget
+/// primitive per minibatch.
+#[derive(Clone, Copy, Default)]
+pub(crate) struct ParallelSearchControl<'control> {
+    stop_requested: Option<&'control AtomicBool>,
+    deadline: Option<Instant>,
+    #[cfg(test)]
+    close_observed: Option<&'control AtomicBool>,
+    #[cfg(test)]
+    cancelled_inline_productive: Option<&'control AtomicUsize>,
+}
+
+impl<'control> ParallelSearchControl<'control> {
+    fn none() -> Self {
+        Self::default()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn new(
+        stop_requested: Option<&'control AtomicBool>,
+        deadline: Option<Instant>,
+    ) -> Self {
+        Self {
+            stop_requested,
+            deadline,
+            close_observed: None,
+            cancelled_inline_productive: None,
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_close_observer(mut self, close_observed: &'control AtomicBool) -> Self {
+        self.close_observed = Some(close_observed);
+        self
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_cancelled_inline_observer(
+        mut self,
+        cancelled_inline_productive: &'control AtomicUsize,
+    ) -> Self {
+        self.cancelled_inline_productive = Some(cancelled_inline_productive);
+        self
+    }
+
+    fn requested_close_reason(self) -> Option<AdmissionCloseReason> {
+        if self
+            .stop_requested
+            .is_some_and(|stop| stop.load(Ordering::Relaxed))
+        {
+            Some(AdmissionCloseReason::StopRequested)
+        } else if self
+            .deadline
+            .is_some_and(|deadline| Instant::now() >= deadline)
+        {
+            Some(AdmissionCloseReason::Deadline)
+        } else {
+            None
+        }
+    }
+
+    fn close_if_requested(self, coordinator: &SearchCoordinator) {
+        if let Some(reason) = self.requested_close_reason() {
+            coordinator.close(reason);
+            self.notify_close_observed();
+        }
+    }
+
+    fn notify_close_observed(self) {
+        #[cfg(test)]
+        if let Some(close_observed) = self.close_observed {
+            close_observed.store(true, Ordering::SeqCst);
+        }
+    }
+
+    fn record_cancelled_inline(self, _productive: u32) {
+        #[cfg(test)]
+        if let Some(cancelled_inline_productive) = self.cancelled_inline_productive {
+            cancelled_inline_productive.fetch_add(_productive as usize, Ordering::SeqCst);
+        }
+    }
+}
+
+#[derive(Default)]
+struct ParallelWorkerStats {
+    timings: SearchTimings,
+    ledger: SearchLedgerStats,
+    nn_evals: u32,
+    terminals: u32,
+    collisions: u32,
+    tt_stop_hits: u32,
+}
+
+impl ParallelWorkerStats {
+    fn record_batch(&mut self, batch: BatchStats) {
+        self.nn_evals += batch.nn_evals;
+        self.terminals += batch.terminals;
+        self.collisions += batch.collisions;
+        self.tt_stop_hits += batch.tt_stop_hits;
+        self.ledger.merge(batch.ledger);
+    }
+
+    fn record_cancelled_batch(
+        &mut self,
+        ledger: SearchLedgerStats,
+        terminals: u32,
+        tt_stop_hits: u32,
+    ) {
+        self.terminals += terminals;
+        self.tt_stop_hits += tt_stop_hits;
+        self.ledger.merge(ledger);
+    }
+
+    fn productive(&self) -> u32 {
+        self.nn_evals + self.terminals + self.tt_stop_hits
+    }
+
+    fn merge(&mut self, worker: Self) {
+        self.timings.merge(worker.timings);
+        self.ledger.merge(worker.ledger);
+        self.nn_evals += worker.nn_evals;
+        self.terminals += worker.terminals;
+        self.collisions += worker.collisions;
+        self.tt_stop_hits += worker.tt_stop_hits;
+    }
+}
+
+type PanicPayload = Box<dyn Any + Send + 'static>;
+
+struct ParallelWorkerExit {
+    stats: ParallelWorkerStats,
+    backend_panic: Option<PanicPayload>,
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn run_search_parallel_with_control(
+    tree: &mut MCGSTree,
+    game: &GameState,
+    backend: &dyn Backend,
+    config: &SearchConfig,
+    n_sims: u32,
+    worker_batch_size: u32,
+    worker_count: usize,
+    rng: &mut impl Rng,
+    control: ParallelSearchControl<'_>,
+) -> Result<ProfiledSearchResult, BackendError> {
+    assert!(
+        worker_count > 0,
+        "parallel search needs at least one worker"
+    );
+    assert!(
+        worker_batch_size > 0,
+        "parallel search batch size must be positive"
+    );
+    assert!(
+        u32::try_from(worker_count).is_ok(),
+        "parallel worker count exceeds the productive counter range"
+    );
+
+    let worker_seeds: Vec<u64> = (0..worker_count).map(|_| rng.gen()).collect();
+    tree.with_search_session(|session| {
+        run_search_parallel_session(
+            &session,
+            game,
+            backend,
+            config,
+            n_sims,
+            worker_batch_size,
+            worker_seeds,
+            rng,
+            control,
+        )
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn run_search_parallel_session<'tree, 'session>(
+    session: &SearchSession<'tree, 'session>,
+    game: &GameState,
+    backend: &dyn Backend,
+    config: &SearchConfig,
+    n_sims: u32,
+    worker_batch_size: u32,
+    worker_seeds: Vec<u64>,
+    result_rng: &mut impl Rng,
+    control: ParallelSearchControl<'_>,
+) -> Result<ProfiledSearchResult, BackendError> {
+    let worker_count = worker_seeds.len();
+    // A globally quiescent empty wave cannot be temporary contention: every
+    // other lease has already settled. A short retry allowance turns a
+    // degenerate gather configuration or leaked claim into bounded partial
+    // completion instead of tying liveness to a potentially huge sim budget.
+    const MAX_QUIESCENT_ZERO_PROGRESS_WAVES: u32 = 3;
+    let zero_progress_bound = MAX_QUIESCENT_ZERO_PROGRESS_WAVES;
+    let coordinator = SearchCoordinator::new(n_sims, zero_progress_bound);
+
+    let joined = std::thread::scope(|scope| {
+        let mut workers = Vec::with_capacity(worker_count);
+        let coordinator = &coordinator;
+        for seed in worker_seeds {
+            let worker_game = game.clone();
+            workers.push(scope.spawn(move || {
+                let mut worker_rng = SmallRng::seed_from_u64(seed);
+                let worker = catch_unwind(AssertUnwindSafe(|| {
+                    run_parallel_worker(
+                        session,
+                        coordinator,
+                        &worker_game,
+                        backend,
+                        config,
+                        worker_batch_size,
+                        &mut worker_rng,
+                        control,
+                    )
+                }));
+                if worker.is_err() {
+                    coordinator.close(AdmissionCloseReason::WorkerPanicked);
+                }
+                worker
+            }));
+        }
+        workers
+            .into_iter()
+            .map(std::thread::ScopedJoinHandle::join)
+            .collect::<Vec<_>>()
+    });
+
+    let mut aggregate = ParallelWorkerStats::default();
+    let mut saved_backend_panic = None;
+    let mut unexpected_worker_panic = None;
+    for worker in joined {
+        match worker {
+            Ok(Ok(worker)) => {
+                aggregate.merge(worker.stats);
+                if saved_backend_panic.is_none() {
+                    saved_backend_panic = worker.backend_panic;
+                }
+            }
+            Ok(Err(payload)) | Err(payload) => {
+                if unexpected_worker_panic.is_none() {
+                    unexpected_worker_panic = Some(payload);
+                }
+            }
+        }
+    }
+
+    if let Some(payload) = unexpected_worker_panic {
+        // A graph-phase invariant panic may have poisoned the gate or
+        // abandoned an admitted reservation plan. Peers have been stopped and
+        // joined, but claiming a quiescent/reusable graph here would mask the
+        // original bug with a cleanup assertion. Backend panics take the
+        // controlled cleanup path below instead.
+        resume_unwind(payload);
+    }
+
+    aggregate.ledger.assert_settled();
+    let outcome = coordinator.finish();
+    assert_eq!(
+        outcome.snapshot.charged(),
+        aggregate.productive(),
+        "search coordinator and worker ledgers disagree on productive work"
+    );
+    assert_eq!(
+        aggregate.ledger.committed,
+        u64::from(aggregate.productive()),
+        "graph ledger and worker counters disagree on committed work"
+    );
+
+    if let Some(payload) = saved_backend_panic {
+        resume_unwind(payload);
+    }
+    if let Some(error) = outcome.first_failure {
+        return Err(error);
+    }
+    let termination = match outcome
+        .snapshot
+        .close_reason
+        .expect("finished coordinator must retain its close reason")
+    {
+        AdmissionCloseReason::BudgetExhausted => SearchTermination::BudgetExhausted,
+        AdmissionCloseReason::StopRequested => SearchTermination::StopRequested,
+        AdmissionCloseReason::Deadline => SearchTermination::Deadline,
+        AdmissionCloseReason::NoProgress => SearchTermination::NoProgress,
+        AdmissionCloseReason::BackendFailure | AdmissionCloseReason::WorkerPanicked => {
+            unreachable!("failed or panicked workers cannot return a search result")
+        }
+    };
+
+    let wait_started = Instant::now();
+    let mut epoch = session.write();
+    aggregate.timings.extract_wait += wait_started.elapsed();
+    let hold_started = Instant::now();
+    let mut result = {
+        let access = epoch.access();
+        let root = access.root();
+        extract_result(&access, &root, config, result_rng)
+    };
+    drop(epoch);
+    aggregate.timings.extract_hold += hold_started.elapsed();
+
+    result.nn_evals = aggregate.nn_evals;
+    result.terminals = aggregate.terminals;
+    result.collisions = aggregate.collisions;
+    result.tt_stop_hits = aggregate.tt_stop_hits;
+
+    Ok(ProfiledSearchResult {
+        result,
+        timings: aggregate.timings,
+        ledger: aggregate.ledger,
+        termination,
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn run_parallel_worker<'tree, 'session>(
+    session: &SearchSession<'tree, 'session>,
+    coordinator: &SearchCoordinator,
+    game: &GameState,
+    backend: &dyn Backend,
+    config: &SearchConfig,
+    batch_size: u32,
+    rng: &mut impl Rng,
+    control: ParallelSearchControl<'_>,
+) -> ParallelWorkerExit {
+    let mut stats = ParallelWorkerStats::default();
+
+    loop {
+        control.close_if_requested(coordinator);
+        let lease_started = Instant::now();
+        let provisional = coordinator.lease(batch_size);
+        stats.timings.lease_wait += lease_started.elapsed();
+        let Some(provisional) = provisional else {
+            break;
+        };
+
+        let wait_started = Instant::now();
+        let mut epoch = session.write();
+        stats.timings.gather_wait += wait_started.elapsed();
+        let hold_started = Instant::now();
+        control.close_if_requested(coordinator);
+        let admitted = match provisional.admit(&mut epoch) {
+            Ok(admitted) => admitted,
+            Err(_) => {
+                drop(epoch);
+                stats.timings.gather_hold += hold_started.elapsed();
+                break;
+            }
+        };
+        let pending = {
+            let mut access = epoch.access();
+            gather_batch(&mut access, game, config, admitted.units(), rng)
+        };
+        drop(epoch);
+        stats.timings.gather_hold += hold_started.elapsed();
+        stats.timings.batches += 1;
+
+        let inference_started = Instant::now();
+        let inference = infer_pending_batch_caught(&pending, backend);
+        stats.timings.inference += inference_started.elapsed();
+        control.close_if_requested(coordinator);
+
+        match inference {
+            Ok(Ok(eval_results)) => {
+                let wait_started = Instant::now();
+                let mut epoch = session.write();
+                stats.timings.settle_wait += wait_started.elapsed();
+                let hold_started = Instant::now();
+                let batch = {
+                    let mut access = epoch.access();
+                    settle_pending_batch(&mut access, pending, eval_results, config, rng)
+                };
+                drop(epoch);
+                stats.timings.settle_hold += hold_started.elapsed();
+                let produced = batch.nn_evals + batch.terminals + batch.tt_stop_hits;
+                let completion_started = Instant::now();
+                admitted.complete(produced);
+                stats.timings.completion_wait += completion_started.elapsed();
+                stats.record_batch(batch);
+            }
+            Ok(Err(error)) => {
+                coordinator.record_first_failure(error);
+                control.notify_close_observed();
+                let inline_terminals = pending.terminals;
+                let inline_tt_stops = pending.tt_stop_hits;
+                let inline_productive = inline_terminals + inline_tt_stops;
+                control.record_cancelled_inline(inline_productive);
+                let wait_started = Instant::now();
+                let mut epoch = session.write();
+                stats.timings.cleanup_wait += wait_started.elapsed();
+                let hold_started = Instant::now();
+                let ledger = {
+                    let mut access = epoch.access();
+                    cancel_pending_batch(&mut access, pending)
+                };
+                drop(epoch);
+                stats.timings.cleanup_hold += hold_started.elapsed();
+                let completion_started = Instant::now();
+                admitted.cancel_with_committed(inline_productive);
+                stats.timings.completion_wait += completion_started.elapsed();
+                stats.record_cancelled_batch(ledger, inline_terminals, inline_tt_stops);
+                break;
+            }
+            Err(payload) => {
+                coordinator.close(AdmissionCloseReason::WorkerPanicked);
+                control.notify_close_observed();
+                let inline_terminals = pending.terminals;
+                let inline_tt_stops = pending.tt_stop_hits;
+                let inline_productive = inline_terminals + inline_tt_stops;
+                control.record_cancelled_inline(inline_productive);
+                let wait_started = Instant::now();
+                let mut epoch = session.write();
+                stats.timings.cleanup_wait += wait_started.elapsed();
+                let hold_started = Instant::now();
+                let ledger = {
+                    let mut access = epoch.access();
+                    cancel_pending_batch(&mut access, pending)
+                };
+                drop(epoch);
+                stats.timings.cleanup_hold += hold_started.elapsed();
+                let completion_started = Instant::now();
+                admitted.cancel_with_committed(inline_productive);
+                stats.timings.completion_wait += completion_started.elapsed();
+                stats.record_cancelled_batch(ledger, inline_terminals, inline_tt_stops);
+                return ParallelWorkerExit {
+                    stats,
+                    backend_panic: Some(payload),
+                };
+            }
+        }
+    }
+
+    ParallelWorkerExit {
+        stats,
+        backend_panic: None,
+    }
 }
 
 /// Run the transitional one-worker session protocol with phase instrumentation.
@@ -408,6 +1025,7 @@ pub(crate) fn run_search_session<'tree, 'session>(
         result,
         timings: *timings,
         ledger,
+        termination: SearchTermination::BudgetExhausted,
     })
 }
 
