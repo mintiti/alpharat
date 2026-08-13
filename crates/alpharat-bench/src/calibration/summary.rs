@@ -78,6 +78,8 @@ pub struct TrialCounts {
 #[serde(deny_unknown_fields)]
 pub struct CaseSummary {
     pub id: String,
+    pub comparison_key: String,
+    pub label: String,
     pub benchmark: SummaryBenchmark,
     pub state: CaseState,
     pub measured_trials: TrialCounts,
@@ -89,6 +91,7 @@ pub struct CaseSummary {
 #[serde(deny_unknown_fields)]
 pub struct RunSummary {
     pub protocol_version: u32,
+    pub plan_id: String,
     pub run_id: String,
     pub cases: Vec<CaseSummary>,
 }
@@ -105,7 +108,11 @@ pub struct MetricDelta {
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct CaseComparison {
-    pub id: String,
+    pub comparison_key: String,
+    pub left_id: String,
+    pub right_id: String,
+    pub left_label: String,
+    pub right_label: String,
     pub benchmark: SummaryBenchmark,
     pub metrics: BTreeMap<String, MetricDelta>,
 }
@@ -143,6 +150,8 @@ pub fn summarize_run(run: &LoadedRun) -> RunSummary {
                     .unwrap_or_default();
                 CaseSummary {
                     id: planned.id().to_owned(),
+                    comparison_key: planned.comparison_key().to_owned(),
+                    label: planned.label().to_owned(),
                     benchmark: SummaryBenchmark::BackendCapacity,
                     state,
                     measured_trials: capacity_counts(trials),
@@ -156,6 +165,8 @@ pub fn summarize_run(run: &LoadedRun) -> RunSummary {
                     .unwrap_or_default();
                 CaseSummary {
                     id: planned.id().to_owned(),
+                    comparison_key: planned.comparison_key().to_owned(),
+                    label: planned.label().to_owned(),
                     benchmark: SummaryBenchmark::Search,
                     state,
                     measured_trials: search_counts(trials),
@@ -166,8 +177,11 @@ pub fn summarize_run(run: &LoadedRun) -> RunSummary {
         cases.push(summary);
     }
 
+    add_paired_policy_drift(&mut cases, &search_by_case);
+
     RunSummary {
         protocol_version: run.record.protocol_version,
+        plan_id: run.record.plan_id.clone(),
         run_id: run.record.run_id.clone(),
         cases,
     }
@@ -184,18 +198,18 @@ pub fn compare_runs(
     let left_cases = left_summary
         .cases
         .iter()
-        .map(|case| (case.id.as_str(), case))
+        .map(|case| (case.comparison_key.as_str(), case))
         .collect::<BTreeMap<_, _>>();
     let right_cases = right_summary
         .cases
         .iter()
-        .map(|case| (case.id.as_str(), case))
+        .map(|case| (case.comparison_key.as_str(), case))
         .collect::<BTreeMap<_, _>>();
     let mut cases = Vec::with_capacity(check.comparable_cases.len());
 
-    for case_id in &check.comparable_cases {
-        let left_case = left_cases[case_id.as_str()];
-        let right_case = right_cases[case_id.as_str()];
+    for comparison_key in &check.comparable_cases {
+        let left_case = left_cases[comparison_key.as_str()];
+        let right_case = right_cases[comparison_key.as_str()];
         let mut metrics = BTreeMap::new();
         for (name, left_distribution) in &left_case.metrics {
             let Some(right_distribution) = right_case.metrics.get(name) else {
@@ -207,7 +221,11 @@ pub fn compare_runs(
             );
         }
         cases.push(CaseComparison {
-            id: case_id.clone(),
+            comparison_key: comparison_key.clone(),
+            left_id: left_case.id.clone(),
+            right_id: right_case.id.clone(),
+            left_label: left_case.label.clone(),
+            right_label: right_case.label.clone(),
             benchmark: left_case.benchmark,
             metrics,
         });
@@ -226,8 +244,8 @@ pub fn compare_runs(
 /// Render the compact within-record case comparison written beside every run record.
 pub fn render_run_comparison(summary: &RunSummary) -> String {
     let mut output = format!(
-        "# Calibration comparison: {}\n\nDistributions are `median [p25, p75]` over completed measured trials. Deltas are descriptive differences from the first completed case of the same benchmark; no ranking or recommendation is applied.\n",
-        summary.run_id
+        "# Calibration run: {}\n\nPlan: `{}`. Distributions are `median [p25, p75]` over completed measured trials. Trial counts are `completed/failed/interrupted`. Deltas are descriptive differences from the first completed case of the same benchmark; no ranking or recommendation is applied.\n",
+        summary.run_id, summary.plan_id
     );
     render_case_table(
         &mut output,
@@ -245,6 +263,7 @@ pub fn render_run_comparison(summary: &RunSummary) -> String {
         "productive_per_s",
         &["wall_ms", "device_avg_batch", "gate_wait_ms", "nn_evals"],
     );
+    render_search_behavior_table(&mut output, summary);
     output
 }
 
@@ -287,6 +306,19 @@ pub fn render_record_comparison(comparison: &RunComparison) -> String {
             "device_avg_batch",
             "gate_wait_ms",
             "nn_evals",
+        ],
+    );
+    render_record_table(
+        &mut output,
+        comparison,
+        SummaryBenchmark::Search,
+        "Search behavior",
+        &[
+            "nn_evals",
+            "terminals",
+            "tt_stops",
+            "collisions",
+            "policy_l1_vs_baseline",
         ],
     );
     if !comparison.unavailable_cases.is_empty() {
@@ -550,6 +582,82 @@ fn search_metrics(trials: &[&SearchTrial]) -> BTreeMap<String, Distribution> {
     metrics
 }
 
+fn add_paired_policy_drift(
+    cases: &mut [CaseSummary],
+    search_by_case: &BTreeMap<&str, Vec<&SearchTrial>>,
+) {
+    let Some(baseline_id) = cases
+        .iter()
+        .find(|case| {
+            case.benchmark == SummaryBenchmark::Search && case.state == CaseState::Completed
+        })
+        .map(|case| case.id.clone())
+    else {
+        return;
+    };
+    let Some(baseline_trials) = search_by_case.get(baseline_id.as_str()) else {
+        return;
+    };
+    let baseline_by_trial = baseline_trials
+        .iter()
+        .copied()
+        .filter(|trial| {
+            trial.phase == TrialPhase::Measured && trial.status == TrialStatus::Completed
+        })
+        .map(|trial| (trial.trial, trial))
+        .collect::<BTreeMap<_, _>>();
+
+    for case in cases
+        .iter_mut()
+        .filter(|case| case.benchmark == SummaryBenchmark::Search)
+    {
+        let values = search_by_case
+            .get(case.id.as_str())
+            .into_iter()
+            .flat_map(|trials| trials.iter().copied())
+            .filter(|trial| {
+                trial.phase == TrialPhase::Measured && trial.status == TrialStatus::Completed
+            })
+            .filter_map(|trial| {
+                baseline_by_trial
+                    .get(&trial.trial)
+                    .map(|baseline| root_policy_l1(baseline, trial))
+            });
+        insert_metric(&mut case.metrics, "policy_l1_vs_baseline", values);
+    }
+}
+
+fn root_policy_l1(left: &SearchTrial, right: &SearchTrial) -> f64 {
+    let left = [
+        left.policy_p1_0,
+        left.policy_p1_1,
+        left.policy_p1_2,
+        left.policy_p1_3,
+        left.policy_p1_4,
+        left.policy_p2_0,
+        left.policy_p2_1,
+        left.policy_p2_2,
+        left.policy_p2_3,
+        left.policy_p2_4,
+    ];
+    let right = [
+        right.policy_p1_0,
+        right.policy_p1_1,
+        right.policy_p1_2,
+        right.policy_p1_3,
+        right.policy_p1_4,
+        right.policy_p2_0,
+        right.policy_p2_1,
+        right.policy_p2_2,
+        right.policy_p2_3,
+        right.policy_p2_4,
+    ];
+    left.into_iter()
+        .zip(right)
+        .map(|(left, right)| f64::from((left.unwrap() - right.unwrap()).abs()))
+        .sum()
+}
+
 fn insert_metric(
     metrics: &mut BTreeMap<String, Distribution>,
     name: &str,
@@ -592,7 +700,7 @@ fn render_case_table(
             .map(|metric| (case.id.as_str(), metric))
     });
     output.push_str(&format!("\n## {title}\n\n"));
-    output.push_str("| Case | State | Measured | ");
+    output.push_str("| Case | State | Trials | ");
     output.push_str(headline);
     output.push_str(" | Delta | ");
     output.push_str(&supporting.join(" | "));
@@ -616,7 +724,7 @@ fn render_case_table(
         };
         output.push_str(&format!(
             "| {} | {:?} | {}/{}/{} | {} | {} | ",
-            case.id,
+            case.label,
             case.state,
             case.measured_trials.completed,
             case.measured_trials.failed,
@@ -628,6 +736,43 @@ fn render_case_table(
             let value = case
                 .metrics
                 .get(*name)
+                .map(format_distribution)
+                .unwrap_or_else(|| "—".to_owned());
+            output.push_str(&value);
+            output.push_str(" | ");
+        }
+        output.push('\n');
+    }
+}
+
+fn render_search_behavior_table(output: &mut String, summary: &RunSummary) {
+    let cases = summary
+        .cases
+        .iter()
+        .filter(|case| case.benchmark == SummaryBenchmark::Search)
+        .collect::<Vec<_>>();
+    if cases.is_empty() {
+        return;
+    }
+
+    output.push_str(
+        "\n### Search behavior\n\n`policy_l1_vs_baseline` is the same-trial P1+P2 root-policy distance from the first completed search case. It shows behavior change, not playing quality.\n\n",
+    );
+    output.push_str(
+        "| Case | nn_evals | terminals | tt_stops | collisions | policy_l1_vs_baseline |\n|---|---:|---:|---:|---:|---:|\n",
+    );
+    for case in cases {
+        output.push_str(&format!("| {} | ", case.label));
+        for name in [
+            "nn_evals",
+            "terminals",
+            "tt_stops",
+            "collisions",
+            "policy_l1_vs_baseline",
+        ] {
+            let value = case
+                .metrics
+                .get(name)
                 .map(format_distribution)
                 .unwrap_or_else(|| "—".to_owned());
             output.push_str(&value);
@@ -660,7 +805,12 @@ fn render_record_table(
     }
     output.push('\n');
     for case in cases {
-        output.push_str(&format!("| {} | ", case.id));
+        let label = if case.left_label == case.right_label {
+            case.left_label.clone()
+        } else {
+            format!("{} → {}", case.left_label, case.right_label)
+        };
+        output.push_str(&format!("| {label} | "));
         for name in metrics {
             let value = case
                 .metrics

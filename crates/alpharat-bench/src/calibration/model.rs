@@ -17,6 +17,9 @@ pub const COMPARISON_JSON_FILE: &str = "comparison.json";
 #[serde(deny_unknown_fields)]
 pub struct RunRecord {
     pub protocol_version: u32,
+    /// The reusable experiment-plan identity.
+    pub plan_id: String,
+    /// The identity of this one execution, independent of the reusable plan.
     pub run_id: String,
     pub created_at: String,
     pub context: RunContext,
@@ -197,11 +200,15 @@ pub enum ComparisonAxis {
 pub enum CasePlan {
     BackendCapacity {
         id: String,
+        comparison_key: String,
+        label: String,
         workload: ArtifactIdentity,
         requested: CapacityRequest,
     },
     Search {
         id: String,
+        comparison_key: String,
+        label: String,
         workload: ArtifactIdentity,
         requested: SearchRequest,
     },
@@ -218,6 +225,25 @@ impl CasePlan {
         match self {
             Self::BackendCapacity { .. } => BenchmarkKind::BackendCapacity,
             Self::Search { .. } => BenchmarkKind::Search,
+        }
+    }
+
+    /// Stable slot used to pair corresponding cases across records.
+    ///
+    /// Unlike `id` and `label`, this omits source-specific identity such as backend/provider so
+    /// the same experimental slot can pair across controlled records.
+    pub fn comparison_key(&self) -> &str {
+        match self {
+            Self::BackendCapacity { comparison_key, .. } | Self::Search { comparison_key, .. } => {
+                comparison_key
+            }
+        }
+    }
+
+    /// Human-facing setup name. Labels are descriptive and never comparison identity.
+    pub fn label(&self) -> &str {
+        match self {
+            Self::BackendCapacity { label, .. } | Self::Search { label, .. } => label,
         }
     }
 

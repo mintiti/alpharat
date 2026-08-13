@@ -8,19 +8,21 @@ use alpharat_bench::calibration::{
     check_comparable, load_run_folder, CaseState, SourceState, COMPARISON_FILE, RUN_RECORD_FILE,
     SEARCH_TRIALS_FILE, SEARCH_WORKLOAD_FILE, SUMMARY_FILE,
 };
-use alpharat_bench::runner::execute_plan_file;
+use alpharat_bench::runner::{derive_run_artifacts, execute_plan_file};
 use serde_json::json;
 
 fn search_plan() -> serde_json::Value {
     json!({
         "protocol_version": 1,
-        "run_id": "runner-search-fixture",
+        "plan_id": "runner-search-fixture",
         "model": { "label": "fixture model", "path": "model.bin" },
         "comparison_axes": ["workers"],
         "cases": [
             {
                 "benchmark": "search",
                 "id": "search-w1",
+                "comparison_key": "search-workers-1-total-in-flight-4-direct",
+                "label": "One worker — total in-flight 4, direct",
                 "requested": {
                     "backend": { "engine": "smart_uniform" },
                     "workers": 1,
@@ -34,6 +36,8 @@ fn search_plan() -> serde_json::Value {
             {
                 "benchmark": "search",
                 "id": "search-w2",
+                "comparison_key": "search-workers-2-total-in-flight-4-direct",
+                "label": "Two workers — total in-flight 4, direct",
                 "requested": {
                     "backend": { "engine": "smart_uniform" },
                     "workers": 2,
@@ -88,7 +92,8 @@ fn one_command_materializes_and_reloads_a_search_run() {
 
     let run = execute_plan_file(&plan, &output).unwrap();
 
-    assert_eq!(run.record.run_id, "runner-search-fixture");
+    assert_eq!(run.record.plan_id, "runner-search-fixture");
+    assert!(run.record.run_id.starts_with("run-"));
     assert!(run
         .record
         .cases
@@ -115,8 +120,8 @@ fn one_command_materializes_and_reloads_a_search_run() {
     let reloaded = load_run_folder(&output).unwrap();
     assert_eq!(reloaded.search_trials.len(), 2);
     let markdown = fs::read_to_string(output.join(COMPARISON_FILE)).unwrap();
-    assert!(markdown.contains("search-w1"));
-    assert!(markdown.contains("search-w2"));
+    assert!(markdown.contains("One worker — total in-flight 4, direct"));
+    assert!(markdown.contains("Two workers — total in-flight 4, direct"));
     assert!(markdown.contains("no ranking or recommendation"));
 }
 
@@ -173,6 +178,10 @@ fn two_cli_runs_with_different_outputs_compare_as_the_same_build() {
 
     let left = load_run_folder(&left_folder).unwrap();
     let right = load_run_folder(&right_folder).unwrap();
+    assert_eq!(left.record.plan_id, right.record.plan_id);
+    assert!(left.record.run_id.starts_with("run-a-"));
+    assert!(right.record.run_id.starts_with("run-b-"));
+    assert_ne!(left.record.run_id, right.record.run_id);
     assert_ne!(
         left.record.context.build.command,
         right.record.context.build.command
@@ -196,4 +205,32 @@ fn execution_refuses_to_overwrite_an_existing_record_folder() {
     let error = execute_plan_file(&plan, &output).unwrap_err();
 
     assert!(error.to_string().contains("never overwrites"));
+}
+
+#[test]
+fn derive_regenerates_only_disposable_artifacts_from_a_valid_record() {
+    let temporary = tempfile::tempdir().unwrap();
+    fs::write(temporary.path().join("model.bin"), b"model").unwrap();
+    let plan = temporary.path().join("plan.json");
+    fs::write(&plan, serde_json::to_vec_pretty(&search_plan()).unwrap()).unwrap();
+    let output = temporary.path().join("preserved-run");
+    execute_plan_file(&plan, &output).unwrap();
+    let record_before = fs::read(output.join(RUN_RECORD_FILE)).unwrap();
+    let trials_before = fs::read(output.join(SEARCH_TRIALS_FILE)).unwrap();
+    fs::remove_file(output.join(SUMMARY_FILE)).unwrap();
+    fs::remove_file(output.join(COMPARISON_FILE)).unwrap();
+
+    let loaded = derive_run_artifacts(&output).unwrap();
+
+    assert!(loaded.record.run_id.starts_with("preserved-run-"));
+    assert_eq!(
+        fs::read(output.join(RUN_RECORD_FILE)).unwrap(),
+        record_before
+    );
+    assert_eq!(
+        fs::read(output.join(SEARCH_TRIALS_FILE)).unwrap(),
+        trials_before
+    );
+    assert!(output.join(SUMMARY_FILE).is_file());
+    assert!(output.join(COMPARISON_FILE).is_file());
 }

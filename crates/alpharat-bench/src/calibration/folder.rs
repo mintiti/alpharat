@@ -103,6 +103,7 @@ fn validate_record(folder: &Path, record: &RunRecord) -> Result<(), ProtocolErro
             record.protocol_version
         )));
     }
+    require_text("plan_id", &record.plan_id)?;
     require_text("run_id", &record.run_id)?;
     require_text("created_at", &record.created_at)?;
     validate_context(folder, record)?;
@@ -209,14 +210,24 @@ pub fn validate_run_plan(plan: &super::model::RunPlan) -> Result<(), ProtocolErr
     }
 
     let mut planned = BTreeMap::new();
+    let mut comparison_keys = BTreeMap::new();
     for case in &plan.cases {
         require_text("case id", case.id())?;
+        require_text("case comparison key", case.comparison_key())?;
+        require_text("case label", case.label())?;
         validate_artifact("case workload", case.workload())?;
         validate_case_plan(case)?;
         if planned.insert(case.id(), case).is_some() {
             return Err(ProtocolError::invalid(format!(
                 "duplicate planned case id '{}'",
                 case.id()
+            )));
+        }
+        if let Some(previous) = comparison_keys.insert(case.comparison_key(), case.id()) {
+            return Err(ProtocolError::invalid(format!(
+                "cases '{previous}' and '{}' share comparison key '{}'",
+                case.id(),
+                case.comparison_key()
             )));
         }
     }
@@ -860,6 +871,7 @@ fn validate_capacity_trial_metrics(
     let expected_positions = expected_calls * u128::from(request.batch_size);
     if trial.outer_calls.map(u128::from) != Some(expected_calls)
         || trial.outer_positions.map(u128::from) != Some(expected_positions)
+        || trial.device_calls != trial.outer_calls
         || trial.device_positions.map(u128::from) != Some(expected_positions)
         || trial.caller_peak.is_some_and(|peak| peak > request.callers)
     {
@@ -868,6 +880,33 @@ fn validate_capacity_trial_metrics(
             trial.case_id
         )));
     }
+    let wall_ms = trial.wall_ms.unwrap();
+    let caller_time_ms = trial.caller_time_ms.unwrap();
+    let caller_union_ms = trial.caller_union_ms.unwrap();
+    if greater_than(caller_union_ms, wall_ms) || greater_than(caller_union_ms, caller_time_ms) {
+        return Err(ProtocolError::invalid(format!(
+            "completed capacity trial for '{}' has inconsistent wall or caller timing",
+            trial.case_id
+        )));
+    }
+    validate_derived_metric(
+        &trial.case_id,
+        "positions_per_s",
+        trial.positions_per_s.unwrap(),
+        rate_per_second(trial.outer_positions.unwrap(), wall_ms),
+    )?;
+    validate_derived_metric(
+        &trial.case_id,
+        "device_avg_batch",
+        trial.device_avg_batch.unwrap(),
+        average(trial.device_positions.unwrap(), trial.device_calls.unwrap()),
+    )?;
+    validate_derived_metric(
+        &trial.case_id,
+        "device_inference_ms",
+        trial.device_inference_ms.unwrap(),
+        caller_union_ms,
+    )?;
     Ok(())
 }
 
@@ -958,8 +997,105 @@ fn validate_search_trial_metrics(
             trial.case_id
         )));
     }
+    let wall_ms = trial.wall_ms.unwrap();
+    let phase_occupancy_ms = trial.phase_occupancy_ms.unwrap();
+    let expected_phase_occupancy = trial.lease_wait_ms.unwrap()
+        + trial.gate_wait_ms.unwrap()
+        + trial.gate_hold_ms.unwrap()
+        + trial.inference_caller_ms.unwrap()
+        + trial.completion_wait_ms.unwrap();
+    let backend_caller_ms = trial.backend_caller_ms.unwrap();
+    let backend_union_ms = trial.backend_union_ms.unwrap();
+    if greater_than(backend_union_ms, backend_caller_ms)
+        || greater_than(backend_union_ms, wall_ms)
+        || trial
+            .backend_peak_callers
+            .is_some_and(|peak| peak > request.workers)
+    {
+        return Err(ProtocolError::invalid(format!(
+            "completed search trial for '{}' has inconsistent backend timing or concurrency",
+            trial.case_id
+        )));
+    }
+    validate_derived_metric(
+        &trial.case_id,
+        "productive_per_s",
+        trial.productive_per_s.unwrap(),
+        rate_per_second(productive, wall_ms),
+    )?;
+    validate_derived_metric(
+        &trial.case_id,
+        "phase_occupancy_ms",
+        phase_occupancy_ms,
+        expected_phase_occupancy,
+    )?;
+    validate_derived_metric(
+        &trial.case_id,
+        "phase_occupancy_per_wall",
+        trial.phase_occupancy_per_wall.unwrap(),
+        ratio(phase_occupancy_ms, wall_ms),
+    )?;
+    validate_derived_metric(
+        &trial.case_id,
+        "backend_caller_per_union",
+        trial.backend_caller_per_union.unwrap(),
+        ratio(backend_caller_ms, backend_union_ms),
+    )?;
+    validate_derived_metric(
+        &trial.case_id,
+        "device_avg_batch",
+        trial.device_avg_batch.unwrap(),
+        average(trial.device_positions.unwrap(), trial.device_calls.unwrap()),
+    )?;
     validate_policy_sum(&trial.case_id, &policies[..5])?;
     validate_policy_sum(&trial.case_id, &policies[5..])
+}
+
+fn rate_per_second(units: u64, wall_ms: f64) -> f64 {
+    if wall_ms == 0.0 {
+        0.0
+    } else {
+        units as f64 * 1_000.0 / wall_ms
+    }
+}
+
+fn average(units: u64, count: u64) -> f64 {
+    if count == 0 {
+        0.0
+    } else {
+        units as f64 / count as f64
+    }
+}
+
+fn ratio(numerator: f64, denominator: f64) -> f64 {
+    if denominator == 0.0 {
+        0.0
+    } else {
+        numerator / denominator
+    }
+}
+
+fn validate_derived_metric(
+    case_id: &str,
+    name: &str,
+    actual: f64,
+    expected: f64,
+) -> Result<(), ProtocolError> {
+    if !approximately_equal(actual, expected) {
+        return Err(ProtocolError::invalid(format!(
+            "trial for '{case_id}' reports {name}={actual}, but its recorded inputs imply {expected}"
+        )));
+    }
+    Ok(())
+}
+
+fn greater_than(left: f64, right: f64) -> bool {
+    left > right && !approximately_equal(left, right)
+}
+
+fn approximately_equal(left: f64, right: f64) -> bool {
+    let scale = left.abs().max(right.abs()).max(1.0);
+    (left - right).abs() <= scale * 1e-9
 }
 
 fn validate_trial_status(

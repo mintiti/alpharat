@@ -69,6 +69,22 @@ fn change_csv_cell(folder: &Path, file: &str, data_row: usize, column: &str, val
     fs::write(path, updated).unwrap();
 }
 
+fn duplicate_csv_rows(folder: &Path, file: &str, source_id: &str, new_id: &str) {
+    let path = folder.join(file);
+    let contents = fs::read_to_string(&path).unwrap();
+    let mut lines = contents.lines().map(str::to_owned).collect::<Vec<_>>();
+    let copies = lines
+        .iter()
+        .skip(1)
+        .filter(|line| line.starts_with(&format!("{source_id},")))
+        .map(|line| line.replacen(source_id, new_id, 1))
+        .collect::<Vec<_>>();
+    lines.extend(copies);
+    let mut updated = lines.join("\n");
+    updated.push('\n');
+    fs::write(path, updated).unwrap();
+}
+
 fn error_message(error: ProtocolError) -> String {
     error.to_string()
 }
@@ -238,6 +254,40 @@ fn rejects_search_work_that_does_not_balance() {
 }
 
 #[test]
+fn rejects_a_capacity_rate_that_does_not_match_recorded_work_and_time() {
+    let run = copy_fixture();
+    change_csv_cell(
+        run.path(),
+        CAPACITY_TRIALS_FILE,
+        1,
+        "positions_per_s",
+        "123.0",
+    );
+    refresh_trial_file(run.path(), "backend_capacity", CAPACITY_TRIALS_FILE, 2);
+
+    let error = load_run_folder(run.path()).unwrap_err();
+
+    assert!(error_message(error).contains("recorded inputs imply"));
+}
+
+#[test]
+fn rejects_a_search_ratio_that_does_not_match_recorded_inputs() {
+    let run = copy_fixture();
+    change_csv_cell(
+        run.path(),
+        SEARCH_TRIALS_FILE,
+        1,
+        "phase_occupancy_per_wall",
+        "42.0",
+    );
+    refresh_trial_file(run.path(), "search", SEARCH_TRIALS_FILE, 2);
+
+    let error = load_run_folder(run.path()).unwrap_err();
+
+    assert!(error_message(error).contains("recorded inputs imply"));
+}
+
+#[test]
 fn rejects_search_capacity_that_cannot_resolve_to_a_worker_batch() {
     let run = copy_fixture();
     update_record(run.path(), |record| {
@@ -259,6 +309,7 @@ fn rejects_case_differences_that_the_plan_did_not_name() {
             .retain(|axis| axis != "batch_size");
         let mut second_case = record["plan"]["cases"][0].clone();
         second_case["id"] = json!("capacity-cpu-b16-c2");
+        second_case["comparison_key"] = json!("capacity-batch-16-callers-2");
         second_case["requested"]["batch_size"] = json!(16);
         record["plan"]["cases"]
             .as_array_mut()
@@ -287,7 +338,10 @@ fn accepts_two_equivalent_runs_for_comparison() {
     assert!(check.differing_axes.is_empty());
     assert_eq!(
         check.comparable_cases,
-        ["capacity-cpu-b8-c2", "search-cpu-w2-cap128"]
+        [
+            "capacity-batch-8-callers-2",
+            "search-workers-2-total-in-flight-128-direct"
+        ]
     );
     assert!(check.unavailable_cases.is_empty());
 }
@@ -376,6 +430,7 @@ fn treats_labels_paths_and_list_order_as_descriptions_not_identity() {
             .unwrap()
             .reverse();
         for case in record["plan"]["cases"].as_array_mut().unwrap() {
+            case["label"] = json!("same case, clearer label");
             case["workload"]["label"] = json!("same workload, clearer label");
             case["workload"]["path_hint"] = json!("elsewhere/workload.bin");
         }
@@ -386,6 +441,97 @@ fn treats_labels_paths_and_list_order_as_descriptions_not_identity() {
     let check = check_comparable(&left, &right).unwrap();
 
     assert!(check.differing_axes.is_empty());
+}
+
+#[test]
+fn pairs_records_by_comparison_key_when_local_ids_and_labels_differ() {
+    let left = copy_fixture();
+    let right = copy_fixture();
+    update_record(right.path(), |record| {
+        record["run_id"] = json!("second-synthetic-run");
+        record["plan"]["cases"][0]["id"] = json!("capacity-local-id-on-right");
+        record["plan"]["cases"][0]["label"] = json!("Right-host capacity label");
+        record["cases"][0]["id"] = json!("capacity-local-id-on-right");
+    });
+    for row in 0..2 {
+        change_csv_cell(
+            right.path(),
+            CAPACITY_TRIALS_FILE,
+            row,
+            "case_id",
+            "capacity-local-id-on-right",
+        );
+    }
+    refresh_trial_file(right.path(), "backend_capacity", CAPACITY_TRIALS_FILE, 2);
+    let left = load_run_folder(left.path()).unwrap();
+    let right = load_run_folder(right.path()).unwrap();
+
+    let comparison = compare_runs(&left, &right).unwrap();
+    let capacity = comparison
+        .cases
+        .iter()
+        .find(|case| case.comparison_key == "capacity-batch-8-callers-2")
+        .unwrap();
+
+    assert_eq!(capacity.left_id, "capacity-cpu-b8-c2");
+    assert_eq!(capacity.right_id, "capacity-local-id-on-right");
+    assert_eq!(capacity.right_label, "Right-host capacity label");
+}
+
+#[test]
+fn rejects_duplicate_comparison_keys_inside_one_plan() {
+    let run = copy_fixture();
+    update_record(run.path(), |record| {
+        record["plan"]["cases"][1]["comparison_key"] =
+            record["plan"]["cases"][0]["comparison_key"].clone();
+    });
+
+    let error = load_run_folder(run.path()).unwrap_err();
+
+    assert!(error_message(error).contains("share comparison key"));
+}
+
+#[test]
+fn exposes_paired_search_composition_and_policy_drift() {
+    let run = copy_fixture();
+    update_record(run.path(), |record| {
+        let mut plan = record["plan"]["cases"][1].clone();
+        plan["id"] = json!("search-cpu-w4-cap128");
+        plan["comparison_key"] = json!("search-workers-4-total-in-flight-128-direct");
+        plan["label"] = json!("Four workers — total in-flight 128, direct");
+        plan["requested"]["workers"] = json!(4);
+        record["plan"]["cases"].as_array_mut().unwrap().push(plan);
+
+        let mut outcome = record["cases"][1].clone();
+        outcome["id"] = json!("search-cpu-w4-cap128");
+        outcome["outcome"]["resolved"]["workers"] = json!(4);
+        outcome["outcome"]["resolved"]["worker_batch"] = json!(32);
+        record["cases"].as_array_mut().unwrap().push(outcome);
+    });
+    duplicate_csv_rows(
+        run.path(),
+        SEARCH_TRIALS_FILE,
+        "search-cpu-w2-cap128",
+        "search-cpu-w4-cap128",
+    );
+    change_csv_cell(run.path(), SEARCH_TRIALS_FILE, 3, "policy_p1_0", "0.2");
+    change_csv_cell(run.path(), SEARCH_TRIALS_FILE, 3, "policy_p1_1", "0.1");
+    refresh_trial_file(run.path(), "search", SEARCH_TRIALS_FILE, 4);
+    let run = load_run_folder(run.path()).unwrap();
+
+    let summary = summarize_run(&run);
+    let changed = summary
+        .cases
+        .iter()
+        .find(|case| case.id == "search-cpu-w4-cap128")
+        .unwrap();
+    let drift = &changed.metrics["policy_l1_vs_baseline"];
+    let markdown = alpharat_bench::calibration::render_run_comparison(&summary);
+
+    assert!((drift.median - 0.2).abs() < 1e-6);
+    assert!(markdown.contains("Search behavior"));
+    assert!(markdown.contains("Four workers — total in-flight 128, direct"));
+    assert!(markdown.contains("policy_l1_vs_baseline"));
 }
 
 #[test]

@@ -11,6 +11,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
+use uuid::Uuid;
 
 use crate::calibration::{
     load_run_folder, render_run_comparison, summarize_run, validate_run_plan, AcceleratorIdentity,
@@ -44,7 +45,8 @@ static INTERRUPTED: AtomicBool = AtomicBool::new(false);
 #[serde(deny_unknown_fields)]
 pub struct ExecutionPlan {
     pub protocol_version: u32,
-    pub run_id: String,
+    /// Identity of the reusable plan. One execution receives its own ID from the output folder.
+    pub plan_id: String,
     pub model: FileArtifact,
     pub comparison_axes: BTreeSet<ComparisonAxis>,
     pub cases: Vec<ExecutionCase>,
@@ -90,10 +92,14 @@ pub enum SearchWorkloadSource {
 pub enum ExecutionCase {
     BackendCapacity {
         id: String,
+        comparison_key: String,
+        label: String,
         requested: CapacityRequest,
     },
     Search {
         id: String,
+        comparison_key: String,
+        label: String,
         requested: SearchRequest,
     },
 }
@@ -161,6 +167,7 @@ pub fn execute_plan_file(
     validate_run_plan(&run_plan)?;
 
     let output_folder = output_folder.as_ref();
+    let run_id = execution_id_from_output_folder(output_folder)?;
     create_output_folder(output_folder)?;
     write_resolved_workloads(output_folder, &resolved_workloads)?;
     let source = materialize_source_identity(output_folder, source)?;
@@ -190,7 +197,8 @@ pub fn execute_plan_file(
         write_trial_files(output_folder, &run_plan, &capacity_trials, &search_trials)?;
     let record = RunRecord {
         protocol_version: PROTOCOL_VERSION,
-        run_id: execution.run_id,
+        plan_id: execution.plan_id,
+        run_id,
         created_at: utc_timestamp(),
         context,
         plan: run_plan,
@@ -201,13 +209,24 @@ pub fn execute_plan_file(
 
     // The generated record must satisfy the same loader as a future comparison consumer.
     let loaded = load_run_folder(output_folder)?;
-    let summary = summarize_run(&loaded);
-    write_json(output_folder.join(SUMMARY_FILE), &summary, "run summary")?;
-    write(
-        output_folder.join(COMPARISON_FILE),
-        render_run_comparison(&summary).as_bytes(),
-    )?;
+    write_derived_artifacts(&loaded)?;
     Ok(loaded)
+}
+
+/// Revalidate a durable record and regenerate only its disposable summary and human report.
+pub fn derive_run_artifacts(folder: impl AsRef<Path>) -> Result<LoadedRun, RunnerError> {
+    let loaded = load_run_folder(folder)?;
+    write_derived_artifacts(&loaded)?;
+    Ok(loaded)
+}
+
+fn write_derived_artifacts(loaded: &LoadedRun) -> Result<(), RunnerError> {
+    let summary = summarize_run(loaded);
+    write_json(loaded.folder.join(SUMMARY_FILE), &summary, "run summary")?;
+    write(
+        loaded.folder.join(COMPARISON_FILE),
+        render_run_comparison(&summary).as_bytes(),
+    )
 }
 
 fn validate_execution_plan(plan: &ExecutionPlan) -> Result<(), RunnerError> {
@@ -217,8 +236,8 @@ fn validate_execution_plan(plan: &ExecutionPlan) -> Result<(), RunnerError> {
             plan.protocol_version
         )));
     }
-    if plan.run_id.trim().is_empty() {
-        return Err(RunnerError::Invalid("run id cannot be empty".to_owned()));
+    if plan.plan_id.trim().is_empty() {
+        return Err(RunnerError::Invalid("plan id cannot be empty".to_owned()));
     }
     if plan.model.label.trim().is_empty() || plan.model.path.as_os_str().is_empty() {
         return Err(RunnerError::Invalid(
@@ -351,8 +370,15 @@ fn resolve_run_plan(
     let mut cases = Vec::with_capacity(execution.cases.len());
     for case in &execution.cases {
         cases.push(match case {
-            ExecutionCase::BackendCapacity { id, requested } => CasePlan::BackendCapacity {
+            ExecutionCase::BackendCapacity {
+                id,
+                comparison_key,
+                label,
+                requested,
+            } => CasePlan::BackendCapacity {
                 id: id.clone(),
+                comparison_key: comparison_key.clone(),
+                label: label.clone(),
                 workload: workloads
                     .capacity
                     .as_ref()
@@ -361,8 +387,15 @@ fn resolve_run_plan(
                     .clone(),
                 requested: requested.clone(),
             },
-            ExecutionCase::Search { id, requested } => CasePlan::Search {
+            ExecutionCase::Search {
+                id,
+                comparison_key,
+                label,
+                requested,
+            } => CasePlan::Search {
                 id: id.clone(),
+                comparison_key: comparison_key.clone(),
+                label: label.clone(),
                 workload: workloads
                     .search
                     .as_ref()
@@ -863,6 +896,20 @@ fn create_output_folder(folder: &Path) -> Result<(), RunnerError> {
         path: folder.to_path_buf(),
         source,
     })
+}
+
+fn execution_id_from_output_folder(folder: &Path) -> Result<String, RunnerError> {
+    let folder_name = folder
+        .file_name()
+        .and_then(OsStr::to_str)
+        .filter(|name| !name.trim().is_empty())
+        .ok_or_else(|| {
+            RunnerError::Invalid(format!(
+                "output folder '{}' does not provide a usable run id",
+                folder.display()
+            ))
+        })?;
+    Ok(format!("{folder_name}-{}", Uuid::new_v4()))
 }
 
 fn resolve_path(base: &Path, path: &Path) -> PathBuf {

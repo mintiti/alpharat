@@ -26,20 +26,20 @@ pub enum ComparisonIssue {
     ModelIdentity,
     MissingCase {
         run_id: String,
-        case_id: String,
+        comparison_key: String,
     },
     BenchmarkKind {
-        case_id: String,
+        comparison_key: String,
     },
     WorkloadIdentity {
-        case_id: String,
+        comparison_key: String,
     },
     UndeclaredAxes {
-        case_id: String,
+        comparison_key: String,
         axes: BTreeSet<ComparisonAxis>,
     },
     FixedPlanDifference {
-        case_id: String,
+        comparison_key: String,
         message: String,
     },
 }
@@ -133,40 +133,40 @@ pub fn check_comparable(
         .plan
         .cases
         .iter()
-        .map(|case| (case.id(), case))
+        .map(|case| (case.comparison_key(), case))
         .collect();
     let right_plans: BTreeMap<_, _> = right
         .record
         .plan
         .cases
         .iter()
-        .map(|case| (case.id(), case))
+        .map(|case| (case.comparison_key(), case))
         .collect();
 
-    for case_id in left_plans.keys() {
-        if !right_plans.contains_key(case_id) {
+    for comparison_key in left_plans.keys() {
+        if !right_plans.contains_key(comparison_key) {
             issues.push(ComparisonIssue::MissingCase {
                 run_id: right.record.run_id.clone(),
-                case_id: (*case_id).to_owned(),
+                comparison_key: (*comparison_key).to_owned(),
             });
         }
     }
-    for case_id in right_plans.keys() {
-        if !left_plans.contains_key(case_id) {
+    for comparison_key in right_plans.keys() {
+        if !left_plans.contains_key(comparison_key) {
             issues.push(ComparisonIssue::MissingCase {
                 run_id: left.record.run_id.clone(),
-                case_id: (*case_id).to_owned(),
+                comparison_key: (*comparison_key).to_owned(),
             });
         }
     }
 
-    for (case_id, left_plan) in &left_plans {
-        let Some(right_plan) = right_plans.get(case_id) else {
+    for (comparison_key, left_plan) in &left_plans {
+        let Some(right_plan) = right_plans.get(comparison_key) else {
             continue;
         };
         if left_plan.kind() != right_plan.kind() {
             issues.push(ComparisonIssue::BenchmarkKind {
-                case_id: (*case_id).to_owned(),
+                comparison_key: (*comparison_key).to_owned(),
             });
             continue;
         }
@@ -175,7 +175,7 @@ pub fn check_comparable(
             .has_same_content_as(right_plan.workload())
         {
             issues.push(ComparisonIssue::WorkloadIdentity {
-                case_id: (*case_id).to_owned(),
+                comparison_key: (*comparison_key).to_owned(),
             });
         }
         match case_plan_differences(left_plan, right_plan) {
@@ -193,14 +193,14 @@ pub fn check_comparable(
                     .collect::<BTreeSet<_>>();
                 if !undeclared.is_empty() {
                     issues.push(ComparisonIssue::UndeclaredAxes {
-                        case_id: (*case_id).to_owned(),
+                        comparison_key: (*comparison_key).to_owned(),
                         axes: undeclared,
                     });
                 }
                 differing_axes.extend(case_differences);
             }
             Err(error) => issues.push(ComparisonIssue::FixedPlanDifference {
-                case_id: (*case_id).to_owned(),
+                comparison_key: (*comparison_key).to_owned(),
                 message: error.to_string(),
             }),
         }
@@ -224,13 +224,15 @@ pub fn check_comparable(
         .collect();
     let mut comparable_cases = Vec::new();
     let mut unavailable_cases = Vec::new();
-    for case_id in left_plans.keys() {
-        if left_states[case_id] == CaseState::Completed
-            && right_states[case_id] == CaseState::Completed
+    for left_plan in &left.record.plan.cases {
+        let comparison_key = left_plan.comparison_key();
+        let right_plan = right_plans[comparison_key];
+        if left_states[left_plan.id()] == CaseState::Completed
+            && right_states[right_plan.id()] == CaseState::Completed
         {
-            comparable_cases.push((*case_id).to_owned());
+            comparable_cases.push(comparison_key.to_owned());
         } else {
-            unavailable_cases.push((*case_id).to_owned());
+            unavailable_cases.push(comparison_key.to_owned());
         }
     }
 
@@ -273,7 +275,7 @@ fn context_difference(
         || !right.record.plan.comparison_axes.contains(&axis)
     {
         issues.push(ComparisonIssue::UndeclaredAxes {
-            case_id: "<run-context>".to_owned(),
+            comparison_key: "<run-context>".to_owned(),
             axes: BTreeSet::from([axis]),
         });
     }

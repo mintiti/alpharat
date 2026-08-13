@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 use alpharat_bench::calibration::{
     compare_runs, load_run_folder, render_record_comparison, COMPARISON_FILE, COMPARISON_JSON_FILE,
 };
-use alpharat_bench::runner::execute_plan_file;
+use alpharat_bench::runner::{derive_run_artifacts, execute_plan_file};
 
 fn main() {
     if let Err(error) = run() {
@@ -21,15 +21,47 @@ fn run() -> Result<(), String> {
     };
     match command {
         "run" => run_plan(&raw[1..]),
+        "derive" => derive(&raw[1..]),
         "compare" => compare(&raw[1..]),
         "--help" | "-h" | "help" => {
             print_help();
             Ok(())
         }
         other => Err(format!(
-            "unknown command '{other}'; expected run or compare"
+            "unknown command '{other}'; expected run, derive, or compare"
         )),
     }
+}
+
+fn derive(args: &[String]) -> Result<(), String> {
+    let mut run = None;
+    let mut index = 0;
+    while index < args.len() {
+        let flag = args[index].as_str();
+        match flag {
+            "--run" => {
+                index += 1;
+                run = Some(PathBuf::from(
+                    args.get(index)
+                        .ok_or_else(|| "--run requires a value".to_owned())?,
+                ));
+            }
+            "--help" | "-h" => {
+                print_derive_help();
+                return Ok(());
+            }
+            other => return Err(format!("unknown derive option '{other}'")),
+        }
+        index += 1;
+    }
+    let folder = run.ok_or_else(|| "derive requires --run <run-folder>".to_owned())?;
+    let loaded = derive_run_artifacts(&folder).map_err(|error| error.to_string())?;
+    eprintln!(
+        "regenerated derived artifacts for calibration run '{}' in {}",
+        loaded.record.run_id,
+        loaded.folder.display()
+    );
+    Ok(())
 }
 
 fn run_plan(args: &[String]) -> Result<(), String> {
@@ -144,6 +176,7 @@ fn print_help() {
     eprintln!();
     eprintln!("Commands:");
     eprintln!("  run      Execute an explicit plan into a self-contained run folder");
+    eprintln!("  derive   Regenerate disposable reports from a validated run folder");
     eprintln!("  compare  Compare two compatible run folders");
     eprintln!();
     eprintln!("Use 'alpharat-calibrate <command> --help' for command options.");
@@ -151,6 +184,10 @@ fn print_help() {
 
 fn print_run_help() {
     eprintln!("Usage: alpharat-calibrate run --plan <plan.json> --output <folder>");
+}
+
+fn print_derive_help() {
+    eprintln!("Usage: alpharat-calibrate derive --run <run-folder>");
 }
 
 fn print_compare_help() {
