@@ -175,7 +175,8 @@ mod inner {
     /// Configuration for the TensorRT-RTX backend.
     pub struct TensorrtConfig {
         /// Batch size TensorRT should optimize the dynamic profile around.
-        pub opt_batch: usize,
+        /// Defaults to `max_batch` when omitted.
+        pub opt_batch: Option<usize>,
         /// Maximum batch size. GPU buffers are pre-allocated for this size.
         pub max_batch: usize,
         /// Directory for cached serialized engines. `None` disables caching.
@@ -190,7 +191,7 @@ mod inner {
     impl Default for TensorrtConfig {
         fn default() -> Self {
             Self {
-                opt_batch: 256,
+                opt_batch: None,
                 max_batch: 256,
                 cache_dir: None,
                 host_io: TrtHostIoMode::Pinned,
@@ -210,6 +211,10 @@ mod inner {
 
     fn checked_bytes(elements: usize, label: &str) -> Result<usize, BackendError> {
         checked_elements(elements, std::mem::size_of::<f32>(), label)
+    }
+
+    fn elapsed_us(start: Option<Instant>) -> f64 {
+        start.map_or(0.0, |start| start.elapsed().as_secs_f64() * 1_000_000.0)
     }
 
     #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -244,6 +249,7 @@ mod inner {
 
     #[derive(Clone, Copy, Debug, Eq, PartialEq)]
     struct BatchLayout {
+        batch_size: usize,
         input_elements: usize,
         policy_elements: usize,
         value_elements: usize,
@@ -288,6 +294,7 @@ mod inner {
             let value_elements = max_batch;
             let output = OutputLayout::new(policy_elements, value_elements)?;
             let capacity = BatchLayout {
+                batch_size: max_batch,
                 input_elements,
                 policy_elements,
                 value_elements,
@@ -324,6 +331,7 @@ mod inner {
             let policy_elements = checked_elements(n, 5, "policy batch")?;
             let value_elements = n;
             Ok(BatchLayout {
+                batch_size: n,
                 input_elements,
                 policy_elements,
                 value_elements,
@@ -919,6 +927,8 @@ mod inner {
     struct TrtSession {
         handle: *mut c_void, // opaque TrtSession from C++ shim
         stream: *mut c_void,
+        input_name: CString,
+        last_batch: Option<usize>,
         buffers: GpuBuffers,
         pinned: Option<PinnedHostBuffers>,
         completion: Option<CudaEvent>,
@@ -1020,10 +1030,14 @@ mod inner {
 
             let mut stream: *mut c_void = std::ptr::null_mut();
             cuda_check(unsafe { cudaStreamCreate(&mut stream) }, "cudaStreamCreate")?;
+            let input_name = CString::new(crate::TENSOR_INPUT)
+                .expect("TensorRT input tensor name must not contain NUL bytes");
 
             Ok(Self {
                 handle,
                 stream,
+                input_name,
+                last_batch: None,
                 buffers,
                 pinned,
                 completion,
@@ -1058,33 +1072,40 @@ mod inner {
             self.health.ensure_healthy()
         }
 
-        fn validate_input(&self, input_len: usize, n: usize) -> Result<BatchLayout, BackendError> {
+        fn validate_input(
+            &self,
+            input_len: usize,
+            batch: BatchLayout,
+        ) -> Result<(), BackendError> {
             self.ensure_healthy()?;
-            let batch = self.layout.batch(n)?;
             if input_len != batch.input_elements {
                 return Err(BackendError::msg(format!(
                     "input length {input_len} != expected {}",
                     batch.input_elements
                 )));
             }
-            Ok(batch)
+            Ok(())
         }
 
-        fn set_input_shape(&self, n: usize) -> Result<(), BackendError> {
-            let obs_name = CString::new(crate::TENSOR_INPUT).unwrap();
+        fn ensure_input_shape(&mut self, n: usize) -> Result<(), BackendError> {
+            if self.last_batch == Some(n) {
+                return Ok(());
+            }
             let n = i64::try_from(n)
                 .map_err(|_| BackendError::msg("TensorRT batch size does not fit in i64"))?;
             let obs_dim = i64::try_from(self.layout.obs_dim).map_err(|_| {
                 BackendError::msg("TensorRT observation dimension does not fit in i64")
             })?;
             let shape = [n, obs_dim];
-            let rc =
-                unsafe { trt_set_input_shape(self.handle, obs_name.as_ptr(), 2, shape.as_ptr()) };
+            let rc = unsafe {
+                trt_set_input_shape(self.handle, self.input_name.as_ptr(), 2, shape.as_ptr())
+            };
             if rc != 0 {
                 return Err(BackendError::msg(format!(
                     "Failed to set input shape for batch size {n} (rc={rc})"
                 )));
             }
+            self.last_batch = Some(n as usize);
             Ok(())
         }
 
@@ -1117,12 +1138,12 @@ mod inner {
         fn infer_pageable(
             &mut self,
             input: &[f32],
-            n: usize,
+            batch: BatchLayout,
             profile_stages: bool,
         ) -> Result<(OwnedTrtOutputs, TrtTimingInfo), BackendError> {
-            let batch = self.validate_input(input.len(), n)?;
-            self.set_input_shape(n)?;
-            let total_start = Instant::now();
+            self.validate_input(input.len(), batch)?;
+            self.ensure_input_shape(batch.batch_size)?;
+            let total_start = profile_stages.then(Instant::now);
             let mut timing = TrtTimingInfo::default();
             let events = if profile_stages {
                 self.stage_events.as_ref()
@@ -1180,12 +1201,12 @@ mod inner {
                 )?;
             }
 
-            let alloc_start = Instant::now();
+            let alloc_start = profile_stages.then(Instant::now);
             let mut pp1 = vec![0.0f32; batch.policy_elements];
             let mut pp2 = vec![0.0f32; batch.policy_elements];
             let mut v1 = vec![0.0f32; batch.value_elements];
             let mut v2 = vec![0.0f32; batch.value_elements];
-            timing.output_alloc_us = alloc_start.elapsed().as_secs_f64() * 1_000_000.0;
+            timing.output_alloc_us = elapsed_us(alloc_start);
 
             if let Some(events) = events {
                 events
@@ -1258,13 +1279,12 @@ mod inner {
                 )?;
             }
 
-            timing.total_us = total_start.elapsed().as_secs_f64() * 1_000_000.0;
+            timing.total_us = elapsed_us(total_start);
             flight.finish();
             Ok(((pp1, pp2, v1, v2), timing))
         }
 
-        fn pinned_input_mut(&mut self, n: usize) -> Result<&mut [f32], BackendError> {
-            let batch = self.layout.batch(n)?;
+        fn pinned_input_mut(&mut self, batch: BatchLayout) -> Result<&mut [f32], BackendError> {
             self.ensure_healthy()?;
             self.pinned
                 .as_mut()
@@ -1274,13 +1294,12 @@ mod inner {
 
         fn infer_pinned_prepared(
             &mut self,
-            n: usize,
+            batch: BatchLayout,
             profile_stages: bool,
         ) -> Result<TrtTimingInfo, BackendError> {
-            let batch = self.layout.batch(n)?;
-            self.validate_input(batch.input_elements, n)?;
-            self.set_input_shape(n)?;
-            let total_start = Instant::now();
+            self.validate_input(batch.input_elements, batch)?;
+            self.ensure_input_shape(batch.batch_size)?;
+            let total_start = profile_stages.then(Instant::now);
             let pinned = self.pinned.as_mut().ok_or_else(|| {
                 BackendError::msg("pinned inference requested on pageable session")
             })?;
@@ -1373,13 +1392,15 @@ mod inner {
             } else {
                 TrtTimingInfo::default()
             };
-            timing.total_us = total_start.elapsed().as_secs_f64() * 1_000_000.0;
+            timing.total_us = elapsed_us(total_start);
             flight.finish();
             Ok(timing)
         }
 
-        fn pinned_output_slices(&self, n: usize) -> Result<TrtOutputSlices<'_>, BackendError> {
-            let batch = self.layout.batch(n)?;
+        fn pinned_output_slices(
+            &self,
+            batch: BatchLayout,
+        ) -> Result<TrtOutputSlices<'_>, BackendError> {
             self.ensure_healthy()?;
             self.pinned
                 .as_ref()
@@ -1426,17 +1447,18 @@ mod inner {
         ) -> Result<Self, BackendError> {
             let obs_dim = encoder.obs_dim();
             let layout = TensorLayout::new(config.max_batch, obs_dim)?;
+            let opt_batch = config.opt_batch.unwrap_or(config.max_batch);
 
-            if config.opt_batch == 0 || config.opt_batch > config.max_batch {
+            if opt_batch == 0 || opt_batch > config.max_batch {
                 return Err(BackendError::msg(format!(
                     "TensorRT opt_batch must be in 1..={} (got {})",
-                    config.max_batch, config.opt_batch
+                    config.max_batch, opt_batch
                 )));
             }
-            if config.opt_batch > i32::MAX as usize {
+            if opt_batch > i32::MAX as usize {
                 return Err(BackendError::msg(format!(
                     "TensorRT opt_batch must fit in i32 (got {})",
-                    config.opt_batch
+                    opt_batch
                 )));
             }
             load_trt_libs()?;
@@ -1450,7 +1472,7 @@ mod inner {
             })?;
 
             let onnx_hash: [u8; 32] = Sha256::digest(&onnx_bytes).into();
-            let key = cache_key(&onnx_hash, config.opt_batch, config.max_batch)?;
+            let key = cache_key(&onnx_hash, opt_batch, config.max_batch)?;
 
             // Load cached engine or build from scratch
             let engine_data = match &config.cache_dir {
@@ -1461,7 +1483,7 @@ mod inner {
                     }
                     None => {
                         eprintln!("[TensorRT] Building engine from ONNX (this may take 10-30s)...");
-                        let data = build_engine(&onnx_bytes, config.opt_batch, config.max_batch)?;
+                        let data = build_engine(&onnx_bytes, opt_batch, config.max_batch)?;
                         save_cache(dir, &key, &data, &onnx_hash);
                         eprintln!("[TensorRT] Engine cached as {key}");
                         data
@@ -1469,7 +1491,7 @@ mod inner {
                 },
                 None => {
                     eprintln!("[TensorRT] Building engine (no cache dir configured)...");
-                    build_engine(&onnx_bytes, config.opt_batch, config.max_batch)?
+                    build_engine(&onnx_bytes, opt_batch, config.max_batch)?
                 }
             };
 
@@ -1478,7 +1500,7 @@ mod inner {
             let pinned_bytes = session.pinned_bytes();
             eprintln!(
                 "[TensorRT] Profile: MIN=1, OPT={}, MAX={}; one execution context; CUDA graphs: off; host I/O: {}; pinned bytes: {}; stage profiling: {}",
-                config.opt_batch,
+                opt_batch,
                 config.max_batch,
                 config.host_io,
                 pinned_bytes,
@@ -1585,13 +1607,14 @@ mod inner {
                 ));
             }
             let call_start = Instant::now();
+            let batch = self.layout.batch(n)?;
             let mut session = self.lock_session()?;
-            session.validate_input(encoded.len(), n)?;
+            session.validate_input(encoded.len(), batch)?;
 
             let (results, mut timing) = match self.host_io {
                 TrtHostIoMode::Pageable => {
                     let ((pp1, pp2, v1, v2), mut timing) =
-                        session.infer_pageable(encoded, n, true)?;
+                        session.infer_pageable(encoded, batch, true)?;
                     let parse_start = Instant::now();
                     let results = parse_eval_results(&pp1, &pp2, &v1, &v2, n)?;
                     timing.parse_us = parse_start.elapsed().as_secs_f64() * 1_000_000.0;
@@ -1599,12 +1622,12 @@ mod inner {
                 }
                 TrtHostIoMode::Pinned => {
                     let stage_start = Instant::now();
-                    session.pinned_input_mut(n)?.copy_from_slice(encoded);
+                    session.pinned_input_mut(batch)?.copy_from_slice(encoded);
                     let input_stage_us = stage_start.elapsed().as_secs_f64() * 1_000_000.0;
-                    let mut timing = session.infer_pinned_prepared(n, true)?;
+                    let mut timing = session.infer_pinned_prepared(batch, true)?;
                     timing.input_stage_us = input_stage_us;
                     let parse_start = Instant::now();
-                    let (pp1, pp2, v1, v2) = session.pinned_output_slices(n)?;
+                    let (pp1, pp2, v1, v2) = session.pinned_output_slices(batch)?;
                     let results = parse_eval_results(pp1, pp2, v1, v2, n)?;
                     timing.parse_us = parse_start.elapsed().as_secs_f64() * 1_000_000.0;
                     (results, timing)
@@ -1628,50 +1651,50 @@ mod inner {
             }
             let obs_dim = self.encoder.obs_dim();
             let batch = self.layout.batch(n)?;
-            let call_start = Instant::now();
+            let call_start = self.profile_stages.then(Instant::now);
 
             let (results, mut timing) = match self.host_io {
                 TrtHostIoMode::Pageable => {
-                    let allocation_start = Instant::now();
+                    let allocation_start = self.profile_stages.then(Instant::now);
                     let mut buf = vec![0.0f32; batch.input_elements];
-                    let input_stage_us = allocation_start.elapsed().as_secs_f64() * 1_000_000.0;
-                    let encode_start = Instant::now();
+                    let input_stage_us = elapsed_us(allocation_start);
+                    let encode_start = self.profile_stages.then(Instant::now);
                     for (i, game) in games.iter().enumerate() {
                         self.encoder.encode_into(game, &mut buf, i * obs_dim);
                     }
-                    let encode_us = encode_start.elapsed().as_secs_f64() * 1_000_000.0;
+                    let encode_us = elapsed_us(encode_start);
 
                     let mut session = self.lock_session()?;
                     let ((pp1, pp2, v1, v2), mut timing) =
-                        session.infer_pageable(&buf, n, self.profile_stages)?;
+                        session.infer_pageable(&buf, batch, self.profile_stages)?;
                     timing.input_stage_us = input_stage_us;
                     timing.encode_us = encode_us;
-                    let parse_start = Instant::now();
+                    let parse_start = self.profile_stages.then(Instant::now);
                     let results = parse_eval_results(&pp1, &pp2, &v1, &v2, n)?;
-                    timing.parse_us = parse_start.elapsed().as_secs_f64() * 1_000_000.0;
+                    timing.parse_us = elapsed_us(parse_start);
                     (results, timing)
                 }
                 TrtHostIoMode::Pinned => {
                     let mut session = self.lock_session()?;
-                    let encode_start = Instant::now();
+                    let encode_start = self.profile_stages.then(Instant::now);
                     {
-                        let input = session.pinned_input_mut(n)?;
+                        let input = session.pinned_input_mut(batch)?;
                         for (i, game) in games.iter().enumerate() {
                             self.encoder.encode_into(game, input, i * obs_dim);
                         }
                     }
-                    let encode_us = encode_start.elapsed().as_secs_f64() * 1_000_000.0;
-                    let mut timing = session.infer_pinned_prepared(n, self.profile_stages)?;
+                    let encode_us = elapsed_us(encode_start);
+                    let mut timing = session.infer_pinned_prepared(batch, self.profile_stages)?;
                     timing.encode_us = encode_us;
-                    let parse_start = Instant::now();
-                    let (pp1, pp2, v1, v2) = session.pinned_output_slices(n)?;
+                    let parse_start = self.profile_stages.then(Instant::now);
+                    let (pp1, pp2, v1, v2) = session.pinned_output_slices(batch)?;
                     let results = parse_eval_results(pp1, pp2, v1, v2, n)?;
-                    timing.parse_us = parse_start.elapsed().as_secs_f64() * 1_000_000.0;
+                    timing.parse_us = elapsed_us(parse_start);
                     (results, timing)
                 }
             };
 
-            timing.total_us = call_start.elapsed().as_secs_f64() * 1_000_000.0;
+            timing.total_us = elapsed_us(call_start);
             if self.profile_stages {
                 self.stats.record(n, &timing);
             }
@@ -1694,12 +1717,21 @@ mod inner {
         }
 
         #[test]
+        fn optimization_batch_defaults_to_the_configured_maximum() {
+            let config = TensorrtConfig {
+                max_batch: 128,
+                ..TensorrtConfig::default()
+            };
+            assert_eq!(config.opt_batch.unwrap_or(config.max_batch), 128);
+        }
+
+        #[test]
         fn invalid_optimization_batch_is_rejected_before_runtime_load() {
             let error = TensorrtBackend::new(
                 "not-read.onnx",
                 FlatEncoder::new(7, 7),
                 TensorrtConfig {
-                    opt_batch: 129,
+                    opt_batch: Some(129),
                     max_batch: 128,
                     ..TensorrtConfig::default()
                 },

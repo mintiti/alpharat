@@ -21,7 +21,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-MODES = ("pageable", "pinned")
+MODES: tuple[str, str] = ("pageable", "pinned")
 CAPACITY_ROW = re.compile(
     r"^\s*(?P<batch>\d+)\s+(?P<callers>\d+)\s+"
     r"(?P<stage>[\d.]+)\s+(?P<h2d>[\d.]+)\s+(?P<infer>[\d.]+)\s+"
@@ -96,7 +96,7 @@ def _percentile(histogram: list[list[int]], percentile: float) -> int:
 
 
 def _mode_order(repetition: int) -> tuple[str, str]:
-    return MODES if repetition % 2 == 0 else tuple(reversed(MODES))
+    return MODES if repetition % 2 == 0 else (MODES[1], MODES[0])
 
 
 def _batch_order(batches: list[int], repetition: int) -> list[int]:
@@ -195,6 +195,8 @@ def _run_selfplay(
     threads: int,
     search_batch: int,
     max_batch: int,
+    seed: int,
+    profile_stages: bool,
 ) -> dict[str, Any]:
     from alpharat_sampling import rust_self_play
 
@@ -220,6 +222,7 @@ def _run_selfplay(
         collision_scaling_end=50_000,
         collision_scaling_power=1.0,
         num_threads=threads,
+        seed=seed,
         output_dir=str(games_dir),
         max_games_per_bundle=32,
         onnx_model_path=str(model),
@@ -227,14 +230,16 @@ def _run_selfplay(
         mux_max_batch_size=max_batch,
         tensorrt_opt_batch=max_batch,
         tensorrt_pinned_host_io=mode == "pinned",
-        tensorrt_profile_stages=True,
+        tensorrt_profile_stages=profile_stages,
         use_inference_mux=True,
         cache_size=0,
     )
     elapsed = float(stats.elapsed_secs)
     histogram = [[int(batch), int(count)] for batch, count in stats.inference_batch_histogram]
-    result = {
+    result: dict[str, Any] = {
         "host_io": str(stats.tensorrt_host_io),
+        "seed": seed,
+        "profile_stages": profile_stages,
         "pinned_bytes": int(stats.tensorrt_pinned_bytes),
         "profiled_calls": int(stats.tensorrt_profiled_calls),
         "profiled_positions": int(stats.tensorrt_profiled_positions),
@@ -282,9 +287,11 @@ def _run_selfplay(
     )
     if result["host_io"] != mode:
         raise RuntimeError(f"requested {mode} host I/O but backend reported {result['host_io']}")
-    if result["profiled_calls"] != result["inference_batches"]:
+    expected_profiled_calls = result["inference_batches"] if profile_stages else 0
+    expected_profiled_positions = result["inference_positions"] if profile_stages else 0
+    if result["profiled_calls"] != expected_profiled_calls:
         raise RuntimeError("TensorRT and mux call counts disagree")
-    if result["profiled_positions"] != result["inference_positions"]:
+    if result["profiled_positions"] != expected_profiled_positions:
         raise RuntimeError("TensorRT and mux position counts disagree")
     return result
 
@@ -331,48 +338,83 @@ def _render_comparison(record: dict[str, Any]) -> str:
         )
     page_rate = _median(pageable["selfplay_trials"], "simulations_per_second")
     pinned_rate = _median(pinned["selfplay_trials"], "simulations_per_second")
+    page_eval_rate = _median(pageable["selfplay_trials"], "nn_evals_per_second")
+    pinned_eval_rate = _median(pinned["selfplay_trials"], "nn_evals_per_second")
     lines.extend(
         [
             "",
             f"Pinned/pageable median self-play sims/s ratio: **{pinned_rate / page_rate:.4f}×**.",
-            "",
-            "## Profiled TensorRT stages (median aggregate seconds per self-play trial)",
+            (
+                "Pinned/pageable median NN evals/s ratio: "
+                f"**{pinned_eval_rate / page_eval_rate:.4f}×**."
+            ),
             "",
             (
-                "| Host I/O | encode | input stage | H2D | inference | output alloc | "
-                "D2H | parse | residual wall | profiled backend | pinned bytes |"
+                "Each pair uses the same master seed and index-derived game/search RNG streams. "
+                "Production mux timing can still change dynamic batch composition and downstream "
+                "trajectories, so normalized rates are the primary comparison; per-trial work "
+                "totals are retained in the validity record."
             ),
-            "|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
         ]
     )
-    for mode in MODES:
-        trials = cases[mode]["selfplay_trials"]
-        lines.append(
-            "| {mode} | {encode:.4f} | {stage:.4f} | {h2d:.4f} | {infer:.4f} | "
-            "{alloc:.4f} | {d2h:.4f} | {parse:.4f} | {residual:.4f} | "
-            "{total:.4f} | {pinned:.0f} |".format(
-                mode=mode,
-                encode=_median(trials, "encode_seconds"),
-                stage=_median(trials, "input_stage_seconds"),
-                h2d=_median(trials, "h2d_seconds"),
-                infer=_median(trials, "infer_seconds"),
-                alloc=_median(trials, "output_alloc_seconds"),
-                d2h=_median(trials, "d2h_seconds"),
-                parse=_median(trials, "parse_seconds"),
-                residual=_median(trials, "residual_wall_seconds"),
-                total=_median(trials, "backend_profiled_seconds"),
-                pinned=_median(trials, "pinned_bytes"),
+    if record["config"]["profile_stages"]:
+        lines.extend(
+            [
+                "",
+                "## Profiled TensorRT stages (median aggregate seconds per self-play trial)",
+                "",
+                (
+                    "| Host I/O | encode | input stage | H2D | inference | output alloc | "
+                    "D2H | parse | residual wall | profiled backend | pinned bytes |"
+                ),
+                "|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
+            ]
+        )
+        for mode in MODES:
+            trials = cases[mode]["selfplay_trials"]
+            lines.append(
+                "| {mode} | {encode:.4f} | {stage:.4f} | {h2d:.4f} | {infer:.4f} | "
+                "{alloc:.4f} | {d2h:.4f} | {parse:.4f} | {residual:.4f} | "
+                "{total:.4f} | {pinned:.0f} |".format(
+                    mode=mode,
+                    encode=_median(trials, "encode_seconds"),
+                    stage=_median(trials, "input_stage_seconds"),
+                    h2d=_median(trials, "h2d_seconds"),
+                    infer=_median(trials, "infer_seconds"),
+                    alloc=_median(trials, "output_alloc_seconds"),
+                    d2h=_median(trials, "d2h_seconds"),
+                    parse=_median(trials, "parse_seconds"),
+                    residual=_median(trials, "residual_wall_seconds"),
+                    total=_median(trials, "backend_profiled_seconds"),
+                    pinned=_median(trials, "pinned_bytes"),
+                )
             )
+        lines.extend(
+            [
+                "",
+                (
+                    "Residual wall time is total profiled backend wall time minus the explicit "
+                    "host stages and non-overlapping CUDA-event intervals. It includes shape/lane "
+                    "setup, CUDA/TensorRT API overhead, and completion-wait overhead not otherwise "
+                    "attributed."
+                ),
+            ]
+        )
+    else:
+        lines.extend(
+            [
+                "",
+                "## TensorRT stage profiling",
+                "",
+                (
+                    "Disabled for these self-play acceptance trials so they exercise "
+                    "the production default. Re-run with `--profile-stages` for "
+                    "diagnostic stage attribution."
+                ),
+            ]
         )
     lines.extend(
         [
-            "",
-            (
-                "Residual wall time is total profiled backend wall time minus the explicit "
-                "host stages and non-overlapping CUDA-event intervals. It includes shape/lane "
-                "setup, CUDA/TensorRT API overhead, and completion-wait overhead not otherwise "
-                "attributed."
-            ),
             "",
             "## Capacity, parity, and lifecycle",
             "",
@@ -406,6 +448,17 @@ def main() -> None:
     parser.add_argument("--simulations", type=int, default=1_897)
     parser.add_argument("--threads", type=int, default=16)
     parser.add_argument("--search-batch", type=int, default=16)
+    parser.add_argument(
+        "--seed",
+        type=int,
+        default=20_260_814,
+        help="Master seed used to derive deterministic per-game creation and search streams",
+    )
+    parser.add_argument(
+        "--profile-stages",
+        action="store_true",
+        help="Enable diagnostic TensorRT host/CUDA stage timing during self-play",
+    )
     args = parser.parse_args()
 
     model = args.model.resolve()
@@ -417,8 +470,22 @@ def main() -> None:
         parser.error(f"capacity binary does not exist: {binary}")
     if max(args.batches) > args.max_batch:
         parser.error("every requested batch must be <= max batch")
+    if (
+        min(
+            args.max_batch,
+            args.capacity_iters,
+            args.games,
+            args.simulations,
+            args.threads,
+            args.search_batch,
+        )
+        < 1
+    ):
+        parser.error("batch, iteration, game, simulation, and thread counts must be positive")
     if args.capacity_repetitions < 1 or args.selfplay_trials < 1:
         parser.error("repetition counts must be positive")
+    if not 0 <= args.seed <= (1 << 64) - 1:
+        parser.error("seed must fit in an unsigned 64-bit integer")
     output_dir.mkdir(parents=True, exist_ok=False)
     capacity_raw = output_dir / "capacity-raw"
     capacity_raw.mkdir()
@@ -439,13 +506,14 @@ def main() -> None:
     if nvidia_smi is None and Path("/usr/lib/wsl/lib/nvidia-smi").is_file():
         nvidia_smi = "/usr/lib/wsl/lib/nvidia-smi"
     record: dict[str, Any] = {
-        "protocol_version": 1,
+        "protocol_version": 2,
         "created_at": datetime.now(UTC).isoformat(),
         "scope": {
             "execution_contexts": 1,
             "cuda_graphs": False,
             "inference_mux": "eager",
             "profile": f"MIN=1,OPT={args.max_batch},MAX={args.max_batch}",
+            "selfplay_stage_profiling": args.profile_stages,
         },
         "source": {
             "git_head": _command_output(["git", "rev-parse", "HEAD"]),
@@ -484,6 +552,12 @@ def main() -> None:
             "simulations": args.simulations,
             "threads": args.threads,
             "search_batch": args.search_batch,
+            "seed": args.seed,
+            "profile_stages": args.profile_stages,
+        },
+        "validity": {
+            "paired_random_streams": "same master seed with per-game domain derivation",
+            "work_comparison_by_trial": [],
         },
         "execution_log": [],
         "cases": {mode: {"capacity_runs": [], "selfplay_trials": []} for mode in MODES},
@@ -533,6 +607,8 @@ def main() -> None:
                 threads=args.threads,
                 search_batch=args.search_batch,
                 max_batch=args.max_batch,
+                seed=args.seed,
+                profile_stages=args.profile_stages,
             )
             result.update(
                 {
@@ -546,6 +622,28 @@ def main() -> None:
                 {"order": execution_order, "phase": "selfplay", "mode": mode}
             )
             _write_json(output_dir / "record.json", record)
+
+        compared_fields = (
+            "total_positions",
+            "total_simulations",
+            "total_nn_evals",
+            "total_terminals",
+            "total_collisions",
+        )
+        pageable_trial = record["cases"]["pageable"]["selfplay_trials"][-1]
+        pinned_trial = record["cases"]["pinned"]["selfplay_trials"][-1]
+        mismatches = {
+            field: {
+                "pageable": pageable_trial[field],
+                "pinned": pinned_trial[field],
+            }
+            for field in compared_fields
+            if pageable_trial[field] != pinned_trial[field]
+        }
+        record["validity"]["work_comparison_by_trial"].append(
+            {"trial": trial + 1, "identical": not mismatches, "differences": mismatches}
+        )
+        _write_json(output_dir / "record.json", record)
 
     record["completed_at"] = datetime.now(UTC).isoformat()
     _write_json(output_dir / "record.json", record)

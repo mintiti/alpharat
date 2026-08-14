@@ -120,6 +120,7 @@ fn run_bench_uniform(
             n_sims,
             batch_size,
             num_threads,
+            seed: None,
         };
         let result = run_self_play(&games[..num_games], &backend, search_config, &config, None)
             .expect("SmartUniform self-play failed");
@@ -190,6 +191,7 @@ fn run_bench_onnx(
                     n_sims,
                     batch_size,
                     num_threads,
+                    seed: None,
                 };
 
                 let result =

@@ -177,6 +177,7 @@ def run_rust_sampling(
     num_games: int,
     group: str,
     num_threads: int = 4,
+    seed: int | None = None,
     max_games_per_bundle: int = 32,
     mux_max_batch_size: int = 256,
     tensorrt_opt_batch: int | None = None,
@@ -199,6 +200,8 @@ def run_rust_sampling(
         num_games: Total games to generate.
         group: Batch group name for ExperimentManager.
         num_threads: Worker threads for Rust self-play.
+        seed: Optional master seed. Game creation and MCTS randomness derive
+            stable per-game streams from this value.
         max_games_per_bundle: Max games per NPZ bundle file.
         mux_max_batch_size: Max batch size for ONNX mux backend.
         tensorrt_opt_batch: TensorRT dynamic-profile optimization point. Defaults to max batch.
@@ -278,6 +281,7 @@ def run_rust_sampling(
         "collision_scaling_end": mcts.collision_scaling_end,
         "collision_scaling_power": mcts.collision_scaling_power,
         "num_threads": num_threads,
+        "seed": seed,
         "output_dir": str(output_dir),
         "max_games_per_bundle": max_games_per_bundle,
         "onnx_model_path": onnx_path,

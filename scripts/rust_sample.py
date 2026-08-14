@@ -48,6 +48,12 @@ def main() -> None:
     parser.add_argument("--group", type=str, required=True, help="Batch group name")
     parser.add_argument("--num-games", type=int, default=1000, help="Number of games")
     parser.add_argument("--threads", type=int, default=4, help="Worker threads")
+    parser.add_argument(
+        "--seed",
+        type=int,
+        default=None,
+        help="Master seed for reproducible per-game creation and search randomness",
+    )
     parser.add_argument("--checkpoint", type=str, default=None, help="Path to .pt checkpoint")
     parser.add_argument("--max-bundle", type=int, default=32, help="Max games per NPZ bundle")
     parser.add_argument("--mux-batch", type=int, default=256, help="Max mux batch size for ONNX")
@@ -97,6 +103,7 @@ def main() -> None:
         num_games=args.num_games,
         group=args.group,
         num_threads=args.threads,
+        seed=args.seed,
         max_games_per_bundle=args.max_bundle,
         mux_max_batch_size=args.mux_batch,
         checkpoint=args.checkpoint,

@@ -403,7 +403,7 @@ fn create_tensorrt_backend(
     let encoder = FlatEncoder::new(width, height);
     let cache_dir = Path::new(output_dir).parent().map(|p| p.join(".trt_cache"));
     let config = TensorrtConfig {
-        opt_batch: opt_batch_size.unwrap_or(max_batch_size),
+        opt_batch: opt_batch_size,
         max_batch: max_batch_size,
         cache_dir,
         host_io: if pinned_host_io {
@@ -488,6 +488,7 @@ fn create_onnx_backend(
     collision_scaling_end = 50000,
     collision_scaling_power = 1.0,
     num_threads = 4,
+    seed = None,
     output_dir,
     max_games_per_bundle = 32,
     onnx_model_path = None,
@@ -530,6 +531,7 @@ fn rust_self_play(
     collision_scaling_power: f32,
     // Sampling
     num_threads: u32,
+    seed: Option<u64>,
     output_dir: &str,
     max_games_per_bundle: usize,
     // NN (optional)
@@ -558,6 +560,7 @@ fn rust_self_play(
         wall_density,
         mud_density,
         maze_symmetric,
+        seed,
     );
 
     let search_config = SearchConfig {
@@ -577,6 +580,7 @@ fn rust_self_play(
         n_sims: simulations,
         batch_size,
         num_threads,
+        seed,
     };
 
     let output_path = Path::new(output_dir);
@@ -714,6 +718,7 @@ fn make_games(
     wall_density: f32,
     mud_density: f32,
     maze_symmetric: bool,
+    seed: Option<u64>,
 ) -> Vec<GameState> {
     let base = GameBuilder::new(width, height).with_max_turns(max_turns);
 
@@ -746,7 +751,12 @@ fn make_games(
         .build();
 
     (0..n)
-        .map(|_| config.create(None).expect("game creation failed"))
+        .map(|game_index| {
+            let game_seed = seed.map(|master_seed| {
+                selfplay::game_creation_seed(master_seed, game_index)
+            });
+            config.create(game_seed).expect("game creation failed")
+        })
         .collect()
 }
 
