@@ -65,6 +65,7 @@ class IterateSamplingParams(StrictBaseModel):
     """Sampling-specific settings for iteration."""
 
     workers: int = 4
+    seed: int | None = None
     cache_size: int = 0
     mux_max_batch_size: int = 256
     tensorrt_opt_batch: int | None = None
@@ -146,6 +147,7 @@ def run_sampling_phase(
         num_games=config.iteration.games,
         group=batch_group,
         num_threads=config.sampling.workers,
+        seed=config.sampling.seed,
         checkpoint=str(checkpoint_path) if checkpoint_path else None,
         experiments_dir=experiments_dir,
         device=device,

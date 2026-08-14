@@ -101,7 +101,23 @@ fn main() {
             other => panic!("unknown arg: {other}"),
         }
     }
+    assert!(max_batch > 0, "max-batch must be at least 1");
+    assert!(callers > 0, "callers must be at least 1");
+    assert!(
+        requested_batch_sizes
+            .as_ref()
+            .is_none_or(|batches| !batches.is_empty() && batches.iter().all(|&batch| batch > 0)),
+        "batch sizes must be a non-empty list of positive integers"
+    );
+    assert!(
+        benchmark_iters.is_none_or(|iters| iters > 0),
+        "iters must be at least 1"
+    );
     let opt_batch = opt_batch.unwrap_or(max_batch);
+    assert!(
+        (1..=max_batch).contains(&opt_batch),
+        "opt-batch must be in 1..={max_batch}"
+    );
 
     #[cfg(not(feature = "tensorrt"))]
     let _ = (
@@ -451,7 +467,7 @@ fn run_trt_benchmark(
         other => panic!("unknown TensorRT host I/O mode: {other}"),
     };
     let config = TensorrtConfig {
-        opt_batch,
+        opt_batch: Some(opt_batch),
         max_batch,
         cache_dir: cache_dir.clone(),
         host_io,
@@ -557,7 +573,7 @@ fn verify_trt_parity(
         model_path,
         FlatEncoder::new(width, height),
         TensorrtConfig {
-            opt_batch: max_batch,
+            opt_batch: Some(max_batch),
             max_batch,
             cache_dir,
             host_io: TrtHostIoMode::Pageable,
@@ -666,6 +682,14 @@ fn verify_trt_root_behavior(
         .sum();
     let value_abs_p1 = (expected.value_p1 - actual.value_p1).abs();
     let value_abs_p2 = (expected.value_p2 - actual.value_p2).abs();
+    const ROOT_BEHAVIOR_TOLERANCE: f32 = 1.0e-4;
+    assert!(
+        policy_l1_p1 <= ROOT_BEHAVIOR_TOLERANCE
+            && policy_l1_p2 <= ROOT_BEHAVIOR_TOLERANCE
+            && value_abs_p1 <= ROOT_BEHAVIOR_TOLERANCE
+            && value_abs_p2 <= ROOT_BEHAVIOR_TOLERANCE,
+        "TensorRT fixed-root behavior exceeded tolerance {ROOT_BEHAVIOR_TOLERANCE}: policy_l1_p1={policy_l1_p1}, policy_l1_p2={policy_l1_p2}, value_abs_p1={value_abs_p1}, value_abs_p2={value_abs_p2}"
+    );
     println!(
         "  Root behavior: policy_l1_p1={policy_l1_p1:.6}, policy_l1_p2={policy_l1_p2:.6}, value_abs_p1={value_abs_p1:.6}, value_abs_p2={value_abs_p2:.6}"
     );

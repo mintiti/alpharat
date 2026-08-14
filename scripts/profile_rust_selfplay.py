@@ -82,6 +82,12 @@ def main() -> None:
     parser.add_argument("--games", type=int, default=50, help="Number of games")
     parser.add_argument("--sims", type=int, default=600, help="MCTS simulations per move")
     parser.add_argument("--threads", type=int, default=4, help="Worker threads")
+    parser.add_argument(
+        "--seed",
+        type=int,
+        default=None,
+        help="Master seed for reproducible per-game creation and search randomness",
+    )
     parser.add_argument("--batch-size", type=int, default=16, help="Within-tree NN batch size")
     parser.add_argument("--mux-batch", type=int, default=256, help="Mux max batch size")
     parser.add_argument(
@@ -148,7 +154,7 @@ def main() -> None:
         "trt_cuda_graphs=False, "
         f"trt_pinned_host_io={args.tensorrt_pinned_host_io}, "
         f"trt_profile_stages={args.tensorrt_profile_stages}, "
-        f"inference_mux={not args.no_inference_mux}, device={args.device}"
+        f"seed={args.seed}, inference_mux={not args.no_inference_mux}, device={args.device}"
     )
 
     stats = rust_self_play(
@@ -173,6 +179,7 @@ def main() -> None:
         collision_scaling_end=50_000,
         collision_scaling_power=1.0,
         num_threads=args.threads,
+        seed=args.seed,
         output_dir=str(output_dir),
         max_games_per_bundle=32,
         onnx_model_path=onnx_path,

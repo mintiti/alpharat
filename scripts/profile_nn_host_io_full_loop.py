@@ -13,7 +13,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-MODES = ("pageable", "pinned")
+MODES: tuple[str, str] = ("pageable", "pinned")
 
 
 def _sha256(path: Path) -> str:
@@ -31,7 +31,7 @@ def _write_json(path: Path, value: dict[str, Any]) -> None:
 
 
 def _mode_order(trial: int) -> tuple[str, str]:
-    return MODES if trial % 2 == 0 else tuple(reversed(MODES))
+    return MODES if trial % 2 == 0 else (MODES[1], MODES[0])
 
 
 def _median(records: list[dict[str, Any]], field: str) -> float:
@@ -229,10 +229,14 @@ def main() -> None:
             result = _summarize_timing(json.loads(timing_path.read_text(encoding="utf-8")))
             if result["host_io"] != mode:
                 raise RuntimeError(f"requested {mode}, backend reported {result['host_io']}")
-            if result["profiled_calls"] != result["inference_batches"]:
-                raise RuntimeError("TensorRT and mux call counts disagree")
-            if result["profiled_positions"] != result["inference_positions"]:
-                raise RuntimeError("TensorRT and mux position counts disagree")
+            profiled = (
+                result["profiled_calls"] == result["inference_batches"]
+                and result["profiled_positions"] == result["inference_positions"]
+            )
+            unprofiled = result["profiled_calls"] == 0 and result["profiled_positions"] == 0
+            if not (profiled or unprofiled):
+                raise RuntimeError("TensorRT profiling counters are internally inconsistent")
+            result["profile_stages"] = profiled
             result.update(
                 {
                     "trial": trial + 1,

@@ -166,7 +166,7 @@ fn build_tensorrt(
         ))
     })?;
     let tensorrt = TensorrtConfig {
-        opt_batch: max_batch,
+        opt_batch: Some(max_batch),
         max_batch,
         cache_dir: config.tensorrt_cache.clone(),
         ..TensorrtConfig::default()

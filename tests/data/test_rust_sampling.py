@@ -50,3 +50,9 @@ def test_tensor_rt_pinned_host_io_is_the_python_default() -> None:
     parameter = signature(run_rust_sampling).parameters["tensorrt_pinned_host_io"]
 
     assert parameter.default is True
+
+
+def test_sampling_seed_is_optional_by_default() -> None:
+    parameter = signature(run_rust_sampling).parameters["seed"]
+
+    assert parameter.default is None
