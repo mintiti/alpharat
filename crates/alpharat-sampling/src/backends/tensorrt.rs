@@ -4,11 +4,12 @@ mod inner {
     use alpharat_mcts::{Backend, BackendError, EvalResult};
     use pyrat::GameState;
     use sha2::{Digest, Sha256};
+    use std::cell::{Cell, RefCell};
     use std::ffi::{c_void, CString};
     use std::fs;
     use std::path::{Path, PathBuf};
     use std::sync::atomic::{AtomicU64, Ordering};
-    use std::sync::{Arc, Condvar, Mutex, MutexGuard};
+    use std::sync::{Arc, Mutex, MutexGuard};
     use std::time::Instant;
 
     // -----------------------------------------------------------------------
@@ -29,10 +30,10 @@ mod inner {
             stream: *mut c_void,
         ) -> i32;
         fn cudaStreamCreate(stream: *mut *mut c_void) -> i32;
-        fn cudaStreamCreateWithFlags(stream: *mut *mut c_void, flags: u32) -> i32;
         fn cudaStreamSynchronize(stream: *mut c_void) -> i32;
         fn cudaStreamDestroy(stream: *mut c_void) -> i32;
         fn cudaEventCreate(event: *mut *mut c_void) -> i32;
+        fn cudaEventCreateWithFlags(event: *mut *mut c_void, flags: u32) -> i32;
         fn cudaEventDestroy(event: *mut c_void) -> i32;
         fn cudaEventRecord(event: *mut c_void, stream: *mut c_void) -> i32;
         fn cudaEventSynchronize(event: *mut c_void) -> i32;
@@ -44,7 +45,7 @@ mod inner {
 
     const CUDA_MEMCPY_H2D: i32 = 1;
     const CUDA_MEMCPY_D2H: i32 = 2;
-    const CUDA_STREAM_NON_BLOCKING: u32 = 1;
+    const CUDA_EVENT_DISABLE_TIMING: u32 = 2;
 
     type OwnedTrtOutputs = (Vec<f32>, Vec<f32>, Vec<f32>, Vec<f32>);
     type TrtOutputSlices<'a> = (&'a [f32], &'a [f32], &'a [f32], &'a [f32]);
@@ -74,6 +75,12 @@ mod inner {
             )));
         }
         Ok(())
+    }
+
+    fn warn_cuda_drop(code: i32, op: &str) {
+        if let Err(error) = cuda_check(code, op) {
+            eprintln!("[TensorRT] Warning: {error}");
+        }
     }
 
     fn compute_capability() -> Result<(i32, i32), BackendError> {
@@ -108,12 +115,8 @@ mod inner {
 
         fn trt_free_buffer(data: *mut c_void);
 
-        fn trt_create_engine(engine_data: *const c_void, engine_len: usize) -> *mut c_void;
-        fn trt_destroy_engine(handle: *mut c_void);
-
-        fn trt_create_session(engine_handle: *mut c_void, enable_cuda_graphs: i32) -> *mut c_void;
+        fn trt_create_session(engine_data: *const c_void, engine_len: usize) -> *mut c_void;
         fn trt_destroy_session(handle: *mut c_void);
-        fn trt_session_cuda_graphs_requested(handle: *mut c_void) -> i32;
 
         fn trt_set_tensor_address(handle: *mut c_void, name: *const i8, ptr: *mut c_void) -> i32;
         fn trt_set_input_shape(
@@ -153,10 +156,10 @@ mod inner {
     /// Host-memory lifetime used by one TensorRT execution session.
     #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
     pub enum TrtHostIoMode {
-        /// Preserve the existing per-call pageable vectors and stage barriers.
-        #[default]
+        /// Preserve the legacy per-call pageable vectors and stage barriers.
         Pageable,
         /// Reuse one page-locked input/output slot and wait once after D2H.
+        #[default]
         Pinned,
     }
 
@@ -177,16 +180,10 @@ mod inner {
         pub max_batch: usize,
         /// Directory for cached serialized engines. `None` disables caching.
         pub cache_dir: Option<PathBuf>,
-        /// Number of independent execution context/stream/buffer lanes.
-        pub execution_contexts: usize,
-        /// Request TensorRT-RTX whole-model CUDA Graph capture for each lane.
-        ///
-        /// TensorRT may silently fall back when a model or stream cannot be captured,
-        /// so graph-off/on measurement remains the behavioral check.
-        pub cuda_graphs: bool,
-        /// Experiment-only host I/O lifetime. Defaults to the existing pageable path.
+        /// Host I/O lifetime. Pinned is the measured RTX 5090 production default.
         pub host_io: TrtHostIoMode,
-        /// Record CUDA-event and host-stage timing for production calls.
+        /// Record CUDA-event and host-stage timing for production calls. Timing
+        /// events are not allocated or touched when this is false.
         pub profile_stages: bool,
     }
 
@@ -196,9 +193,7 @@ mod inner {
                 opt_batch: 256,
                 max_batch: 256,
                 cache_dir: None,
-                execution_contexts: 1,
-                cuda_graphs: false,
-                host_io: TrtHostIoMode::Pageable,
+                host_io: TrtHostIoMode::Pinned,
                 profile_stages: false,
             }
         }
@@ -207,6 +202,137 @@ mod inner {
     // -----------------------------------------------------------------------
     // GPU buffer management
     // -----------------------------------------------------------------------
+
+    fn checked_elements(lhs: usize, rhs: usize, label: &str) -> Result<usize, BackendError> {
+        lhs.checked_mul(rhs)
+            .ok_or_else(|| BackendError::msg(format!("TensorRT {label} element count overflow")))
+    }
+
+    fn checked_bytes(elements: usize, label: &str) -> Result<usize, BackendError> {
+        checked_elements(elements, std::mem::size_of::<f32>(), label)
+    }
+
+    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+    struct OutputLayout {
+        policy_p1: usize,
+        policy_p2: usize,
+        value_p1: usize,
+        value_p2: usize,
+        total: usize,
+    }
+
+    impl OutputLayout {
+        fn new(policy_elements: usize, value_elements: usize) -> Result<Self, BackendError> {
+            let value_p1 = policy_elements.checked_mul(2).ok_or_else(|| {
+                BackendError::msg("TensorRT output layout policy offset overflow")
+            })?;
+            let value_p2 = value_p1
+                .checked_add(value_elements)
+                .ok_or_else(|| BackendError::msg("TensorRT output layout value offset overflow"))?;
+            let total = value_p2
+                .checked_add(value_elements)
+                .ok_or_else(|| BackendError::msg("TensorRT output layout total size overflow"))?;
+            Ok(Self {
+                policy_p1: 0,
+                policy_p2: policy_elements,
+                value_p1,
+                value_p2,
+                total,
+            })
+        }
+    }
+
+    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+    struct BatchLayout {
+        input_elements: usize,
+        policy_elements: usize,
+        value_elements: usize,
+        input_bytes: usize,
+        policy_bytes: usize,
+        value_bytes: usize,
+    }
+
+    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+    struct TensorLayout {
+        max_batch: usize,
+        obs_dim: usize,
+        capacity: BatchLayout,
+        output: OutputLayout,
+        output_bytes: usize,
+        pinned_bytes: usize,
+    }
+
+    impl TensorLayout {
+        fn new(max_batch: usize, obs_dim: usize) -> Result<Self, BackendError> {
+            if max_batch == 0 {
+                return Err(BackendError::msg("TensorRT max_batch must be at least 1"));
+            }
+            if max_batch > i32::MAX as usize {
+                return Err(BackendError::msg(format!(
+                    "TensorRT max_batch must fit in i32 (got {max_batch})"
+                )));
+            }
+            if obs_dim == 0 {
+                return Err(BackendError::msg(
+                    "TensorRT observation dimension must be at least 1",
+                ));
+            }
+            if obs_dim > i64::MAX as usize {
+                return Err(BackendError::msg(format!(
+                    "TensorRT observation dimension must fit in i64 (got {obs_dim})"
+                )));
+            }
+
+            let input_elements = checked_elements(max_batch, obs_dim, "input capacity")?;
+            let policy_elements = checked_elements(max_batch, 5, "policy capacity")?;
+            let value_elements = max_batch;
+            let output = OutputLayout::new(policy_elements, value_elements)?;
+            let capacity = BatchLayout {
+                input_elements,
+                policy_elements,
+                value_elements,
+                input_bytes: checked_bytes(input_elements, "input capacity")?,
+                policy_bytes: checked_bytes(policy_elements, "policy capacity")?,
+                value_bytes: checked_bytes(value_elements, "value capacity")?,
+            };
+            let output_bytes = checked_bytes(output.total, "output capacity")?;
+            let pinned_bytes = capacity
+                .input_bytes
+                .checked_add(output_bytes)
+                .ok_or_else(|| BackendError::msg("TensorRT total pinned byte size overflow"))?;
+            Ok(Self {
+                max_batch,
+                obs_dim,
+                capacity,
+                output,
+                output_bytes,
+                pinned_bytes,
+            })
+        }
+
+        fn batch(&self, n: usize) -> Result<BatchLayout, BackendError> {
+            if n == 0 {
+                return Err(BackendError::msg("TensorRT batch size must be at least 1"));
+            }
+            if n > self.max_batch {
+                return Err(BackendError::msg(format!(
+                    "batch size {n} exceeds max_batch {}",
+                    self.max_batch
+                )));
+            }
+            let input_elements = checked_elements(n, self.obs_dim, "input batch")?;
+            let policy_elements = checked_elements(n, 5, "policy batch")?;
+            let value_elements = n;
+            Ok(BatchLayout {
+                input_elements,
+                policy_elements,
+                value_elements,
+                input_bytes: checked_bytes(input_elements, "input batch")?,
+                policy_bytes: checked_bytes(policy_elements, "policy batch")?,
+                value_bytes: checked_bytes(value_elements, "value batch")?,
+            })
+        }
+    }
 
     struct GpuBuffers {
         d_input: *mut c_void,
@@ -225,8 +351,7 @@ mod inner {
         /// On `?`-return, `Drop` runs on the partially-initialized struct.
         /// All pointers start as `null_mut()` and `cudaFree(NULL)` is a
         /// documented no-op, so cleanup is safe even on partial allocation.
-        fn alloc(max_batch: usize, obs_dim: usize) -> Result<Self, BackendError> {
-            let f = std::mem::size_of::<f32>();
+        fn alloc(layout: TensorLayout) -> Result<Self, BackendError> {
             let mut b = Self {
                 d_input: std::ptr::null_mut(),
                 d_policy_p1: std::ptr::null_mut(),
@@ -236,23 +361,23 @@ mod inner {
             };
             unsafe {
                 cuda_check(
-                    cudaMalloc(&mut b.d_input, max_batch * obs_dim * f),
+                    cudaMalloc(&mut b.d_input, layout.capacity.input_bytes),
                     "cudaMalloc(input)",
                 )?;
                 cuda_check(
-                    cudaMalloc(&mut b.d_policy_p1, max_batch * 5 * f),
+                    cudaMalloc(&mut b.d_policy_p1, layout.capacity.policy_bytes),
                     "cudaMalloc(policy_p1)",
                 )?;
                 cuda_check(
-                    cudaMalloc(&mut b.d_policy_p2, max_batch * 5 * f),
+                    cudaMalloc(&mut b.d_policy_p2, layout.capacity.policy_bytes),
                     "cudaMalloc(policy_p2)",
                 )?;
                 cuda_check(
-                    cudaMalloc(&mut b.d_value_p1, max_batch * f),
+                    cudaMalloc(&mut b.d_value_p1, layout.capacity.value_bytes),
                     "cudaMalloc(value_p1)",
                 )?;
                 cuda_check(
-                    cudaMalloc(&mut b.d_value_p2, max_batch * f),
+                    cudaMalloc(&mut b.d_value_p2, layout.capacity.value_bytes),
                     "cudaMalloc(value_p2)",
                 )?;
             }
@@ -263,32 +388,11 @@ mod inner {
     impl Drop for GpuBuffers {
         fn drop(&mut self) {
             unsafe {
-                cudaFree(self.d_input);
-                cudaFree(self.d_policy_p1);
-                cudaFree(self.d_policy_p2);
-                cudaFree(self.d_value_p1);
-                cudaFree(self.d_value_p2);
-            }
-        }
-    }
-
-    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-    struct OutputLayout {
-        policy_p1: usize,
-        policy_p2: usize,
-        value_p1: usize,
-        value_p2: usize,
-        total: usize,
-    }
-
-    impl OutputLayout {
-        fn new(max_batch: usize) -> Self {
-            Self {
-                policy_p1: 0,
-                policy_p2: max_batch * 5,
-                value_p1: max_batch * 10,
-                value_p2: max_batch * 11,
-                total: max_batch * 12,
+                warn_cuda_drop(cudaFree(self.d_input), "cudaFree(input)");
+                warn_cuda_drop(cudaFree(self.d_policy_p1), "cudaFree(policy_p1)");
+                warn_cuda_drop(cudaFree(self.d_policy_p2), "cudaFree(policy_p2)");
+                warn_cuda_drop(cudaFree(self.d_value_p1), "cudaFree(value_p1)");
+                warn_cuda_drop(cudaFree(self.d_value_p2), "cudaFree(value_p2)");
             }
         }
     }
@@ -296,54 +400,66 @@ mod inner {
     struct PinnedAllocation {
         ptr: *mut c_void,
         len_f32: usize,
+        bytes: usize,
     }
 
-    // SAFETY: the allocation is exclusively owned by one leased TrtSession.
+    // SAFETY: the allocation is exclusively owned by one mutex-serialized TrtSession.
     unsafe impl Send for PinnedAllocation {}
 
     impl PinnedAllocation {
-        fn alloc(len_f32: usize, label: &str) -> Result<Self, BackendError> {
+        fn alloc(len_f32: usize, bytes: usize, label: &str) -> Result<Self, BackendError> {
             let mut ptr = std::ptr::null_mut();
-            cuda_check(
-                unsafe {
-                    cudaMallocHost(
-                        &mut ptr,
-                        len_f32
-                            .checked_mul(std::mem::size_of::<f32>())
-                            .ok_or_else(|| BackendError::msg("pinned allocation size overflow"))?,
-                    )
-                },
-                label,
-            )?;
-            Ok(Self { ptr, len_f32 })
+            let operation = format!("{label} ({bytes} bytes of page-locked host memory)");
+            cuda_check(unsafe { cudaMallocHost(&mut ptr, bytes) }, &operation)?;
+            Ok(Self {
+                ptr,
+                len_f32,
+                bytes,
+            })
         }
 
-        fn as_mut_slice(&mut self, len: usize) -> &mut [f32] {
-            assert!(len <= self.len_f32);
-            unsafe { std::slice::from_raw_parts_mut(self.ptr.cast::<f32>(), len) }
+        fn as_mut_slice(&mut self, len: usize) -> Result<&mut [f32], BackendError> {
+            if len > self.len_f32 {
+                return Err(BackendError::msg(format!(
+                    "TensorRT pinned slice length {len} exceeds allocation {}",
+                    self.len_f32
+                )));
+            }
+            Ok(unsafe { std::slice::from_raw_parts_mut(self.ptr.cast::<f32>(), len) })
         }
 
-        fn ptr_at(&self, offset: usize) -> *mut c_void {
-            assert!(offset <= self.len_f32);
-            unsafe { self.ptr.cast::<f32>().add(offset).cast::<c_void>() }
+        fn ptr_at_mut(&mut self, offset: usize) -> Result<*mut c_void, BackendError> {
+            if offset > self.len_f32 {
+                return Err(BackendError::msg(format!(
+                    "TensorRT pinned pointer offset {offset} exceeds allocation {}",
+                    self.len_f32
+                )));
+            }
+            Ok(unsafe { self.ptr.cast::<f32>().add(offset).cast::<c_void>() })
         }
 
-        fn slice_at(&self, offset: usize, len: usize) -> &[f32] {
-            assert!(offset + len <= self.len_f32);
-            unsafe { std::slice::from_raw_parts(self.ptr.cast::<f32>().add(offset), len) }
+        fn slice_at(&self, offset: usize, len: usize) -> Result<&[f32], BackendError> {
+            let end = offset
+                .checked_add(len)
+                .ok_or_else(|| BackendError::msg("TensorRT pinned output slice range overflow"))?;
+            if end > self.len_f32 {
+                return Err(BackendError::msg(format!(
+                    "TensorRT pinned output range {offset}..{end} exceeds allocation {}",
+                    self.len_f32
+                )));
+            }
+            Ok(unsafe { std::slice::from_raw_parts(self.ptr.cast::<f32>().add(offset), len) })
         }
 
         fn bytes(&self) -> usize {
-            self.len_f32 * std::mem::size_of::<f32>()
+            self.bytes
         }
     }
 
     impl Drop for PinnedAllocation {
         fn drop(&mut self) {
             if !self.ptr.is_null() {
-                unsafe {
-                    cudaFreeHost(self.ptr);
-                }
+                warn_cuda_drop(unsafe { cudaFreeHost(self.ptr) }, "cudaFreeHost");
             }
         }
     }
@@ -351,53 +467,62 @@ mod inner {
     struct PinnedHostBuffers {
         input: PinnedAllocation,
         output: PinnedAllocation,
-        layout: OutputLayout,
-        max_batch: usize,
-        obs_dim: usize,
+        layout: TensorLayout,
     }
 
     impl PinnedHostBuffers {
-        fn alloc(max_batch: usize, obs_dim: usize) -> Result<Self, BackendError> {
-            let layout = OutputLayout::new(max_batch);
+        fn alloc(layout: TensorLayout) -> Result<Self, BackendError> {
             Ok(Self {
-                input: PinnedAllocation::alloc(max_batch * obs_dim, "cudaMallocHost(input)")?,
-                output: PinnedAllocation::alloc(layout.total, "cudaMallocHost(output)")?,
+                input: PinnedAllocation::alloc(
+                    layout.capacity.input_elements,
+                    layout.capacity.input_bytes,
+                    "cudaMallocHost(input)",
+                )?,
+                output: PinnedAllocation::alloc(
+                    layout.output.total,
+                    layout.output_bytes,
+                    "cudaMallocHost(output)",
+                )?,
                 layout,
-                max_batch,
-                obs_dim,
             })
         }
 
-        fn input_mut(&mut self, n: usize) -> &mut [f32] {
-            assert!(n <= self.max_batch);
-            self.input.as_mut_slice(n * self.obs_dim)
+        fn input_mut(&mut self, batch: BatchLayout) -> Result<&mut [f32], BackendError> {
+            self.input.as_mut_slice(batch.input_elements)
         }
 
         fn input_ptr(&self) -> *const c_void {
             self.input.ptr.cast_const()
         }
 
-        fn output_ptrs(&self) -> [*mut c_void; 4] {
-            [
-                self.output.ptr_at(self.layout.policy_p1),
-                self.output.ptr_at(self.layout.policy_p2),
-                self.output.ptr_at(self.layout.value_p1),
-                self.output.ptr_at(self.layout.value_p2),
-            ]
+        fn output_ptrs_mut(&mut self) -> Result<[*mut c_void; 4], BackendError> {
+            Ok([
+                self.output.ptr_at_mut(self.layout.output.policy_p1)?,
+                self.output.ptr_at_mut(self.layout.output.policy_p2)?,
+                self.output.ptr_at_mut(self.layout.output.value_p1)?,
+                self.output.ptr_at_mut(self.layout.output.value_p2)?,
+            ])
         }
 
-        fn output_slices(&self, n: usize) -> TrtOutputSlices<'_> {
-            assert!(n <= self.max_batch);
-            (
-                self.output.slice_at(self.layout.policy_p1, n * 5),
-                self.output.slice_at(self.layout.policy_p2, n * 5),
-                self.output.slice_at(self.layout.value_p1, n),
-                self.output.slice_at(self.layout.value_p2, n),
-            )
+        fn output_slices(&self, batch: BatchLayout) -> Result<TrtOutputSlices<'_>, BackendError> {
+            Ok((
+                self.output
+                    .slice_at(self.layout.output.policy_p1, batch.policy_elements)?,
+                self.output
+                    .slice_at(self.layout.output.policy_p2, batch.policy_elements)?,
+                self.output
+                    .slice_at(self.layout.output.value_p1, batch.value_elements)?,
+                self.output
+                    .slice_at(self.layout.output.value_p2, batch.value_elements)?,
+            ))
         }
 
         fn bytes(&self) -> usize {
-            self.input.bytes() + self.output.bytes()
+            debug_assert_eq!(
+                self.input.bytes() + self.output.bytes(),
+                self.layout.pinned_bytes
+            );
+            self.layout.pinned_bytes
         }
     }
 
@@ -405,13 +530,22 @@ mod inner {
         handle: *mut c_void,
     }
 
-    // SAFETY: events are only recorded and queried by their leased session.
+    // SAFETY: events are only recorded and queried by their mutex-serialized session.
     unsafe impl Send for CudaEvent {}
 
     impl CudaEvent {
-        fn new() -> Result<Self, BackendError> {
+        fn timing() -> Result<Self, BackendError> {
             let mut handle = std::ptr::null_mut();
             cuda_check(unsafe { cudaEventCreate(&mut handle) }, "cudaEventCreate")?;
+            Ok(Self { handle })
+        }
+
+        fn completion() -> Result<Self, BackendError> {
+            let mut handle = std::ptr::null_mut();
+            cuda_check(
+                unsafe { cudaEventCreateWithFlags(&mut handle, CUDA_EVENT_DISABLE_TIMING) },
+                "cudaEventCreateWithFlags(disable timing)",
+            )?;
             Ok(Self { handle })
         }
 
@@ -436,8 +570,10 @@ mod inner {
     impl Drop for CudaEvent {
         fn drop(&mut self) {
             if !self.handle.is_null() {
-                unsafe {
-                    cudaEventDestroy(self.handle);
+                if let Err(error) =
+                    cuda_check(unsafe { cudaEventDestroy(self.handle) }, "cudaEventDestroy")
+                {
+                    eprintln!("[TensorRT] Warning: {error}");
                 }
             }
         }
@@ -455,12 +591,12 @@ mod inner {
     impl StageEvents {
         fn new() -> Result<Self, BackendError> {
             Ok(Self {
-                h2d_start: CudaEvent::new()?,
-                h2d_end: CudaEvent::new()?,
-                infer_start: CudaEvent::new()?,
-                infer_end: CudaEvent::new()?,
-                d2h_start: CudaEvent::new()?,
-                d2h_end: CudaEvent::new()?,
+                h2d_start: CudaEvent::timing()?,
+                h2d_end: CudaEvent::timing()?,
+                infer_start: CudaEvent::timing()?,
+                infer_end: CudaEvent::timing()?,
+                d2h_start: CudaEvent::timing()?,
+                d2h_end: CudaEvent::timing()?,
             })
         }
 
@@ -480,15 +616,50 @@ mod inner {
         }
     }
 
-    struct StreamFlight {
+    struct SessionHealth {
+        poisoned: Cell<bool>,
+        cleanup_error: RefCell<Option<String>>,
+    }
+
+    impl SessionHealth {
+        fn new() -> Self {
+            Self {
+                poisoned: Cell::new(false),
+                cleanup_error: RefCell::new(None),
+            }
+        }
+
+        fn poison(&self, error: &BackendError) {
+            self.poisoned.set(true);
+            *self.cleanup_error.borrow_mut() = Some(error.to_string());
+        }
+
+        fn ensure_healthy(&self) -> Result<(), BackendError> {
+            if !self.poisoned.get() {
+                return Ok(());
+            }
+            let reason = self
+                .cleanup_error
+                .borrow()
+                .clone()
+                .unwrap_or_else(|| "unknown CUDA stream cleanup failure".to_string());
+            Err(BackendError::msg(format!(
+                "TensorRT session is poisoned and cannot be reused: {reason}"
+            )))
+        }
+    }
+
+    struct StreamFlight<'a> {
         stream: *mut c_void,
+        health: &'a SessionHealth,
         armed: bool,
     }
 
-    impl StreamFlight {
-        fn new(stream: *mut c_void) -> Self {
+    impl<'a> StreamFlight<'a> {
+        fn new(stream: *mut c_void, health: &'a SessionHealth) -> Self {
             Self {
                 stream,
+                health,
                 armed: true,
             }
         }
@@ -496,13 +667,25 @@ mod inner {
         fn finish(&mut self) {
             self.armed = false;
         }
+
+        fn quiesce(&mut self) -> Result<(), BackendError> {
+            self.armed = false;
+            let result = cuda_check(
+                unsafe { cudaStreamSynchronize(self.stream) },
+                "cudaStreamSynchronize(error cleanup)",
+            );
+            if let Err(error) = &result {
+                self.health.poison(error);
+            }
+            result
+        }
     }
 
-    impl Drop for StreamFlight {
+    impl Drop for StreamFlight<'_> {
         fn drop(&mut self) {
             if self.armed {
-                unsafe {
-                    cudaStreamSynchronize(self.stream);
+                if let Err(error) = self.quiesce() {
+                    eprintln!("[TensorRT] Warning: {error}");
                 }
             }
         }
@@ -683,6 +866,7 @@ mod inner {
             -7 => "failed to create builder config",
             -8 => "failed to add optimization profile to config",
             -9 => "engine serialization failed",
+            -10 => "failed to allocate the serialized engine buffer",
             _ => "unknown error",
         }
     }
@@ -694,6 +878,10 @@ mod inner {
         opt_batch: usize,
         max_batch: usize,
     ) -> Result<Vec<u8>, BackendError> {
+        let opt_batch = i32::try_from(opt_batch)
+            .map_err(|_| BackendError::msg("TensorRT opt_batch does not fit in i32"))?;
+        let max_batch = i32::try_from(max_batch)
+            .map_err(|_| BackendError::msg("TensorRT max_batch does not fit in i32"))?;
         let mut out_data: *mut c_void = std::ptr::null_mut();
         let mut out_len: usize = 0;
 
@@ -702,9 +890,9 @@ mod inner {
                 onnx_bytes.as_ptr() as *const c_void,
                 onnx_bytes.len(),
                 1, // min_batch
-                opt_batch as i32,
-                max_batch as i32, // max_batch
-                256,              // workspace MB
+                opt_batch,
+                max_batch,
+                256, // workspace MB
                 &mut out_data,
                 &mut out_len,
             )
@@ -728,181 +916,55 @@ mod inner {
     // TrtSession — owns TRT context + CUDA resources
     // -----------------------------------------------------------------------
 
-    struct TrtEngine {
-        handle: *mut c_void,
-    }
-
-    // SAFETY: TensorRT engines are immutable during inference. Context creation
-    // happens serially in `TensorrtBackend::new`, and every mutable execution
-    // object lives in its own leased `TrtSession`.
-    unsafe impl Send for TrtEngine {}
-    unsafe impl Sync for TrtEngine {}
-
-    impl TrtEngine {
-        fn new(engine_data: &[u8]) -> Result<Self, BackendError> {
-            let handle = unsafe {
-                trt_create_engine(engine_data.as_ptr() as *const c_void, engine_data.len())
-            };
-            if handle.is_null() {
-                return Err(BackendError::msg("Failed to deserialize TRT engine"));
-            }
-            Ok(Self { handle })
-        }
-
-        fn io_tensor_names(&self) -> Vec<String> {
-            let n_io = unsafe { trt_get_nb_io_tensors(self.handle) };
-            (0..n_io)
-                .map(|i| {
-                    let ptr = unsafe { trt_get_tensor_name(self.handle, i) };
-                    if ptr.is_null() {
-                        "<null>".to_string()
-                    } else {
-                        unsafe { std::ffi::CStr::from_ptr(ptr) }
-                            .to_string_lossy()
-                            .into_owned()
-                    }
-                })
-                .collect()
-        }
-    }
-
-    impl Drop for TrtEngine {
-        fn drop(&mut self) {
-            unsafe { trt_destroy_engine(self.handle) };
-        }
-    }
-
-    struct LanePool<T> {
-        lanes: Vec<Mutex<T>>,
-        available: Mutex<Vec<usize>>,
-        ready: Condvar,
-    }
-
-    impl<T> LanePool<T> {
-        fn new(lanes: Vec<T>) -> Result<Self, BackendError> {
-            if lanes.is_empty() {
-                return Err(BackendError::msg(
-                    "TensorRT execution_contexts must be at least 1",
-                ));
-            }
-            let available = (0..lanes.len()).collect();
-            Ok(Self {
-                lanes: lanes.into_iter().map(Mutex::new).collect(),
-                available: Mutex::new(available),
-                ready: Condvar::new(),
-            })
-        }
-
-        fn lease(&self) -> Result<LaneLease<'_, T>, BackendError> {
-            let mut available = self
-                .available
-                .lock()
-                .map_err(|_| BackendError::msg("TensorRT lane queue lock poisoned"))?;
-            while available.is_empty() {
-                available = self
-                    .ready
-                    .wait(available)
-                    .map_err(|_| BackendError::msg("TensorRT lane queue lock poisoned"))?;
-            }
-            let index = available.pop().expect("non-empty lane queue");
-            drop(available);
-
-            let guard = match self.lanes[index].lock() {
-                Ok(guard) => guard,
-                Err(_) => {
-                    self.release(index);
-                    return Err(BackendError::msg("TensorRT execution lane lock poisoned"));
-                }
-            };
-            Ok(LaneLease {
-                pool: self,
-                index,
-                guard: Some(guard),
-            })
-        }
-
-        fn release(&self, index: usize) {
-            let mut available = self
-                .available
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            available.push(index);
-            self.ready.notify_one();
-        }
-    }
-
-    struct LaneLease<'a, T> {
-        pool: &'a LanePool<T>,
-        index: usize,
-        guard: Option<MutexGuard<'a, T>>,
-    }
-
-    impl<T> LaneLease<'_, T> {
-        fn get_mut(&mut self) -> &mut T {
-            self.guard.as_deref_mut().expect("lane lease guard present")
-        }
-    }
-
-    impl<T> Drop for LaneLease<'_, T> {
-        fn drop(&mut self) {
-            drop(self.guard.take());
-            self.pool.release(self.index);
-        }
-    }
-
     struct TrtSession {
         handle: *mut c_void, // opaque TrtSession from C++ shim
         stream: *mut c_void,
         buffers: GpuBuffers,
         pinned: Option<PinnedHostBuffers>,
-        events: StageEvents,
-        max_batch: usize,
-        obs_dim: usize,
-        stream_scoped_copies: bool,
-        _engine: Arc<TrtEngine>,
+        completion: Option<CudaEvent>,
+        stage_events: Option<StageEvents>,
+        layout: TensorLayout,
+        health: SessionHealth,
     }
 
-    // SAFETY: A session is used by at most one `LaneLease` at a time.
+    // SAFETY: all session access is serialized by `TensorrtBackend::session`.
     unsafe impl Send for TrtSession {}
 
     impl Drop for TrtSession {
         fn drop(&mut self) {
-            unsafe {
-                // Host and device buffers are fields dropped after this method.
-                // Quiesce first so no asynchronous work can outlive them.
-                cudaStreamSynchronize(self.stream);
-                trt_destroy_session(self.handle);
-                cudaStreamDestroy(self.stream);
+            // Host and device buffers are fields dropped after this method.
+            // Quiesce first so no asynchronous work can outlive them.
+            if let Err(error) = cuda_check(
+                unsafe { cudaStreamSynchronize(self.stream) },
+                "cudaStreamSynchronize(session drop)",
+            ) {
+                eprintln!("[TensorRT] Warning: {error}");
+            }
+            unsafe { trt_destroy_session(self.handle) };
+            if let Err(error) = cuda_check(
+                unsafe { cudaStreamDestroy(self.stream) },
+                "cudaStreamDestroy",
+            ) {
+                eprintln!("[TensorRT] Warning: {error}");
             }
         }
     }
 
     impl TrtSession {
         fn new(
-            engine: Arc<TrtEngine>,
-            obs_dim: usize,
-            max_batch: usize,
-            cuda_graphs: bool,
+            engine_data: &[u8],
+            layout: TensorLayout,
             host_io: TrtHostIoMode,
-            log_configuration: bool,
+            profile_stages: bool,
         ) -> Result<Self, BackendError> {
-            let enable_cuda_graphs = if cuda_graphs { 1 } else { 0 };
-            let handle = unsafe { trt_create_session(engine.handle, enable_cuda_graphs) };
+            let handle = unsafe {
+                trt_create_session(engine_data.as_ptr().cast::<c_void>(), engine_data.len())
+            };
             if handle.is_null() {
-                return Err(BackendError::msg(format!(
-                    "Failed to create TRT execution context (cuda_graphs={cuda_graphs})"
-                )));
+                return Err(BackendError::msg("Failed to create TensorRT session"));
             }
 
-            match Self::init_session(
-                handle,
-                engine,
-                obs_dim,
-                max_batch,
-                cuda_graphs,
-                host_io,
-                log_configuration,
-            ) {
+            match Self::init_session(handle, layout, host_io, profile_stages) {
                 Ok(session) => Ok(session),
                 Err(e) => {
                     // Clean up the C++ session on init failure
@@ -916,24 +978,27 @@ mod inner {
         /// `new()` can destroy the handle on error.
         fn init_session(
             handle: *mut c_void,
-            engine: Arc<TrtEngine>,
-            obs_dim: usize,
-            max_batch: usize,
-            cuda_graphs: bool,
+            layout: TensorLayout,
             host_io: TrtHostIoMode,
-            log_configuration: bool,
+            profile_stages: bool,
         ) -> Result<Self, BackendError> {
-            if log_configuration {
-                let names = engine.io_tensor_names();
-                eprintln!("[TensorRT] IO tensors: {names:?}");
-                let accepted = unsafe { trt_session_cuda_graphs_requested(handle) } != 0;
-                eprintln!(
-                    "[TensorRT] RTX CUDA graphs: requested={cuda_graphs}, config_accepted={accepted}"
-                );
-            }
+            let n_io = unsafe { trt_get_nb_io_tensors(handle) };
+            let names: Vec<String> = (0..n_io)
+                .map(|index| {
+                    let ptr = unsafe { trt_get_tensor_name(handle, index) };
+                    if ptr.is_null() {
+                        "<null>".to_string()
+                    } else {
+                        unsafe { std::ffi::CStr::from_ptr(ptr) }
+                            .to_string_lossy()
+                            .into_owned()
+                    }
+                })
+                .collect();
+            eprintln!("[TensorRT] IO tensors: {names:?}");
 
             // Allocate GPU buffers
-            let buffers = GpuBuffers::alloc(max_batch, obs_dim)?;
+            let buffers = GpuBuffers::alloc(layout)?;
 
             // Bind tensor addresses
             Self::bind_tensors(handle, &buffers)?;
@@ -941,33 +1006,30 @@ mod inner {
             // Lifecycle resources are created once, outside every timed call.
             let pinned = match host_io {
                 TrtHostIoMode::Pageable => None,
-                TrtHostIoMode::Pinned => Some(PinnedHostBuffers::alloc(max_batch, obs_dim)?),
+                TrtHostIoMode::Pinned => Some(PinnedHostBuffers::alloc(layout)?),
             };
-            let events = StageEvents::new()?;
+            let completion = match host_io {
+                TrtHostIoMode::Pageable => None,
+                TrtHostIoMode::Pinned => Some(CudaEvent::completion()?),
+            };
+            let stage_events = if profile_stages {
+                Some(StageEvents::new()?)
+            } else {
+                None
+            };
 
             let mut stream: *mut c_void = std::ptr::null_mut();
-            if cuda_graphs {
-                // Graph capture cannot interact with CUDA's legacy stream, so
-                // graph lanes use non-blocking streams plus stream-scoped copies.
-                cuda_check(
-                    unsafe { cudaStreamCreateWithFlags(&mut stream, CUDA_STREAM_NON_BLOCKING) },
-                    "cudaStreamCreateWithFlags(non-blocking)",
-                )?;
-            } else {
-                // Preserve the pre-pool default path exactly when graphs are off.
-                cuda_check(unsafe { cudaStreamCreate(&mut stream) }, "cudaStreamCreate")?;
-            }
+            cuda_check(unsafe { cudaStreamCreate(&mut stream) }, "cudaStreamCreate")?;
 
             Ok(Self {
                 handle,
                 stream,
                 buffers,
                 pinned,
-                events,
-                max_batch,
-                obs_dim,
-                stream_scoped_copies: cuda_graphs,
-                _engine: engine,
+                completion,
+                stage_events,
+                layout,
+                health: SessionHealth::new(),
             })
         }
 
@@ -992,25 +1054,30 @@ mod inner {
             Ok(())
         }
 
-        fn validate_input(&self, input_len: usize, n: usize) -> Result<(), BackendError> {
-            if n > self.max_batch {
-                return Err(BackendError::msg(format!(
-                    "batch size {n} exceeds max_batch {}",
-                    self.max_batch
-                )));
-            }
-            if input_len != n * self.obs_dim {
+        fn ensure_healthy(&self) -> Result<(), BackendError> {
+            self.health.ensure_healthy()
+        }
+
+        fn validate_input(&self, input_len: usize, n: usize) -> Result<BatchLayout, BackendError> {
+            self.ensure_healthy()?;
+            let batch = self.layout.batch(n)?;
+            if input_len != batch.input_elements {
                 return Err(BackendError::msg(format!(
                     "input length {input_len} != expected {}",
-                    n * self.obs_dim
+                    batch.input_elements
                 )));
             }
-            Ok(())
+            Ok(batch)
         }
 
         fn set_input_shape(&self, n: usize) -> Result<(), BackendError> {
             let obs_name = CString::new(crate::TENSOR_INPUT).unwrap();
-            let shape = [n as i64, self.obs_dim as i64];
+            let n = i64::try_from(n)
+                .map_err(|_| BackendError::msg("TensorRT batch size does not fit in i64"))?;
+            let obs_dim = i64::try_from(self.layout.obs_dim).map_err(|_| {
+                BackendError::msg("TensorRT observation dimension does not fit in i64")
+            })?;
+            let shape = [n, obs_dim];
             let rc =
                 unsafe { trt_set_input_shape(self.handle, obs_name.as_ptr(), 2, shape.as_ptr()) };
             if rc != 0 {
@@ -1029,12 +1096,7 @@ mod inner {
             kind: i32,
             op: &str,
         ) -> Result<(), BackendError> {
-            let code = if self.stream_scoped_copies {
-                unsafe { cudaMemcpyAsync(dst, src, count, kind, self.stream) }
-            } else {
-                unsafe { cudaMemcpy(dst, src, count, kind) }
-            };
-            cuda_check(code, op)
+            cuda_check(unsafe { cudaMemcpy(dst, src, count, kind) }, op)
         }
 
         fn copy_async(
@@ -1051,16 +1113,6 @@ mod inner {
             )
         }
 
-        fn finish_output_copies(&self) -> Result<(), BackendError> {
-            if self.stream_scoped_copies {
-                cuda_check(
-                    unsafe { cudaStreamSynchronize(self.stream) },
-                    "cudaStreamSynchronize(outputs)",
-                )?;
-            }
-            Ok(())
-        }
-
         /// Preserve the existing pageable allocation and synchronization path.
         fn infer_pageable(
             &mut self,
@@ -1068,38 +1120,41 @@ mod inner {
             n: usize,
             profile_stages: bool,
         ) -> Result<(OwnedTrtOutputs, TrtTimingInfo), BackendError> {
-            self.validate_input(input.len(), n)?;
+            let batch = self.validate_input(input.len(), n)?;
             self.set_input_shape(n)?;
-            let f = std::mem::size_of::<f32>();
             let total_start = Instant::now();
             let mut timing = TrtTimingInfo::default();
+            let events = if profile_stages {
+                self.stage_events.as_ref()
+            } else {
+                None
+            };
+            let mut flight = StreamFlight::new(self.stream, &self.health);
 
-            if profile_stages {
-                self.events
+            if let Some(events) = events {
+                events
                     .h2d_start
                     .record(self.stream, "cudaEventRecord(H2D start)")?;
                 self.copy_async(
                     self.buffers.d_input,
                     input.as_ptr().cast::<c_void>(),
-                    n * self.obs_dim * f,
+                    batch.input_bytes,
                     CUDA_MEMCPY_H2D,
                     "input H2D async",
                 )?;
-                self.events
+                events
                     .h2d_end
                     .record(self.stream, "cudaEventRecord(H2D end)")?;
                 // Match the control's existing H2D-before-enqueue barrier.
-                self.events
-                    .h2d_end
-                    .synchronize("cudaEventSynchronize(H2D)")?;
-                self.events
+                events.h2d_end.synchronize("cudaEventSynchronize(H2D)")?;
+                events
                     .infer_start
                     .record(self.stream, "cudaEventRecord(inference start)")?;
             } else {
                 self.copy_control(
                     self.buffers.d_input,
                     input.as_ptr().cast::<c_void>(),
-                    n * self.obs_dim * f,
+                    batch.input_bytes,
                     CUDA_MEMCPY_H2D,
                     "input H2D",
                 )?;
@@ -1111,11 +1166,11 @@ mod inner {
                     "TRT enqueue_v3 failed (rc={rc})"
                 )));
             }
-            if profile_stages {
-                self.events
+            if let Some(events) = events {
+                events
                     .infer_end
                     .record(self.stream, "cudaEventRecord(inference end)")?;
-                self.events
+                events
                     .infer_end
                     .synchronize("cudaEventSynchronize(inference)")?;
             } else {
@@ -1126,51 +1181,49 @@ mod inner {
             }
 
             let alloc_start = Instant::now();
-            let mut pp1 = vec![0.0f32; n * 5];
-            let mut pp2 = vec![0.0f32; n * 5];
-            let mut v1 = vec![0.0f32; n];
-            let mut v2 = vec![0.0f32; n];
+            let mut pp1 = vec![0.0f32; batch.policy_elements];
+            let mut pp2 = vec![0.0f32; batch.policy_elements];
+            let mut v1 = vec![0.0f32; batch.value_elements];
+            let mut v2 = vec![0.0f32; batch.value_elements];
             timing.output_alloc_us = alloc_start.elapsed().as_secs_f64() * 1_000_000.0;
 
-            if profile_stages {
-                self.events
+            if let Some(events) = events {
+                events
                     .d2h_start
                     .record(self.stream, "cudaEventRecord(D2H start)")?;
                 self.copy_async(
                     pp1.as_mut_ptr().cast::<c_void>(),
                     self.buffers.d_policy_p1,
-                    n * 5 * f,
+                    batch.policy_bytes,
                     CUDA_MEMCPY_D2H,
                     "policy_p1 D2H async",
                 )?;
                 self.copy_async(
                     pp2.as_mut_ptr().cast::<c_void>(),
                     self.buffers.d_policy_p2,
-                    n * 5 * f,
+                    batch.policy_bytes,
                     CUDA_MEMCPY_D2H,
                     "policy_p2 D2H async",
                 )?;
                 self.copy_async(
                     v1.as_mut_ptr().cast::<c_void>(),
                     self.buffers.d_value_p1,
-                    n * f,
+                    batch.value_bytes,
                     CUDA_MEMCPY_D2H,
                     "value_p1 D2H async",
                 )?;
                 self.copy_async(
                     v2.as_mut_ptr().cast::<c_void>(),
                     self.buffers.d_value_p2,
-                    n * f,
+                    batch.value_bytes,
                     CUDA_MEMCPY_D2H,
                     "value_p2 D2H async",
                 )?;
-                self.events
+                events
                     .d2h_end
                     .record(self.stream, "cudaEventRecord(D2H end)")?;
-                self.events
-                    .d2h_end
-                    .synchronize("cudaEventSynchronize(D2H)")?;
-                let device = self.events.timing()?;
+                events.d2h_end.synchronize("cudaEventSynchronize(D2H)")?;
+                let device = events.timing()?;
                 timing.h2d_us = device.h2d_us;
                 timing.infer_us = device.infer_us;
                 timing.d2h_us = device.d2h_us;
@@ -1178,44 +1231,45 @@ mod inner {
                 self.copy_control(
                     pp1.as_mut_ptr().cast::<c_void>(),
                     self.buffers.d_policy_p1,
-                    n * 5 * f,
+                    batch.policy_bytes,
                     CUDA_MEMCPY_D2H,
                     "policy_p1 D2H",
                 )?;
                 self.copy_control(
                     pp2.as_mut_ptr().cast::<c_void>(),
                     self.buffers.d_policy_p2,
-                    n * 5 * f,
+                    batch.policy_bytes,
                     CUDA_MEMCPY_D2H,
                     "policy_p2 D2H",
                 )?;
                 self.copy_control(
                     v1.as_mut_ptr().cast::<c_void>(),
                     self.buffers.d_value_p1,
-                    n * f,
+                    batch.value_bytes,
                     CUDA_MEMCPY_D2H,
                     "value_p1 D2H",
                 )?;
                 self.copy_control(
                     v2.as_mut_ptr().cast::<c_void>(),
                     self.buffers.d_value_p2,
-                    n * f,
+                    batch.value_bytes,
                     CUDA_MEMCPY_D2H,
                     "value_p2 D2H",
                 )?;
-                self.finish_output_copies()?;
             }
 
             timing.total_us = total_start.elapsed().as_secs_f64() * 1_000_000.0;
+            flight.finish();
             Ok(((pp1, pp2, v1, v2), timing))
         }
 
         fn pinned_input_mut(&mut self, n: usize) -> Result<&mut [f32], BackendError> {
-            self.validate_input(n * self.obs_dim, n)?;
+            let batch = self.layout.batch(n)?;
+            self.ensure_healthy()?;
             self.pinned
                 .as_mut()
-                .map(|buffers| buffers.input_mut(n))
-                .ok_or_else(|| BackendError::msg("pinned input requested on pageable session"))
+                .ok_or_else(|| BackendError::msg("pinned input requested on pageable session"))?
+                .input_mut(batch)
         }
 
         fn infer_pinned_prepared(
@@ -1223,34 +1277,42 @@ mod inner {
             n: usize,
             profile_stages: bool,
         ) -> Result<TrtTimingInfo, BackendError> {
-            self.validate_input(n * self.obs_dim, n)?;
+            let batch = self.layout.batch(n)?;
+            self.validate_input(batch.input_elements, n)?;
             self.set_input_shape(n)?;
-            let f = std::mem::size_of::<f32>();
             let total_start = Instant::now();
-            let pinned = self.pinned.as_ref().ok_or_else(|| {
+            let pinned = self.pinned.as_mut().ok_or_else(|| {
                 BackendError::msg("pinned inference requested on pageable session")
             })?;
+            let completion = self.completion.as_ref().ok_or_else(|| {
+                BackendError::msg("pinned inference completion event is unavailable")
+            })?;
+            let events = if profile_stages {
+                self.stage_events.as_ref()
+            } else {
+                None
+            };
             let input_ptr = pinned.input_ptr();
-            let [pp1_ptr, pp2_ptr, v1_ptr, v2_ptr] = pinned.output_ptrs();
-            let mut flight = StreamFlight::new(self.stream);
+            let [pp1_ptr, pp2_ptr, v1_ptr, v2_ptr] = pinned.output_ptrs_mut()?;
+            let mut flight = StreamFlight::new(self.stream, &self.health);
 
-            if profile_stages {
-                self.events
+            if let Some(events) = events {
+                events
                     .h2d_start
                     .record(self.stream, "cudaEventRecord(H2D start)")?;
             }
             self.copy_async(
                 self.buffers.d_input,
                 input_ptr,
-                n * self.obs_dim * f,
+                batch.input_bytes,
                 CUDA_MEMCPY_H2D,
                 "pinned input H2D async",
             )?;
-            if profile_stages {
-                self.events
+            if let Some(events) = events {
+                events
                     .h2d_end
                     .record(self.stream, "cudaEventRecord(H2D end)")?;
-                self.events
+                events
                     .infer_start
                     .record(self.stream, "cudaEventRecord(inference start)")?;
             }
@@ -1261,11 +1323,11 @@ mod inner {
                     "TRT enqueue_v3 failed (rc={rc})"
                 )));
             }
-            if profile_stages {
-                self.events
+            if let Some(events) = events {
+                events
                     .infer_end
                     .record(self.stream, "cudaEventRecord(inference end)")?;
-                self.events
+                events
                     .d2h_start
                     .record(self.stream, "cudaEventRecord(D2H start)")?;
             }
@@ -1273,40 +1335,41 @@ mod inner {
             self.copy_async(
                 pp1_ptr,
                 self.buffers.d_policy_p1,
-                n * 5 * f,
+                batch.policy_bytes,
                 CUDA_MEMCPY_D2H,
                 "pinned policy_p1 D2H async",
             )?;
             self.copy_async(
                 pp2_ptr,
                 self.buffers.d_policy_p2,
-                n * 5 * f,
+                batch.policy_bytes,
                 CUDA_MEMCPY_D2H,
                 "pinned policy_p2 D2H async",
             )?;
             self.copy_async(
                 v1_ptr,
                 self.buffers.d_value_p1,
-                n * f,
+                batch.value_bytes,
                 CUDA_MEMCPY_D2H,
                 "pinned value_p1 D2H async",
             )?;
             self.copy_async(
                 v2_ptr,
                 self.buffers.d_value_p2,
-                n * f,
+                batch.value_bytes,
                 CUDA_MEMCPY_D2H,
                 "pinned value_p2 D2H async",
             )?;
-            self.events
-                .d2h_end
-                .record(self.stream, "cudaEventRecord(completion)")?;
-            self.events
-                .d2h_end
-                .synchronize("cudaEventSynchronize(completion)")?;
+            if let Some(events) = events {
+                events
+                    .d2h_end
+                    .record(self.stream, "cudaEventRecord(D2H end)")?;
+            }
+            completion.record(self.stream, "cudaEventRecord(completion)")?;
+            completion.synchronize("cudaEventSynchronize(completion)")?;
 
-            let mut timing = if profile_stages {
-                self.events.timing()?
+            let mut timing = if let Some(events) = events {
+                events.timing()?
             } else {
                 TrtTimingInfo::default()
             };
@@ -1316,10 +1379,12 @@ mod inner {
         }
 
         fn pinned_output_slices(&self, n: usize) -> Result<TrtOutputSlices<'_>, BackendError> {
+            let batch = self.layout.batch(n)?;
+            self.ensure_healthy()?;
             self.pinned
                 .as_ref()
-                .map(|buffers| buffers.output_slices(n))
-                .ok_or_else(|| BackendError::msg("pinned output requested on pageable session"))
+                .ok_or_else(|| BackendError::msg("pinned output requested on pageable session"))?
+                .output_slices(batch)
         }
 
         fn pinned_bytes(&self) -> usize {
@@ -1337,12 +1402,13 @@ mod inner {
     /// optimized engine for the current GPU, and runs inference directly on
     /// the GPU. Engines are cached to disk for fast subsequent startups.
     ///
-    /// Thread safety: callers lease one independent execution context, CUDA
-    /// stream, and buffer set from a bounded pool. A single caller retains the
-    /// old one-lane behavior when `execution_contexts` is 1.
+    /// Thread safety: the one TensorRT execution context, stream, and reusable
+    /// host/device buffers are serialized behind a mutex (the same topology as
+    /// the pre-experiment backend and the measured production coordinate).
     pub struct TensorrtBackend<E: ObservationEncoder> {
-        sessions: LanePool<TrtSession>,
+        session: Mutex<TrtSession>,
         encoder: E,
+        layout: TensorLayout,
         host_io: TrtHostIoMode,
         profile_stages: bool,
         stats: Arc<TrtStats>,
@@ -1358,33 +1424,22 @@ mod inner {
             encoder: E,
             config: TensorrtConfig,
         ) -> Result<Self, BackendError> {
-            if config.max_batch == 0 {
-                return Err(BackendError::msg("TensorRT max_batch must be at least 1"));
-            }
+            let obs_dim = encoder.obs_dim();
+            let layout = TensorLayout::new(config.max_batch, obs_dim)?;
+
             if config.opt_batch == 0 || config.opt_batch > config.max_batch {
                 return Err(BackendError::msg(format!(
                     "TensorRT opt_batch must be in 1..={} (got {})",
                     config.max_batch, config.opt_batch
                 )));
             }
-            if config.execution_contexts == 0 {
-                return Err(BackendError::msg(
-                    "TensorRT execution_contexts must be at least 1",
-                ));
-            }
-            if config.host_io == TrtHostIoMode::Pinned && config.cuda_graphs {
-                return Err(BackendError::msg(
-                    "the pinned-I/O experiment requires CUDA graphs to remain off",
-                ));
-            }
-            if config.host_io == TrtHostIoMode::Pinned && config.execution_contexts != 1 {
-                return Err(BackendError::msg(
-                    "the pinned-I/O experiment requires exactly one execution context",
-                ));
+            if config.opt_batch > i32::MAX as usize {
+                return Err(BackendError::msg(format!(
+                    "TensorRT opt_batch must fit in i32 (got {})",
+                    config.opt_batch
+                )));
             }
             load_trt_libs()?;
-
-            let obs_dim = encoder.obs_dim();
             let onnx_path = model_path.as_ref();
 
             let onnx_bytes = fs::read(onnx_path).map_err(|e| {
@@ -1418,26 +1473,13 @@ mod inner {
                 }
             };
 
-            let engine = Arc::new(TrtEngine::new(&engine_data)?);
-            let mut sessions = Vec::with_capacity(config.execution_contexts);
-            for index in 0..config.execution_contexts {
-                sessions.push(TrtSession::new(
-                    Arc::clone(&engine),
-                    obs_dim,
-                    config.max_batch,
-                    config.cuda_graphs,
-                    config.host_io,
-                    index == 0,
-                )?);
-            }
-            let pinned_bytes = sessions.iter().map(TrtSession::pinned_bytes).sum();
-            let sessions = LanePool::new(sessions)?;
+            let session =
+                TrtSession::new(&engine_data, layout, config.host_io, config.profile_stages)?;
+            let pinned_bytes = session.pinned_bytes();
             eprintln!(
-                "[TensorRT] Profile: MIN=1, OPT={}, MAX={}; execution contexts: {}; CUDA graphs requested: {}; host I/O: {}; pinned bytes: {}; stage profiling: {}",
+                "[TensorRT] Profile: MIN=1, OPT={}, MAX={}; one execution context; CUDA graphs: off; host I/O: {}; pinned bytes: {}; stage profiling: {}",
                 config.opt_batch,
                 config.max_batch,
-                config.execution_contexts,
-                config.cuda_graphs,
                 config.host_io,
                 pinned_bytes,
                 config.profile_stages,
@@ -1445,8 +1487,9 @@ mod inner {
             let stats = Arc::new(TrtStats::new(config.host_io, pinned_bytes));
 
             Ok(Self {
-                sessions,
+                session: Mutex::new(session),
                 encoder,
+                layout,
                 host_io: config.host_io,
                 profile_stages: config.profile_stages,
                 stats,
@@ -1455,6 +1498,14 @@ mod inner {
 
         pub fn stats(&self) -> &Arc<TrtStats> {
             &self.stats
+        }
+
+        fn lock_session(&self) -> Result<MutexGuard<'_, TrtSession>, BackendError> {
+            self.session.lock().map_err(|_| {
+                BackendError::msg(
+                    "TensorRT session lock poisoned after a panic; the session will not be reused",
+                )
+            })
         }
     }
 
@@ -1467,6 +1518,19 @@ mod inner {
         v2: &[f32],
         n: usize,
     ) -> Result<Vec<EvalResult>, BackendError> {
+        let policy_len = checked_elements(n, 5, "parsed policy output")?;
+        for (name, actual, expected) in [
+            ("policy_p1", pp1.len(), policy_len),
+            ("policy_p2", pp2.len(), policy_len),
+            ("value_p1", v1.len(), n),
+            ("value_p2", v2.len(), n),
+        ] {
+            if actual < expected {
+                return Err(BackendError::msg(format!(
+                    "TensorRT {name} output length {actual} is shorter than expected {expected}"
+                )));
+            }
+        }
         (0..n)
             .map(|i| {
                 let p1_off = i * 5;
@@ -1515,9 +1579,13 @@ mod inner {
             encoded: &[f32],
             n: usize,
         ) -> Result<(Vec<EvalResult>, TrtTimingInfo), BackendError> {
+            if !self.profile_stages {
+                return Err(BackendError::msg(
+                    "evaluate_encoded_timed requires TensorrtConfig::profile_stages = true",
+                ));
+            }
             let call_start = Instant::now();
-            let mut lease = self.sessions.lease()?;
-            let session = lease.get_mut();
+            let mut session = self.lock_session()?;
             session.validate_input(encoded.len(), n)?;
 
             let (results, mut timing) = match self.host_io {
@@ -1559,12 +1627,13 @@ mod inner {
                 return Ok(Vec::new());
             }
             let obs_dim = self.encoder.obs_dim();
+            let batch = self.layout.batch(n)?;
             let call_start = Instant::now();
 
             let (results, mut timing) = match self.host_io {
                 TrtHostIoMode::Pageable => {
                     let allocation_start = Instant::now();
-                    let mut buf = vec![0.0f32; n * obs_dim];
+                    let mut buf = vec![0.0f32; batch.input_elements];
                     let input_stage_us = allocation_start.elapsed().as_secs_f64() * 1_000_000.0;
                     let encode_start = Instant::now();
                     for (i, game) in games.iter().enumerate() {
@@ -1572,11 +1641,9 @@ mod inner {
                     }
                     let encode_us = encode_start.elapsed().as_secs_f64() * 1_000_000.0;
 
-                    let mut lease = self.sessions.lease()?;
+                    let mut session = self.lock_session()?;
                     let ((pp1, pp2, v1, v2), mut timing) =
-                        lease
-                            .get_mut()
-                            .infer_pageable(&buf, n, self.profile_stages)?;
+                        session.infer_pageable(&buf, n, self.profile_stages)?;
                     timing.input_stage_us = input_stage_us;
                     timing.encode_us = encode_us;
                     let parse_start = Instant::now();
@@ -1585,8 +1652,7 @@ mod inner {
                     (results, timing)
                 }
                 TrtHostIoMode::Pinned => {
-                    let mut lease = self.sessions.lease()?;
-                    let session = lease.get_mut();
+                    let mut session = self.lock_session()?;
                     let encode_start = Instant::now();
                     {
                         let input = session.pinned_input_mut(n)?;
@@ -1615,50 +1681,16 @@ mod inner {
 
     #[cfg(test)]
     mod tests {
-        use super::{LanePool, OutputLayout, TensorrtBackend, TensorrtConfig, TrtHostIoMode};
+        use super::{
+            parse_eval_results, OutputLayout, SessionHealth, TensorLayout, TensorrtBackend,
+            TensorrtConfig, TrtHostIoMode,
+        };
         use crate::FlatEncoder;
-        use std::sync::{mpsc, Arc};
-        use std::time::Duration;
+        use alpharat_mcts::BackendError;
 
         #[test]
-        fn lane_pool_reuses_the_recently_released_lane() {
-            let pool = LanePool::new(vec![10_u8, 20_u8]).unwrap();
-
-            let mut first = pool.lease().unwrap();
-            assert_eq!(*first.get_mut(), 20);
-            drop(first);
-
-            let mut second = pool.lease().unwrap();
-            assert_eq!(*second.get_mut(), 20);
-        }
-
-        #[test]
-        fn lane_pool_waits_until_capacity_is_released() {
-            let pool = Arc::new(LanePool::new(vec![()]).unwrap());
-            let held = pool.lease().unwrap();
-            let (started_tx, started_rx) = mpsc::channel();
-            let (acquired_tx, acquired_rx) = mpsc::channel();
-            let waiter_pool = Arc::clone(&pool);
-
-            let waiter = std::thread::spawn(move || {
-                started_tx.send(()).unwrap();
-                let _lease = waiter_pool.lease().unwrap();
-                acquired_tx.send(()).unwrap();
-            });
-
-            started_rx.recv_timeout(Duration::from_secs(1)).unwrap();
-            assert!(acquired_rx.recv_timeout(Duration::from_millis(25)).is_err());
-            drop(held);
-            acquired_rx.recv_timeout(Duration::from_secs(1)).unwrap();
-            waiter.join().unwrap();
-        }
-
-        #[test]
-        fn lane_pool_rejects_zero_capacity() {
-            let Err(error) = LanePool::<()>::new(Vec::new()) else {
-                panic!("zero-capacity lane pool should be rejected");
-            };
-            assert!(error.to_string().contains("at least 1"));
+        fn pinned_host_io_is_the_tensor_rt_default() {
+            assert_eq!(TensorrtConfig::default().host_io, TrtHostIoMode::Pinned);
         }
 
         #[test]
@@ -1680,7 +1712,7 @@ mod inner {
 
         #[test]
         fn pinned_output_layout_uses_disjoint_max_batch_regions() {
-            let layout = OutputLayout::new(128);
+            let layout = OutputLayout::new(640, 128).unwrap();
             assert_eq!(layout.policy_p1, 0);
             assert_eq!(layout.policy_p2, 640);
             assert_eq!(layout.value_p1, 1280);
@@ -1689,39 +1721,48 @@ mod inner {
         }
 
         #[test]
-        fn pinned_experiment_rejects_graphs_before_runtime_load() {
-            let error = TensorrtBackend::new(
-                "not-read.onnx",
-                FlatEncoder::new(7, 7),
-                TensorrtConfig {
-                    host_io: TrtHostIoMode::Pinned,
-                    cuda_graphs: true,
-                    ..TensorrtConfig::default()
-                },
-            )
-            .err()
-            .expect("pinned host I/O plus graphs should fail");
-
-            assert!(error
-                .to_string()
-                .contains("requires CUDA graphs to remain off"));
+        fn tensor_layout_accounts_for_the_full_pinned_allocation() {
+            let layout = TensorLayout::new(128, 349).unwrap();
+            assert_eq!(layout.capacity.input_elements, 44_672);
+            assert_eq!(layout.output.total, 1_536);
+            assert_eq!(layout.pinned_bytes, 184_832);
         }
 
         #[test]
-        fn pinned_experiment_rejects_multiple_contexts_before_runtime_load() {
+        fn tensor_layout_rejects_overflow_before_loading_cuda() {
+            let error = TensorLayout::new(3, i64::MAX as usize).unwrap_err();
+            assert!(error.to_string().contains("overflow"));
+        }
+
+        #[test]
+        fn invalid_max_batch_is_rejected_before_runtime_load() {
             let error = TensorrtBackend::new(
                 "not-read.onnx",
                 FlatEncoder::new(7, 7),
                 TensorrtConfig {
-                    host_io: TrtHostIoMode::Pinned,
-                    execution_contexts: 2,
+                    max_batch: 0,
                     ..TensorrtConfig::default()
                 },
             )
             .err()
-            .expect("pinned host I/O plus multiple contexts should fail");
+            .expect("zero max batch should fail");
 
-            assert!(error.to_string().contains("exactly one execution context"));
+            assert!(error.to_string().contains("max_batch must be at least 1"));
+        }
+
+        #[test]
+        fn short_output_buffers_are_rejected_without_indexing_them() {
+            let error =
+                parse_eval_results(&[0.0; 9], &[0.0; 10], &[0.0; 2], &[0.0; 2], 2).unwrap_err();
+            assert!(error.to_string().contains("policy_p1 output length 9"));
+        }
+
+        #[test]
+        fn failed_stream_cleanup_poison_is_fail_closed() {
+            let health = SessionHealth::new();
+            health.poison(&BackendError::msg("forced cleanup failure"));
+            let error = health.ensure_healthy().unwrap_err();
+            assert!(error.to_string().contains("forced cleanup failure"));
         }
     }
 }

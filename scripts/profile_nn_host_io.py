@@ -2,7 +2,7 @@
 """Compare pageable and reusable pinned TensorRT host I/O under one eager lane.
 
 The record is intentionally descriptive: validity is a hard gate, but the script
-does not encode a numerical performance threshold or select a default.
+does not encode a numerical performance threshold.
 """
 
 from __future__ import annotations
@@ -30,7 +30,7 @@ CAPACITY_ROW = re.compile(
     r"(?P<throughput>[\d.]+[kM]?)\s*$"
 )
 PARITY = re.compile(
-    r"Parity: \d+ simultaneous lane\(s\), batch=(?P<batch>\d+), "
+    r"Parity: one context, batch=(?P<batch>\d+), "
     r"max_abs_diff=(?P<value>[\d.eE+-]+)"
 )
 ROOT_BEHAVIOR = re.compile(
@@ -125,8 +125,6 @@ def _run_capacity(
         str(max_batch),
         "--opt-batch",
         str(max_batch),
-        "--contexts",
-        "1",
         "--callers",
         "1",
         "--host-io",
@@ -228,8 +226,6 @@ def _run_selfplay(
         device="tensorrt",
         mux_max_batch_size=max_batch,
         tensorrt_opt_batch=max_batch,
-        tensorrt_execution_contexts=1,
-        tensorrt_cuda_graphs=False,
         tensorrt_pinned_host_io=mode == "pinned",
         tensorrt_profile_stages=True,
         use_inference_mux=True,
@@ -306,7 +302,7 @@ def _render_comparison(record: dict[str, Any]) -> str:
         "",
         (
             "Validity is a hard gate. Performance below is descriptive; this experiment "
-            "does not encode a pass/fail speed threshold or change the default."
+            "does not encode a numerical pass/fail speed threshold."
         ),
         "",
         "## Long production-shaped self-play",

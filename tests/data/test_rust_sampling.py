@@ -1,6 +1,8 @@
 from __future__ import annotations
 
-from alpharat.data.rust_sampling import RustSamplingMetrics
+from inspect import signature
+
+from alpharat.data.rust_sampling import RustSamplingMetrics, run_rust_sampling
 
 
 def _metrics(histogram: tuple[tuple[int, int], ...]) -> RustSamplingMetrics:
@@ -42,3 +44,9 @@ def test_inference_batch_summary_handles_uninstrumented_backend() -> None:
 
     assert metrics.inference_avg_batch_size == 0.0
     assert metrics.inference_batch_percentile(0.5) == 0
+
+
+def test_tensor_rt_pinned_host_io_is_the_python_default() -> None:
+    parameter = signature(run_rust_sampling).parameters["tensorrt_pinned_host_io"]
+
+    assert parameter.default is True

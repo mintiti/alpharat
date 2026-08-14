@@ -91,20 +91,11 @@ def main() -> None:
         help="TensorRT dynamic-profile optimization point (defaults to mux batch)",
     )
     parser.add_argument(
-        "--tensorrt-contexts",
-        type=int,
-        default=1,
-        help="Independent TensorRT context/stream/buffer lanes",
-    )
-    parser.add_argument(
-        "--tensorrt-cuda-graphs",
-        action="store_true",
-        help="Request whole-model CUDA Graph capture for TensorRT lanes",
-    )
-    parser.add_argument(
-        "--tensorrt-pinned-host-io",
-        action="store_true",
-        help="Use the experimental reusable page-locked TensorRT host slot",
+        "--tensorrt-pageable-host-io",
+        action="store_false",
+        dest="tensorrt_pinned_host_io",
+        default=True,
+        help="Use legacy pageable TensorRT staging for a control run",
     )
     parser.add_argument(
         "--tensorrt-profile-stages",
@@ -152,9 +143,9 @@ def main() -> None:
     print(
         f"Running {args.games} games, {args.sims} sims, "
         f"{args.threads} threads, batch={args.batch_size}, "
-        f"mux_batch={args.mux_batch}, trt_contexts={args.tensorrt_contexts}, "
+        f"mux_batch={args.mux_batch}, trt_contexts=1, "
         f"trt_opt_batch={args.tensorrt_opt_batch or args.mux_batch}, "
-        f"trt_cuda_graphs={args.tensorrt_cuda_graphs}, "
+        "trt_cuda_graphs=False, "
         f"trt_pinned_host_io={args.tensorrt_pinned_host_io}, "
         f"trt_profile_stages={args.tensorrt_profile_stages}, "
         f"inference_mux={not args.no_inference_mux}, device={args.device}"
@@ -187,8 +178,6 @@ def main() -> None:
         onnx_model_path=onnx_path,
         mux_max_batch_size=args.mux_batch,
         tensorrt_opt_batch=args.tensorrt_opt_batch,
-        tensorrt_execution_contexts=args.tensorrt_contexts,
-        tensorrt_cuda_graphs=args.tensorrt_cuda_graphs,
         tensorrt_pinned_host_io=args.tensorrt_pinned_host_io,
         tensorrt_profile_stages=args.tensorrt_profile_stages,
         use_inference_mux=not args.no_inference_mux,

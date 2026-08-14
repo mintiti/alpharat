@@ -396,29 +396,16 @@ fn create_tensorrt_backend(
     opt_batch_size: Option<usize>,
     output_dir: &str,
     num_threads: u32,
-    execution_contexts: usize,
-    cuda_graphs: bool,
     pinned_host_io: bool,
     profile_stages: bool,
     use_inference_mux: bool,
 ) -> Result<(Box<dyn Backend>, BackendRuntimeStats), SelfPlayError> {
-    if cuda_graphs && execution_contexts > 1 && !use_inference_mux {
-        return Err(SelfPlayError::Backend(alpharat_mcts::BackendError::msg(
-            concat!(
-                "TensorRT CUDA graphs with multiple direct self-play contexts are unsupported: ",
-                "concurrent capture across variable batch shapes exits inside TensorRT-RTX 1.3. ",
-                "Use one context, keep the inference mux enabled, or disable CUDA graphs."
-            ),
-        )));
-    }
     let encoder = FlatEncoder::new(width, height);
     let cache_dir = Path::new(output_dir).parent().map(|p| p.join(".trt_cache"));
     let config = TensorrtConfig {
         opt_batch: opt_batch_size.unwrap_or(max_batch_size),
         max_batch: max_batch_size,
         cache_dir,
-        execution_contexts,
-        cuda_graphs,
         host_io: if pinned_host_io {
             TrtHostIoMode::Pinned
         } else {
@@ -507,9 +494,7 @@ fn create_onnx_backend(
     device = "auto",
     mux_max_batch_size = 256,
     tensorrt_opt_batch = None,
-    tensorrt_execution_contexts = 1,
-    tensorrt_cuda_graphs = false,
-    tensorrt_pinned_host_io = false,
+    tensorrt_pinned_host_io = true,
     tensorrt_profile_stages = false,
     use_inference_mux = true,
     cache_size = 0,
@@ -552,8 +537,6 @@ fn rust_self_play(
     device: &str,
     mux_max_batch_size: usize,
     tensorrt_opt_batch: Option<usize>,
-    tensorrt_execution_contexts: usize,
-    tensorrt_cuda_graphs: bool,
     tensorrt_pinned_host_io: bool,
     tensorrt_profile_stages: bool,
     use_inference_mux: bool,
@@ -601,8 +584,6 @@ fn rust_self_play(
     #[cfg(not(feature = "tensorrt"))]
     let _ = (
         tensorrt_opt_batch,
-        tensorrt_execution_contexts,
-        tensorrt_cuda_graphs,
         tensorrt_pinned_host_io,
         tensorrt_profile_stages,
     );
@@ -631,8 +612,6 @@ fn rust_self_play(
                         tensorrt_opt_batch,
                         output_dir,
                         num_threads,
-                        tensorrt_execution_contexts,
-                        tensorrt_cuda_graphs,
                         tensorrt_pinned_host_io,
                         tensorrt_profile_stages,
                         use_inference_mux,
