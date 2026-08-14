@@ -18,6 +18,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import shutil
 import tempfile
 from pathlib import Path
 
@@ -61,10 +62,16 @@ def _export_random_model(width: int, height: int, onnx_path: Path) -> None:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Profile Rust self-play with NN")
-    parser.add_argument(
+    model_source = parser.add_mutually_exclusive_group()
+    model_source.add_argument(
         "--checkpoint",
         default=None,
         help="Path to .pt checkpoint (omit to use a random model)",
+    )
+    model_source.add_argument(
+        "--onnx",
+        default=None,
+        help="Path to an already-exported ONNX model (avoids Python model/config imports)",
     )
     parser.add_argument(
         "--device",
@@ -77,24 +84,46 @@ def main() -> None:
     parser.add_argument("--threads", type=int, default=4, help="Worker threads")
     parser.add_argument("--batch-size", type=int, default=16, help="Within-tree NN batch size")
     parser.add_argument("--mux-batch", type=int, default=256, help="Mux max batch size")
+    parser.add_argument(
+        "--tensorrt-opt-batch",
+        type=int,
+        default=None,
+        help="TensorRT dynamic-profile optimization point (defaults to mux batch)",
+    )
+    parser.add_argument(
+        "--tensorrt-contexts",
+        type=int,
+        default=1,
+        help="Independent TensorRT context/stream/buffer lanes",
+    )
+    parser.add_argument(
+        "--tensorrt-cuda-graphs",
+        action="store_true",
+        help="Request whole-model CUDA Graph capture for TensorRT lanes",
+    )
+    parser.add_argument(
+        "--tensorrt-pinned-host-io",
+        action="store_true",
+        help="Use the experimental reusable page-locked TensorRT host slot",
+    )
+    parser.add_argument(
+        "--tensorrt-profile-stages",
+        action="store_true",
+        help="Record host and CUDA-event TensorRT stage timings",
+    )
+    parser.add_argument(
+        "--no-inference-mux",
+        action="store_true",
+        help="Send worker requests directly to the backend",
+    )
     args = parser.parse_args()
 
     width, height = 7, 7
 
-    from alpharat.mcts.config import RustMCTSConfig
-
-    mcts = RustMCTSConfig(
-        simulations=args.sims,
-        c_puct=0.512,
-        force_k=0.103,
-        fpu_reduction=0.459,
-        batch_size=args.batch_size,
-        noise_epsilon=0.25,
-        noise_concentration=10.83,
-    )
-
     # Get or create ONNX model
-    if args.checkpoint is not None:
+    if args.onnx is not None:
+        onnx_path = args.onnx
+    elif args.checkpoint is not None:
         from alpharat.data.rust_sampling import _ensure_onnx
 
         onnx_path = _ensure_onnx(args.checkpoint)
@@ -115,57 +144,89 @@ def main() -> None:
 
         preload_cuda_libs()
 
-    with tempfile.TemporaryDirectory() as tmp:
-        output_dir = Path(tmp) / "games"
-        output_dir.mkdir()
+    profile_root = Path(tempfile.gettempdir()) / "alpharat_profile_selfplay"
+    output_dir = profile_root / "games"
+    shutil.rmtree(output_dir, ignore_errors=True)
+    output_dir.mkdir(parents=True)
 
-        print(
-            f"Running {args.games} games, {args.sims} sims, "
-            f"{args.threads} threads, batch={args.batch_size}, "
-            f"mux_batch={args.mux_batch}, device={args.device}"
-        )
+    print(
+        f"Running {args.games} games, {args.sims} sims, "
+        f"{args.threads} threads, batch={args.batch_size}, "
+        f"mux_batch={args.mux_batch}, trt_contexts={args.tensorrt_contexts}, "
+        f"trt_opt_batch={args.tensorrt_opt_batch or args.mux_batch}, "
+        f"trt_cuda_graphs={args.tensorrt_cuda_graphs}, "
+        f"trt_pinned_host_io={args.tensorrt_pinned_host_io}, "
+        f"trt_profile_stages={args.tensorrt_profile_stages}, "
+        f"inference_mux={not args.no_inference_mux}, device={args.device}"
+    )
 
-        stats = rust_self_play(
-            width=width,
-            height=height,
-            cheese_count=10,
-            max_turns=50,
-            num_games=args.games,
-            maze_type="open",
-            positions="corners",
-            cheese_symmetric=True,
-            simulations=mcts.simulations,
-            batch_size=mcts.batch_size,
-            c_puct=mcts.c_puct,
-            fpu_reduction=mcts.fpu_reduction,
-            force_k=mcts.force_k,
-            noise_epsilon=mcts.noise_epsilon,
-            noise_concentration=mcts.noise_concentration,
-            collision_limit_min=mcts.collision_limit_min,
-            collision_limit_max=mcts.collision_limit_max,
-            collision_scaling_start=mcts.collision_scaling_start,
-            collision_scaling_end=mcts.collision_scaling_end,
-            collision_scaling_power=mcts.collision_scaling_power,
-            num_threads=args.threads,
-            output_dir=str(output_dir),
-            max_games_per_bundle=32,
-            onnx_model_path=onnx_path,
-            mux_max_batch_size=args.mux_batch,
-            device=args.device,
-        )
+    stats = rust_self_play(
+        width=width,
+        height=height,
+        cheese_count=10,
+        max_turns=50,
+        num_games=args.games,
+        maze_type="open",
+        positions="corners",
+        cheese_symmetric=True,
+        simulations=args.sims,
+        batch_size=args.batch_size,
+        c_puct=0.512,
+        fpu_reduction=0.459,
+        force_k=0.103,
+        noise_epsilon=0.25,
+        noise_concentration=10.83,
+        collision_limit_min=1,
+        collision_limit_max=256,
+        collision_scaling_start=800,
+        collision_scaling_end=50_000,
+        collision_scaling_power=1.0,
+        num_threads=args.threads,
+        output_dir=str(output_dir),
+        max_games_per_bundle=32,
+        onnx_model_path=onnx_path,
+        mux_max_batch_size=args.mux_batch,
+        tensorrt_opt_batch=args.tensorrt_opt_batch,
+        tensorrt_execution_contexts=args.tensorrt_contexts,
+        tensorrt_cuda_graphs=args.tensorrt_cuda_graphs,
+        tensorrt_pinned_host_io=args.tensorrt_pinned_host_io,
+        tensorrt_profile_stages=args.tensorrt_profile_stages,
+        use_inference_mux=not args.no_inference_mux,
+        device=args.device,
+    )
 
-        elapsed = stats.elapsed_secs
-        print("\nResults:")
-        print(f"  Games: {stats.total_games}")
-        print(f"  Positions: {stats.total_positions}")
-        print(f"  Simulations: {stats.total_simulations}")
-        print(f"  NN evals: {stats.total_nn_evals}")
-        print(f"  Terminals: {stats.total_terminals}")
-        print(f"  Collisions: {stats.total_collisions}")
-        print(f"  Elapsed: {elapsed:.2f}s")
-        print(f"  Sims/s: {stats.total_simulations / elapsed:,.0f}")
-        print(f"  NN evals/s: {stats.total_nn_evals / elapsed:,.0f}")
-        print(f"  Collision%: {stats.collision_fraction * 100:.1f}%")
+    elapsed = stats.elapsed_secs
+    print("\nResults:")
+    print(f"  Games: {stats.total_games}")
+    print(f"  Positions: {stats.total_positions}")
+    print(f"  Simulations: {stats.total_simulations}")
+    print(f"  NN evals: {stats.total_nn_evals}")
+    print(f"  Terminals: {stats.total_terminals}")
+    print(f"  Collisions: {stats.total_collisions}")
+    print(f"  Elapsed: {elapsed:.2f}s")
+    print(f"  Sims/s: {stats.total_simulations / elapsed:,.0f}")
+    print(f"  NN evals/s: {stats.total_nn_evals / elapsed:,.0f}")
+    print(f"  Collision%: {stats.collision_fraction * 100:.1f}%")
+    if stats.inference_batches:
+        histogram = ",".join(f"{batch}:{count}" for batch, count in stats.inference_batch_histogram)
+        print(f"  Device batches: {stats.inference_batches}")
+        print(f"  Average device batch: {stats.inference_avg_batch_size:.2f}")
+        print(f"  Device batch histogram: {histogram}")
+        print(f"  Inference backend time: {stats.inference_nn_seconds:.3f}s")
+        print(f"  Inference queue wait: {stats.inference_wait_seconds:.3f}s")
+    if stats.tensorrt_profiled_calls:
+        print(f"  TensorRT host I/O: {stats.tensorrt_host_io}")
+        print(f"  TensorRT pinned bytes: {stats.tensorrt_pinned_bytes}")
+        print(f"  TensorRT profiled calls: {stats.tensorrt_profiled_calls}")
+        print(f"  TensorRT profiled positions: {stats.tensorrt_profiled_positions}")
+        print(f"  TensorRT encode: {stats.tensorrt_encode_seconds:.6f}s")
+        print(f"  TensorRT input stage: {stats.tensorrt_input_stage_seconds:.6f}s")
+        print(f"  TensorRT H2D: {stats.tensorrt_h2d_seconds:.6f}s")
+        print(f"  TensorRT inference: {stats.tensorrt_infer_seconds:.6f}s")
+        print(f"  TensorRT output allocation: {stats.tensorrt_output_alloc_seconds:.6f}s")
+        print(f"  TensorRT D2H: {stats.tensorrt_d2h_seconds:.6f}s")
+        print(f"  TensorRT parse: {stats.tensorrt_parse_seconds:.6f}s")
+        print(f"  TensorRT total: {stats.tensorrt_total_seconds:.6f}s")
 
 
 if __name__ == "__main__":
