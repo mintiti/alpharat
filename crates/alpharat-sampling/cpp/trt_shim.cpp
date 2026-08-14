@@ -107,13 +107,19 @@ static constexpr int32_t TRT_VERSION = NV_TENSORRT_VERSION;
 static constexpr int32_t ONNX_PARSER_VERSION = NV_ONNX_PARSER_VERSION;
 
 // ---------------------------------------------------------------------------
-// TrtSession — opaque handle for Rust
+// Shared engine + per-lane session handles for Rust
 // ---------------------------------------------------------------------------
 
+struct TrtEngine {
+    IRuntime*    runtime;
+    ICudaEngine* engine;
+};
+
 struct TrtSession {
-    IRuntime*          runtime;
-    ICudaEngine*       engine;
-    IExecutionContext*  context;
+    TrtEngine*         owner;
+    IRuntimeConfig*    runtime_config;
+    IExecutionContext* context;
+    bool               cuda_graphs_requested;
 };
 
 // ---------------------------------------------------------------------------
@@ -244,10 +250,10 @@ extern "C" void trt_free_buffer(void* data) {
 }
 
 // ---------------------------------------------------------------------------
-// Session lifecycle
+// Shared engine and session lifecycle
 // ---------------------------------------------------------------------------
 
-extern "C" void* trt_create_session(const void* engine_data, size_t engine_len) {
+extern "C" void* trt_create_engine(const void* engine_data, size_t engine_len) {
     auto& logger = get_logger();
 
     auto create_runtime = resolve_create_runtime();
@@ -259,10 +265,48 @@ extern "C" void* trt_create_session(const void* engine_data, size_t engine_len) 
     ICudaEngine* engine = runtime->deserializeCudaEngine(engine_data, engine_len);
     if (!engine) { delete runtime; return nullptr; }
 
-    IExecutionContext* context = engine->createExecutionContext();
-    if (!context) { delete engine; delete runtime; return nullptr; }
+    return static_cast<void*>(new TrtEngine{runtime, engine});
+}
 
-    auto* session = new TrtSession{runtime, engine, context};
+extern "C" void trt_destroy_engine(void* handle) {
+    if (!handle) return;
+    auto* e = static_cast<TrtEngine*>(handle);
+    delete e->engine;
+    delete e->runtime;
+    delete e;
+}
+
+extern "C" void* trt_create_session(void* engine_handle, int enable_cuda_graphs) {
+    if (!engine_handle) return nullptr;
+    auto* owner = static_cast<TrtEngine*>(engine_handle);
+
+    IRuntimeConfig* runtime_config = nullptr;
+    IExecutionContext* context = nullptr;
+    bool cuda_graphs_requested = false;
+
+    if (enable_cuda_graphs != 0) {
+        runtime_config = owner->engine->createRuntimeConfig();
+        if (!runtime_config) return nullptr;
+
+        if (!runtime_config->setCudaGraphStrategy(CudaGraphStrategy::kWHOLE_GRAPH_CAPTURE)) {
+            delete runtime_config;
+            return nullptr;
+        }
+
+        context = owner->engine->createExecutionContext(runtime_config);
+        cuda_graphs_requested =
+            runtime_config->getCudaGraphStrategy() == CudaGraphStrategy::kWHOLE_GRAPH_CAPTURE;
+    } else {
+        // Preserve the pre-pool graph-disabled construction path exactly.
+        context = owner->engine->createExecutionContext();
+    }
+
+    if (!context) {
+        delete runtime_config;
+        return nullptr;
+    }
+
+    auto* session = new TrtSession{owner, runtime_config, context, cuda_graphs_requested};
     return static_cast<void*>(session);
 }
 
@@ -270,9 +314,14 @@ extern "C" void trt_destroy_session(void* handle) {
     if (!handle) return;
     auto* s = static_cast<TrtSession*>(handle);
     delete s->context;
-    delete s->engine;
-    delete s->runtime;
+    delete s->runtime_config;
     delete s;
+}
+
+extern "C" int trt_session_cuda_graphs_requested(void* handle) {
+    if (!handle) return 0;
+    auto* s = static_cast<TrtSession*>(handle);
+    return s->cuda_graphs_requested ? 1 : 0;
 }
 
 // ---------------------------------------------------------------------------
@@ -313,12 +362,12 @@ extern "C" int32_t trt_get_version() {
 // Engine inspection
 // ---------------------------------------------------------------------------
 
-extern "C" int trt_get_nb_io_tensors(void* handle) {
-    auto* s = static_cast<TrtSession*>(handle);
-    return s->engine->getNbIOTensors();
+extern "C" int trt_get_nb_io_tensors(void* engine_handle) {
+    auto* e = static_cast<TrtEngine*>(engine_handle);
+    return e->engine->getNbIOTensors();
 }
 
-extern "C" const char* trt_get_tensor_name(void* handle, int index) {
-    auto* s = static_cast<TrtSession*>(handle);
-    return s->engine->getIOTensorName(index);
+extern "C" const char* trt_get_tensor_name(void* engine_handle, int index) {
+    auto* e = static_cast<TrtEngine*>(engine_handle);
+    return e->engine->getIOTensorName(index);
 }

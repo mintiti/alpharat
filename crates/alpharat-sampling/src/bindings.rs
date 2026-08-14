@@ -8,17 +8,42 @@ use std::sync::Arc;
 use alpharat_mcts::{Backend, SearchConfig, SmartUniformBackend};
 use pyrat::{GameBuilder, GameState, MazeParams};
 
+use crate::backends::mux::{MuxStats, MuxStatsSnapshot};
 use crate::selfplay::{self, SelfPlayConfig, SelfPlayError, SelfPlayStats};
 
-use crate::CachedBackend;
 #[cfg(any(feature = "onnx", feature = "tensorrt"))]
 use crate::backends::mux::{MuxBackend, MuxConfig};
+use crate::CachedBackend;
 #[cfg(any(feature = "onnx", feature = "tensorrt"))]
 use crate::FlatEncoder;
 #[cfg(feature = "onnx")]
 use crate::{ExecutionProvider, OnnxBackend};
 #[cfg(feature = "tensorrt")]
-use crate::{TensorrtBackend, TensorrtConfig};
+use crate::{TensorrtBackend, TensorrtConfig, TrtHostIoMode, TrtStats, TrtStatsSnapshot};
+
+#[derive(Default)]
+struct BackendRuntimeStats {
+    inference: Option<Arc<MuxStats>>,
+    #[cfg(feature = "tensorrt")]
+    tensorrt: Option<Arc<TrtStats>>,
+}
+
+#[derive(Default)]
+struct BackendStatsSnapshot {
+    inference: Option<MuxStatsSnapshot>,
+    #[cfg(feature = "tensorrt")]
+    tensorrt: Option<TrtStatsSnapshot>,
+}
+
+impl BackendRuntimeStats {
+    fn snapshot(&self) -> BackendStatsSnapshot {
+        BackendStatsSnapshot {
+            inference: self.inference.as_ref().map(|stats| stats.snapshot()),
+            #[cfg(feature = "tensorrt")]
+            tensorrt: self.tensorrt.as_ref().map(|stats| stats.snapshot()),
+        }
+    }
+}
 
 // ---------------------------------------------------------------------------
 // PySelfPlayStats
@@ -29,6 +54,9 @@ use crate::{TensorrtBackend, TensorrtConfig};
 #[derive(Clone)]
 pub struct PySelfPlayStats {
     inner: SelfPlayStats,
+    inference: Option<MuxStatsSnapshot>,
+    #[cfg(feature = "tensorrt")]
+    tensorrt: Option<TrtStatsSnapshot>,
 }
 
 #[pymethods]
@@ -145,6 +173,144 @@ impl PySelfPlayStats {
         self.inner.cache_hit_rate()
     }
 
+    #[getter]
+    fn inference_batches(&self) -> u64 {
+        self.inference
+            .as_ref()
+            .map_or(0, |stats| stats.total_batches)
+    }
+
+    #[getter]
+    fn inference_positions(&self) -> u64 {
+        self.inference
+            .as_ref()
+            .map_or(0, |stats| stats.total_positions)
+    }
+
+    #[getter]
+    fn inference_avg_batch_size(&self) -> f64 {
+        self.inference.as_ref().map_or(0.0, |stats| {
+            if stats.total_batches == 0 {
+                0.0
+            } else {
+                stats.total_positions as f64 / stats.total_batches as f64
+            }
+        })
+    }
+
+    #[getter]
+    fn inference_nn_seconds(&self) -> f64 {
+        self.inference
+            .as_ref()
+            .map_or(0.0, |stats| stats.nn_time_ns as f64 / 1e9)
+    }
+
+    #[getter]
+    fn inference_wait_seconds(&self) -> f64 {
+        self.inference
+            .as_ref()
+            .map_or(0.0, |stats| stats.wait_time_ns as f64 / 1e9)
+    }
+
+    /// Exact `(device_batch_size, call_count)` distribution from the eager mux.
+    #[getter]
+    fn inference_batch_histogram(&self) -> Vec<(usize, u64)> {
+        self.inference
+            .as_ref()
+            .map_or_else(Vec::new, |stats| stats.batch_histogram.clone())
+    }
+
+    #[cfg(feature = "tensorrt")]
+    #[getter]
+    fn tensorrt_host_io(&self) -> String {
+        self.tensorrt.as_ref().map_or_else(
+            || "unavailable".to_string(),
+            |stats| stats.host_io.to_string(),
+        )
+    }
+
+    #[cfg(feature = "tensorrt")]
+    #[getter]
+    fn tensorrt_pinned_bytes(&self) -> usize {
+        self.tensorrt.as_ref().map_or(0, |stats| stats.pinned_bytes)
+    }
+
+    #[cfg(feature = "tensorrt")]
+    #[getter]
+    fn tensorrt_profiled_calls(&self) -> u64 {
+        self.tensorrt.as_ref().map_or(0, |stats| stats.calls)
+    }
+
+    #[cfg(feature = "tensorrt")]
+    #[getter]
+    fn tensorrt_profiled_positions(&self) -> u64 {
+        self.tensorrt.as_ref().map_or(0, |stats| stats.positions)
+    }
+
+    #[cfg(feature = "tensorrt")]
+    #[getter]
+    fn tensorrt_encode_seconds(&self) -> f64 {
+        self.tensorrt
+            .as_ref()
+            .map_or(0.0, |stats| stats.encode_ns as f64 / 1e9)
+    }
+
+    #[cfg(feature = "tensorrt")]
+    #[getter]
+    fn tensorrt_input_stage_seconds(&self) -> f64 {
+        self.tensorrt
+            .as_ref()
+            .map_or(0.0, |stats| stats.input_stage_ns as f64 / 1e9)
+    }
+
+    #[cfg(feature = "tensorrt")]
+    #[getter]
+    fn tensorrt_h2d_seconds(&self) -> f64 {
+        self.tensorrt
+            .as_ref()
+            .map_or(0.0, |stats| stats.h2d_ns as f64 / 1e9)
+    }
+
+    #[cfg(feature = "tensorrt")]
+    #[getter]
+    fn tensorrt_infer_seconds(&self) -> f64 {
+        self.tensorrt
+            .as_ref()
+            .map_or(0.0, |stats| stats.infer_ns as f64 / 1e9)
+    }
+
+    #[cfg(feature = "tensorrt")]
+    #[getter]
+    fn tensorrt_output_alloc_seconds(&self) -> f64 {
+        self.tensorrt
+            .as_ref()
+            .map_or(0.0, |stats| stats.output_alloc_ns as f64 / 1e9)
+    }
+
+    #[cfg(feature = "tensorrt")]
+    #[getter]
+    fn tensorrt_d2h_seconds(&self) -> f64 {
+        self.tensorrt
+            .as_ref()
+            .map_or(0.0, |stats| stats.d2h_ns as f64 / 1e9)
+    }
+
+    #[cfg(feature = "tensorrt")]
+    #[getter]
+    fn tensorrt_parse_seconds(&self) -> f64 {
+        self.tensorrt
+            .as_ref()
+            .map_or(0.0, |stats| stats.parse_ns as f64 / 1e9)
+    }
+
+    #[cfg(feature = "tensorrt")]
+    #[getter]
+    fn tensorrt_total_seconds(&self) -> f64 {
+        self.tensorrt
+            .as_ref()
+            .map_or(0.0, |stats| stats.total_ns as f64 / 1e9)
+    }
+
     fn __repr__(&self) -> String {
         format!(
             "SelfPlayStats(games={}, positions={}, sims={}, elapsed={:.2}s, sims/s={:.0})",
@@ -210,11 +376,14 @@ fn maybe_mux<B: Backend + 'static>(
     backend: B,
     max_batch_size: usize,
     num_threads: u32,
-) -> Box<dyn Backend> {
-    if num_threads > 1 {
-        Box::new(MuxBackend::new(backend, MuxConfig { max_batch_size }))
+    enabled: bool,
+) -> (Box<dyn Backend>, Option<Arc<MuxStats>>) {
+    if enabled && num_threads > 1 {
+        let mux = MuxBackend::new(backend, MuxConfig { max_batch_size });
+        let stats = Arc::clone(mux.stats());
+        (Box::new(mux), Some(stats))
     } else {
-        Box::new(backend)
+        (Box::new(backend), None)
     }
 }
 
@@ -224,18 +393,49 @@ fn create_tensorrt_backend(
     width: u8,
     height: u8,
     max_batch_size: usize,
+    opt_batch_size: Option<usize>,
     output_dir: &str,
     num_threads: u32,
-) -> Result<Box<dyn Backend>, SelfPlayError> {
+    execution_contexts: usize,
+    cuda_graphs: bool,
+    pinned_host_io: bool,
+    profile_stages: bool,
+    use_inference_mux: bool,
+) -> Result<(Box<dyn Backend>, BackendRuntimeStats), SelfPlayError> {
+    if cuda_graphs && execution_contexts > 1 && !use_inference_mux {
+        return Err(SelfPlayError::Backend(alpharat_mcts::BackendError::msg(
+            concat!(
+                "TensorRT CUDA graphs with multiple direct self-play contexts are unsupported: ",
+                "concurrent capture across variable batch shapes exits inside TensorRT-RTX 1.3. ",
+                "Use one context, keep the inference mux enabled, or disable CUDA graphs."
+            ),
+        )));
+    }
     let encoder = FlatEncoder::new(width, height);
     let cache_dir = Path::new(output_dir).parent().map(|p| p.join(".trt_cache"));
     let config = TensorrtConfig {
+        opt_batch: opt_batch_size.unwrap_or(max_batch_size),
         max_batch: max_batch_size,
         cache_dir,
+        execution_contexts,
+        cuda_graphs,
+        host_io: if pinned_host_io {
+            TrtHostIoMode::Pinned
+        } else {
+            TrtHostIoMode::Pageable
+        },
+        profile_stages,
     };
-    let trt =
-        TensorrtBackend::new(model_path, encoder, config).map_err(SelfPlayError::Backend)?;
-    Ok(maybe_mux(trt, max_batch_size, num_threads))
+    let trt = TensorrtBackend::new(model_path, encoder, config).map_err(SelfPlayError::Backend)?;
+    let tensorrt = Arc::clone(trt.stats());
+    let (backend, inference) = maybe_mux(trt, max_batch_size, num_threads, use_inference_mux);
+    Ok((
+        backend,
+        BackendRuntimeStats {
+            inference,
+            tensorrt: Some(tensorrt),
+        },
+    ))
 }
 
 #[cfg(feature = "onnx")]
@@ -246,13 +446,22 @@ fn create_onnx_backend(
     height: u8,
     max_batch_size: usize,
     num_threads: u32,
-) -> Result<Box<dyn Backend>, SelfPlayError> {
+    use_inference_mux: bool,
+) -> Result<(Box<dyn Backend>, BackendRuntimeStats), SelfPlayError> {
     let encoder = FlatEncoder::new(width, height);
     let provider = ExecutionProvider::try_from(device)
         .map_err(|e| SelfPlayError::Backend(alpharat_mcts::BackendError::msg(e)))?;
-    let onnx =
-        OnnxBackend::with_provider(model_path, encoder, provider).map_err(SelfPlayError::Backend)?;
-    Ok(maybe_mux(onnx, max_batch_size, num_threads))
+    let onnx = OnnxBackend::with_provider(model_path, encoder, provider)
+        .map_err(SelfPlayError::Backend)?;
+    let (backend, inference) = maybe_mux(onnx, max_batch_size, num_threads, use_inference_mux);
+    Ok((
+        backend,
+        BackendRuntimeStats {
+            inference,
+            #[cfg(feature = "tensorrt")]
+            tensorrt: None,
+        },
+    ))
 }
 
 // ---------------------------------------------------------------------------
@@ -297,6 +506,12 @@ fn create_onnx_backend(
     onnx_model_path = None,
     device = "auto",
     mux_max_batch_size = 256,
+    tensorrt_opt_batch = None,
+    tensorrt_execution_contexts = 1,
+    tensorrt_cuda_graphs = false,
+    tensorrt_pinned_host_io = false,
+    tensorrt_profile_stages = false,
+    use_inference_mux = true,
     cache_size = 0,
     progress = None,
 ))]
@@ -336,6 +551,12 @@ fn rust_self_play(
     onnx_model_path: Option<&str>,
     device: &str,
     mux_max_batch_size: usize,
+    tensorrt_opt_batch: Option<usize>,
+    tensorrt_execution_contexts: usize,
+    tensorrt_cuda_graphs: bool,
+    tensorrt_pinned_host_io: bool,
+    tensorrt_profile_stages: bool,
+    use_inference_mux: bool,
     // Cache (optional, 0 = disabled)
     cache_size: usize,
     // Progress (optional)
@@ -377,6 +598,15 @@ fn rust_self_play(
 
     let output_path = Path::new(output_dir);
 
+    #[cfg(not(feature = "tensorrt"))]
+    let _ = (
+        tensorrt_opt_batch,
+        tensorrt_execution_contexts,
+        tensorrt_cuda_graphs,
+        tensorrt_pinned_host_io,
+        tensorrt_profile_stages,
+    );
+
     // Get a reference to the inner progress if provided
     let progress_arc = progress.as_ref().map(|p| Arc::clone(&p.inner));
 
@@ -390,23 +620,28 @@ fn rust_self_play(
         match onnx_model_path {
             #[cfg(any(feature = "onnx", feature = "tensorrt"))]
             Some(model_path) => {
-                let backend: Box<dyn Backend> = match device {
+                let (backend, backend_stats): (Box<dyn Backend>, BackendRuntimeStats) = match device
+                {
                     #[cfg(feature = "tensorrt")]
                     "tensorrt" => create_tensorrt_backend(
                         model_path,
                         width,
                         height,
                         mux_max_batch_size,
+                        tensorrt_opt_batch,
                         output_dir,
                         num_threads,
+                        tensorrt_execution_contexts,
+                        tensorrt_cuda_graphs,
+                        tensorrt_pinned_host_io,
+                        tensorrt_profile_stages,
+                        use_inference_mux,
                     )?,
                     #[cfg(not(feature = "tensorrt"))]
                     "tensorrt" => {
-                        return Err(SelfPlayError::Backend(
-                            alpharat_mcts::BackendError::msg(
-                                "TensorRT support not compiled (build with --features tensorrt)",
-                            ),
-                        ));
+                        return Err(SelfPlayError::Backend(alpharat_mcts::BackendError::msg(
+                            "TensorRT support not compiled (build with --features tensorrt)",
+                        )));
                     }
                     #[cfg(feature = "onnx")]
                     _ => create_onnx_backend(
@@ -416,18 +651,17 @@ fn rust_self_play(
                         height,
                         mux_max_batch_size,
                         num_threads,
+                        use_inference_mux,
                     )?,
                     #[cfg(not(feature = "onnx"))]
                     _ => {
-                        return Err(SelfPlayError::Backend(
-                            alpharat_mcts::BackendError::msg(
-                                "ONNX support not compiled (build with --features onnx)",
-                            ),
-                        ));
+                        return Err(SelfPlayError::Backend(alpharat_mcts::BackendError::msg(
+                            "ONNX support not compiled (build with --features onnx)",
+                        )));
                     }
                 };
 
-                if cache_size > 0 {
+                let disk_result = if cache_size > 0 {
                     let cached = CachedBackend::new(backend, cache_size);
                     let mut disk_result = selfplay::run_self_play_to_disk(
                         &games,
@@ -440,7 +674,7 @@ fn rust_self_play(
                     )?;
                     disk_result.stats.cache_hits = cached.stats.hits.load(Relaxed);
                     disk_result.stats.cache_misses = cached.stats.misses.load(Relaxed);
-                    Ok(disk_result)
+                    disk_result
                 } else {
                     selfplay::run_self_play_to_disk(
                         &games,
@@ -450,15 +684,14 @@ fn rust_self_play(
                         output_path,
                         max_games_per_bundle,
                         progress_ref,
-                    )
-                }
+                    )?
+                };
+                Ok((disk_result, backend_stats.snapshot()))
             }
             #[cfg(not(any(feature = "onnx", feature = "tensorrt")))]
-            Some(_) => Err(SelfPlayError::Backend(
-                alpharat_mcts::BackendError::msg(
-                    "No NN backend compiled (build with --features onnx or tensorrt)",
-                ),
-            )),
+            Some(_) => Err(SelfPlayError::Backend(alpharat_mcts::BackendError::msg(
+                "No NN backend compiled (build with --features onnx or tensorrt)",
+            ))),
             None => selfplay::run_self_play_to_disk(
                 &games,
                 &SmartUniformBackend,
@@ -467,13 +700,17 @@ fn rust_self_play(
                 output_path,
                 max_games_per_bundle,
                 progress_ref,
-            ),
+            )
+            .map(|disk_result| (disk_result, BackendStatsSnapshot::default())),
         }
     });
 
     match result {
-        Ok(disk_result) => Ok(PySelfPlayStats {
+        Ok((disk_result, backend_stats)) => Ok(PySelfPlayStats {
             inner: disk_result.stats,
+            inference: backend_stats.inference,
+            #[cfg(feature = "tensorrt")]
+            tensorrt: backend_stats.tensorrt,
         }),
         Err(SelfPlayError::Backend(e)) => {
             Err(pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))
@@ -525,7 +762,9 @@ fn make_games(
         _ => panic!("unknown positions: {positions}"),
     };
 
-    let config = with_positions.with_random_cheese(cheese_count, cheese_symmetric).build();
+    let config = with_positions
+        .with_random_cheese(cheese_count, cheese_symmetric)
+        .build();
 
     (0..n)
         .map(|_| config.create(None).expect("game creation failed"))

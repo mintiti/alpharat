@@ -18,6 +18,10 @@
 //! For NVIDIA Nsight profiling:
 //!   nsys profile --stats=true target/release/bench_nn_throughput model.onnx --device tensorrt
 
+#[cfg(feature = "tensorrt")]
+use std::sync::{Arc, Barrier};
+#[cfg(feature = "tensorrt")]
+use std::time::Duration;
 use std::time::Instant;
 
 fn main() {
@@ -30,7 +34,16 @@ fn main() {
     let mut height: u8 = 7;
     let mut device = "cpu";
     let mut max_batch: usize = 262144;
+    let mut opt_batch: Option<usize> = None;
     let mut intra_threads: usize = 4;
+    let mut execution_contexts: usize = 1;
+    let mut callers: usize = 1;
+    let mut cuda_graphs = false;
+    let mut host_io = "pageable";
+    let mut tensorrt_cache_dir: Option<String> = None;
+    let mut requested_batch_sizes = None;
+    let mut benchmark_iters: Option<usize> = None;
+    let mut verify_parity = false;
     let mut i = 2;
     while i < args.len() {
         match args[i].as_str() {
@@ -50,13 +63,67 @@ fn main() {
                 max_batch = args[i + 1].parse().expect("invalid max-batch");
                 i += 2;
             }
+            "--opt-batch" => {
+                opt_batch = Some(args[i + 1].parse().expect("invalid opt-batch"));
+                i += 2;
+            }
             "--intra-threads" => {
                 intra_threads = args[i + 1].parse().expect("invalid intra-threads");
                 i += 2;
             }
+            "--contexts" => {
+                execution_contexts = args[i + 1].parse().expect("invalid contexts");
+                i += 2;
+            }
+            "--callers" => {
+                callers = args[i + 1].parse().expect("invalid callers");
+                i += 2;
+            }
+            "--cuda-graphs" => {
+                cuda_graphs = true;
+                i += 1;
+            }
+            "--host-io" => {
+                host_io = Box::leak(args[i + 1].clone().into_boxed_str());
+                i += 2;
+            }
+            "--cache-dir" => {
+                tensorrt_cache_dir = Some(args[i + 1].clone());
+                i += 2;
+            }
+            "--batches" => {
+                requested_batch_sizes = Some(
+                    args[i + 1]
+                        .split(',')
+                        .map(|value| value.parse().expect("invalid batch size"))
+                        .collect::<Vec<_>>(),
+                );
+                i += 2;
+            }
+            "--iters" => {
+                benchmark_iters = Some(args[i + 1].parse().expect("invalid iters"));
+                i += 2;
+            }
+            "--verify-parity" => {
+                verify_parity = true;
+                i += 1;
+            }
             other => panic!("unknown arg: {other}"),
         }
     }
+    let opt_batch = opt_batch.unwrap_or(max_batch);
+
+    #[cfg(not(feature = "tensorrt"))]
+    let _ = (
+        execution_contexts,
+        callers,
+        cuda_graphs,
+        host_io,
+        opt_batch,
+        tensorrt_cache_dir,
+        benchmark_iters,
+        verify_parity,
+    );
 
     // --- Pre-encode games ---
     let (_encoded_buf, obs_dim) = pre_encode_games(width, height, max_batch);
@@ -65,10 +132,12 @@ fn main() {
         "NN Inference Throughput — {width}x{height}, obs_dim={obs_dim}, device={device}, intra_threads={intra_threads}",
     );
 
-    let mut batch_sizes: Vec<usize> = vec![
-        1, 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8192, 16384, 32768, 65536, 131072,
-        262144,
-    ];
+    let mut batch_sizes: Vec<usize> = requested_batch_sizes.unwrap_or_else(|| {
+        vec![
+            1, 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8192, 16384, 32768, 65536, 131072,
+            262144,
+        ]
+    });
     // Add max_batch to the list if it's not already there
     if !batch_sizes.contains(&max_batch) {
         batch_sizes.push(max_batch);
@@ -111,9 +180,19 @@ fn main() {
             &_encoded_buf,
             obs_dim,
             &batch_sizes,
-            max_batch,
-            width,
-            height,
+            TrtBenchConfig {
+                opt_batch,
+                max_batch,
+                width,
+                height,
+                execution_contexts,
+                callers,
+                cuda_graphs,
+                host_io,
+                cache_dir: tensorrt_cache_dir.map(Into::into),
+                benchmark_iters,
+                verify_parity,
+            },
         ),
         other => {
             let mut supported = vec![];
@@ -344,27 +423,84 @@ fn run_ort_benchmark(
 // ---------------------------------------------------------------------------
 
 #[cfg(feature = "tensorrt")]
+struct TrtBenchConfig {
+    opt_batch: usize,
+    max_batch: usize,
+    width: u8,
+    height: u8,
+    execution_contexts: usize,
+    callers: usize,
+    cuda_graphs: bool,
+    host_io: &'static str,
+    cache_dir: Option<std::path::PathBuf>,
+    benchmark_iters: Option<usize>,
+    verify_parity: bool,
+}
+
+#[cfg(feature = "tensorrt")]
 fn run_trt_benchmark(
     model_path: &str,
     encoded_buf: &[f32],
     obs_dim: usize,
     batch_sizes: &[usize],
-    max_batch: usize,
-    width: u8,
-    height: u8,
+    config: TrtBenchConfig,
 ) {
-    use alpharat_sampling::{FlatEncoder, TensorrtBackend, TensorrtConfig};
+    use alpharat_sampling::{FlatEncoder, TensorrtBackend, TensorrtConfig, TrtHostIoMode};
+
+    let TrtBenchConfig {
+        opt_batch,
+        max_batch,
+        width,
+        height,
+        execution_contexts,
+        callers,
+        cuda_graphs,
+        host_io,
+        cache_dir,
+        benchmark_iters,
+        verify_parity,
+    } = config;
+    assert!(callers > 0, "callers must be at least 1");
 
     let encoder = FlatEncoder::new(width, height);
+    let host_io = match host_io {
+        "pageable" => TrtHostIoMode::Pageable,
+        "pinned" => TrtHostIoMode::Pinned,
+        other => panic!("unknown TensorRT host I/O mode: {other}"),
+    };
     let config = TensorrtConfig {
+        opt_batch,
         max_batch,
-        cache_dir: None,
+        cache_dir: cache_dir.clone(),
+        execution_contexts,
+        cuda_graphs,
+        host_io,
+        profile_stages: false,
     };
     let backend = TensorrtBackend::new(model_path, encoder, config)
         .expect("failed to create TensorRT backend");
 
     let num_games = encoded_buf.len() / obs_dim;
-    print_header();
+    if verify_parity {
+        verify_trt_parity(
+            model_path,
+            &backend,
+            encoded_buf,
+            obs_dim,
+            batch_sizes,
+            TrtParityConfig {
+                width,
+                height,
+                execution_contexts,
+                max_batch,
+                cache_dir,
+            },
+        );
+    }
+    println!(
+        "  TensorRT profile=MIN1/OPT{opt_batch}/MAX{max_batch}, lanes={execution_contexts}, callers={callers}, cuda_graphs={cuda_graphs}, host_io={host_io}"
+    );
+    print_trt_header();
     let mut peak_pos_s: f64 = 0.0;
 
     for &batch_size in batch_sizes {
@@ -372,50 +508,322 @@ fn run_trt_benchmark(
             break;
         }
 
-        let iters = (5000 / batch_size).clamp(10, 500);
-        let warmup = (iters / 10).max(5);
+        let iters = benchmark_iters.unwrap_or_else(|| (5000 / batch_size).clamp(10, 500));
+        let warmup = (iters / 10).clamp(5, 100);
         let batch_data = &encoded_buf[..batch_size * obs_dim];
 
-        // Warmup
-        for _ in 0..warmup {
-            let _ = backend
-                .evaluate_encoded_timed(batch_data, batch_size)
-                .expect("TRT inference failed during warmup");
-        }
-
-        // Timed runs
-        let mut h2d_us_total: f64 = 0.0;
-        let mut infer_us_total: f64 = 0.0;
-        let mut d2h_us_total: f64 = 0.0;
-
-        for _ in 0..iters {
-            let (_results, timing) = backend
-                .evaluate_encoded_timed(batch_data, batch_size)
-                .expect("TRT inference failed");
-            h2d_us_total += timing.h2d_us;
-            infer_us_total += timing.infer_us;
-            d2h_us_total += timing.d2h_us;
-        }
-
-        let h2d_us = h2d_us_total / iters as f64;
-        let infer_us = infer_us_total / iters as f64;
-        let d2h_us = d2h_us_total / iters as f64;
-        let total_us = h2d_us + infer_us + d2h_us;
-        let pos_per_s = batch_size as f64 / (total_us / 1_000_000.0);
-        let gpu_util = (infer_us / total_us) * 100.0;
+        let timing = benchmark_trt_batch(&backend, batch_data, batch_size, callers, iters, warmup);
+        let total_calls = callers * iters;
+        let input_stage_us = timing.totals.input_stage_us / total_calls as f64;
+        let h2d_us = timing.totals.h2d_us / total_calls as f64;
+        let infer_us = timing.totals.infer_us / total_calls as f64;
+        let output_alloc_us = timing.totals.output_alloc_us / total_calls as f64;
+        let d2h_us = timing.totals.d2h_us / total_calls as f64;
+        let parse_us = timing.totals.parse_us / total_calls as f64;
+        let call_us = timing.totals.call_us / total_calls as f64;
+        let residual_us =
+            (call_us - input_stage_us - h2d_us - infer_us - output_alloc_us - d2h_us - parse_us)
+                .max(0.0);
+        let effective_us = timing.wall_time.as_secs_f64() * 1_000_000.0 / total_calls as f64;
+        let pos_per_s = batch_size as f64 * total_calls as f64 / timing.wall_time.as_secs_f64();
         peak_pos_s = peak_pos_s.max(pos_per_s);
 
         println!(
-            "  {:>6} {:>9.1} {:>9.1} {:>9.1} {:>9.1} {:>12} {:>9.0}%",
+            "  {:>6} {:>7} {:>9.1} {:>9.1} {:>9.1} {:>9.1} {:>9.1} {:>9.1} {:>9.1} {:>9.1} {:>9.1} {:>12}",
             batch_size,
+            callers,
+            input_stage_us,
             h2d_us,
             infer_us,
+            output_alloc_us,
             d2h_us,
-            total_us,
+            parse_us,
+            residual_us,
+            call_us,
+            effective_us,
             format_throughput(pos_per_s),
-            gpu_util,
         );
     }
 
     print_footer(peak_pos_s);
+}
+
+#[cfg(feature = "tensorrt")]
+struct TrtParityConfig {
+    width: u8,
+    height: u8,
+    execution_contexts: usize,
+    max_batch: usize,
+    cache_dir: Option<std::path::PathBuf>,
+}
+
+#[cfg(feature = "tensorrt")]
+fn verify_trt_parity(
+    model_path: &str,
+    candidate: &alpharat_sampling::TensorrtBackend<alpharat_sampling::FlatEncoder>,
+    encoded_buf: &[f32],
+    obs_dim: usize,
+    batch_sizes: &[usize],
+    config: TrtParityConfig,
+) {
+    use alpharat_sampling::{FlatEncoder, TensorrtBackend, TensorrtConfig, TrtHostIoMode};
+
+    let TrtParityConfig {
+        width,
+        height,
+        execution_contexts,
+        max_batch,
+        cache_dir,
+    } = config;
+
+    let baseline = TensorrtBackend::new(
+        model_path,
+        FlatEncoder::new(width, height),
+        TensorrtConfig {
+            opt_batch: max_batch,
+            max_batch,
+            cache_dir,
+            execution_contexts: 1,
+            cuda_graphs: false,
+            host_io: TrtHostIoMode::Pageable,
+            profile_stages: false,
+        },
+    )
+    .expect("failed to create TensorRT parity baseline");
+    for &batch_size in batch_sizes {
+        let batch_data = &encoded_buf[..batch_size * obs_dim];
+        let (expected, _) = baseline
+            .evaluate_encoded_timed(batch_data, batch_size)
+            .expect("TensorRT parity baseline failed");
+
+        let gate = Arc::new(Barrier::new(execution_contexts));
+        let candidate_results = std::thread::scope(|scope| {
+            let mut handles = Vec::with_capacity(execution_contexts);
+            for _ in 0..execution_contexts {
+                let gate = Arc::clone(&gate);
+                handles.push(scope.spawn(move || {
+                    gate.wait();
+                    candidate
+                        .evaluate_encoded_timed(batch_data, batch_size)
+                        .expect("TensorRT parity candidate failed")
+                        .0
+                }));
+            }
+            handles
+                .into_iter()
+                .map(|handle| handle.join().expect("TensorRT parity caller panicked"))
+                .collect::<Vec<_>>()
+        });
+
+        let mut max_abs_diff = 0.0_f32;
+        for actual in &candidate_results {
+            assert_eq!(
+                actual.len(),
+                expected.len(),
+                "TensorRT parity length mismatch"
+            );
+            for (actual, expected) in actual.iter().zip(&expected) {
+                for (actual, expected) in actual.policy_p1.iter().zip(expected.policy_p1) {
+                    max_abs_diff = max_abs_diff.max((actual - expected).abs());
+                }
+                for (actual, expected) in actual.policy_p2.iter().zip(expected.policy_p2) {
+                    max_abs_diff = max_abs_diff.max((actual - expected).abs());
+                }
+                max_abs_diff = max_abs_diff.max((actual.value_p1 - expected.value_p1).abs());
+                max_abs_diff = max_abs_diff.max((actual.value_p2 - expected.value_p2).abs());
+            }
+        }
+        assert!(
+            max_abs_diff <= 1.0e-4,
+            "TensorRT parity max abs diff {max_abs_diff} exceeds 1e-4 at batch {batch_size}"
+        );
+        println!(
+            "  Parity: {execution_contexts} simultaneous lane(s), batch={batch_size}, max_abs_diff={max_abs_diff:.3e}"
+        );
+    }
+
+    verify_trt_root_behavior(candidate, &baseline, width, height);
+}
+
+#[cfg(feature = "tensorrt")]
+fn verify_trt_root_behavior(
+    candidate: &alpharat_sampling::TensorrtBackend<alpharat_sampling::FlatEncoder>,
+    baseline: &alpharat_sampling::TensorrtBackend<alpharat_sampling::FlatEncoder>,
+    width: u8,
+    height: u8,
+) {
+    use alpharat_mcts::{run_search, Backend, MCTSTree, SearchConfig};
+    use pyrat::GameBuilder;
+    use rand::rngs::SmallRng;
+    use rand::SeedableRng;
+
+    let game_config = GameBuilder::new(width, height)
+        .with_max_turns(50)
+        .with_open_maze()
+        .with_corner_positions()
+        .with_random_cheese(10, true)
+        .build();
+    let game = game_config
+        .create(Some(20_260_813))
+        .expect("failed to create deterministic root-parity game");
+    let search_config = SearchConfig {
+        c_puct: 0.512,
+        fpu_reduction: 0.459,
+        force_k: 0.103,
+        noise_epsilon: 0.0,
+        ..SearchConfig::default()
+    };
+
+    let run = |backend: &dyn Backend| {
+        let mut tree = MCTSTree::new(&game);
+        let mut rng = SmallRng::seed_from_u64(20_260_813);
+        run_search(
+            &mut tree,
+            &game,
+            backend,
+            &search_config,
+            2_048,
+            16,
+            &mut rng,
+        )
+        .expect("deterministic root-parity search failed")
+    };
+
+    let expected = run(baseline);
+    let actual = run(candidate);
+    let policy_l1_p1: f32 = expected
+        .policy_p1
+        .iter()
+        .zip(actual.policy_p1)
+        .map(|(expected, actual)| (expected - actual).abs())
+        .sum();
+    let policy_l1_p2: f32 = expected
+        .policy_p2
+        .iter()
+        .zip(actual.policy_p2)
+        .map(|(expected, actual)| (expected - actual).abs())
+        .sum();
+    let value_abs_p1 = (expected.value_p1 - actual.value_p1).abs();
+    let value_abs_p2 = (expected.value_p2 - actual.value_p2).abs();
+    println!(
+        "  Root behavior: policy_l1_p1={policy_l1_p1:.6}, policy_l1_p2={policy_l1_p2:.6}, value_abs_p1={value_abs_p1:.6}, value_abs_p2={value_abs_p2:.6}"
+    );
+}
+
+#[cfg(feature = "tensorrt")]
+fn print_trt_header() {
+    println!(
+        "  {:>6} {:>7} {:>10} {:>10} {:>10} {:>10} {:>10} {:>10} {:>10} {:>10} {:>10} {:>12}",
+        "batch",
+        "callers",
+        "stage_us",
+        "h2d_us",
+        "infer_us",
+        "alloc_us",
+        "d2h_us",
+        "parse_us",
+        "resid_us",
+        "call_us",
+        "eff_us",
+        "pos/s"
+    );
+    println!("  {:-<143}", "");
+}
+
+#[cfg(feature = "tensorrt")]
+#[derive(Default)]
+struct TrtStageTotals {
+    input_stage_us: f64,
+    h2d_us: f64,
+    infer_us: f64,
+    output_alloc_us: f64,
+    d2h_us: f64,
+    parse_us: f64,
+    call_us: f64,
+}
+
+#[cfg(feature = "tensorrt")]
+impl TrtStageTotals {
+    fn add(&mut self, timing: &alpharat_sampling::TrtTimingInfo) {
+        self.input_stage_us += timing.input_stage_us;
+        self.h2d_us += timing.h2d_us;
+        self.infer_us += timing.infer_us;
+        self.output_alloc_us += timing.output_alloc_us;
+        self.d2h_us += timing.d2h_us;
+        self.parse_us += timing.parse_us;
+        self.call_us += timing.total_us;
+    }
+
+    fn merge(&mut self, other: &Self) {
+        self.input_stage_us += other.input_stage_us;
+        self.h2d_us += other.h2d_us;
+        self.infer_us += other.infer_us;
+        self.output_alloc_us += other.output_alloc_us;
+        self.d2h_us += other.d2h_us;
+        self.parse_us += other.parse_us;
+        self.call_us += other.call_us;
+    }
+}
+
+#[cfg(feature = "tensorrt")]
+struct ConcurrentTrtTiming {
+    totals: TrtStageTotals,
+    wall_time: Duration,
+}
+
+#[cfg(feature = "tensorrt")]
+fn benchmark_trt_batch(
+    backend: &alpharat_sampling::TensorrtBackend<alpharat_sampling::FlatEncoder>,
+    batch_data: &[f32],
+    batch_size: usize,
+    callers: usize,
+    iters: usize,
+    warmup: usize,
+) -> ConcurrentTrtTiming {
+    let warmup_gate = Arc::new(Barrier::new(callers));
+    let timed_gate = Arc::new(Barrier::new(callers));
+
+    let per_caller = std::thread::scope(|scope| {
+        let mut handles = Vec::with_capacity(callers);
+        for _ in 0..callers {
+            let warmup_gate = Arc::clone(&warmup_gate);
+            let timed_gate = Arc::clone(&timed_gate);
+            handles.push(scope.spawn(move || {
+                warmup_gate.wait();
+                for _ in 0..warmup {
+                    let _ = backend
+                        .evaluate_encoded_timed(batch_data, batch_size)
+                        .expect("TRT inference failed during warmup");
+                }
+
+                timed_gate.wait();
+                let start = Instant::now();
+                let mut totals = TrtStageTotals::default();
+                for _ in 0..iters {
+                    let (_results, timing) = backend
+                        .evaluate_encoded_timed(batch_data, batch_size)
+                        .expect("TRT inference failed");
+                    totals.add(&timing);
+                }
+                (totals, start.elapsed())
+            }));
+        }
+        handles
+            .into_iter()
+            .map(|handle| handle.join().expect("TRT benchmark caller panicked"))
+            .collect::<Vec<_>>()
+    });
+
+    let mut totals = TrtStageTotals::default();
+    for (caller_totals, _) in &per_caller {
+        totals.merge(caller_totals);
+    }
+    ConcurrentTrtTiming {
+        totals,
+        wall_time: per_caller
+            .iter()
+            .map(|result| result.1)
+            .max()
+            .expect("at least one TRT benchmark caller"),
+    }
 }

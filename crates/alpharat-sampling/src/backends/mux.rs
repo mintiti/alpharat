@@ -1,6 +1,6 @@
 use alpharat_mcts::{Backend, BackendError, EvalResult};
 use pyrat::GameState;
-use std::collections::VecDeque;
+use std::collections::{BTreeMap, VecDeque};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc;
 use std::sync::{Arc, Condvar, Mutex};
@@ -13,7 +13,7 @@ pub struct MuxConfig {
     pub max_batch_size: usize,
 }
 
-/// Mux worker thread timing and batch statistics (atomic, lock-free reads).
+/// Mux worker timing counters and exact achieved-batch statistics.
 pub struct MuxStats {
     /// Number of inner backend evaluate_batch calls.
     pub total_batches: AtomicU64,
@@ -23,6 +23,18 @@ pub struct MuxStats {
     pub nn_time_ns: AtomicU64,
     /// Cumulative time in nanoseconds the worker spent waiting for requests.
     pub wait_time_ns: AtomicU64,
+    /// Exact achieved inner-backend batch counts, keyed by positions per call.
+    batch_histogram: Mutex<BTreeMap<usize, u64>>,
+}
+
+/// Stable point-in-time view of mux workload telemetry.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct MuxStatsSnapshot {
+    pub total_batches: u64,
+    pub total_positions: u64,
+    pub nn_time_ns: u64,
+    pub wait_time_ns: u64,
+    pub batch_histogram: Vec<(usize, u64)>,
 }
 
 impl MuxStats {
@@ -32,6 +44,7 @@ impl MuxStats {
             total_positions: AtomicU64::new(0),
             nn_time_ns: AtomicU64::new(0),
             wait_time_ns: AtomicU64::new(0),
+            batch_histogram: Mutex::new(BTreeMap::new()),
         }
     }
 
@@ -61,6 +74,33 @@ impl MuxStats {
 
     pub fn wait_time_secs(&self) -> f64 {
         self.wait_time_ns.load(Ordering::Relaxed) as f64 / 1e9
+    }
+
+    fn record_batch(&self, positions: usize) {
+        let mut histogram = self
+            .batch_histogram
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        *histogram.entry(positions).or_default() += 1;
+    }
+
+    /// Capture counters and the full achieved-batch distribution consistently enough
+    /// for post-run reporting. Callers normally snapshot after self-play has stopped.
+    pub fn snapshot(&self) -> MuxStatsSnapshot {
+        let batch_histogram = self
+            .batch_histogram
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .iter()
+            .map(|(&batch, &count)| (batch, count))
+            .collect();
+        MuxStatsSnapshot {
+            total_batches: self.total_batches.load(Ordering::Relaxed),
+            total_positions: self.total_positions.load(Ordering::Relaxed),
+            nn_time_ns: self.nn_time_ns.load(Ordering::Relaxed),
+            wait_time_ns: self.wait_time_ns.load(Ordering::Relaxed),
+            batch_histogram,
+        }
     }
 }
 
@@ -227,16 +267,12 @@ impl Backend for MuxBackend {
         self.queue.push(request);
         // Outer expect: worker dropping the channel = bug (programming error).
         // Inner Result: propagates backend errors from the worker.
-        rx.recv().expect("mux worker dropped without sending result")
+        rx.recv()
+            .expect("mux worker dropped without sending result")
     }
 }
 
-fn worker_loop(
-    queue: &BatchQueue,
-    inner: &dyn Backend,
-    max_batch_size: usize,
-    stats: &MuxStats,
-) {
+fn worker_loop(queue: &BatchQueue, inner: &dyn Backend, max_batch_size: usize, stats: &MuxStats) {
     loop {
         let wait_start = Instant::now();
         let requests = match queue.wait_drain(max_batch_size) {
@@ -260,8 +296,11 @@ fn worker_loop(
         let nn_ns = nn_start.elapsed().as_nanos() as u64;
 
         stats.total_batches.fetch_add(1, Ordering::Relaxed);
-        stats.total_positions.fetch_add(n_positions, Ordering::Relaxed);
+        stats
+            .total_positions
+            .fetch_add(n_positions, Ordering::Relaxed);
         stats.nn_time_ns.fetch_add(nn_ns, Ordering::Relaxed);
+        stats.record_batch(all_games.len());
 
         match batch_result {
             Ok(all_results) => {
@@ -377,11 +416,23 @@ mod tests {
     // ---- Tests ----
 
     #[test]
+    fn snapshot_preserves_exact_batch_distribution() {
+        let stats = MuxStats::new();
+        stats.record_batch(16);
+        stats.record_batch(32);
+        stats.record_batch(16);
+        stats.total_batches.store(3, Ordering::Relaxed);
+        stats.total_positions.store(64, Ordering::Relaxed);
+
+        let snapshot = stats.snapshot();
+        assert_eq!(snapshot.total_batches, 3);
+        assert_eq!(snapshot.total_positions, 64);
+        assert_eq!(snapshot.batch_histogram, vec![(16, 2), (32, 1)]);
+    }
+
+    #[test]
     fn single_thread_single_request() {
-        let mux = MuxBackend::new(
-            SmartUniformBackend,
-            MuxConfig { max_batch_size: 64 },
-        );
+        let mux = MuxBackend::new(SmartUniformBackend, MuxConfig { max_batch_size: 64 });
         let game = open_5x5(Coordinates::new(2, 2), Coordinates::new(0, 0));
 
         let mux_result = mux.evaluate(&game).unwrap();
@@ -395,10 +446,7 @@ mod tests {
 
     #[test]
     fn single_thread_sequential_requests() {
-        let mux = MuxBackend::new(
-            SmartUniformBackend,
-            MuxConfig { max_batch_size: 64 },
-        );
+        let mux = MuxBackend::new(SmartUniformBackend, MuxConfig { max_batch_size: 64 });
 
         let games = [
             open_5x5(Coordinates::new(0, 0), Coordinates::new(4, 4)),
@@ -416,10 +464,7 @@ mod tests {
 
     #[test]
     fn single_thread_batch_request() {
-        let mux = MuxBackend::new(
-            SmartUniformBackend,
-            MuxConfig { max_batch_size: 64 },
-        );
+        let mux = MuxBackend::new(SmartUniformBackend, MuxConfig { max_batch_size: 64 });
 
         let games = [
             open_5x5(Coordinates::new(0, 0), Coordinates::new(4, 4)),
@@ -441,7 +486,9 @@ mod tests {
     fn multi_thread_concurrent_requests() {
         let mux = Arc::new(MuxBackend::new(
             SmartUniformBackend,
-            MuxConfig { max_batch_size: 256 },
+            MuxConfig {
+                max_batch_size: 256,
+            },
         ));
 
         let n_threads = 8;
@@ -478,7 +525,9 @@ mod tests {
 
         let mux = Arc::new(MuxBackend::new(
             SpyBackendHandle(spy),
-            MuxConfig { max_batch_size: 256 },
+            MuxConfig {
+                max_batch_size: 256,
+            },
         ));
 
         let n_threads = 8;
@@ -545,10 +594,7 @@ mod tests {
 
     #[test]
     fn empty_batch() {
-        let mux = MuxBackend::new(
-            SmartUniformBackend,
-            MuxConfig { max_batch_size: 64 },
-        );
+        let mux = MuxBackend::new(SmartUniformBackend, MuxConfig { max_batch_size: 64 });
 
         let results = mux.evaluate_batch(&[]).unwrap();
         assert!(results.is_empty());
@@ -557,20 +603,14 @@ mod tests {
     #[test]
     fn drop_while_idle() {
         // MuxBackend should drop cleanly when no threads are active.
-        let mux = MuxBackend::new(
-            SmartUniformBackend,
-            MuxConfig { max_batch_size: 64 },
-        );
+        let mux = MuxBackend::new(SmartUniformBackend, MuxConfig { max_batch_size: 64 });
         drop(mux); // should not hang or panic
     }
 
     #[test]
     fn drop_after_work() {
         // MuxBackend should drop cleanly after processing requests.
-        let mux = MuxBackend::new(
-            SmartUniformBackend,
-            MuxConfig { max_batch_size: 64 },
-        );
+        let mux = MuxBackend::new(SmartUniformBackend, MuxConfig { max_batch_size: 64 });
         let game = open_5x5(Coordinates::new(2, 2), Coordinates::new(0, 0));
         let _ = mux.evaluate(&game);
         drop(mux); // should not hang or panic
@@ -578,10 +618,7 @@ mod tests {
 
     #[test]
     fn failing_backend_propagates_error() {
-        let mux = MuxBackend::new(
-            FailingBackend::new(0),
-            MuxConfig { max_batch_size: 64 },
-        );
+        let mux = MuxBackend::new(FailingBackend::new(0), MuxConfig { max_batch_size: 64 });
         let game = open_5x5(Coordinates::new(2, 2), Coordinates::new(0, 0));
 
         let result = mux.evaluate(&game);
