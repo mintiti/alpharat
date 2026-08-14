@@ -36,10 +36,8 @@ fn main() {
     let mut max_batch: usize = 262144;
     let mut opt_batch: Option<usize> = None;
     let mut intra_threads: usize = 4;
-    let mut execution_contexts: usize = 1;
     let mut callers: usize = 1;
-    let mut cuda_graphs = false;
-    let mut host_io = "pageable";
+    let mut host_io = "pinned";
     let mut tensorrt_cache_dir: Option<String> = None;
     let mut requested_batch_sizes = None;
     let mut benchmark_iters: Option<usize> = None;
@@ -71,17 +69,9 @@ fn main() {
                 intra_threads = args[i + 1].parse().expect("invalid intra-threads");
                 i += 2;
             }
-            "--contexts" => {
-                execution_contexts = args[i + 1].parse().expect("invalid contexts");
-                i += 2;
-            }
             "--callers" => {
                 callers = args[i + 1].parse().expect("invalid callers");
                 i += 2;
-            }
-            "--cuda-graphs" => {
-                cuda_graphs = true;
-                i += 1;
             }
             "--host-io" => {
                 host_io = Box::leak(args[i + 1].clone().into_boxed_str());
@@ -115,9 +105,7 @@ fn main() {
 
     #[cfg(not(feature = "tensorrt"))]
     let _ = (
-        execution_contexts,
         callers,
-        cuda_graphs,
         host_io,
         opt_batch,
         tensorrt_cache_dir,
@@ -185,9 +173,7 @@ fn main() {
                 max_batch,
                 width,
                 height,
-                execution_contexts,
                 callers,
-                cuda_graphs,
                 host_io,
                 cache_dir: tensorrt_cache_dir.map(Into::into),
                 benchmark_iters,
@@ -428,9 +414,7 @@ struct TrtBenchConfig {
     max_batch: usize,
     width: u8,
     height: u8,
-    execution_contexts: usize,
     callers: usize,
-    cuda_graphs: bool,
     host_io: &'static str,
     cache_dir: Option<std::path::PathBuf>,
     benchmark_iters: Option<usize>,
@@ -452,9 +436,7 @@ fn run_trt_benchmark(
         max_batch,
         width,
         height,
-        execution_contexts,
         callers,
-        cuda_graphs,
         host_io,
         cache_dir,
         benchmark_iters,
@@ -472,10 +454,8 @@ fn run_trt_benchmark(
         opt_batch,
         max_batch,
         cache_dir: cache_dir.clone(),
-        execution_contexts,
-        cuda_graphs,
         host_io,
-        profile_stages: false,
+        profile_stages: true,
     };
     let backend = TensorrtBackend::new(model_path, encoder, config)
         .expect("failed to create TensorRT backend");
@@ -491,14 +471,13 @@ fn run_trt_benchmark(
             TrtParityConfig {
                 width,
                 height,
-                execution_contexts,
                 max_batch,
                 cache_dir,
             },
         );
     }
     println!(
-        "  TensorRT profile=MIN1/OPT{opt_batch}/MAX{max_batch}, lanes={execution_contexts}, callers={callers}, cuda_graphs={cuda_graphs}, host_io={host_io}"
+        "  TensorRT profile=MIN1/OPT{opt_batch}/MAX{max_batch}, one context, graphs=off, callers={callers}, host_io={host_io}"
     );
     print_trt_header();
     let mut peak_pos_s: f64 = 0.0;
@@ -552,7 +531,6 @@ fn run_trt_benchmark(
 struct TrtParityConfig {
     width: u8,
     height: u8,
-    execution_contexts: usize,
     max_batch: usize,
     cache_dir: Option<std::path::PathBuf>,
 }
@@ -571,7 +549,6 @@ fn verify_trt_parity(
     let TrtParityConfig {
         width,
         height,
-        execution_contexts,
         max_batch,
         cache_dir,
     } = config;
@@ -583,10 +560,8 @@ fn verify_trt_parity(
             opt_batch: max_batch,
             max_batch,
             cache_dir,
-            execution_contexts: 1,
-            cuda_graphs: false,
             host_io: TrtHostIoMode::Pageable,
-            profile_stages: false,
+            profile_stages: true,
         },
     )
     .expect("failed to create TensorRT parity baseline");
@@ -596,24 +571,12 @@ fn verify_trt_parity(
             .evaluate_encoded_timed(batch_data, batch_size)
             .expect("TensorRT parity baseline failed");
 
-        let gate = Arc::new(Barrier::new(execution_contexts));
-        let candidate_results = std::thread::scope(|scope| {
-            let mut handles = Vec::with_capacity(execution_contexts);
-            for _ in 0..execution_contexts {
-                let gate = Arc::clone(&gate);
-                handles.push(scope.spawn(move || {
-                    gate.wait();
-                    candidate
-                        .evaluate_encoded_timed(batch_data, batch_size)
-                        .expect("TensorRT parity candidate failed")
-                        .0
-                }));
-            }
-            handles
-                .into_iter()
-                .map(|handle| handle.join().expect("TensorRT parity caller panicked"))
-                .collect::<Vec<_>>()
-        });
+        let candidate_results = vec![
+            candidate
+                .evaluate_encoded_timed(batch_data, batch_size)
+                .expect("TensorRT parity candidate failed")
+                .0,
+        ];
 
         let mut max_abs_diff = 0.0_f32;
         for actual in &candidate_results {
@@ -637,9 +600,7 @@ fn verify_trt_parity(
             max_abs_diff <= 1.0e-4,
             "TensorRT parity max abs diff {max_abs_diff} exceeds 1e-4 at batch {batch_size}"
         );
-        println!(
-            "  Parity: {execution_contexts} simultaneous lane(s), batch={batch_size}, max_abs_diff={max_abs_diff:.3e}"
-        );
+        println!("  Parity: one context, batch={batch_size}, max_abs_diff={max_abs_diff:.3e}");
     }
 
     verify_trt_root_behavior(candidate, &baseline, width, height);

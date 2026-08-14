@@ -15,6 +15,7 @@
 #include <cstring>
 #include <dlfcn.h>
 #include <mutex>
+#include <new>
 
 using namespace nvinfer1;
 
@@ -107,19 +108,15 @@ static constexpr int32_t TRT_VERSION = NV_TENSORRT_VERSION;
 static constexpr int32_t ONNX_PARSER_VERSION = NV_ONNX_PARSER_VERSION;
 
 // ---------------------------------------------------------------------------
-// Shared engine + per-lane session handles for Rust
+// One opaque session handle for Rust. TensorRT requires the runtime to outlive
+// the engine and the engine to outlive its execution context, so one owner
+// keeps that destruction order explicit.
 // ---------------------------------------------------------------------------
 
-struct TrtEngine {
-    IRuntime*    runtime;
-    ICudaEngine* engine;
-};
-
 struct TrtSession {
-    TrtEngine*         owner;
-    IRuntimeConfig*    runtime_config;
+    IRuntime*          runtime;
+    ICudaEngine*       engine;
     IExecutionContext* context;
-    bool               cuda_graphs_requested;
 };
 
 // ---------------------------------------------------------------------------
@@ -164,6 +161,8 @@ extern "C" int trt_build_engine(
     // (value -1), set optimization profile with min/opt/max batch.
     IOptimizationProfile* profile = builder->createOptimizationProfile();
     if (!profile) { delete parser; delete network; delete builder; return -5; }
+    // The builder retains ownership of profiles it creates. Do not delete
+    // `profile`; destroying `builder` releases it after the build completes.
 
     int nb_inputs = network->getNbInputs();
     for (int i = 0; i < nb_inputs; i++) {
@@ -235,6 +234,15 @@ extern "C" int trt_build_engine(
     // Copy to caller-owned buffer (freed by trt_free_buffer)
     *out_len = serialized->size();
     *out_data = malloc(*out_len);
+    if (!*out_data) {
+        *out_len = 0;
+        delete serialized;
+        delete config;
+        delete parser;
+        delete network;
+        delete builder;
+        return -10;
+    }
     memcpy(*out_data, serialized->data(), *out_len);
 
     delete serialized;
@@ -250,10 +258,10 @@ extern "C" void trt_free_buffer(void* data) {
 }
 
 // ---------------------------------------------------------------------------
-// Shared engine and session lifecycle
+// Session lifecycle
 // ---------------------------------------------------------------------------
 
-extern "C" void* trt_create_engine(const void* engine_data, size_t engine_len) {
+extern "C" void* trt_create_session(const void* engine_data, size_t engine_len) {
     auto& logger = get_logger();
 
     auto create_runtime = resolve_create_runtime();
@@ -265,48 +273,16 @@ extern "C" void* trt_create_engine(const void* engine_data, size_t engine_len) {
     ICudaEngine* engine = runtime->deserializeCudaEngine(engine_data, engine_len);
     if (!engine) { delete runtime; return nullptr; }
 
-    return static_cast<void*>(new TrtEngine{runtime, engine});
-}
+    IExecutionContext* context = engine->createExecutionContext();
+    if (!context) { delete engine; delete runtime; return nullptr; }
 
-extern "C" void trt_destroy_engine(void* handle) {
-    if (!handle) return;
-    auto* e = static_cast<TrtEngine*>(handle);
-    delete e->engine;
-    delete e->runtime;
-    delete e;
-}
-
-extern "C" void* trt_create_session(void* engine_handle, int enable_cuda_graphs) {
-    if (!engine_handle) return nullptr;
-    auto* owner = static_cast<TrtEngine*>(engine_handle);
-
-    IRuntimeConfig* runtime_config = nullptr;
-    IExecutionContext* context = nullptr;
-    bool cuda_graphs_requested = false;
-
-    if (enable_cuda_graphs != 0) {
-        runtime_config = owner->engine->createRuntimeConfig();
-        if (!runtime_config) return nullptr;
-
-        if (!runtime_config->setCudaGraphStrategy(CudaGraphStrategy::kWHOLE_GRAPH_CAPTURE)) {
-            delete runtime_config;
-            return nullptr;
-        }
-
-        context = owner->engine->createExecutionContext(runtime_config);
-        cuda_graphs_requested =
-            runtime_config->getCudaGraphStrategy() == CudaGraphStrategy::kWHOLE_GRAPH_CAPTURE;
-    } else {
-        // Preserve the pre-pool graph-disabled construction path exactly.
-        context = owner->engine->createExecutionContext();
-    }
-
-    if (!context) {
-        delete runtime_config;
+    auto* session = new (std::nothrow) TrtSession{runtime, engine, context};
+    if (!session) {
+        delete context;
+        delete engine;
+        delete runtime;
         return nullptr;
     }
-
-    auto* session = new TrtSession{owner, runtime_config, context, cuda_graphs_requested};
     return static_cast<void*>(session);
 }
 
@@ -314,14 +290,9 @@ extern "C" void trt_destroy_session(void* handle) {
     if (!handle) return;
     auto* s = static_cast<TrtSession*>(handle);
     delete s->context;
-    delete s->runtime_config;
+    delete s->engine;
+    delete s->runtime;
     delete s;
-}
-
-extern "C" int trt_session_cuda_graphs_requested(void* handle) {
-    if (!handle) return 0;
-    auto* s = static_cast<TrtSession*>(handle);
-    return s->cuda_graphs_requested ? 1 : 0;
 }
 
 // ---------------------------------------------------------------------------
@@ -362,12 +333,12 @@ extern "C" int32_t trt_get_version() {
 // Engine inspection
 // ---------------------------------------------------------------------------
 
-extern "C" int trt_get_nb_io_tensors(void* engine_handle) {
-    auto* e = static_cast<TrtEngine*>(engine_handle);
-    return e->engine->getNbIOTensors();
+extern "C" int trt_get_nb_io_tensors(void* handle) {
+    auto* s = static_cast<TrtSession*>(handle);
+    return s->engine->getNbIOTensors();
 }
 
-extern "C" const char* trt_get_tensor_name(void* engine_handle, int index) {
-    auto* e = static_cast<TrtEngine*>(engine_handle);
-    return e->engine->getIOTensorName(index);
+extern "C" const char* trt_get_tensor_name(void* handle, int index) {
+    auto* s = static_cast<TrtSession*>(handle);
+    return s->engine->getIOTensorName(index);
 }

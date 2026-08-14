@@ -1,6 +1,6 @@
 use alpharat_mcts::{Backend, BackendError, EvalResult};
 use pyrat::GameState;
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::VecDeque;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc;
 use std::sync::{Arc, Condvar, Mutex};
@@ -23,8 +23,9 @@ pub struct MuxStats {
     pub nn_time_ns: AtomicU64,
     /// Cumulative time in nanoseconds the worker spent waiting for requests.
     pub wait_time_ns: AtomicU64,
-    /// Exact achieved inner-backend batch counts, keyed by positions per call.
-    batch_histogram: Mutex<BTreeMap<usize, u64>>,
+    /// Exact achieved inner-backend batch counts. The fixed array is allocated
+    /// once, so recording adds one relaxed atomic and never locks or allocates.
+    batch_histogram: Box<[AtomicU64]>,
 }
 
 /// Stable point-in-time view of mux workload telemetry.
@@ -38,13 +39,16 @@ pub struct MuxStatsSnapshot {
 }
 
 impl MuxStats {
-    fn new() -> Self {
+    fn new(max_batch_size: usize) -> Self {
         Self {
             total_batches: AtomicU64::new(0),
             total_positions: AtomicU64::new(0),
             nn_time_ns: AtomicU64::new(0),
             wait_time_ns: AtomicU64::new(0),
-            batch_histogram: Mutex::new(BTreeMap::new()),
+            batch_histogram: (0..=max_batch_size)
+                .map(|_| AtomicU64::new(0))
+                .collect::<Vec<_>>()
+                .into_boxed_slice(),
         }
     }
 
@@ -77,11 +81,10 @@ impl MuxStats {
     }
 
     fn record_batch(&self, positions: usize) {
-        let mut histogram = self
-            .batch_histogram
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        *histogram.entry(positions).or_default() += 1;
+        debug_assert!(positions < self.batch_histogram.len());
+        if let Some(count) = self.batch_histogram.get(positions) {
+            count.fetch_add(1, Ordering::Relaxed);
+        }
     }
 
     /// Capture counters and the full achieved-batch distribution consistently enough
@@ -89,10 +92,12 @@ impl MuxStats {
     pub fn snapshot(&self) -> MuxStatsSnapshot {
         let batch_histogram = self
             .batch_histogram
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .iter()
-            .map(|(&batch, &count)| (batch, count))
+            .enumerate()
+            .filter_map(|(batch, count)| {
+                let count = count.load(Ordering::Relaxed);
+                (count != 0).then_some((batch, count))
+            })
             .collect();
         MuxStatsSnapshot {
             total_batches: self.total_batches.load(Ordering::Relaxed),
@@ -210,13 +215,14 @@ impl BatchQueue {
 pub struct MuxBackend {
     queue: Arc<BatchQueue>,
     stats: Arc<MuxStats>,
+    max_batch_size: usize,
     worker: Option<thread::JoinHandle<()>>,
 }
 
 impl MuxBackend {
     pub fn new(inner: impl Backend + 'static, config: MuxConfig) -> Self {
         let queue = Arc::new(BatchQueue::new());
-        let stats = Arc::new(MuxStats::new());
+        let stats = Arc::new(MuxStats::new(config.max_batch_size));
         let worker_queue = queue.clone();
         let worker_stats = stats.clone();
         let max_batch_size = config.max_batch_size;
@@ -228,6 +234,7 @@ impl MuxBackend {
         Self {
             queue,
             stats,
+            max_batch_size,
             worker: Some(worker),
         }
     }
@@ -256,6 +263,13 @@ impl Backend for MuxBackend {
     fn evaluate_batch(&self, games: &[&GameState]) -> Result<Vec<EvalResult>, BackendError> {
         if games.is_empty() {
             return Ok(Vec::new());
+        }
+        if games.len() > self.max_batch_size {
+            return Err(BackendError::msg(format!(
+                "mux batch size {} exceeds max_batch_size {}",
+                games.len(),
+                self.max_batch_size
+            )));
         }
 
         let (tx, rx) = mpsc::sync_channel(1);
@@ -417,7 +431,7 @@ mod tests {
 
     #[test]
     fn snapshot_preserves_exact_batch_distribution() {
-        let stats = MuxStats::new();
+        let stats = MuxStats::new(64);
         stats.record_batch(16);
         stats.record_batch(32);
         stats.record_batch(16);
@@ -583,13 +597,20 @@ mod tests {
 
         let batch_sizes = spy_ref.batch_sizes.lock().unwrap();
         for &size in batch_sizes.iter() {
-            // First request always accepted, but in sequential mode each is size 1.
-            // In concurrent mode the cap is 2. Either way, ≤2 for non-first or ≤ any for first.
-            assert!(
-                size <= 2 || size == batch_sizes[0],
-                "batch size {size} exceeds max_batch_size=2 (and isn't the first request)"
-            );
+            assert!(size <= 2, "batch size {size} exceeds max_batch_size=2");
         }
+    }
+
+    #[test]
+    fn oversized_batch_is_rejected_before_queueing() {
+        let mux = MuxBackend::new(SmartUniformBackend, MuxConfig { max_batch_size: 1 });
+        let game = open_5x5(Coordinates::new(0, 0), Coordinates::new(4, 4));
+        let error = mux.evaluate_batch(&[&game, &game]).unwrap_err();
+
+        assert!(error
+            .to_string()
+            .contains("mux batch size 2 exceeds max_batch_size 1"));
+        assert_eq!(mux.stats().total_batches.load(Ordering::Relaxed), 0);
     }
 
     #[test]

@@ -180,7 +180,7 @@ def run_rust_sampling(
     max_games_per_bundle: int = 32,
     mux_max_batch_size: int = 256,
     tensorrt_opt_batch: int | None = None,
-    tensorrt_pinned_host_io: bool = False,
+    tensorrt_pinned_host_io: bool = True,
     tensorrt_profile_stages: bool = False,
     checkpoint: str | None = None,
     device: str = "auto",
@@ -202,7 +202,9 @@ def run_rust_sampling(
         max_games_per_bundle: Max games per NPZ bundle file.
         mux_max_batch_size: Max batch size for ONNX mux backend.
         tensorrt_opt_batch: TensorRT dynamic-profile optimization point. Defaults to max batch.
-        tensorrt_pinned_host_io: Use the experiment's reusable page-locked host slot.
+        tensorrt_pinned_host_io: Reuse TensorRT page-locked host staging (recommended).
+            Set false only for an explicit pageable control. Allocation failure is reported
+            during backend initialization rather than silently falling back.
         tensorrt_profile_stages: Record CUDA-event and host-stage TensorRT timings.
         checkpoint: Path to .pt checkpoint for NN-guided sampling.
         device: Execution provider — "auto", "cpu", "coreml", "mps", "cuda", "tensorrt".

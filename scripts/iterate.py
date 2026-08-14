@@ -68,7 +68,7 @@ class IterateSamplingParams(StrictBaseModel):
     cache_size: int = 0
     mux_max_batch_size: int = 256
     tensorrt_opt_batch: int | None = None
-    tensorrt_pinned_host_io: bool = False
+    tensorrt_pinned_host_io: bool = True
     tensorrt_profile_stages: bool = False
 
 
