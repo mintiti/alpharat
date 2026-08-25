@@ -1,0 +1,39 @@
+{
+  "schema_version": 1,
+  "game": {
+    "width": 7,
+    "height": 7,
+    "player_1": [0, 0],
+    "player_2": [6, 6],
+    "cheese": [
+      [1, 0],
+      [3, 0],
+      [5, 0],
+      [0, 1],
+      [2, 1],
+      [4, 1],
+      [6, 1],
+      [1, 2],
+      [3, 2],
+      [5, 2]
+    ],
+    "max_turns": 50,
+    "creation_seed": null
+  },
+  "search": {
+    "c_puct": 1.5,
+    "fpu_reduction": 0.2,
+    "force_k": 2.0,
+    "noise_epsilon": 0.0,
+    "noise_concentration": 10.83,
+    "collision_limit_min": 1,
+    "collision_limit_max": 256,
+    "collision_scaling_start": 800,
+    "collision_scaling_end": 50000,
+    "collision_scaling_power": 1.0
+  },
+  "seeds": {
+    "warmup_base": 1000,
+    "measured_base": 42
+  }
+}

@@ -325,8 +325,9 @@ fn run_mcgs(
         .unwrap();
         timings.push(start.elapsed().as_secs_f64());
 
-        last_tt_entries = tree.tt().len();
-        last_tt_live = tree.tt().live_count();
+        let stats = tree.stats();
+        last_tt_entries = stats.transpositions.entries;
+        last_tt_live = stats.transpositions.live_entries;
         last_result = Some(result);
     }
 

@@ -18,9 +18,20 @@ numpy = { version = "0.25", optional = true }
 [dev-dependencies]
 criterion = { version = "0.5", features = ["html_reports"] }
 
+[target.'cfg(loom)'.dependencies]
+loom = "0.7"
+
 [[bench]]
 name = "search"
 harness = false
 
+[[example]]
+name = "profile_one_worker"
+required-features = ["bench-internals"]
+
 [features]
+bench-internals = []
 python = ["dep:pyo3", "dep:numpy", "pyrat/python"]
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(loom)"] }

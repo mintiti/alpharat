@@ -1,0 +1,205 @@
+{
+  "protocol_version": 1,
+  "plan_id": "mac-cnn-calibration-v1",
+  "model": {
+    "label": "CNN64 res,res,gpool seed 0",
+    "path": "../../../experiments/benchmarks/mcgs-parallel-mac-model-batch-2026-08-11/cnn64-rrg-seed0.onnx"
+  },
+  "comparison_axes": [
+    "batch_size",
+    "callers",
+    "workers",
+    "total_in_flight",
+    "mux_max_batch"
+  ],
+  "cases": [
+    {
+      "benchmark": "backend_capacity",
+      "id": "capacity-coreml-b1-c1",
+      "comparison_key": "capacity-batch-1-callers-1",
+      "label": "CoreML — batch 1, one caller",
+      "requested": {
+        "backend": { "engine": "onnx", "provider": "coreml" },
+        "batch_size": 1,
+        "callers": 1,
+        "calls_per_caller": 32,
+        "warmup_trials": 2,
+        "measured_trials": 10
+      }
+    },
+    {
+      "benchmark": "backend_capacity",
+      "id": "capacity-coreml-b8-c1",
+      "comparison_key": "capacity-batch-8-callers-1",
+      "label": "CoreML — batch 8, one caller",
+      "requested": {
+        "backend": { "engine": "onnx", "provider": "coreml" },
+        "batch_size": 8,
+        "callers": 1,
+        "calls_per_caller": 32,
+        "warmup_trials": 2,
+        "measured_trials": 10
+      }
+    },
+    {
+      "benchmark": "backend_capacity",
+      "id": "capacity-coreml-b32-c1",
+      "comparison_key": "capacity-batch-32-callers-1",
+      "label": "CoreML — batch 32, one caller",
+      "requested": {
+        "backend": { "engine": "onnx", "provider": "coreml" },
+        "batch_size": 32,
+        "callers": 1,
+        "calls_per_caller": 32,
+        "warmup_trials": 2,
+        "measured_trials": 10
+      }
+    },
+    {
+      "benchmark": "backend_capacity",
+      "id": "capacity-coreml-b128-c1",
+      "comparison_key": "capacity-batch-128-callers-1",
+      "label": "CoreML — batch 128, one caller",
+      "requested": {
+        "backend": { "engine": "onnx", "provider": "coreml" },
+        "batch_size": 128,
+        "callers": 1,
+        "calls_per_caller": 32,
+        "warmup_trials": 2,
+        "measured_trials": 10
+      }
+    },
+    {
+      "benchmark": "backend_capacity",
+      "id": "capacity-coreml-b512-c1",
+      "comparison_key": "capacity-batch-512-callers-1",
+      "label": "CoreML — batch 512, one caller",
+      "requested": {
+        "backend": { "engine": "onnx", "provider": "coreml" },
+        "batch_size": 512,
+        "callers": 1,
+        "calls_per_caller": 32,
+        "warmup_trials": 2,
+        "measured_trials": 10
+      }
+    },
+    {
+      "benchmark": "backend_capacity",
+      "id": "capacity-coreml-b512-c2",
+      "comparison_key": "capacity-batch-512-callers-2",
+      "label": "CoreML — batch 512, two callers",
+      "requested": {
+        "backend": { "engine": "onnx", "provider": "coreml" },
+        "batch_size": 512,
+        "callers": 2,
+        "calls_per_caller": 32,
+        "warmup_trials": 2,
+        "measured_trials": 10
+      }
+    },
+    {
+      "benchmark": "backend_capacity",
+      "id": "capacity-coreml-b512-c4",
+      "comparison_key": "capacity-batch-512-callers-4",
+      "label": "CoreML — batch 512, four callers",
+      "requested": {
+        "backend": { "engine": "onnx", "provider": "coreml" },
+        "batch_size": 512,
+        "callers": 4,
+        "calls_per_caller": 32,
+        "warmup_trials": 2,
+        "measured_trials": 10
+      }
+    },
+    {
+      "benchmark": "search",
+      "id": "search-coreml-w1-cap256-direct",
+      "comparison_key": "search-workers-1-total-in-flight-256-direct",
+      "label": "One worker — total in-flight 256, direct",
+      "requested": {
+        "backend": { "engine": "onnx", "provider": "coreml" },
+        "workers": 1,
+        "total_in_flight": 256,
+        "mux_max_batch": null,
+        "productive_work": 50000,
+        "warmup_trials": 2,
+        "measured_trials": 10
+      }
+    },
+    {
+      "benchmark": "search",
+      "id": "search-coreml-w1-cap512-direct",
+      "comparison_key": "search-workers-1-total-in-flight-512-direct",
+      "label": "One worker — total in-flight 512, direct",
+      "requested": {
+        "backend": { "engine": "onnx", "provider": "coreml" },
+        "workers": 1,
+        "total_in_flight": 512,
+        "mux_max_batch": null,
+        "productive_work": 50000,
+        "warmup_trials": 2,
+        "measured_trials": 10
+      }
+    },
+    {
+      "benchmark": "search",
+      "id": "search-coreml-w1-cap1024-direct",
+      "comparison_key": "search-workers-1-total-in-flight-1024-direct",
+      "label": "One worker — total in-flight 1024, direct",
+      "requested": {
+        "backend": { "engine": "onnx", "provider": "coreml" },
+        "workers": 1,
+        "total_in_flight": 1024,
+        "mux_max_batch": null,
+        "productive_work": 50000,
+        "warmup_trials": 2,
+        "measured_trials": 10
+      }
+    },
+    {
+      "benchmark": "search",
+      "id": "search-coreml-w4-per-worker512-mux512",
+      "comparison_key": "search-workers-4-per-worker-in-flight-512-mux-512",
+      "label": "Four workers — per-worker in-flight 512, mux 512",
+      "requested": {
+        "backend": { "engine": "onnx", "provider": "coreml" },
+        "workers": 4,
+        "total_in_flight": 2048,
+        "mux_max_batch": 512,
+        "productive_work": 50000,
+        "warmup_trials": 2,
+        "measured_trials": 10
+      }
+    },
+    {
+      "benchmark": "search",
+      "id": "search-coreml-w4-per-worker1024-mux1024",
+      "comparison_key": "search-workers-4-per-worker-in-flight-1024-mux-1024",
+      "label": "Four workers — per-worker in-flight 1024, mux 1024",
+      "requested": {
+        "backend": { "engine": "onnx", "provider": "coreml" },
+        "workers": 4,
+        "total_in_flight": 4096,
+        "mux_max_batch": 1024,
+        "productive_work": 50000,
+        "warmup_trials": 2,
+        "measured_trials": 10
+      }
+    }
+  ],
+  "capacity_workload": {
+    "source": "standard",
+    "label": "standard 7x7 capacity positions",
+    "width": 7,
+    "height": 7
+  },
+  "search_workload": {
+    "source": "built_in",
+    "label": "MCGS fixed-work 7x7 v1"
+  },
+  "tensorrt_cache": null,
+  "accelerators": [
+    { "kind": "gpu", "name": "Apple integrated GPU", "memory_bytes": null }
+  ],
+  "runtime_software": []
+}

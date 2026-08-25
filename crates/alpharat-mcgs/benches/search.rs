@@ -3,6 +3,8 @@ use std::time::Duration;
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
 
 use alpharat_mcgs::{gc, run_search, MCGSTree, SearchConfig, SmartUniformBackend};
+#[cfg(feature = "bench-internals")]
+use alpharat_mcgs::run_search_one_worker_profiled;
 use pyrat::{Coordinates, Direction, GameBuilder, GameState};
 use rand::rngs::SmallRng;
 use rand::SeedableRng;
@@ -126,7 +128,7 @@ fn bench_search_reuse(c: &mut Criterion) {
                         game.make_move(d1, d2);
 
                         tree.advance_root(&game, a1, a2);
-                        tree.tt_mut().evict_expired();
+                        tree.evict_expired();
 
                         (tree, game, SmallRng::seed_from_u64(123))
                     },
@@ -145,5 +147,108 @@ fn bench_search_reuse(c: &mut Criterion) {
     }
 }
 
+#[cfg(feature = "bench-internals")]
+fn bench_one_worker_fresh(c: &mut Criterion) {
+    let backend = SmartUniformBackend;
+    let config = SearchConfig::default();
+    let batch_size = 64u32;
+    let sims = 8_000u32;
+    let game = open_game(7, 7, 10, 50);
+
+    let mut fresh = c.benchmark_group("search_one_worker/8000_sims");
+    fresh.measurement_time(Duration::from_secs(5));
+    fresh.sample_size(50);
+    fresh.throughput(Throughput::Elements(sims as u64));
+    fresh.bench_function("7x7", |b| {
+        b.iter(|| {
+            let mut tree = MCGSTree::new(&game);
+            let mut rng = SmallRng::seed_from_u64(42);
+            let mut timings = alpharat_mcgs::SearchTimings::default();
+            run_search_one_worker_profiled(
+                &mut tree,
+                &game,
+                &backend,
+                &config,
+                sims,
+                batch_size,
+                &mut rng,
+                &mut timings,
+            )
+            .unwrap()
+        })
+    });
+    fresh.finish();
+}
+
+#[cfg(feature = "bench-internals")]
+fn bench_one_worker_reuse(c: &mut Criterion) {
+    gc::init();
+
+    let backend = SmartUniformBackend;
+    let config = SearchConfig::default();
+    let batch_size = 64u32;
+    let sims = 8_000u32;
+    let game = open_game(7, 7, 10, 50);
+    let mut reuse = c.benchmark_group("search_one_worker_reuse/8000_sims");
+    reuse.measurement_time(Duration::from_secs(5));
+    reuse.sample_size(50);
+    reuse.throughput(Throughput::Elements(sims as u64));
+    reuse.bench_function("7x7", |b| {
+        b.iter_batched(
+            || {
+                let mut tree = MCGSTree::new(&game);
+                let mut rng = SmallRng::seed_from_u64(42);
+                let result = run_search(
+                    &mut tree,
+                    &game,
+                    &backend,
+                    &config,
+                    sims,
+                    batch_size,
+                    &mut rng,
+                )
+                .unwrap();
+
+                let a1 = best_action(&result.visit_counts_p1);
+                let a2 = best_action(&result.visit_counts_p2);
+                let mut advanced = game.clone();
+                advanced.make_move(
+                    Direction::try_from(a1).expect("valid direction"),
+                    Direction::try_from(a2).expect("valid direction"),
+                );
+                tree.advance_root(&advanced, a1, a2);
+                tree.evict_expired();
+
+                (tree, advanced, SmallRng::seed_from_u64(123))
+            },
+            |(mut tree, advanced, mut rng)| {
+                let mut timings = alpharat_mcgs::SearchTimings::default();
+                run_search_one_worker_profiled(
+                    &mut tree,
+                    &advanced,
+                    &backend,
+                    &config,
+                    sims,
+                    batch_size,
+                    &mut rng,
+                    &mut timings,
+                )
+                .unwrap()
+            },
+            criterion::BatchSize::LargeInput,
+        )
+    });
+    reuse.finish();
+}
+
+#[cfg(feature = "bench-internals")]
+criterion_group!(
+    benches,
+    bench_search,
+    bench_one_worker_fresh,
+    bench_search_reuse,
+    bench_one_worker_reuse
+);
+#[cfg(not(feature = "bench-internals"))]
 criterion_group!(benches, bench_search, bench_search_reuse);
 criterion_main!(benches);

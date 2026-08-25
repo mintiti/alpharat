@@ -1,0 +1,3 @@
+case_id,phase,trial,status,error,wall_ms,positions_per_s,outer_calls,outer_positions,caller_time_ms,caller_union_ms,caller_peak,device_calls,device_positions,device_avg_batch,device_inference_ms
+capacity-cpu-b8-c2,warmup,1,completed,,2.1,30476.190476190477,8,64,3.2,2.1,2,8,64,8.0,2.1
+capacity-cpu-b8-c2,measured,1,completed,,2.0,32000.0,8,64,3.0,2.0,2,8,64,8.0,2.0
