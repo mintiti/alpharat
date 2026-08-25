@@ -166,8 +166,10 @@ fn build_tensorrt(
         ))
     })?;
     let tensorrt = TensorrtConfig {
+        opt_batch: Some(max_batch),
         max_batch,
         cache_dir: config.tensorrt_cache.clone(),
+        ..TensorrtConfig::default()
     };
     TensorrtBackend::new(model, FlatEncoder::new(width, height), tensorrt)
         .map(|backend| Box::new(backend) as Box<dyn Backend>)

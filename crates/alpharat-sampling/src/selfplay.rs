@@ -119,7 +119,7 @@ pub struct GameRecord {
     pub total_simulations: u64,
     /// Initial cheese count.
     pub cheese_available: u16,
-    /// Index of this game in the self-play batch (for identity, not seeding).
+    /// Stable index used for identity and optional per-game seed derivation.
     pub game_index: u32,
     /// H*W, y-major, CheeseOutcome values — who collected each cheese.
     pub cheese_outcomes: Vec<u8>,
@@ -336,6 +336,9 @@ pub struct SelfPlayConfig {
     pub batch_size: u32,
     /// Number of worker threads (only used by `run_self_play`).
     pub num_threads: u32,
+    /// Optional master seed. Each game derives its own search RNG stream from
+    /// this seed and its stable game index, independent of worker scheduling.
+    pub seed: Option<u64>,
 }
 
 /// Atomic counters for tracking self-play progress from outside.
@@ -367,6 +370,34 @@ impl Default for SelfPlayProgress {
 // ---------------------------------------------------------------------------
 // Helper functions
 // ---------------------------------------------------------------------------
+
+#[cfg(any(feature = "python", test))]
+const GAME_CREATION_SEED_DOMAIN: u64 = 0x4741_4d45_5f43_5245;
+const SEARCH_SEED_DOMAIN: u64 = 0x5345_4152_4348_5f52;
+
+fn mix_seed(mut value: u64) -> u64 {
+    value = value.wrapping_add(0x9e37_79b9_7f4a_7c15);
+    value = (value ^ (value >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+    value = (value ^ (value >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
+    value ^ (value >> 31)
+}
+
+fn indexed_seed(master_seed: u64, game_index: usize, domain: u64) -> u64 {
+    mix_seed(
+        master_seed
+            ^ domain
+            ^ (game_index as u64).wrapping_mul(0x9e37_79b9_7f4a_7c15),
+    )
+}
+
+#[cfg(any(feature = "python", test))]
+pub(crate) fn game_creation_seed(master_seed: u64, game_index: usize) -> u64 {
+    indexed_seed(master_seed, game_index, GAME_CREATION_SEED_DOMAIN)
+}
+
+fn search_seed(master_seed: u64, game_index: usize) -> u64 {
+    indexed_seed(master_seed, game_index, SEARCH_SEED_DOMAIN)
+}
 
 /// Build i8[H, W, 4] maze array in C-order (y-major).
 ///
@@ -619,20 +650,34 @@ where
     F: FnMut(GameRecord),
 {
     let n_games = games.len();
-    let mut rng = SmallRng::from_entropy();
+    let mut entropy_rng = config.seed.is_none().then(SmallRng::from_entropy);
     loop {
         let idx = next_game.fetch_add(1, Relaxed) as usize;
         if idx >= n_games {
             break;
         }
-        let record = play_game(
-            games[idx].clone(),
-            backend,
-            search_config,
-            config,
-            &mut rng,
-            idx as u32,
-        )?;
+        let record = if let Some(master_seed) = config.seed {
+            let mut rng = SmallRng::seed_from_u64(search_seed(master_seed, idx));
+            play_game(
+                games[idx].clone(),
+                backend,
+                search_config,
+                config,
+                &mut rng,
+                idx as u32,
+            )?
+        } else {
+            play_game(
+                games[idx].clone(),
+                backend,
+                search_config,
+                config,
+                entropy_rng
+                    .as_mut()
+                    .expect("unseeded worker must own an entropy RNG"),
+                idx as u32,
+            )?
+        };
 
         if let Some(p) = progress {
             p.positions_completed
@@ -652,7 +697,9 @@ where
 /// Run self-play on a slice of games using `config.num_threads` worker threads.
 ///
 /// Each thread claims games by atomic index, clones + plays them.
-/// Each thread uses its own entropy-seeded RNG (no deterministic seeding).
+/// With no master seed, each thread retains its own entropy-seeded RNG. With a
+/// master seed, each game uses an index-derived RNG independent of the worker
+/// that claims it.
 /// Results are sorted by `game_index` before returning.
 pub fn run_self_play(
     games: &[GameState],
@@ -956,7 +1003,7 @@ mod tests {
     fn play_game_completes() {
         let game = short_game();
         let search = SearchConfig::default();
-        let sp = SelfPlayConfig { n_sims: 16, batch_size: 8, num_threads: 1 };
+        let sp = SelfPlayConfig { n_sims: 16, batch_size: 8, num_threads: 1, seed: None };
         let mut rng = SmallRng::seed_from_u64(42);
         let record = play_game(game, &BACKEND, &search, &sp, &mut rng, 0).unwrap();
 
@@ -974,7 +1021,7 @@ mod tests {
     fn play_game_position_fields() {
         let game = short_game();
         let search = SearchConfig::default();
-        let sp = SelfPlayConfig { n_sims: 16, batch_size: 8, num_threads: 1 };
+        let sp = SelfPlayConfig { n_sims: 16, batch_size: 8, num_threads: 1, seed: None };
         let mut rng = SmallRng::seed_from_u64(42);
         let record = play_game(game, &BACKEND, &search, &sp, &mut rng, 0).unwrap();
 
@@ -996,7 +1043,7 @@ mod tests {
     fn play_game_simulations_tracked() {
         let game = short_game();
         let search = SearchConfig::default();
-        let sp = SelfPlayConfig { n_sims: 32, batch_size: 8, num_threads: 1 };
+        let sp = SelfPlayConfig { n_sims: 32, batch_size: 8, num_threads: 1, seed: None };
         let mut rng = SmallRng::seed_from_u64(42);
         let record = play_game(game, &BACKEND, &search, &sp, &mut rng, 0).unwrap();
 
@@ -1016,7 +1063,7 @@ mod tests {
     fn play_game_maze_and_cheese_recorded() {
         let game = standard_game();
         let search = SearchConfig::default();
-        let sp = SelfPlayConfig { n_sims: 8, batch_size: 8, num_threads: 1 };
+        let sp = SelfPlayConfig { n_sims: 8, batch_size: 8, num_threads: 1, seed: None };
         let mut rng = SmallRng::seed_from_u64(42);
         let record = play_game(game, &BACKEND, &search, &sp, &mut rng, 0).unwrap();
 
@@ -1031,7 +1078,7 @@ mod tests {
     fn run_self_play_game_count() {
         let games: Vec<GameState> = (0..10).map(|_| short_game()).collect();
         let search = SearchConfig::default();
-        let sp = SelfPlayConfig { n_sims: 8, batch_size: 8, num_threads: 2 };
+        let sp = SelfPlayConfig { n_sims: 8, batch_size: 8, num_threads: 2, seed: None };
 
         let result = run_self_play(&games, &BACKEND, &search, &sp, None).unwrap();
 
@@ -1043,7 +1090,7 @@ mod tests {
     fn run_self_play_game_index_order() {
         let games: Vec<GameState> = (0..8).map(|_| short_game()).collect();
         let search = SearchConfig::default();
-        let sp = SelfPlayConfig { n_sims: 8, batch_size: 8, num_threads: 4 };
+        let sp = SelfPlayConfig { n_sims: 8, batch_size: 8, num_threads: 4, seed: None };
 
         let result = run_self_play(&games, &BACKEND, &search, &sp, None).unwrap();
 
@@ -1054,10 +1101,50 @@ mod tests {
     }
 
     #[test]
+    fn seeded_self_play_is_independent_of_worker_assignment() {
+        let games: Vec<GameState> = (0..8).map(|_| short_game()).collect();
+        let search = SearchConfig::default();
+        let mut config = SelfPlayConfig {
+            n_sims: 16,
+            batch_size: 8,
+            num_threads: 1,
+            seed: Some(20_260_814),
+        };
+        let serial = run_self_play(&games, &BACKEND, &search, &config, None).unwrap();
+
+        config.num_threads = 4;
+        let parallel = run_self_play(&games, &BACKEND, &search, &config, None).unwrap();
+
+        for (serial, parallel) in serial.games.iter().zip(&parallel.games) {
+            let serial_actions: Vec<_> = serial
+                .positions
+                .iter()
+                .map(|position| (position.action_p1, position.action_p2))
+                .collect();
+            let parallel_actions: Vec<_> = parallel
+                .positions
+                .iter()
+                .map(|position| (position.action_p1, position.action_p2))
+                .collect();
+            assert_eq!(serial.game_index, parallel.game_index);
+            assert_eq!(serial_actions, parallel_actions);
+            assert_eq!(serial.final_p1_score, parallel.final_p1_score);
+            assert_eq!(serial.final_p2_score, parallel.final_p2_score);
+            assert_eq!(serial.total_simulations, parallel.total_simulations);
+        }
+    }
+
+    #[test]
+    fn game_creation_and_search_use_distinct_seed_domains() {
+        assert_ne!(game_creation_seed(42, 7), search_seed(42, 7));
+        assert_ne!(game_creation_seed(42, 7), game_creation_seed(42, 8));
+    }
+
+    #[test]
     fn run_self_play_progress() {
         let games: Vec<GameState> = (0..4).map(|_| short_game()).collect();
         let search = SearchConfig::default();
-        let sp = SelfPlayConfig { n_sims: 8, batch_size: 8, num_threads: 2 };
+        let sp = SelfPlayConfig { n_sims: 8, batch_size: 8, num_threads: 2, seed: None };
         let progress = SelfPlayProgress::new();
 
         let result = run_self_play(&games, &BACKEND, &search, &sp, Some(&progress)).unwrap();
@@ -1415,7 +1502,7 @@ mod tests {
     fn play_game_cheese_outcomes_populated() {
         let game = standard_game(); // 5x5, 3 cheese
         let search = SearchConfig::default();
-        let sp = SelfPlayConfig { n_sims: 16, batch_size: 8, num_threads: 1 };
+        let sp = SelfPlayConfig { n_sims: 16, batch_size: 8, num_threads: 1, seed: None };
         let mut rng = SmallRng::seed_from_u64(42);
         let record = play_game(game, &BACKEND, &search, &sp, &mut rng, 0).unwrap();
 
@@ -1475,7 +1562,7 @@ mod tests {
         // forcing the reinit fallback path in play_game.
         let game = short_game();
         let search = SearchConfig::default();
-        let sp = SelfPlayConfig { n_sims: 1, batch_size: 1, num_threads: 1 };
+        let sp = SelfPlayConfig { n_sims: 1, batch_size: 1, num_threads: 1, seed: None };
         let mut rng = SmallRng::seed_from_u64(42);
         let record = play_game(game, &BACKEND, &search, &sp, &mut rng, 0).unwrap();
 
@@ -1488,7 +1575,7 @@ mod tests {
     fn play_game_result_matches_scores() {
         let game = standard_game();
         let search = SearchConfig::default();
-        let sp = SelfPlayConfig { n_sims: 16, batch_size: 8, num_threads: 1 };
+        let sp = SelfPlayConfig { n_sims: 16, batch_size: 8, num_threads: 1, seed: None };
         let mut rng = SmallRng::seed_from_u64(42);
         let record = play_game(game, &BACKEND, &search, &sp, &mut rng, 0).unwrap();
 
@@ -1505,7 +1592,7 @@ mod tests {
     fn run_self_play_zero_games() {
         let games: Vec<GameState> = vec![];
         let search = SearchConfig::default();
-        let sp = SelfPlayConfig { n_sims: 8, batch_size: 8, num_threads: 2 };
+        let sp = SelfPlayConfig { n_sims: 8, batch_size: 8, num_threads: 2, seed: None };
 
         let result = run_self_play(&games, &BACKEND, &search, &sp, None).unwrap();
 
@@ -1519,7 +1606,7 @@ mod tests {
     fn run_self_play_more_threads_than_games() {
         let games: Vec<GameState> = (0..2).map(|_| short_game()).collect();
         let search = SearchConfig::default();
-        let sp = SelfPlayConfig { n_sims: 8, batch_size: 8, num_threads: 8 };
+        let sp = SelfPlayConfig { n_sims: 8, batch_size: 8, num_threads: 8, seed: None };
 
         let result = run_self_play(&games, &BACKEND, &search, &sp, None).unwrap();
 
@@ -1540,7 +1627,7 @@ mod tests {
 
         let games: Vec<GameState> = (0..4).map(|_| short_game()).collect();
         let search = SearchConfig::default();
-        let sp = SelfPlayConfig { n_sims: 8, batch_size: 8, num_threads: 2 };
+        let sp = SelfPlayConfig { n_sims: 8, batch_size: 8, num_threads: 2, seed: None };
 
         let result =
             run_self_play_to_disk(&games, &BACKEND, &search, &sp, &dir, 2, None).unwrap();
@@ -1563,7 +1650,7 @@ mod tests {
 
         let games: Vec<GameState> = (0..4).map(|_| short_game()).collect();
         let search = SearchConfig::default();
-        let sp = SelfPlayConfig { n_sims: 8, batch_size: 8, num_threads: 2 };
+        let sp = SelfPlayConfig { n_sims: 8, batch_size: 8, num_threads: 2, seed: None };
 
         let disk_result =
             run_self_play_to_disk(&games, &BACKEND, &search, &sp, &dir, 100, None).unwrap();
@@ -1588,7 +1675,7 @@ mod tests {
 
         let games: Vec<GameState> = vec![];
         let search = SearchConfig::default();
-        let sp = SelfPlayConfig { n_sims: 8, batch_size: 8, num_threads: 2 };
+        let sp = SelfPlayConfig { n_sims: 8, batch_size: 8, num_threads: 2, seed: None };
 
         let result =
             run_self_play_to_disk(&games, &BACKEND, &search, &sp, &dir, 100, None).unwrap();
@@ -1609,7 +1696,7 @@ mod tests {
 
         let games: Vec<GameState> = (0..4).map(|_| short_game()).collect();
         let search = SearchConfig::default();
-        let sp = SelfPlayConfig { n_sims: 8, batch_size: 8, num_threads: 2 };
+        let sp = SelfPlayConfig { n_sims: 8, batch_size: 8, num_threads: 2, seed: None };
 
         let result =
             run_self_play_to_disk(&games, &BACKEND, &search, &sp, &dir, 100, None).unwrap();

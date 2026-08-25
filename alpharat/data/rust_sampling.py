@@ -65,6 +65,23 @@ class RustSamplingMetrics:
     total_collisions: int
     cache_hits: int
     cache_misses: int
+    inference_batches: int
+    inference_positions: int
+    inference_nn_seconds: float
+    inference_wait_seconds: float
+    inference_batch_histogram: tuple[tuple[int, int], ...]
+    tensorrt_host_io: str = "unavailable"
+    tensorrt_pinned_bytes: int = 0
+    tensorrt_profiled_calls: int = 0
+    tensorrt_profiled_positions: int = 0
+    tensorrt_encode_seconds: float = 0.0
+    tensorrt_input_stage_seconds: float = 0.0
+    tensorrt_h2d_seconds: float = 0.0
+    tensorrt_infer_seconds: float = 0.0
+    tensorrt_output_alloc_seconds: float = 0.0
+    tensorrt_d2h_seconds: float = 0.0
+    tensorrt_parse_seconds: float = 0.0
+    tensorrt_total_seconds: float = 0.0
 
     @property
     def games_per_second(self) -> float:
@@ -114,6 +131,25 @@ class RustSamplingMetrics:
         total = self.cache_hits + self.cache_misses
         return self.cache_hits / total if total > 0 else 0.0
 
+    @property
+    def inference_avg_batch_size(self) -> float:
+        if self.inference_batches == 0:
+            return 0.0
+        return self.inference_positions / self.inference_batches
+
+    def inference_batch_percentile(self, percentile: float) -> int:
+        """Return a nearest-rank percentile from the exact achieved-batch histogram."""
+        if not self.inference_batch_histogram:
+            return 0
+        total = sum(count for _, count in self.inference_batch_histogram)
+        rank = max(1, int(total * percentile + 0.999999))
+        cumulative = 0
+        for batch, count in self.inference_batch_histogram:
+            cumulative += count
+            if cumulative >= rank:
+                return batch
+        return self.inference_batch_histogram[-1][0]
+
 
 def _ensure_onnx(checkpoint_path: str) -> str | None:
     """Return path to ONNX model, auto-exporting from .pt if needed.
@@ -141,8 +177,12 @@ def run_rust_sampling(
     num_games: int,
     group: str,
     num_threads: int = 4,
+    seed: int | None = None,
     max_games_per_bundle: int = 32,
     mux_max_batch_size: int = 256,
+    tensorrt_opt_batch: int | None = None,
+    tensorrt_pinned_host_io: bool = True,
+    tensorrt_profile_stages: bool = False,
     checkpoint: str | None = None,
     device: str = "auto",
     cache_size: int = 0,
@@ -160,8 +200,15 @@ def run_rust_sampling(
         num_games: Total games to generate.
         group: Batch group name for ExperimentManager.
         num_threads: Worker threads for Rust self-play.
+        seed: Optional master seed. Game creation and MCTS randomness derive
+            stable per-game streams from this value.
         max_games_per_bundle: Max games per NPZ bundle file.
         mux_max_batch_size: Max batch size for ONNX mux backend.
+        tensorrt_opt_batch: TensorRT dynamic-profile optimization point. Defaults to max batch.
+        tensorrt_pinned_host_io: Reuse TensorRT page-locked host staging (recommended).
+            Set false only for an explicit pageable control. Allocation failure is reported
+            during backend initialization rather than silently falling back.
+        tensorrt_profile_stages: Record CUDA-event and host-stage TensorRT timings.
         checkpoint: Path to .pt checkpoint for NN-guided sampling.
         device: Execution provider — "auto", "cpu", "coreml", "mps", "cuda", "tensorrt".
         cache_size: Thread-local NN eval cache capacity (0 = disabled).
@@ -234,10 +281,14 @@ def run_rust_sampling(
         "collision_scaling_end": mcts.collision_scaling_end,
         "collision_scaling_power": mcts.collision_scaling_power,
         "num_threads": num_threads,
+        "seed": seed,
         "output_dir": str(output_dir),
         "max_games_per_bundle": max_games_per_bundle,
         "onnx_model_path": onnx_path,
         "mux_max_batch_size": mux_max_batch_size,
+        "tensorrt_opt_batch": tensorrt_opt_batch,
+        "tensorrt_pinned_host_io": tensorrt_pinned_host_io,
+        "tensorrt_profile_stages": tensorrt_profile_stages,
         "device": device,
         "cache_size": cache_size,
     }
@@ -273,6 +324,25 @@ def run_rust_sampling(
         total_collisions=stats.total_collisions,
         cache_hits=stats.cache_hits,
         cache_misses=stats.cache_misses,
+        inference_batches=stats.inference_batches,
+        inference_positions=stats.inference_positions,
+        inference_nn_seconds=stats.inference_nn_seconds,
+        inference_wait_seconds=stats.inference_wait_seconds,
+        inference_batch_histogram=tuple(
+            (int(batch), int(count)) for batch, count in stats.inference_batch_histogram
+        ),
+        tensorrt_host_io=str(getattr(stats, "tensorrt_host_io", "unavailable")),
+        tensorrt_pinned_bytes=int(getattr(stats, "tensorrt_pinned_bytes", 0)),
+        tensorrt_profiled_calls=int(getattr(stats, "tensorrt_profiled_calls", 0)),
+        tensorrt_profiled_positions=int(getattr(stats, "tensorrt_profiled_positions", 0)),
+        tensorrt_encode_seconds=float(getattr(stats, "tensorrt_encode_seconds", 0.0)),
+        tensorrt_input_stage_seconds=float(getattr(stats, "tensorrt_input_stage_seconds", 0.0)),
+        tensorrt_h2d_seconds=float(getattr(stats, "tensorrt_h2d_seconds", 0.0)),
+        tensorrt_infer_seconds=float(getattr(stats, "tensorrt_infer_seconds", 0.0)),
+        tensorrt_output_alloc_seconds=float(getattr(stats, "tensorrt_output_alloc_seconds", 0.0)),
+        tensorrt_d2h_seconds=float(getattr(stats, "tensorrt_d2h_seconds", 0.0)),
+        tensorrt_parse_seconds=float(getattr(stats, "tensorrt_parse_seconds", 0.0)),
+        tensorrt_total_seconds=float(getattr(stats, "tensorrt_total_seconds", 0.0)),
     )
 
     logger.info(
@@ -291,6 +361,29 @@ def run_rust_sampling(
             metrics.cache_hits,
             metrics.cache_misses,
             metrics.cache_hit_rate * 100,
+        )
+    if metrics.inference_batches > 0:
+        logger.info(
+            "Inference batches: %d calls, avg %.1f positions, p50=%d, p90=%d, range=%d..%d",
+            metrics.inference_batches,
+            metrics.inference_avg_batch_size,
+            metrics.inference_batch_percentile(0.5),
+            metrics.inference_batch_percentile(0.9),
+            metrics.inference_batch_histogram[0][0],
+            metrics.inference_batch_histogram[-1][0],
+        )
+    if metrics.tensorrt_profiled_calls > 0:
+        logger.info(
+            "TensorRT %s host I/O: %d calls, %.3fs encode, %.3fs H2D, "
+            "%.3fs inference, %.3fs D2H, %.3fs parse, %d pinned bytes",
+            metrics.tensorrt_host_io,
+            metrics.tensorrt_profiled_calls,
+            metrics.tensorrt_encode_seconds,
+            metrics.tensorrt_h2d_seconds,
+            metrics.tensorrt_infer_seconds,
+            metrics.tensorrt_d2h_seconds,
+            metrics.tensorrt_parse_seconds,
+            metrics.tensorrt_pinned_bytes,
         )
 
     return batch_dir, metrics

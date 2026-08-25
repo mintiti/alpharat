@@ -15,6 +15,7 @@
 #include <cstring>
 #include <dlfcn.h>
 #include <mutex>
+#include <new>
 
 using namespace nvinfer1;
 
@@ -107,13 +108,15 @@ static constexpr int32_t TRT_VERSION = NV_TENSORRT_VERSION;
 static constexpr int32_t ONNX_PARSER_VERSION = NV_ONNX_PARSER_VERSION;
 
 // ---------------------------------------------------------------------------
-// TrtSession — opaque handle for Rust
+// One opaque session handle for Rust. TensorRT requires the runtime to outlive
+// the engine and the engine to outlive its execution context, so one owner
+// keeps that destruction order explicit.
 // ---------------------------------------------------------------------------
 
 struct TrtSession {
     IRuntime*          runtime;
     ICudaEngine*       engine;
-    IExecutionContext*  context;
+    IExecutionContext* context;
 };
 
 // ---------------------------------------------------------------------------
@@ -158,6 +161,8 @@ extern "C" int trt_build_engine(
     // (value -1), set optimization profile with min/opt/max batch.
     IOptimizationProfile* profile = builder->createOptimizationProfile();
     if (!profile) { delete parser; delete network; delete builder; return -5; }
+    // The builder retains ownership of profiles it creates. Do not delete
+    // `profile`; destroying `builder` releases it after the build completes.
 
     int nb_inputs = network->getNbInputs();
     for (int i = 0; i < nb_inputs; i++) {
@@ -229,6 +234,15 @@ extern "C" int trt_build_engine(
     // Copy to caller-owned buffer (freed by trt_free_buffer)
     *out_len = serialized->size();
     *out_data = malloc(*out_len);
+    if (!*out_data) {
+        *out_len = 0;
+        delete serialized;
+        delete config;
+        delete parser;
+        delete network;
+        delete builder;
+        return -10;
+    }
     memcpy(*out_data, serialized->data(), *out_len);
 
     delete serialized;
@@ -262,7 +276,13 @@ extern "C" void* trt_create_session(const void* engine_data, size_t engine_len) 
     IExecutionContext* context = engine->createExecutionContext();
     if (!context) { delete engine; delete runtime; return nullptr; }
 
-    auto* session = new TrtSession{runtime, engine, context};
+    auto* session = new (std::nothrow) TrtSession{runtime, engine, context};
+    if (!session) {
+        delete context;
+        delete engine;
+        delete runtime;
+        return nullptr;
+    }
     return static_cast<void*>(session);
 }
 
