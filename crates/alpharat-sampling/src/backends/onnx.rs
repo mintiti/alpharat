@@ -71,14 +71,15 @@ mod inner {
 
     impl<E: ObservationEncoder> OnnxBackend<E> {
         /// Create an ONNX backend with CPU execution provider.
-        fn new(
-            model_path: impl AsRef<std::path::Path>,
-            encoder: E,
-        ) -> Result<Self, BackendError> {
+        fn new(model_path: impl AsRef<std::path::Path>, encoder: E) -> Result<Self, BackendError> {
             let session = Session::builder()
-                .map_err(|e| BackendError::msg(format!("failed to create ONNX session builder: {e}")))?
+                .map_err(|e| {
+                    BackendError::msg(format!("failed to create ONNX session builder: {e}"))
+                })?
                 .with_intra_threads(1)
-                .map_err(|e| BackendError::msg(format!("failed to set intra-op thread count: {e}")))?
+                .map_err(|e| {
+                    BackendError::msg(format!("failed to set intra-op thread count: {e}"))
+                })?
                 .commit_from_file(model_path)
                 .map_err(|e| BackendError::msg(format!("failed to load ONNX model: {e}")))?;
             Self::build(session, encoder)
@@ -91,9 +92,13 @@ mod inner {
             encoder: E,
         ) -> Result<Self, BackendError> {
             let session = Session::builder()
-                .map_err(|e| BackendError::msg(format!("failed to create ONNX session builder: {e}")))?
+                .map_err(|e| {
+                    BackendError::msg(format!("failed to create ONNX session builder: {e}"))
+                })?
                 .with_intra_threads(1)
-                .map_err(|e| BackendError::msg(format!("failed to set intra-op thread count: {e}")))?
+                .map_err(|e| {
+                    BackendError::msg(format!("failed to set intra-op thread count: {e}"))
+                })?
                 .with_execution_providers([
                     ort::execution_providers::CoreMLExecutionProvider::default()
                         .with_profile_compute_plan(true)
@@ -113,9 +118,13 @@ mod inner {
             encoder: E,
         ) -> Result<Self, BackendError> {
             let session = Session::builder()
-                .map_err(|e| BackendError::msg(format!("failed to create ONNX session builder: {e}")))?
+                .map_err(|e| {
+                    BackendError::msg(format!("failed to create ONNX session builder: {e}"))
+                })?
                 .with_intra_threads(1)
-                .map_err(|e| BackendError::msg(format!("failed to set intra-op thread count: {e}")))?
+                .map_err(|e| {
+                    BackendError::msg(format!("failed to set intra-op thread count: {e}"))
+                })?
                 .with_execution_providers([
                     ort::execution_providers::CUDAExecutionProvider::default()
                         .build()
@@ -184,8 +193,9 @@ mod inner {
             }
 
             // Create input tensor from (shape, data) — no ndarray needed
-            let input = Tensor::from_array(([n, obs_dim], buf))
-                .map_err(|e| BackendError::msg(format!("failed to create ONNX input tensor: {e}")))?;
+            let input = Tensor::from_array(([n, obs_dim], buf)).map_err(|e| {
+                BackendError::msg(format!("failed to create ONNX input tensor: {e}"))
+            })?;
 
             // Run inference (needs &mut session)
             let mut session = self.session.lock().expect("session lock poisoned");

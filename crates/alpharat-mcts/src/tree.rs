@@ -84,12 +84,7 @@ pub fn compute_rewards(game: &GameState, scores_before: (f32, f32)) -> (f32, f32
 /// `populate_node`. Does NOT set priors, values, or terminal status.
 ///
 /// Wires the child into the parent's linked list (prepend).
-pub fn extend_node(
-    parent: NodePtr,
-    outcome_p1: u8,
-    outcome_p2: u8,
-    game: &GameState,
-) -> NodePtr {
+pub fn extend_node(parent: NodePtr, outcome_p1: u8, outcome_p2: u8, game: &GameState) -> NodePtr {
     #[cfg(debug_assertions)]
     unsafe {
         let parent_ref = parent.as_ref();
@@ -919,8 +914,14 @@ mod tests {
         let _undo = game.make_move(pyrat::Direction::Right, pyrat::Direction::Stay);
 
         let (r1, r2) = compute_rewards(&game, scores_before);
-        assert!((r1 - 1.0).abs() < 1e-6, "P1 should collect 1 cheese, got {r1}");
-        assert!((r2 - 0.0).abs() < 1e-6, "P2 should collect nothing, got {r2}");
+        assert!(
+            (r1 - 1.0).abs() < 1e-6,
+            "P1 should collect 1 cheese, got {r1}"
+        );
+        assert!(
+            (r2 - 0.0).abs() < 1e-6,
+            "P2 should collect nothing, got {r2}"
+        );
     }
 
     #[test]
@@ -1191,7 +1192,8 @@ mod tests {
         // Advance to child1: keeps child1 subtree (child1 + grandchild = 2 nodes).
         assert!(tree.advance_root(0, 1));
         assert_eq!(
-            tree.node_count(), 2,
+            tree.node_count(),
+            2,
             "After advancing to child1, only child1 + grandchild remain"
         );
     }

@@ -137,7 +137,10 @@ impl NNCache {
     /// chain forward and moves entries backward if they can be placed closer to
     /// their ideal slot. This prevents probe chain breaks.
     fn evict_item(&mut self) {
-        let key = self.insertion_order.pop_front().expect("evict from non-empty");
+        let key = self
+            .insertion_order
+            .pop_front()
+            .expect("evict from non-empty");
         let table_size = self.table.len();
 
         // Find the entry in the table.
@@ -272,7 +275,10 @@ mod tests {
         cache.insert(300, make_result(300.0)); // evicts key 0
 
         assert!(cache.lookup(0).is_none(), "key 0 should be evicted");
-        assert!(cache.lookup(8).is_some(), "key 8 should survive and be findable");
+        assert!(
+            cache.lookup(8).is_some(),
+            "key 8 should survive and be findable"
+        );
     }
 
     #[test]
@@ -303,10 +309,7 @@ mod tests {
         }
         // Early entries should be evicted.
         for i in 0..900u64 {
-            assert!(
-                cache.lookup(i).is_none(),
-                "key {i} should be evicted (old)"
-            );
+            assert!(cache.lookup(i).is_none(), "key {i} should be evicted (old)");
         }
     }
 

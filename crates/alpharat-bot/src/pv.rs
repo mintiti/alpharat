@@ -96,9 +96,8 @@ pub fn extract_pvs(
                 let subj_idx = best_outcome_idx(subj_half);
                 let opp_idx = best_outcome_idx(opp_half);
 
-                let subj_dir =
-                    Direction::try_from(subj_half.outcome_action(subj_idx as usize))
-                        .unwrap_or(Direction::Stay);
+                let subj_dir = Direction::try_from(subj_half.outcome_action(subj_idx as usize))
+                    .unwrap_or(Direction::Stay);
                 moves.push(subj_dir);
                 pos = subj_dir.apply_to(pos);
 

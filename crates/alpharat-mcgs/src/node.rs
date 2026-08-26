@@ -75,9 +75,7 @@ struct ReservationState {
 impl ReservationState {
     fn new() -> Self {
         Self {
-            joint: std::array::from_fn(|_| {
-                std::array::from_fn(|_| AtomicU32::new(0))
-            }),
+            joint: std::array::from_fn(|_| std::array::from_fn(|_| AtomicU32::new(0))),
             node: AtomicU32::new(0),
         }
     }
@@ -120,43 +118,26 @@ impl ReservationState {
                 if *value == 0 && count == 1 {
                     panic!("{operation}: n_in_flight is already 0");
                 }
-                panic!(
-                    "{operation}: n_in_flight {} < count {count}",
-                    *value
-                )
+                panic!("{operation}: n_in_flight {} < count {count}", *value)
             });
         });
     }
 
     #[inline]
-    fn reserve_joint_exclusive(
-        &mut self,
-        i: usize,
-        j: usize,
-        count: u32,
-        operation: &str,
-    ) {
+    fn reserve_joint_exclusive(&mut self, i: usize, j: usize, count: u32, operation: &str) {
         Self::with_exclusive(&mut self.joint[i][j], |value| {
-            *value = value.checked_add(count).unwrap_or_else(|| {
-                panic!("{operation}: edge_in_flight[{i}][{j}] overflow")
-            });
+            *value = value
+                .checked_add(count)
+                .unwrap_or_else(|| panic!("{operation}: edge_in_flight[{i}][{j}] overflow"));
         });
     }
 
     #[inline]
-    fn release_joint_exclusive(
-        &mut self,
-        i: usize,
-        j: usize,
-        count: u32,
-        operation: &str,
-    ) {
+    fn release_joint_exclusive(&mut self, i: usize, j: usize, count: u32, operation: &str) {
         Self::with_exclusive(&mut self.joint[i][j], |value| {
             *value = value.checked_sub(count).unwrap_or_else(|| {
                 if *value == 0 && count == 1 {
-                    panic!(
-                        "{operation}: edge_in_flight[{i}][{j}] is already 0"
-                    );
+                    panic!("{operation}: edge_in_flight[{i}][{j}] is already 0");
                 }
                 panic!(
                     "{operation}: edge_in_flight[{i}][{j}] {} < count {count}",
@@ -198,46 +179,26 @@ impl ReservationState {
             .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
                 current.checked_sub(count)
             })
-            .unwrap_or_else(|current| {
-                panic!(
-                    "{operation}: n_in_flight {current} < count {count}"
-                )
-            });
+            .unwrap_or_else(|current| panic!("{operation}: n_in_flight {current} < count {count}"));
     }
 
     #[inline]
-    fn reserve_joint_shared(
-        &self,
-        i: usize,
-        j: usize,
-        count: u32,
-        operation: &str,
-    ) {
+    fn reserve_joint_shared(&self, i: usize, j: usize, count: u32, operation: &str) {
         self.joint[i][j]
             .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
                 current.checked_add(count)
             })
-            .unwrap_or_else(|_| {
-                panic!("{operation}: edge_in_flight[{i}][{j}] overflow")
-            });
+            .unwrap_or_else(|_| panic!("{operation}: edge_in_flight[{i}][{j}] overflow"));
     }
 
     #[inline]
-    fn release_joint_shared(
-        &self,
-        i: usize,
-        j: usize,
-        count: u32,
-        operation: &str,
-    ) {
+    fn release_joint_shared(&self, i: usize, j: usize, count: u32, operation: &str) {
         self.joint[i][j]
             .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
                 current.checked_sub(count)
             })
             .unwrap_or_else(|current| {
-                panic!(
-                    "{operation}: edge_in_flight[{i}][{j}] {current} < count {count}"
-                )
+                panic!("{operation}: edge_in_flight[{i}][{j}] {current} < count {count}")
             });
     }
 }
@@ -426,7 +387,14 @@ impl LowNode {
 
     /// LC0's AdjustForTerminal on a joint matrix cell.
     /// Retroactively adjust n_to_fix old visits by delta.
-    pub fn adjust_edge_for_terminal(&mut self, i: usize, j: usize, q1_delta: f32, q2_delta: f32, n_to_fix: u32) {
+    pub fn adjust_edge_for_terminal(
+        &mut self,
+        i: usize,
+        j: usize,
+        q1_delta: f32,
+        q2_delta: f32,
+        n_to_fix: u32,
+    ) {
         debug_assert!(i < self.n1());
         debug_assert!(j < self.n2());
         let n = self.edge_visits[i][j] as f32;
@@ -556,32 +524,18 @@ impl LowNode {
             .release_node_shared(count, "cancel_score_update_multi_shared");
     }
 
-    pub(crate) fn add_virtual_loss_multi_shared(
-        &self,
-        i: usize,
-        j: usize,
-        count: u32,
-    ) {
+    pub(crate) fn add_virtual_loss_multi_shared(&self, i: usize, j: usize, count: u32) {
         debug_assert!(i < self.n1());
         debug_assert!(j < self.n2());
         self.reservations
             .reserve_joint_shared(i, j, count, "add_virtual_loss_multi_shared");
     }
 
-    pub(crate) fn revert_virtual_loss_multi_shared(
-        &self,
-        i: usize,
-        j: usize,
-        count: u32,
-    ) {
+    pub(crate) fn revert_virtual_loss_multi_shared(&self, i: usize, j: usize, count: u32) {
         debug_assert!(i < self.n1());
         debug_assert!(j < self.n2());
-        self.reservations.release_joint_shared(
-            i,
-            j,
-            count,
-            "revert_virtual_loss_multi_shared",
-        );
+        self.reservations
+            .release_joint_shared(i, j, count, "revert_virtual_loss_multi_shared");
     }
 
     // --- Collision detection ---
@@ -862,12 +816,7 @@ impl Edge {
     /// `low_node`: shared position data for the child.
     ///
     /// Automatically increments `low_node.num_parents`.
-    pub fn new(
-        low_node: Arc<SharedNode>,
-        parent_outcome: (u8, u8),
-        r1: f32,
-        r2: f32,
-    ) -> Self {
+    pub fn new(low_node: Arc<SharedNode>, parent_outcome: (u8, u8), r1: f32, r2: f32) -> Self {
         low_node.add_parent();
         Self {
             edge_r1: r1,
@@ -972,9 +921,7 @@ impl SharedNode {
             .fetch_update(Ordering::AcqRel, Ordering::Acquire, |current| {
                 current.checked_add(1)
             })
-            .unwrap_or_else(|current| {
-                panic!("add_parent: num_parents overflow at {current}")
-            });
+            .unwrap_or_else(|current| panic!("add_parent: num_parents overflow at {current}"));
     }
 
     pub fn remove_parent(&self) {
@@ -982,9 +929,7 @@ impl SharedNode {
             .fetch_update(Ordering::AcqRel, Ordering::Acquire, |current| {
                 current.checked_sub(1)
             })
-            .unwrap_or_else(|current| {
-                panic!("remove_parent: num_parents underflow at {current}")
-            });
+            .unwrap_or_else(|current| panic!("remove_parent: num_parents underflow at {current}"));
     }
 
     pub fn num_parents(&self) -> u16 {
@@ -1745,10 +1690,8 @@ mod tests {
                 release.wait();
                 quiescent.wait();
                 let node_quiescent = low.n_in_flight();
-                let p1_quiescent =
-                    std::array::from_fn(|i| low.marginal_in_flight_p1(i));
-                let p2_quiescent =
-                    std::array::from_fn(|j| low.marginal_in_flight_p2(j));
+                let p1_quiescent = std::array::from_fn(|i| low.marginal_in_flight_p1(i));
+                let p2_quiescent = std::array::from_fn(|j| low.marginal_in_flight_p2(j));
                 verified.wait();
                 observations.push((
                     expected,
@@ -1762,14 +1705,8 @@ mod tests {
             observations
         });
 
-        for (
-            expected,
-            node_peak,
-            joint_total,
-            node_quiescent,
-            p1_quiescent,
-            p2_quiescent,
-        ) in observations
+        for (expected, node_peak, joint_total, node_quiescent, p1_quiescent, p2_quiescent) in
+            observations
         {
             assert_eq!(node_peak, expected);
             assert_eq!(joint_total, expected);

@@ -66,7 +66,12 @@ mod tests {
         walls.insert(Coordinates::new(2, 2), vec![Coordinates::new(2, 3)]);
         walls.insert(Coordinates::new(2, 3), vec![Coordinates::new(2, 2)]);
 
-        let game = wall_game(Coordinates::new(2, 2), Coordinates::new(0, 0), walls, &CHEESE);
+        let game = wall_game(
+            Coordinates::new(2, 2),
+            Coordinates::new(0, 0),
+            walls,
+            &CHEESE,
+        );
         let result = BACKEND.evaluate(&game).unwrap();
         let eff = game.effective_actions_p1();
         let half = HalfNode::new(result.policy_p1, eff);

@@ -469,7 +469,10 @@ mod tests {
         //             DOWN=valid, LEFT=valid
         // maze index = (4*7 + 6)*4 = 136
         assert_eq!(buf[136], -1.0, "UP from (6,4) should be blocked (top edge)");
-        assert_eq!(buf[137], -1.0, "RIGHT from (6,4) should be blocked (right edge)");
+        assert_eq!(
+            buf[137], -1.0,
+            "RIGHT from (6,4) should be blocked (right edge)"
+        );
         assert_eq!(buf[138], 0.1, "DOWN from (6,4) should be valid");
         assert_eq!(buf[139], 0.1, "LEFT from (6,4) should be valid");
 
@@ -477,8 +480,14 @@ mod tests {
         // UP=valid, RIGHT=valid, DOWN=blocked, LEFT=blocked
         assert_eq!(buf[0], 0.1, "UP from (0,0) should be valid");
         assert_eq!(buf[1], 0.1, "RIGHT from (0,0) should be valid");
-        assert_eq!(buf[2], -1.0, "DOWN from (0,0) should be blocked (bottom edge)");
-        assert_eq!(buf[3], -1.0, "LEFT from (0,0) should be blocked (left edge)");
+        assert_eq!(
+            buf[2], -1.0,
+            "DOWN from (0,0) should be blocked (bottom edge)"
+        );
+        assert_eq!(
+            buf[3], -1.0,
+            "LEFT from (0,0) should be blocked (left edge)"
+        );
     }
 
     #[test]
@@ -497,10 +506,6 @@ mod tests {
         enc.encode_into(&game, &mut buf, 0);
 
         let scalar_base = 25 * 7;
-        assert_eq!(
-            buf[scalar_base + 1],
-            0.0,
-            "progress should be 0 at turn 0"
-        );
+        assert_eq!(buf[scalar_base + 1], 0.0, "progress should be 0 at turn 0");
     }
 }

@@ -106,8 +106,7 @@ impl NpzWriter {
 
     fn write_entry(&mut self, name: &str, header: &[u8], data: &[u8]) -> io::Result<()> {
         let entry_name = format!("{name}.npy");
-        let options =
-            SimpleFileOptions::default().compression_method(CompressionMethod::Deflated);
+        let options = SimpleFileOptions::default().compression_method(CompressionMethod::Deflated);
         self.zip.start_file(entry_name, options)?;
         self.zip.write_all(header)?;
         self.zip.write_all(data)?;
@@ -125,9 +124,7 @@ const NPY_HEADER_SIZE: usize = 256;
 /// Build a 256-byte .npy v1.0 header.
 fn build_npy_header(descr: &str, shape: &[usize]) -> [u8; NPY_HEADER_SIZE] {
     let shape_str = format_shape(shape);
-    let dict = format!(
-        "{{'descr':'{descr}','fortran_order':False,'shape':{shape_str}}}",
-    );
+    let dict = format!("{{'descr':'{descr}','fortran_order':False,'shape':{shape_str}}}",);
 
     // 10 bytes: magic(6) + version(2) + header_len(2)
     // header_len = dict + spaces + \n = NPY_HEADER_SIZE - 10

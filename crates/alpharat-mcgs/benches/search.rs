@@ -2,9 +2,9 @@ use std::time::Duration;
 
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
 
-use alpharat_mcgs::{gc, run_search, MCGSTree, SearchConfig, SmartUniformBackend};
 #[cfg(feature = "bench-internals")]
 use alpharat_mcgs::run_search_one_worker_profiled;
+use alpharat_mcgs::{gc, run_search, MCGSTree, SearchConfig, SmartUniformBackend};
 use pyrat::{Coordinates, Direction, GameBuilder, GameState};
 use rand::rngs::SmallRng;
 use rand::SeedableRng;
@@ -27,7 +27,10 @@ fn open_game(width: u8, height: u8, n_cheese: u8, max_turns: u16) -> GameState {
 
     GameBuilder::new(width, height)
         .with_open_maze()
-        .with_custom_positions(Coordinates::new(0, 0), Coordinates::new(width - 1, height - 1))
+        .with_custom_positions(
+            Coordinates::new(0, 0),
+            Coordinates::new(width - 1, height - 1),
+        )
         .with_custom_cheese(cheese)
         .with_max_turns(max_turns)
         .build()
@@ -68,8 +71,10 @@ fn bench_search(c: &mut Criterion) {
                 b.iter(|| {
                     let mut tree = MCGSTree::new(game);
                     let mut rng = SmallRng::seed_from_u64(42);
-                    run_search(&mut tree, game, &backend, &config, sims, batch_size, &mut rng)
-                        .unwrap()
+                    run_search(
+                        &mut tree, game, &backend, &config, sims, batch_size, &mut rng,
+                    )
+                    .unwrap()
                 })
             });
         }
@@ -199,13 +204,7 @@ fn bench_one_worker_reuse(c: &mut Criterion) {
                 let mut tree = MCGSTree::new(&game);
                 let mut rng = SmallRng::seed_from_u64(42);
                 let result = run_search(
-                    &mut tree,
-                    &game,
-                    &backend,
-                    &config,
-                    sims,
-                    batch_size,
-                    &mut rng,
+                    &mut tree, &game, &backend, &config, sims, batch_size, &mut rng,
                 )
                 .unwrap();
 

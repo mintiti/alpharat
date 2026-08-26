@@ -1755,7 +1755,10 @@ fn gated_multi_item_validation_cancels_before_any_eval_commit() {
         ..SearchConfig::default()
     };
 
-    for (skew, seed) in [(BatchLengthSkew::Short, 0x5101), (BatchLengthSkew::Long, 0x5102)] {
+    for (skew, seed) in [
+        (BatchLengthSkew::Short, 0x5101),
+        (BatchLengthSkew::Long, 0x5102),
+    ] {
         let game = open_game(20);
         let mut tree = MCGSTree::new(&game);
         let mut rng = SmallRng::seed_from_u64(seed);

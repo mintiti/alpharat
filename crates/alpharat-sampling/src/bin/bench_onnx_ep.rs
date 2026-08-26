@@ -43,10 +43,14 @@ fn main() {
             OnnxBackend::with_provider(model_path, FlatEncoder::new(7, 7), ExecutionProvider::Cpu)
                 .expect("failed to create CPU ONNX backend");
         // Warmup
-        for _ in 0..5 { cpu_backend.evaluate_batch(batch).unwrap(); }
+        for _ in 0..5 {
+            cpu_backend.evaluate_batch(batch).unwrap();
+        }
         let start = Instant::now();
         let iters = 200;
-        for _ in 0..iters { cpu_backend.evaluate_batch(batch).unwrap(); }
+        for _ in 0..iters {
+            cpu_backend.evaluate_batch(batch).unwrap();
+        }
         let cpu_us = start.elapsed().as_micros() as f64 / iters as f64;
 
         // CoreML backend
@@ -59,19 +63,29 @@ fn main() {
             )
             .expect("failed to create CoreML ONNX backend");
             // Warmup
-            for _ in 0..5 { coreml_backend.evaluate_batch(batch).unwrap(); }
+            for _ in 0..5 {
+                coreml_backend.evaluate_batch(batch).unwrap();
+            }
             let start = Instant::now();
-            for _ in 0..iters { coreml_backend.evaluate_batch(batch).unwrap(); }
+            for _ in 0..iters {
+                coreml_backend.evaluate_batch(batch).unwrap();
+            }
             let coreml_us = start.elapsed().as_micros() as f64 / iters as f64;
 
             println!(
                 "batch={:>3}  CPU: {:>8.0}us  CoreML: {:>8.0}us  ratio: {:.2}x",
-                batch_size, cpu_us, coreml_us, cpu_us / coreml_us
+                batch_size,
+                cpu_us,
+                coreml_us,
+                cpu_us / coreml_us
             );
         }
 
         #[cfg(not(feature = "onnx-coreml"))]
-        println!("batch={:>3}  CPU: {:>8.0}us  (CoreML not enabled)", batch_size, cpu_us);
+        println!(
+            "batch={:>3}  CPU: {:>8.0}us  (CoreML not enabled)",
+            batch_size, cpu_us
+        );
     }
 }
 

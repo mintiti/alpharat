@@ -2,10 +2,8 @@
 //!
 //! Usage: write_test_bundle <output_path>
 
-use alpharat_sampling::selfplay::{
-    CheeseOutcome, GameOutcome, GameRecord, PositionRecord,
-};
 use alpharat_sampling::recording::write_bundle;
+use alpharat_sampling::selfplay::{CheeseOutcome, GameOutcome, GameRecord, PositionRecord};
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();

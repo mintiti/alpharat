@@ -25,7 +25,10 @@ fn open_game(width: u8, height: u8, n_cheese: u8, max_turns: u16) -> GameState {
 
     GameBuilder::new(width, height)
         .with_open_maze()
-        .with_custom_positions(Coordinates::new(0, 0), Coordinates::new(width - 1, height - 1))
+        .with_custom_positions(
+            Coordinates::new(0, 0),
+            Coordinates::new(width - 1, height - 1),
+        )
         .with_custom_cheese(cheese)
         .with_max_turns(max_turns)
         .build()
@@ -67,8 +70,10 @@ fn bench_search(c: &mut Criterion) {
                 b.iter(|| {
                     let mut tree = MCTSTree::new(game);
                     let mut rng = SmallRng::seed_from_u64(42);
-                    run_search(&mut tree, game, &backend, &config, sims, batch_size, &mut rng)
-                        .unwrap()
+                    run_search(
+                        &mut tree, game, &backend, &config, sims, batch_size, &mut rng,
+                    )
+                    .unwrap()
                 })
             });
         }

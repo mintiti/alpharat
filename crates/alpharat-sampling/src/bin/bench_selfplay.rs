@@ -17,9 +17,9 @@ use std::sync::Arc;
 #[cfg(feature = "onnx")]
 use alpharat_mcts::Backend;
 #[cfg(feature = "onnx")]
-use alpharat_sampling::{MuxBackend, MuxConfig};
-#[cfg(feature = "onnx")]
 use alpharat_sampling::{ExecutionProvider, FlatEncoder, OnnxBackend};
+#[cfg(feature = "onnx")]
+use alpharat_sampling::{MuxBackend, MuxConfig};
 
 fn make_games(n: usize, width: u8, height: u8, cheese: u16, max_turns: u16) -> Vec<GameState> {
     (0..n)
@@ -158,7 +158,9 @@ fn run_bench_onnx(
     // Without this, the first config in the sweep eats the cold-start cost.
     {
         let warmup_backend = make_onnx_backend(model_path, width, height);
-        let _ = warmup_backend.evaluate(&games[0]).expect("warmup eval failed");
+        let _ = warmup_backend
+            .evaluate(&games[0])
+            .expect("warmup eval failed");
     }
 
     print_header(label);
@@ -192,9 +194,14 @@ fn run_bench_onnx(
                     num_threads,
                 };
 
-                let result =
-                    run_self_play(&games[..num_games], backend.as_ref(), search_config, &config, None)
-                        .expect("ONNX self-play failed");
+                let result = run_self_play(
+                    &games[..num_games],
+                    backend.as_ref(),
+                    search_config,
+                    &config,
+                    None,
+                )
+                .expect("ONNX self-play failed");
                 let mux_label = format!("{mux_max}");
                 print_row(
                     num_threads,
@@ -241,9 +248,7 @@ fn main() {
 
     // --- SmartUniform baseline (no NN) ---
     run_bench_uniform(
-        &format!(
-            "7x7 open, 1897 sims, {GAMES_PER_THREAD}g/thread — SmartUniform (no NN)",
-        ),
+        &format!("7x7 open, 1897 sims, {GAMES_PER_THREAD}g/thread — SmartUniform (no NN)",),
         &search_7x7,
         1897,
         &thread_counts_uniform,

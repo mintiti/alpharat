@@ -290,15 +290,7 @@ pub fn run_search(
     rng: &mut impl Rng,
 ) -> Result<SearchResult, BackendError> {
     tree.with_exclusive(|mut access| {
-        run_search_exclusive(
-            &mut access,
-            game,
-            backend,
-            config,
-            n_sims,
-            batch_size,
-            rng,
-        )
+        run_search_exclusive(&mut access, game, backend, config, n_sims, batch_size, rng)
     })
 }
 
@@ -848,14 +840,7 @@ pub fn run_search_one_worker_profiled(
     timings: &mut SearchTimings,
 ) -> Result<ProfiledSearchResult, BackendError> {
     run_search_one_worker_with_timings(
-        tree,
-        game,
-        backend,
-        config,
-        n_sims,
-        batch_size,
-        rng,
-        timings,
+        tree, game, backend, config, n_sims, batch_size, rng, timings,
     )
 }
 
@@ -896,14 +881,7 @@ pub(crate) fn run_search_one_worker_with_timings(
 ) -> Result<ProfiledSearchResult, BackendError> {
     tree.with_search_session(|session| {
         run_search_session(
-            &session,
-            game,
-            backend,
-            config,
-            n_sims,
-            batch_size,
-            rng,
-            timings,
+            &session, game, backend, config, n_sims, batch_size, rng, timings,
         )
     })
 }
@@ -935,13 +913,7 @@ pub(crate) fn run_search_session<'tree, 'session>(
         let hold_started = Instant::now();
         let pending = {
             let mut access = epoch.access();
-            gather_batch(
-                &mut access,
-                game,
-                config,
-                remaining.min(batch_size),
-                rng,
-            )
+            gather_batch(&mut access, game, config, remaining.min(batch_size), rng)
         };
         drop(epoch);
         timings.gather_hold += hold_started.elapsed();
@@ -1386,7 +1358,11 @@ fn estimated_visits_to_change_best_p1(
     for i in 0..n {
         let visits = low.marginal_visits_p1(i);
         let prior = low.p1_prior(i);
-        let q = if visits > 0 { marginal_q_p1(low, i) } else { fpu };
+        let q = if visits > 0 {
+            marginal_q_p1(low, i)
+        } else {
+            fpu
+        };
         let q_norm = q / value_scale;
         let exploration = c_puct * prior * sqrt_total / (1.0 + ns_p1[i] as f32);
         let mut score = q_norm + exploration;
@@ -1411,10 +1387,16 @@ fn estimated_visits_to_change_best_p1(
     // Tie-breaking with reservoir sampling.
     let mut tie_count = 1u32;
     for i in 0..n {
-        if i as u8 == best_idx { continue; }
+        if i as u8 == best_idx {
+            continue;
+        }
         let visits = low.marginal_visits_p1(i);
         let prior = low.p1_prior(i);
-        let q = if visits > 0 { marginal_q_p1(low, i) } else { fpu };
+        let q = if visits > 0 {
+            marginal_q_p1(low, i)
+        } else {
+            fpu
+        };
         let q_norm = q / value_scale;
         let exploration = c_puct * prior * sqrt_total / (1.0 + ns_p1[i] as f32);
         let mut score = q_norm + exploration;
@@ -1477,7 +1459,11 @@ fn estimated_visits_to_change_best_p2(
     for j in 0..n {
         let visits = low.marginal_visits_p2(j);
         let prior = low.p2_prior(j);
-        let q = if visits > 0 { marginal_q_p2(low, j) } else { fpu };
+        let q = if visits > 0 {
+            marginal_q_p2(low, j)
+        } else {
+            fpu
+        };
         let q_norm = q / value_scale;
         let exploration = c_puct * prior * sqrt_total / (1.0 + ns_p2[j] as f32);
         let mut score = q_norm + exploration;
@@ -1501,10 +1487,16 @@ fn estimated_visits_to_change_best_p2(
 
     let mut tie_count = 1u32;
     for j in 0..n {
-        if j as u8 == best_idx { continue; }
+        if j as u8 == best_idx {
+            continue;
+        }
         let visits = low.marginal_visits_p2(j);
         let prior = low.p2_prior(j);
-        let q = if visits > 0 { marginal_q_p2(low, j) } else { fpu };
+        let q = if visits > 0 {
+            marginal_q_p2(low, j)
+        } else {
+            fpu
+        };
         let q_norm = q / value_scale;
         let exploration = c_puct * prior * sqrt_total / (1.0 + ns_p2[j] as f32);
         let mut score = q_norm + exploration;
@@ -1576,10 +1568,8 @@ fn build_gather_level<'session>(
     let mut last_idx = 0usize;
 
     while remaining > 0 {
-        let (best1, vtcb1) =
-            estimated_visits_to_change_best_p1(low, config, is_root, &ns_p1, rng);
-        let (best2, vtcb2) =
-            estimated_visits_to_change_best_p2(low, config, is_root, &ns_p2, rng);
+        let (best1, vtcb1) = estimated_visits_to_change_best_p1(low, config, is_root, &ns_p1, rng);
+        let (best2, vtcb2) = estimated_visits_to_change_best_p2(low, config, is_root, &ns_p2, rng);
 
         let k = remaining.min(vtcb1).min(vtcb2).max(1);
 
@@ -1766,13 +1756,9 @@ fn pick_nodes_to_extend<'session>(
     config: &SearchConfig,
     budget: u32,
     rng: &mut impl Rng,
-) -> (
-    Vec<NodeToProcess<'session>>,
-    Vec<SharedCollision<'session>>,
-) {
+) -> (Vec<NodeToProcess<'session>>, Vec<SharedCollision<'session>>) {
     let root = access.root();
-    let mut to_process: Vec<NodeToProcess<'session>> =
-        Vec::with_capacity(budget as usize);
+    let mut to_process: Vec<NodeToProcess<'session>> = Vec::with_capacity(budget as usize);
     let mut shared_collisions: Vec<SharedCollision<'session>> = Vec::new();
     let mut work_game = game.clone();
     let mut undos: Vec<MoveUndo> = Vec::new();
@@ -1788,22 +1774,12 @@ fn pick_nodes_to_extend<'session>(
                 if work_game.check_game_over() {
                     access.populate_node(&root, None);
                     to_process.push(NodeToProcess {
-                        reservations: NodeReservationPlan::new(
-                            root.clone(),
-                            Vec::new(),
-                            1,
-                            1,
-                        ),
+                        reservations: NodeReservationPlan::new(root.clone(), Vec::new(), 1, 1),
                         kind: NodeKind::Terminal,
                     });
                 } else {
                     to_process.push(NodeToProcess {
-                        reservations: NodeReservationPlan::new(
-                            root.clone(),
-                            Vec::new(),
-                            1,
-                            1,
-                        ),
+                        reservations: NodeReservationPlan::new(root.clone(), Vec::new(), 1, 1),
                         kind: NodeKind::NeedsEval {
                             game_state: work_game.clone(),
                         },
@@ -1873,8 +1849,7 @@ fn pick_nodes_to_extend<'session>(
             let undo = work_game.make_move(d1, d2);
             let (r1, r2) = compute_rewards(&work_game, scores_before);
 
-            let child =
-                access.find_or_create_child(&level.node, i, j, &work_game, r1, r2);
+            let child = access.find_or_create_child(&level.node, i, j, &work_game, r1, r2);
 
             // Build the path to this child.
             let mut child_path = path_prefix.clone();
@@ -1931,9 +1906,7 @@ fn pick_nodes_to_extend<'session>(
                 work_game.unmake_move(undo);
             } else {
                 // Interior child: check transposition stopping.
-                let edge_vis = access
-                    .node(&level.node)
-                    .edge_visits(i as usize, j as usize);
+                let edge_vis = access.node(&level.node).edge_visits(i as usize, j as usize);
                 if access.num_parents(&child) > 1 && edge_vis < child_visits {
                     // TT stop: edge is behind the shared aggregate.
                     // Covers both first-hit (edge_vis == 0) and stale
@@ -1963,8 +1936,7 @@ fn pick_nodes_to_extend<'session>(
                     access.node_mut(&child).increment_n_in_flight(k);
                     undos.push(undo);
                     path_prefix = child_path;
-                    let child_level =
-                        build_gather_level(access, &child, k, config, false, rng);
+                    let child_level = build_gather_level(access, &child, k, config, false, rng);
                     levels.push(child_level);
                     found_child = true;
                     break;
@@ -2013,8 +1985,7 @@ fn backup_and_finalize<'session>(
         let i = entry.p1_outcome as usize;
         let j = entry.p2_outcome as usize;
 
-        let snapshot =
-            access.backup_snapshot(&entry.node, entry.p1_outcome, entry.p2_outcome);
+        let snapshot = access.backup_snapshot(&entry.node, entry.p1_outcome, entry.p2_outcome);
 
         let mut q1 = snapshot.r1 + v1;
         let mut q2 = snapshot.r2 + v2;
@@ -2022,9 +1993,7 @@ fn backup_and_finalize<'session>(
         let mut q2_delta = v2_delta;
 
         // Delta detection (unchanged from Tier 1).
-        if snapshot.child_num_parents > 1
-            || snapshot.edge_visits < snapshot.child_visits
-        {
+        if snapshot.child_num_parents > 1 || snapshot.edge_visits < snapshot.child_visits {
             let correct_q1 = snapshot.r1 + snapshot.child_v1;
             let correct_q2 = snapshot.r2 + snapshot.child_v2;
             q1_delta = correct_q1 - snapshot.edge_q1;
@@ -2079,8 +2048,7 @@ fn backup_transposition_stop<'session>(
         let i = entry.p1_outcome as usize;
         let j = entry.p2_outcome as usize;
 
-        let snapshot =
-            access.backup_snapshot(&entry.node, entry.p1_outcome, entry.p2_outcome);
+        let snapshot = access.backup_snapshot(&entry.node, entry.p1_outcome, entry.p2_outcome);
 
         let mut q1 = snapshot.r1 + v1;
         let mut q2 = snapshot.r2 + v2;
@@ -2088,9 +2056,7 @@ fn backup_transposition_stop<'session>(
         let mut q2_delta = v2_delta;
 
         // Delta detection (same as backup_and_finalize).
-        if snapshot.child_num_parents > 1
-            || snapshot.edge_visits < snapshot.child_visits
-        {
+        if snapshot.child_num_parents > 1 || snapshot.edge_visits < snapshot.child_visits {
             let correct_q1 = snapshot.r1 + snapshot.child_v1;
             let correct_q2 = snapshot.r2 + snapshot.child_v2;
             q1_delta = correct_q1 - snapshot.edge_q1;
@@ -2334,18 +2300,8 @@ fn settle_pending_batch<'session>(
 
         if config.noise_epsilon > 0.0 && access.same_node(leaf, &pending.root) {
             let low = access.node_mut(leaf);
-            apply_dirichlet_noise_p1(
-                low,
-                config.noise_epsilon,
-                config.noise_concentration,
-                rng,
-            );
-            apply_dirichlet_noise_p2(
-                low,
-                config.noise_epsilon,
-                config.noise_concentration,
-                rng,
-            );
+            apply_dirichlet_noise_p1(low, config.noise_epsilon, config.noise_concentration, rng);
+            apply_dirichlet_noise_p2(low, config.noise_epsilon, config.noise_concentration, rng);
         }
 
         backup_and_finalize(
@@ -2473,14 +2429,25 @@ fn extract_p1(
 
     for i in 0..n {
         let visits = low.marginal_visits_p1(i);
-        q[i] = if visits > 0 { marginal_q_p1(low, i) } else { fpu };
+        q[i] = if visits > 0 {
+            marginal_q_p1(low, i)
+        } else {
+            fpu
+        };
         raw_visits[i] = visits as f32;
         prior[i] = low.p1_prior(i);
         q_norm[i] = q[i] / low.value_scale();
     }
 
     // Compute pruned visits.
-    let pruned = compute_pruned_visits(&q_norm, &prior, &raw_visits, n, children_visits, config.c_puct);
+    let pruned = compute_pruned_visits(
+        &q_norm,
+        &prior,
+        &raw_visits,
+        n,
+        children_visits,
+        config.c_puct,
+    );
 
     // Expand to 5-action space.
     let mut visit_counts = [0.0f32; 5];
@@ -2541,13 +2508,24 @@ fn extract_p2(
 
     for j in 0..n {
         let visits = low.marginal_visits_p2(j);
-        q[j] = if visits > 0 { marginal_q_p2(low, j) } else { fpu };
+        q[j] = if visits > 0 {
+            marginal_q_p2(low, j)
+        } else {
+            fpu
+        };
         raw_visits[j] = visits as f32;
         prior[j] = low.p2_prior(j);
         q_norm[j] = q[j] / low.value_scale();
     }
 
-    let pruned = compute_pruned_visits(&q_norm, &prior, &raw_visits, n, children_visits, config.c_puct);
+    let pruned = compute_pruned_visits(
+        &q_norm,
+        &prior,
+        &raw_visits,
+        n,
+        children_visits,
+        config.c_puct,
+    );
 
     let mut visit_counts = [0.0f32; 5];
     for (j, &pv) in pruned.iter().enumerate().take(n) {
@@ -2640,16 +2618,14 @@ fn compute_pruned_visits(
 mod tests {
     use super::*;
     use crate::node::LowNode;
-    use crate::{BackendError, SmartUniformBackend, ConstantValueBackend};
+    use crate::{BackendError, ConstantValueBackend, SmartUniformBackend};
     use pyrat::{Coordinates, Direction, GameBuilder};
     use rand::rngs::SmallRng;
     use rand::SeedableRng;
     use std::collections::{HashMap, HashSet};
 
     fn with_test_access<R>(
-        test: impl for<'tree, 'session> FnOnce(
-            &mut ExclusiveAccess<'tree, 'session>,
-        ) -> R,
+        test: impl for<'tree, 'session> FnOnce(&mut ExclusiveAccess<'tree, 'session>) -> R,
     ) -> R {
         let game = open_5x5_game(
             Coordinates::new(0, 0),
@@ -2697,10 +2673,9 @@ mod tests {
         leaf_claimed: Option<&NodeHandle<'session>>,
     ) {
         for entry in path {
-            access.node_mut(&entry.node).revert_virtual_loss(
-                entry.p1_outcome as usize,
-                entry.p2_outcome as usize,
-            );
+            access
+                .node_mut(&entry.node)
+                .revert_virtual_loss(entry.p1_outcome as usize, entry.p2_outcome as usize);
         }
         if let Some(leaf) = leaf_claimed {
             access.node_mut(leaf).cancel_score_update();
@@ -2715,11 +2690,7 @@ mod tests {
         SearchConfig::default()
     }
 
-    fn open_5x5_game(
-        p1: Coordinates,
-        p2: Coordinates,
-        cheese: &[Coordinates],
-    ) -> GameState {
+    fn open_5x5_game(p1: Coordinates, p2: Coordinates, cheese: &[Coordinates]) -> GameState {
         GameBuilder::new(5, 5)
             .with_open_maze()
             .with_custom_positions(p1, p2)
@@ -2858,17 +2829,11 @@ mod tests {
     #[test]
     fn backup_single_level() {
         with_test_access(|access| {
-            let root = access.test_node(LowNode::new_shell(
-                [0, 1, 2, 3, 4],
-                [0, 1, 2, 3, 4],
-            ));
+            let root = access.test_node(LowNode::new_shell([0, 1, 2, 3, 4], [0, 1, 2, 3, 4]));
             access.node_mut(&root).set_value_scale(5.0);
             access.node_mut(&root).set_prior([0.2; 5], [0.2; 5]);
 
-            let child = access.test_node(LowNode::new_shell(
-                [0, 1, 2, 3, 4],
-                [0, 1, 2, 3, 4],
-            ));
+            let child = access.test_node(LowNode::new_shell([0, 1, 2, 3, 4], [0, 1, 2, 3, 4]));
             access.node_mut(&child).set_value_scale(5.0);
             access.test_connect(&root, &child, (0, 1), 1.0, 0.5);
 
@@ -2906,25 +2871,17 @@ mod tests {
             // A child has total_visits=5, but the parent's edge only has 2 visits
             // and num_parents=1. This simulates a stale edge after root advancement
             // pruned another parent. The delta correction should still trigger.
-            let root = access.test_node(LowNode::new_shell(
-                [0, 1, 2, 3, 4],
-                [0, 1, 2, 3, 4],
-            ));
+            let root = access.test_node(LowNode::new_shell([0, 1, 2, 3, 4], [0, 1, 2, 3, 4]));
             access.node_mut(&root).set_value_scale(5.0);
             access.node_mut(&root).set_prior([0.2; 5], [0.2; 5]);
 
-            let child = access.test_node(LowNode::new_shell(
-                [0, 1, 2, 3, 4],
-                [0, 1, 2, 3, 4],
-            ));
+            let child = access.test_node(LowNode::new_shell([0, 1, 2, 3, 4], [0, 1, 2, 3, 4]));
             access.node_mut(&child).set_value_scale(5.0);
 
             // Simulate child having been visited 5 times from another (now-pruned) parent
             // with Q that drifted from what our edge knows.
             for _ in 0..5 {
-                access
-                    .node_mut(&child)
-                    .finalize_score_update(3.0, 2.0);
+                access.node_mut(&child).finalize_score_update(3.0, 2.0);
             }
             assert_eq!(access.node(&child).total_visits(), 5);
             assert_eq!(access.num_parents(&child), 0); // no edge yet
@@ -2934,18 +2891,10 @@ mod tests {
             assert_eq!(access.num_parents(&child), 1);
 
             // Add 2 stale visits on the edge with outdated Q values
-            access
-                .node_mut(&root)
-                .finalize_edge_update(0, 1, 2.0, 1.0);
-            access
-                .node_mut(&root)
-                .finalize_edge_update(0, 1, 2.0, 1.0);
-            access
-                .node_mut(&root)
-                .finalize_score_update(2.0, 1.0);
-            access
-                .node_mut(&root)
-                .finalize_score_update(2.0, 1.0);
+            access.node_mut(&root).finalize_edge_update(0, 1, 2.0, 1.0);
+            access.node_mut(&root).finalize_edge_update(0, 1, 2.0, 1.0);
+            access.node_mut(&root).finalize_score_update(2.0, 1.0);
+            access.node_mut(&root).finalize_score_update(2.0, 1.0);
             assert_eq!(access.node(&root).edge_visits(0, 1), 2);
 
             // Now backup a new visit through this path.
@@ -2978,10 +2927,7 @@ mod tests {
     #[test]
     fn cleanup_reverts_virtual_loss() {
         with_test_access(|access| {
-            let node = access.test_node(LowNode::new_shell(
-                [0, 1, 2, 3, 4],
-                [0, 1, 2, 3, 4],
-            ));
+            let node = access.test_node(LowNode::new_shell([0, 1, 2, 3, 4], [0, 1, 2, 3, 4]));
             access.node_mut(&node).add_virtual_loss(1, 2);
 
             let path = vec![PathEntry {
@@ -2998,10 +2944,7 @@ mod tests {
     #[test]
     fn cleanup_cancels_leaf_claim() {
         with_test_access(|access| {
-            let leaf = access.test_node(LowNode::new_shell(
-                [0, 1, 2, 3, 4],
-                [0, 1, 2, 3, 4],
-            ));
+            let leaf = access.test_node(LowNode::new_shell([0, 1, 2, 3, 4], [0, 1, 2, 3, 4]));
             assert!(access.node_mut(&leaf).try_start_score_update());
             assert_eq!(access.node(&leaf).n_in_flight(), 1);
 
@@ -3051,8 +2994,7 @@ mod tests {
         let mut r = rng();
 
         let n_sims = 50;
-        let result =
-            run_search(&mut tree, &game, &backend, &config, n_sims, 16, &mut r).unwrap();
+        let result = run_search(&mut tree, &game, &backend, &config, n_sims, 16, &mut r).unwrap();
 
         // Terminal root: one real visit per pick, total = n_sims.
         // Before fix: quadratic blowup (multivisit=budget per pick, counts as 1).
@@ -3124,7 +3066,10 @@ mod tests {
         let _result = run_search(&mut tree, &game, &backend, &config, 200, 16, &mut r).unwrap();
 
         // TT should have entries beyond just the root
-        assert!(tree.tt().live_count() > 1, "TT should have entries for explored positions");
+        assert!(
+            tree.tt().live_count() > 1,
+            "TT should have entries for explored positions"
+        );
     }
 
     // =====================================================================
@@ -3186,10 +3131,7 @@ mod tests {
     struct FailingBackend;
 
     impl Backend for FailingBackend {
-        fn evaluate(
-            &self,
-            _game: &GameState,
-        ) -> Result<crate::EvalResult, BackendError> {
+        fn evaluate(&self, _game: &GameState) -> Result<crate::EvalResult, BackendError> {
             Err(BackendError::msg("intentional test failure"))
         }
     }
@@ -3202,24 +3144,15 @@ mod tests {
     fn backup_two_level_q_chain() {
         with_test_access(|access| {
             // root --edge(r=1,0.5)--> mid --edge(r=0.5,1.0)--> leaf
-            let root = access.test_node(LowNode::new_shell(
-                [0, 1, 2, 3, 4],
-                [0, 1, 2, 3, 4],
-            ));
+            let root = access.test_node(LowNode::new_shell([0, 1, 2, 3, 4], [0, 1, 2, 3, 4]));
             access.node_mut(&root).set_value_scale(5.0);
             access.node_mut(&root).set_prior([0.2; 5], [0.2; 5]);
 
-            let mid = access.test_node(LowNode::new_shell(
-                [0, 1, 2, 3, 4],
-                [0, 1, 2, 3, 4],
-            ));
+            let mid = access.test_node(LowNode::new_shell([0, 1, 2, 3, 4], [0, 1, 2, 3, 4]));
             access.node_mut(&mid).set_value_scale(5.0);
             access.node_mut(&mid).set_prior([0.2; 5], [0.2; 5]);
 
-            let leaf = access.test_node(LowNode::new_shell(
-                [0, 1, 2, 3, 4],
-                [0, 1, 2, 3, 4],
-            ));
+            let leaf = access.test_node(LowNode::new_shell([0, 1, 2, 3, 4], [0, 1, 2, 3, 4]));
             access.node_mut(&leaf).set_value_scale(5.0);
 
             access.test_connect(&mid, &leaf, (2, 3), 0.5, 1.0);
@@ -3264,31 +3197,19 @@ mod tests {
     #[test]
     fn backup_three_level_reward_chain() {
         with_test_access(|access| {
-            let root = access.test_node(LowNode::new_shell(
-                [0, 1, 2, 3, 4],
-                [0, 1, 2, 3, 4],
-            ));
+            let root = access.test_node(LowNode::new_shell([0, 1, 2, 3, 4], [0, 1, 2, 3, 4]));
             access.node_mut(&root).set_value_scale(10.0);
             access.node_mut(&root).set_prior([0.2; 5], [0.2; 5]);
 
-            let a = access.test_node(LowNode::new_shell(
-                [0, 1, 2, 3, 4],
-                [0, 1, 2, 3, 4],
-            ));
+            let a = access.test_node(LowNode::new_shell([0, 1, 2, 3, 4], [0, 1, 2, 3, 4]));
             access.node_mut(&a).set_value_scale(10.0);
             access.node_mut(&a).set_prior([0.2; 5], [0.2; 5]);
 
-            let b = access.test_node(LowNode::new_shell(
-                [0, 1, 2, 3, 4],
-                [0, 1, 2, 3, 4],
-            ));
+            let b = access.test_node(LowNode::new_shell([0, 1, 2, 3, 4], [0, 1, 2, 3, 4]));
             access.node_mut(&b).set_value_scale(10.0);
             access.node_mut(&b).set_prior([0.2; 5], [0.2; 5]);
 
-            let leaf = access.test_node(LowNode::new_shell(
-                [0, 1, 2, 3, 4],
-                [0, 1, 2, 3, 4],
-            ));
+            let leaf = access.test_node(LowNode::new_shell([0, 1, 2, 3, 4], [0, 1, 2, 3, 4]));
             access.node_mut(&leaf).set_value_scale(10.0);
 
             // Wire: root--(1,0)-->a--(1,0)-->b--(1,0)-->leaf.
@@ -3333,17 +3254,11 @@ mod tests {
     #[test]
     fn backup_multiple_same_edge() {
         with_test_access(|access| {
-            let root = access.test_node(LowNode::new_shell(
-                [0, 1, 2, 3, 4],
-                [0, 1, 2, 3, 4],
-            ));
+            let root = access.test_node(LowNode::new_shell([0, 1, 2, 3, 4], [0, 1, 2, 3, 4]));
             access.node_mut(&root).set_value_scale(5.0);
             access.node_mut(&root).set_prior([0.2; 5], [0.2; 5]);
 
-            let child = access.test_node(LowNode::new_shell(
-                [0, 1, 2, 3, 4],
-                [0, 1, 2, 3, 4],
-            ));
+            let child = access.test_node(LowNode::new_shell([0, 1, 2, 3, 4], [0, 1, 2, 3, 4]));
             access.node_mut(&child).set_value_scale(5.0);
             access.test_connect(&root, &child, (0, 0), 0.0, 0.0);
 
@@ -3373,22 +3288,13 @@ mod tests {
     #[test]
     fn backup_multiple_different_edges() {
         with_test_access(|access| {
-            let root = access.test_node(LowNode::new_shell(
-                [0, 1, 2, 3, 4],
-                [0, 1, 2, 3, 4],
-            ));
+            let root = access.test_node(LowNode::new_shell([0, 1, 2, 3, 4], [0, 1, 2, 3, 4]));
             access.node_mut(&root).set_value_scale(10.0);
             access.node_mut(&root).set_prior([0.2; 5], [0.2; 5]);
 
-            let child_a = access.test_node(LowNode::new_shell(
-                [0, 1, 2, 3, 4],
-                [0, 1, 2, 3, 4],
-            ));
+            let child_a = access.test_node(LowNode::new_shell([0, 1, 2, 3, 4], [0, 1, 2, 3, 4]));
             access.node_mut(&child_a).set_value_scale(10.0);
-            let child_b = access.test_node(LowNode::new_shell(
-                [0, 1, 2, 3, 4],
-                [0, 1, 2, 3, 4],
-            ));
+            let child_b = access.test_node(LowNode::new_shell([0, 1, 2, 3, 4], [0, 1, 2, 3, 4]));
             access.node_mut(&child_b).set_value_scale(10.0);
 
             access.test_connect(&root, &child_a, (0, 0), 0.0, 0.0);
@@ -3419,17 +3325,11 @@ mod tests {
     #[test]
     fn backup_terminal_leaf() {
         with_test_access(|access| {
-            let root = access.test_node(LowNode::new_shell(
-                [0, 1, 2, 3, 4],
-                [0, 1, 2, 3, 4],
-            ));
+            let root = access.test_node(LowNode::new_shell([0, 1, 2, 3, 4], [0, 1, 2, 3, 4]));
             access.node_mut(&root).set_value_scale(5.0);
             access.node_mut(&root).set_prior([0.2; 5], [0.2; 5]);
 
-            let child = access.test_node(LowNode::new_shell(
-                [0, 1, 2, 3, 4],
-                [0, 1, 2, 3, 4],
-            ));
+            let child = access.test_node(LowNode::new_shell([0, 1, 2, 3, 4], [0, 1, 2, 3, 4]));
             access.node_mut(&child).set_terminal();
             access.test_connect(&root, &child, (0, 0), 1.0, 0.5);
 
@@ -3451,10 +3351,7 @@ mod tests {
     #[test]
     fn backup_empty_path() {
         with_test_access(|access| {
-            let root = access.test_node(LowNode::new_shell(
-                [0, 1, 2, 3, 4],
-                [0, 1, 2, 3, 4],
-            ));
+            let root = access.test_node(LowNode::new_shell([0, 1, 2, 3, 4], [0, 1, 2, 3, 4]));
             access.node_mut(&root).set_value_scale(5.0);
             access.node_mut(&root).set_prior([0.2; 5], [0.2; 5]);
 
@@ -3471,17 +3368,11 @@ mod tests {
     #[test]
     fn backup_same_edge_raw_propagation() {
         with_test_access(|access| {
-            let root = access.test_node(LowNode::new_shell(
-                [0, 1, 2, 3, 4],
-                [0, 1, 2, 3, 4],
-            ));
+            let root = access.test_node(LowNode::new_shell([0, 1, 2, 3, 4], [0, 1, 2, 3, 4]));
             access.node_mut(&root).set_value_scale(10.0);
             access.node_mut(&root).set_prior([0.2; 5], [0.2; 5]);
 
-            let child = access.test_node(LowNode::new_shell(
-                [0, 1, 2, 3, 4],
-                [0, 1, 2, 3, 4],
-            ));
+            let child = access.test_node(LowNode::new_shell([0, 1, 2, 3, 4], [0, 1, 2, 3, 4]));
             access.node_mut(&child).set_value_scale(10.0);
             access.test_connect(&root, &child, (0, 0), 2.0, 0.0);
 
@@ -3503,17 +3394,11 @@ mod tests {
     #[test]
     fn backup_asymmetric_rewards() {
         with_test_access(|access| {
-            let root = access.test_node(LowNode::new_shell(
-                [0, 1, 2, 3, 4],
-                [0, 1, 2, 3, 4],
-            ));
+            let root = access.test_node(LowNode::new_shell([0, 1, 2, 3, 4], [0, 1, 2, 3, 4]));
             access.node_mut(&root).set_value_scale(10.0);
             access.node_mut(&root).set_prior([0.2; 5], [0.2; 5]);
 
-            let child = access.test_node(LowNode::new_shell(
-                [0, 1, 2, 3, 4],
-                [0, 1, 2, 3, 4],
-            ));
+            let child = access.test_node(LowNode::new_shell([0, 1, 2, 3, 4], [0, 1, 2, 3, 4]));
             access.node_mut(&child).set_value_scale(10.0);
             access.test_connect(&root, &child, (0, 0), 2.0, 0.5);
 
@@ -3534,17 +3419,11 @@ mod tests {
     #[test]
     fn backup_edge_visit_sum() {
         with_test_access(|access| {
-            let root = access.test_node(LowNode::new_shell(
-                [0, 1, 2, 3, 4],
-                [0, 1, 2, 3, 4],
-            ));
+            let root = access.test_node(LowNode::new_shell([0, 1, 2, 3, 4], [0, 1, 2, 3, 4]));
             access.node_mut(&root).set_value_scale(5.0);
             access.node_mut(&root).set_prior([0.2; 5], [0.2; 5]);
 
-            let child = access.test_node(LowNode::new_shell(
-                [0, 1, 2, 3, 4],
-                [0, 1, 2, 3, 4],
-            ));
+            let child = access.test_node(LowNode::new_shell([0, 1, 2, 3, 4], [0, 1, 2, 3, 4]));
             access.node_mut(&child).set_value_scale(5.0);
             access.test_connect(&root, &child, (0, 0), 0.0, 0.0);
 
@@ -3566,17 +3445,11 @@ mod tests {
     #[test]
     fn backup_p2_independent_propagation() {
         with_test_access(|access| {
-            let root = access.test_node(LowNode::new_shell(
-                [0, 1, 2, 3, 4],
-                [0, 1, 2, 3, 4],
-            ));
+            let root = access.test_node(LowNode::new_shell([0, 1, 2, 3, 4], [0, 1, 2, 3, 4]));
             access.node_mut(&root).set_value_scale(10.0);
             access.node_mut(&root).set_prior([0.2; 5], [0.2; 5]);
 
-            let child = access.test_node(LowNode::new_shell(
-                [0, 1, 2, 3, 4],
-                [0, 1, 2, 3, 4],
-            ));
+            let child = access.test_node(LowNode::new_shell([0, 1, 2, 3, 4], [0, 1, 2, 3, 4]));
             access.node_mut(&child).set_value_scale(10.0);
             access.test_connect(&root, &child, (0, 0), 2.0, 0.5);
 
@@ -3834,19 +3707,13 @@ mod tests {
         // Two nodes: same P1 structure, different P2 priors
         let mut node_a = LowNode::new_shell([0, 1, 2, 3, 4], [0, 1, 2, 3, 4]);
         node_a.set_value_scale(5.0);
-        node_a.set_prior(
-            [0.1, 0.3, 0.2, 0.15, 0.25],
-            [0.8, 0.05, 0.05, 0.05, 0.05],
-        );
+        node_a.set_prior([0.1, 0.3, 0.2, 0.15, 0.25], [0.8, 0.05, 0.05, 0.05, 0.05]);
         node_a.finalize_edge_update(0, 0, 2.0, 2.0);
         node_a.finalize_score_update(2.0, 2.0);
 
         let mut node_b = LowNode::new_shell([0, 1, 2, 3, 4], [0, 1, 2, 3, 4]);
         node_b.set_value_scale(5.0);
-        node_b.set_prior(
-            [0.1, 0.3, 0.2, 0.15, 0.25],
-            [0.05, 0.05, 0.05, 0.05, 0.8],
-        );
+        node_b.set_prior([0.1, 0.3, 0.2, 0.15, 0.25], [0.05, 0.05, 0.05, 0.05, 0.8]);
         node_b.finalize_edge_update(0, 0, 2.0, 2.0);
         node_b.finalize_score_update(2.0, 2.0);
 
@@ -4048,8 +3915,7 @@ mod tests {
             let mut tree = MCGSTree::new(&game);
             let mut r = rng();
 
-            let result =
-                run_search(&mut tree, &game, &backend, &config, 100, 16, &mut r).unwrap();
+            let result = run_search(&mut tree, &game, &backend, &config, 100, 16, &mut r).unwrap();
             let sum_p1: f32 = result.policy_p1.iter().sum();
             let sum_p2: f32 = result.policy_p2.iter().sum();
             assert!((sum_p1 - 1.0).abs() < 1e-4, "{name}: P1 sum = {sum_p1}");
@@ -4077,23 +3943,16 @@ mod tests {
 
         // P2 at (4,4): UP and RIGHT blocked
         assert_eq!(result.visit_counts_p2[0], 0.0, "P2 UP should be blocked");
-        assert_eq!(
-            result.visit_counts_p2[1], 0.0,
-            "P2 RIGHT should be blocked"
-        );
+        assert_eq!(result.visit_counts_p2[1], 0.0, "P2 RIGHT should be blocked");
 
         // Also test corridor
         let game2 = corridor_game();
         let mut tree2 = MCGSTree::new(&game2);
         let mut r2 = rng();
-        let result2 =
-            run_search(&mut tree2, &game2, &backend, &config, 100, 16, &mut r2).unwrap();
+        let result2 = run_search(&mut tree2, &game2, &backend, &config, 100, 16, &mut r2).unwrap();
 
         // P1 at (0,0) in corridor: UP blocked, DOWN blocked, LEFT blocked
-        assert_eq!(
-            result2.visit_counts_p1[0], 0.0,
-            "P1 UP blocked in corridor"
-        );
+        assert_eq!(result2.visit_counts_p1[0], 0.0, "P1 UP blocked in corridor");
         assert_eq!(
             result2.visit_counts_p1[2], 0.0,
             "P1 DOWN blocked in corridor"
@@ -4237,8 +4096,16 @@ mod tests {
         };
         let mut tree1 = MCGSTree::new(&game);
         let mut r1 = SmallRng::seed_from_u64(123);
-        let result1 =
-            run_search(&mut tree1, &game, &backend, &config_no_noise, 100, 16, &mut r1).unwrap();
+        let result1 = run_search(
+            &mut tree1,
+            &game,
+            &backend,
+            &config_no_noise,
+            100,
+            16,
+            &mut r1,
+        )
+        .unwrap();
 
         // With noise
         let config_noise = SearchConfig {
@@ -4301,8 +4168,16 @@ mod tests {
 
         // Phase 1: expand the tree just enough that gather descends interior nodes,
         // but not so much that every leaf is a transposition stop.
-        let _ =
-            run_search(&mut tree, &game, &SmartUniformBackend, &config, 10, 8, &mut r).unwrap();
+        let _ = run_search(
+            &mut tree,
+            &game,
+            &SmartUniformBackend,
+            &config,
+            10,
+            8,
+            &mut r,
+        )
+        .unwrap();
 
         // Phase 2: search with failing backend — high budget to ensure NeedsEval.
         let result = run_search(&mut tree, &game, &FailingBackend, &config, 100, 16, &mut r);
@@ -4312,8 +4187,16 @@ mod tests {
         assert_no_in_flight(&mut tree);
 
         // Phase 4: rerun with good backend — tree should be usable.
-        let result2 =
-            run_search(&mut tree, &game, &SmartUniformBackend, &config, 50, 8, &mut r).unwrap();
+        let result2 = run_search(
+            &mut tree,
+            &game,
+            &SmartUniformBackend,
+            &config,
+            50,
+            8,
+            &mut r,
+        )
+        .unwrap();
         assert!(
             result2.total_visits > 0,
             "search after backend error should produce visits"
@@ -4370,8 +4253,7 @@ mod tests {
         let mut r = rng();
 
         let n_sims = 20;
-        let result =
-            run_search(&mut tree, &game, &backend, &config, n_sims, 1, &mut r).unwrap();
+        let result = run_search(&mut tree, &game, &backend, &config, n_sims, 1, &mut r).unwrap();
 
         // With batch_size=1 and enough cheese, nn_evals + terminals >= n_sims
         assert!(
@@ -4412,18 +4294,12 @@ mod tests {
     #[test]
     fn delta_no_transposition_baseline() {
         with_test_access(|access| {
-            let mut root_low = LowNode::new_shell(
-                [0, 1, 2, 3, 4],
-                [0, 1, 2, 3, 4],
-            );
+            let mut root_low = LowNode::new_shell([0, 1, 2, 3, 4], [0, 1, 2, 3, 4]);
             root_low.set_value_scale(5.0);
             root_low.set_prior([0.2; 5], [0.2; 5]);
             let root = access.test_node(root_low);
 
-            let mut child_low = LowNode::new_shell(
-                [0, 1, 2, 3, 4],
-                [0, 1, 2, 3, 4],
-            );
+            let mut child_low = LowNode::new_shell([0, 1, 2, 3, 4], [0, 1, 2, 3, 4]);
             child_low.set_value_scale(5.0);
             let child = access.test_node(child_low);
 
@@ -4464,26 +4340,17 @@ mod tests {
     fn delta_simple_transposition_correction() {
         with_test_access(|access| {
             // Shared child C (the transposition).
-            let mut child_low = LowNode::new_shell(
-                [0, 1, 2, 3, 4],
-                [0, 1, 2, 3, 4],
-            );
+            let mut child_low = LowNode::new_shell([0, 1, 2, 3, 4], [0, 1, 2, 3, 4]);
             child_low.set_value_scale(5.0);
             let child_c = access.test_node(child_low);
 
-            let mut parent_a_low = LowNode::new_shell(
-                [0, 1, 2, 3, 4],
-                [0, 1, 2, 3, 4],
-            );
+            let mut parent_a_low = LowNode::new_shell([0, 1, 2, 3, 4], [0, 1, 2, 3, 4]);
             parent_a_low.set_value_scale(5.0);
             parent_a_low.set_prior([0.2; 5], [0.2; 5]);
             let parent_a = access.test_node(parent_a_low);
             access.test_connect(&parent_a, &child_c, (0, 0), 1.0, 0.5);
 
-            let mut parent_b_low = LowNode::new_shell(
-                [0, 1, 2, 3, 4],
-                [0, 1, 2, 3, 4],
-            );
+            let mut parent_b_low = LowNode::new_shell([0, 1, 2, 3, 4], [0, 1, 2, 3, 4]);
             parent_b_low.set_value_scale(5.0);
             parent_b_low.set_prior([0.2; 5], [0.2; 5]);
             let parent_b = access.test_node(parent_b_low);
@@ -4541,25 +4408,16 @@ mod tests {
     #[test]
     fn delta_exact_catchup() {
         with_test_access(|access| {
-            let mut child_low = LowNode::new_shell(
-                [0, 1, 2, 3, 4],
-                [0, 1, 2, 3, 4],
-            );
+            let mut child_low = LowNode::new_shell([0, 1, 2, 3, 4], [0, 1, 2, 3, 4]);
             child_low.set_value_scale(5.0);
             let child = access.test_node(child_low);
 
-            let mut parent_low = LowNode::new_shell(
-                [0, 1, 2, 3, 4],
-                [0, 1, 2, 3, 4],
-            );
+            let mut parent_low = LowNode::new_shell([0, 1, 2, 3, 4], [0, 1, 2, 3, 4]);
             parent_low.set_value_scale(5.0);
             parent_low.set_prior([0.2; 5], [0.2; 5]);
             let parent = access.test_node(parent_low);
 
-            let mut other_low = LowNode::new_shell(
-                [0, 1, 2, 3, 4],
-                [0, 1, 2, 3, 4],
-            );
+            let mut other_low = LowNode::new_shell([0, 1, 2, 3, 4], [0, 1, 2, 3, 4]);
             other_low.set_value_scale(5.0);
             other_low.set_prior([0.2; 5], [0.2; 5]);
             let other_parent = access.test_node(other_low);
@@ -4590,8 +4448,7 @@ mod tests {
             backup(access, &path, &child, 10.0, 5.0);
 
             let expected_child_v1 = 25.0 / 6.0;
-            let expected_child_v2 =
-                (0.5 + 1.0 + 1.5 + 2.0 + 2.5 + 5.0) / 6.0;
+            let expected_child_v2 = (0.5 + 1.0 + 1.5 + 2.0 + 2.5 + 5.0) / 6.0;
             let expected_q1 = 2.0 + expected_child_v1;
             let expected_q2 = 1.0 + expected_child_v2;
 
@@ -4609,10 +4466,7 @@ mod tests {
     fn delta_cascading_correction() {
         with_test_access(|access| {
             let mut make_node = |with_prior: bool| {
-                let mut low = LowNode::new_shell(
-                    [0, 1, 2, 3, 4],
-                    [0, 1, 2, 3, 4],
-                );
+                let mut low = LowNode::new_shell([0, 1, 2, 3, 4], [0, 1, 2, 3, 4]);
                 low.set_value_scale(5.0);
                 if with_prior {
                     low.set_prior([0.2; 5], [0.2; 5]);
@@ -4672,12 +4526,8 @@ mod tests {
             };
             let node_a = access.node(&node_a);
             assert_eq!(node_a.edge_visits(0, 0), 2);
-            assert!(
-                (node_a.edge_q_p1(0, 0) - (1.0 + b_v1)).abs() < 0.5
-            );
-            assert!(
-                (node_a.edge_q_p2(0, 0) - (1.0 + b_v2)).abs() < 0.5
-            );
+            assert!((node_a.edge_q_p1(0, 0) - (1.0 + b_v1)).abs() < 0.5);
+            assert!((node_a.edge_q_p2(0, 0) - (1.0 + b_v2)).abs() < 0.5);
         });
     }
 
@@ -4687,10 +4537,7 @@ mod tests {
     fn delta_propagates_through_non_transposition() {
         with_test_access(|access| {
             let mut make_node = |with_prior: bool| {
-                let mut low = LowNode::new_shell(
-                    [0, 1, 2, 3, 4],
-                    [0, 1, 2, 3, 4],
-                );
+                let mut low = LowNode::new_shell([0, 1, 2, 3, 4], [0, 1, 2, 3, 4]);
                 low.set_value_scale(5.0);
                 if with_prior {
                     low.set_prior([0.2; 5], [0.2; 5]);
@@ -4810,7 +4657,10 @@ mod tests {
             useful >= n_sims / 2,
             "useful visits ({useful}) should be >= n_sims/2 ({n_sims}/2), \
              nn={}, term={}, tt_stop={}, coll={}",
-            result.nn_evals, result.terminals, result.tt_stop_hits, result.collisions,
+            result.nn_evals,
+            result.terminals,
+            result.tt_stop_hits,
+            result.collisions,
         );
         assert!(result.total_visits > 0);
     }
@@ -4851,17 +4701,11 @@ mod tests {
     #[test]
     fn tt_stop_initializes_edge_from_aggregate() {
         with_test_access(|access| {
-            let mut child_low = LowNode::new_shell(
-                [0, 1, 2, 3, 4],
-                [0, 1, 2, 3, 4],
-            );
+            let mut child_low = LowNode::new_shell([0, 1, 2, 3, 4], [0, 1, 2, 3, 4]);
             child_low.set_value_scale(5.0);
             let child_c = access.test_node(child_low);
 
-            let mut parent_a_low = LowNode::new_shell(
-                [0, 1, 2, 3, 4],
-                [0, 1, 2, 3, 4],
-            );
+            let mut parent_a_low = LowNode::new_shell([0, 1, 2, 3, 4], [0, 1, 2, 3, 4]);
             parent_a_low.set_value_scale(5.0);
             parent_a_low.set_prior([0.2; 5], [0.2; 5]);
             let parent_a = access.test_node(parent_a_low);
@@ -4874,10 +4718,7 @@ mod tests {
             }];
             backup(access, &path_a, &child_c, 2.0, 3.0);
 
-            let mut parent_b_low = LowNode::new_shell(
-                [0, 1, 2, 3, 4],
-                [0, 1, 2, 3, 4],
-            );
+            let mut parent_b_low = LowNode::new_shell([0, 1, 2, 3, 4], [0, 1, 2, 3, 4]);
             parent_b_low.set_value_scale(5.0);
             parent_b_low.set_prior([0.2; 5], [0.2; 5]);
             let parent_b = access.test_node(parent_b_low);
@@ -4896,10 +4737,7 @@ mod tests {
             for entry in &path_b {
                 let node = access.node_mut(&entry.node);
                 node.increment_n_in_flight(1);
-                node.add_virtual_loss(
-                    entry.p1_outcome as usize,
-                    entry.p2_outcome as usize,
-                );
+                node.add_virtual_loss(entry.p1_outcome as usize, entry.p2_outcome as usize);
             }
             backup_transposition_stop(access, &path_b, &child_c, 1);
 
@@ -4924,26 +4762,17 @@ mod tests {
         // the new aggregate, without incrementing C's total_visits.
 
         with_test_access(|access| {
-            let mut child_low = LowNode::new_shell(
-                [0, 1, 2, 3, 4],
-                [0, 1, 2, 3, 4],
-            );
+            let mut child_low = LowNode::new_shell([0, 1, 2, 3, 4], [0, 1, 2, 3, 4]);
             child_low.set_value_scale(5.0);
             let child_c = access.test_node(child_low);
 
-            let mut parent_a_low = LowNode::new_shell(
-                [0, 1, 2, 3, 4],
-                [0, 1, 2, 3, 4],
-            );
+            let mut parent_a_low = LowNode::new_shell([0, 1, 2, 3, 4], [0, 1, 2, 3, 4]);
             parent_a_low.set_value_scale(5.0);
             parent_a_low.set_prior([0.2; 5], [0.2; 5]);
             let parent_a = access.test_node(parent_a_low);
             access.test_connect(&parent_a, &child_c, (0, 0), 1.0, 0.5);
 
-            let mut parent_b_low = LowNode::new_shell(
-                [0, 1, 2, 3, 4],
-                [0, 1, 2, 3, 4],
-            );
+            let mut parent_b_low = LowNode::new_shell([0, 1, 2, 3, 4], [0, 1, 2, 3, 4]);
             parent_b_low.set_value_scale(5.0);
             parent_b_low.set_prior([0.2; 5], [0.2; 5]);
             let parent_b = access.test_node(parent_b_low);
@@ -4965,10 +4794,7 @@ mod tests {
             reserve_path(access, &path_b, 1);
             backup_transposition_stop(access, &path_b, &child_c, 1);
             assert_eq!(access.node(&parent_b).edge_visits(1, 2), 1);
-            assert!(
-                (access.node(&parent_b).edge_q_p1(1, 2) - 2.5).abs()
-                    < 1e-5
-            );
+            assert!((access.node(&parent_b).edge_q_p1(1, 2) - 2.5).abs() < 1e-5);
 
             backup(access, &path_a, &child_c, 6.0, 1.0);
             let child_low = access.node(&child_c);
@@ -4976,8 +4802,7 @@ mod tests {
             assert!((child_low.v1() - 4.0).abs() < 1e-5);
             assert!((child_low.v2() - 2.0).abs() < 1e-5);
             assert!(
-                access.node(&parent_b).edge_visits(1, 2)
-                    < access.node(&child_c).total_visits()
+                access.node(&parent_b).edge_visits(1, 2) < access.node(&child_c).total_visits()
             );
             let child_visits_before = access.node(&child_c).total_visits();
 
@@ -5009,8 +4834,7 @@ mod tests {
         let mut tree = MCGSTree::new(&game);
         let mut r = rng();
 
-        let result =
-            run_search(&mut tree, &game, &backend, &config, 500, 8, &mut r).unwrap();
+        let result = run_search(&mut tree, &game, &backend, &config, 500, 8, &mut r).unwrap();
 
         assert!(
             result.tt_stop_hits > 0,
@@ -5022,18 +4846,9 @@ mod tests {
     fn cancellation_uses_cached_reservation_shape_after_parent_count_changes() {
         with_test_access(|access| {
             let root = access.root();
-            let target = access.test_node(LowNode::new_shell(
-                [0, 1, 2, 3, 4],
-                [0, 1, 2, 3, 4],
-            ));
-            let parent_a = access.test_node(LowNode::new_shell(
-                [0, 1, 2, 3, 4],
-                [0, 1, 2, 3, 4],
-            ));
-            let parent_b = access.test_node(LowNode::new_shell(
-                [0, 1, 2, 3, 4],
-                [0, 1, 2, 3, 4],
-            ));
+            let target = access.test_node(LowNode::new_shell([0, 1, 2, 3, 4], [0, 1, 2, 3, 4]));
+            let parent_a = access.test_node(LowNode::new_shell([0, 1, 2, 3, 4], [0, 1, 2, 3, 4]));
+            let parent_b = access.test_node(LowNode::new_shell([0, 1, 2, 3, 4], [0, 1, 2, 3, 4]));
             let path = vec![PathEntry {
                 node: root.clone(),
                 p1_outcome: 0,
@@ -5077,8 +4892,7 @@ mod tests {
         let mut r = rng();
 
         let n_sims = 200;
-        let result =
-            run_search(&mut tree, &game, &backend, &config, n_sims, 8, &mut r).unwrap();
+        let result = run_search(&mut tree, &game, &backend, &config, n_sims, 8, &mut r).unwrap();
 
         // Productive work = nn_evals + terminals + tt_stop_hits.
         let productive = result.nn_evals + result.terminals + result.tt_stop_hits;

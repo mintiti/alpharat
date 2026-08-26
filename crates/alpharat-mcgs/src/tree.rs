@@ -7,11 +7,9 @@ use pyrat::Coordinates;
 
 use crate::access::{ExclusiveAccess, SearchSession};
 use crate::node::{LowNode, OwnerToken, SharedNode};
-use crate::observer::{
-    TranspositionEviction, TranspositionStats, TreeStats, TreeView,
-};
-use crate::tt::TranspositionTable;
+use crate::observer::{TranspositionEviction, TranspositionStats, TreeStats, TreeView};
 use crate::smart_uniform_prior;
+use crate::tt::TranspositionTable;
 
 #[cfg(test)]
 use crate::EvalResult;
@@ -256,11 +254,7 @@ mod tests {
     use super::*;
     use pyrat::GameBuilder;
 
-    fn open_5x5_game(
-        p1: Coordinates,
-        p2: Coordinates,
-        cheese: &[Coordinates],
-    ) -> GameState {
+    fn open_5x5_game(p1: Coordinates, p2: Coordinates, cheese: &[Coordinates]) -> GameState {
         GameBuilder::new(5, 5)
             .with_open_maze()
             .with_custom_positions(p1, p2)
@@ -365,7 +359,11 @@ mod tests {
         let game = open_5x5_game(
             Coordinates::new(0, 0),
             Coordinates::new(4, 4),
-            &[Coordinates::new(1, 0), Coordinates::new(2, 0), Coordinates::new(3, 0)],
+            &[
+                Coordinates::new(1, 0),
+                Coordinates::new(2, 0),
+                Coordinates::new(3, 0),
+            ],
         );
         let tree = MCGSTree::new(&game);
         let value_scale = tree.observe(|view| view.with_root(|root| root.stats().value_scale));
@@ -389,10 +387,7 @@ mod tests {
             value_p2: 2.0,
         };
         tree.with_exclusive(|mut access| {
-            let node = access.test_node(LowNode::new_shell(
-                [0, 1, 2, 3, 4],
-                [0, 1, 2, 3, 4],
-            ));
+            let node = access.test_node(LowNode::new_shell([0, 1, 2, 3, 4], [0, 1, 2, 3, 4]));
             access.populate_node(&node, Some(&eval));
             access.test_install_root(&node);
         });
@@ -411,10 +406,7 @@ mod tests {
         );
         let mut tree = MCGSTree::new(&game);
         tree.with_exclusive(|mut access| {
-            let node = access.test_node(LowNode::new_shell(
-                [0, 1, 2, 3, 4],
-                [0, 1, 2, 3, 4],
-            ));
+            let node = access.test_node(LowNode::new_shell([0, 1, 2, 3, 4], [0, 1, 2, 3, 4]));
             access.populate_node(&node, None);
             access.test_install_root(&node);
         });
@@ -496,13 +488,11 @@ mod tests {
             };
 
             let before = access.node_count();
-            let child1 =
-                access.find_or_create_child(&root, i, j, &child_game, 0.0, 0.0);
+            let child1 = access.find_or_create_child(&root, i, j, &child_game, 0.0, 0.0);
             assert_eq!(access.node_count(), before + 1);
 
             // Second call with same (i, j) — reuses existing edge.
-            let child2 =
-                access.find_or_create_child(&root, i, j, &child_game, 0.0, 0.0);
+            let child2 = access.find_or_create_child(&root, i, j, &child_game, 0.0, 0.0);
             assert_eq!(access.node_count(), before + 1);
             assert!(access.same_node(&child1, &child2));
         });
@@ -532,24 +522,14 @@ mod tests {
             };
 
             // Publish the canonical child through the first parent.
-            let existing =
-                access.find_or_create_child(&root, i, j, &child_game, 0.0, 0.0);
+            let existing = access.find_or_create_child(&root, i, j, &child_game, 0.0, 0.0);
             let count_after_insert = access.node_count();
 
             // A detached, owner-consistent second parent has no edge yet, so
             // this call must take the TT-hit path and reuse `existing`.
-            let second_parent = access.test_node(LowNode::new_shell(
-                [0, 1, 2, 3, 4],
-                [0, 1, 2, 3, 4],
-            ));
-            let child = access.find_or_create_child(
-                &second_parent,
-                i,
-                j,
-                &child_game,
-                0.0,
-                0.0,
-            );
+            let second_parent =
+                access.test_node(LowNode::new_shell([0, 1, 2, 3, 4], [0, 1, 2, 3, 4]));
+            let child = access.find_or_create_child(&second_parent, i, j, &child_game, 0.0, 0.0);
 
             assert_eq!(access.node_count(), count_after_insert);
             assert!(access.same_node(&child, &existing));
@@ -678,13 +658,11 @@ mod tests {
 
             // First call creates the edge with r1=1.0, r2=0.5.
             let before = access.node_count();
-            let child1 =
-                access.find_or_create_child(&root, i, j, &child_game, 1.0, 0.5);
+            let child1 = access.find_or_create_child(&root, i, j, &child_game, 1.0, 0.5);
             assert_eq!(access.node_count(), before + 1);
 
             // The existing edge wins; replacement rewards are ignored.
-            let child2 =
-                access.find_or_create_child(&root, i, j, &child_game, 9.0, 9.0);
+            let child2 = access.find_or_create_child(&root, i, j, &child_game, 9.0, 9.0);
             assert_eq!(access.node_count(), before + 1);
             assert!(access.same_node(&child1, &child2));
 
@@ -749,13 +727,8 @@ mod tests {
             value_p2: 1.0,
         };
         tree.with_exclusive(|mut access| {
-            let node = access.test_node(LowNode::new_shell(
-                [0, 1, 2, 3, 4],
-                [0, 1, 2, 3, 4],
-            ));
-            access
-                .node_mut(&node)
-                .finalize_score_update(1.0, 1.0);
+            let node = access.test_node(LowNode::new_shell([0, 1, 2, 3, 4], [0, 1, 2, 3, 4]));
+            access.node_mut(&node).finalize_score_update(1.0, 1.0);
             access.populate_node(&node, Some(&eval));
         });
     }
@@ -770,10 +743,10 @@ mod tests {
         p2_action: u8,
         n_sims: u32,
     ) {
-        use crate::{SearchConfig, SmartUniformBackend, run_search};
+        use crate::{run_search, SearchConfig, SmartUniformBackend};
         use pyrat::Direction;
-        use rand::SeedableRng;
         use rand::rngs::SmallRng;
+        use rand::SeedableRng;
 
         let config = SearchConfig {
             c_puct: 1.5,
@@ -803,9 +776,9 @@ mod tests {
         let mut tree = MCGSTree::new(&game);
 
         // Search to expand children
-        use crate::{SearchConfig, SmartUniformBackend, run_search};
-        use rand::SeedableRng;
+        use crate::{run_search, SearchConfig, SmartUniformBackend};
         use rand::rngs::SmallRng;
+        use rand::SeedableRng;
         let config = SearchConfig::default();
         let backend = SmartUniformBackend;
         let mut rng = SmallRng::seed_from_u64(42);
@@ -894,9 +867,9 @@ mod tests {
         );
         let mut tree = MCGSTree::new(&game);
 
-        use crate::{SearchConfig, SmartUniformBackend, run_search};
-        use rand::SeedableRng;
+        use crate::{run_search, SearchConfig, SmartUniformBackend};
         use rand::rngs::SmallRng;
+        use rand::SeedableRng;
         let config = SearchConfig::default();
         let backend = SmartUniformBackend;
         let mut rng = SmallRng::seed_from_u64(42);
@@ -942,9 +915,9 @@ mod tests {
         );
         let mut tree = MCGSTree::new(&game);
 
-        use crate::{SearchConfig, SmartUniformBackend, run_search};
-        use rand::SeedableRng;
+        use crate::{run_search, SearchConfig, SmartUniformBackend};
         use rand::rngs::SmallRng;
+        use rand::SeedableRng;
         let config = SearchConfig::default();
         let backend = SmartUniformBackend;
         let mut rng = SmallRng::seed_from_u64(42);
@@ -1028,9 +1001,9 @@ mod tests {
         );
         let mut tree = MCGSTree::new(&game);
 
-        use crate::{SearchConfig, SmartUniformBackend, run_search};
-        use rand::SeedableRng;
+        use crate::{run_search, SearchConfig, SmartUniformBackend};
         use rand::rngs::SmallRng;
+        use rand::SeedableRng;
         let config = SearchConfig::default();
         let backend = SmartUniformBackend;
         let mut rng = SmallRng::seed_from_u64(42);
@@ -1121,10 +1094,7 @@ mod tests {
         crate::gc::wait();
 
         let transposition_survives = tree.observe(|view| {
-            view.with_root(|root| {
-                root.edge(surviving_edge.0, surviving_edge.1)
-                    .is_some()
-            })
+            view.with_root(|root| root.edge(surviving_edge.0, surviving_edge.1).is_some())
         });
         assert!(transposition_survives);
     }
@@ -1147,10 +1117,7 @@ mod tests {
         child_low.set_terminal();
 
         let mut root_low = LowNode::new_shell(open, open);
-        root_low.set_prior(
-            [0.1, 0.2, 0.3, 0.15, 0.25],
-            [0.25, 0.15, 0.3, 0.2, 0.1],
-        );
+        root_low.set_prior([0.1, 0.2, 0.3, 0.15, 0.25], [0.25, 0.15, 0.3, 0.2, 0.1]);
         root_low.set_value_scale(5.0);
         root_low.finalize_edge_update(1, 2, 3.0, 4.0);
         root_low.finalize_edge_update(1, 3, 1.0, 2.0);

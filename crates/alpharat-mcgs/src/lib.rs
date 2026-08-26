@@ -35,9 +35,9 @@
 //! let _ = alpharat_mcgs::MCGSTree::tt_mut;
 //! ```
 
+mod access;
 #[cfg(feature = "python")]
 pub mod bindings;
-mod access;
 pub mod gc;
 #[cfg_attr(not(test), allow(dead_code))]
 mod node;

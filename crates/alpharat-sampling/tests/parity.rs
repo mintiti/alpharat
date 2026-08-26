@@ -80,7 +80,11 @@ fn build_game(f: &Fixture) -> GameState {
     }
 
     // Build cheese positions
-    let cheese: Vec<Coordinates> = f.cheese.iter().map(|c| Coordinates::new(c.x, c.y)).collect();
+    let cheese: Vec<Coordinates> = f
+        .cheese
+        .iter()
+        .map(|c| Coordinates::new(c.x, c.y))
+        .collect();
 
     let p1 = Coordinates::new(f.p1_pos.x, f.p1_pos.y);
     let p2 = Coordinates::new(f.p2_pos.x, f.p2_pos.y);

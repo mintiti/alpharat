@@ -54,7 +54,10 @@ fn lifetime_misuse_is_rejected_by_the_compiler() {
         ),
         (
             "access_model_fail_exclusive_view_escape",
-            &["does not live long enough", "lifetime may not live long enough"],
+            &[
+                "does not live long enough",
+                "lifetime may not live long enough",
+            ],
         ),
         (
             "access_model_fail_exclusive_alias",

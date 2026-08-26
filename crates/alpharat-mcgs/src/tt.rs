@@ -350,7 +350,10 @@ mod tests {
         tt.insert(10, &node);
         tt.insert(20, &node);
 
-        assert!(Arc::ptr_eq(&tt.lookup(10).unwrap(), &tt.lookup(20).unwrap()));
+        assert!(Arc::ptr_eq(
+            &tt.lookup(10).unwrap(),
+            &tt.lookup(20).unwrap()
+        ));
     }
 
     #[test]

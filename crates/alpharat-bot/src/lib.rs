@@ -83,9 +83,10 @@ impl MctsBot {
             let encoder = FlatEncoder::new(state.width(), state.height());
             let provider = ExecutionProvider::try_from(self.device.as_str())
                 .unwrap_or_else(|e| panic!("invalid device: {e}"));
-            let onnx: Box<dyn Backend> =
-                Box::new(OnnxBackend::with_provider(&self.model, encoder, provider)
-                    .unwrap_or_else(|e| panic!("failed to load ONNX model '{}': {e}", self.model)));
+            let onnx: Box<dyn Backend> = Box::new(
+                OnnxBackend::with_provider(&self.model, encoder, provider)
+                    .unwrap_or_else(|e| panic!("failed to load ONNX model '{}': {e}", self.model)),
+            );
             if self.cache_size > 0 {
                 return Box::new(CachedBackend::new(onnx, self.cache_size as usize));
             }

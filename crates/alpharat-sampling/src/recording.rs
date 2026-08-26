@@ -23,7 +23,10 @@ use crate::selfplay::GameRecord;
 pub fn write_bundle(games: &[GameRecord], path: &Path) -> io::Result<()> {
     // Validate
     if games.is_empty() {
-        return Err(io::Error::new(io::ErrorKind::InvalidInput, "no games to write"));
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "no games to write",
+        ));
     }
     let w = games[0].width;
     let h = games[0].height;
@@ -455,7 +458,12 @@ mod tests {
 
         for p in &paths {
             assert!(p.exists());
-            assert!(p.file_name().unwrap().to_str().unwrap().starts_with("bundle_"));
+            assert!(p
+                .file_name()
+                .unwrap()
+                .to_str()
+                .unwrap()
+                .starts_with("bundle_"));
         }
 
         let _ = fs::remove_dir_all(&dir);

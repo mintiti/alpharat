@@ -40,11 +40,21 @@ fn parse_args() -> Args {
         match args[i].as_str() {
             "--grids" => {
                 i += 1;
-                grids = Some(args[i].split(',').map(|s| s.trim().parse().unwrap()).collect());
+                grids = Some(
+                    args[i]
+                        .split(',')
+                        .map(|s| s.trim().parse().unwrap())
+                        .collect(),
+                );
             }
             "--sims" => {
                 i += 1;
-                sims = Some(args[i].split(',').map(|s| s.trim().parse().unwrap()).collect());
+                sims = Some(
+                    args[i]
+                        .split(',')
+                        .map(|s| s.trim().parse().unwrap())
+                        .collect(),
+                );
             }
             "--maze" => {
                 i += 1;
@@ -83,7 +93,9 @@ fn parse_args() -> Args {
                 eprintln!("  --device auto|cpu|cuda|coreml  Execution provider (default: auto)");
                 eprintln!();
                 eprintln!("NN backend requires building with --features onnx (or onnx-cuda, onnx-coreml).");
-                eprintln!("Models are grid-size specific: use a single --grids value with --model.");
+                eprintln!(
+                    "Models are grid-size specific: use a single --grids value with --model."
+                );
                 std::process::exit(0);
             }
             other => panic!("unknown flag: {other}"),
@@ -110,11 +122,7 @@ fn parse_args() -> Args {
 ///
 /// Requires the `onnx` feature (or `onnx-cuda`, `onnx-coreml`).
 #[cfg(feature = "onnx")]
-fn make_onnx_backend(
-    model_path: &str,
-    grid_size: u8,
-    device: &str,
-) -> Box<dyn Backend> {
+fn make_onnx_backend(model_path: &str, grid_size: u8, device: &str) -> Box<dyn Backend> {
     use alpharat_sampling::{FlatEncoder, OnnxBackend};
 
     let encoder = FlatEncoder::new(grid_size, grid_size);
@@ -145,11 +153,7 @@ fn make_onnx_backend(
 }
 
 #[cfg(not(feature = "onnx"))]
-fn make_onnx_backend(
-    _model_path: &str,
-    _grid_size: u8,
-    _device: &str,
-) -> Box<dyn Backend> {
+fn make_onnx_backend(_model_path: &str, _grid_size: u8, _device: &str) -> Box<dyn Backend> {
     panic!(
         "ONNX backend requires building with --features onnx (or onnx-cuda, onnx-coreml).\n\
          Example: cargo run --release -p alpharat-bench --features onnx-coreml --bin bench-compare -- --model model.onnx"
@@ -383,8 +387,17 @@ fn format_count(n: Option<usize>) -> String {
 fn print_header() {
     println!(
         "{:<8} {:>8} {:>6} {:>10} {:>8} {:>8} {:>8} {:>8} {:>8} {:>12} {:>12}",
-        "Grid", "Sims", "Engine", "Sims/s", "Time", "NN%", "Term%", "Coll%", "TTStop%",
-        "TT Entries", "TT Live"
+        "Grid",
+        "Sims",
+        "Engine",
+        "Sims/s",
+        "Time",
+        "NN%",
+        "Term%",
+        "Coll%",
+        "TTStop%",
+        "TT Entries",
+        "TT Live"
     );
     println!("{}", "-".repeat(120));
 }

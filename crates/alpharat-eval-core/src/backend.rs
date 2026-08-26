@@ -265,7 +265,12 @@ mod tests {
         walls.insert(Coordinates::new(2, 2), vec![Coordinates::new(2, 3)]);
         walls.insert(Coordinates::new(2, 3), vec![Coordinates::new(2, 2)]);
 
-        let game = wall_game(Coordinates::new(2, 2), Coordinates::new(0, 0), walls, &CHEESE);
+        let game = wall_game(
+            Coordinates::new(2, 2),
+            Coordinates::new(0, 0),
+            walls,
+            &CHEESE,
+        );
         let result = BACKEND.evaluate(&game).unwrap();
 
         let quarter = 0.25;
@@ -315,8 +320,14 @@ mod tests {
             let result = BACKEND.evaluate(game).unwrap();
             let sum_p1: f32 = result.policy_p1.iter().sum();
             let sum_p2: f32 = result.policy_p2.iter().sum();
-            assert!((sum_p1 - 1.0).abs() < 1e-6, "P1 prior doesn't sum to 1: {sum_p1}");
-            assert!((sum_p2 - 1.0).abs() < 1e-6, "P2 prior doesn't sum to 1: {sum_p2}");
+            assert!(
+                (sum_p1 - 1.0).abs() < 1e-6,
+                "P1 prior doesn't sum to 1: {sum_p1}"
+            );
+            assert!(
+                (sum_p2 - 1.0).abs() < 1e-6,
+                "P2 prior doesn't sum to 1: {sum_p2}"
+            );
         }
     }
 

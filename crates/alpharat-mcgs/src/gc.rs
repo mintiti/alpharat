@@ -503,10 +503,7 @@ mod tests {
         gc_cycle();
 
         for (i, weak) in weaks.iter().enumerate() {
-            assert!(
-                weak.upgrade().is_none(),
-                "edge {i} should have been freed"
-            );
+            assert!(weak.upgrade().is_none(), "edge {i} should have been freed");
         }
     }
 

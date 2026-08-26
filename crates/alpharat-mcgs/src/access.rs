@@ -97,10 +97,7 @@ impl<'tree, 'session> SearchSession<'tree, 'session> {
     /// poison this lock.
     pub(crate) fn write(&self) -> WriteEpoch<'_, 'tree, 'session> {
         WriteEpoch {
-            guard: self
-                .gate
-                .write()
-                .expect("MCGS search graph gate poisoned"),
+            guard: self.gate.write().expect("MCGS search graph gate poisoned"),
             brand: PhantomData,
         }
     }

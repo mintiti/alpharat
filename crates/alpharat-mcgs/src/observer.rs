@@ -12,8 +12,7 @@ use std::sync::Arc;
 use crate::node::{Edge, LowNode, SharedNode};
 use crate::tree::MCGSTree;
 
-pub(crate) type Invariant<'session> =
-    PhantomData<fn(&'session mut ()) -> &'session mut ()>;
+pub(crate) type Invariant<'session> = PhantomData<fn(&'session mut ()) -> &'session mut ()>;
 
 /// Which player's outcome-reduced statistics to inspect.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

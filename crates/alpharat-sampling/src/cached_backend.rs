@@ -80,9 +80,7 @@ impl Backend for CachedBackend {
         }
 
         let capacity = self.capacity;
-        let cache_cell = self
-            .caches
-            .get_or(|| RefCell::new(NNCache::new(capacity)));
+        let cache_cell = self.caches.get_or(|| RefCell::new(NNCache::new(capacity)));
         let mut cache = cache_cell.borrow_mut();
 
         let n = games.len();
@@ -204,8 +202,8 @@ fn position_hash(game: &GameState) -> u64 {
 mod tests {
     use super::*;
     use alpharat_mcts::SmartUniformBackend;
-    use pyrat::MudMap;
     use pyrat::GameBuilder;
+    use pyrat::MudMap;
     use std::collections::HashMap;
     use std::sync::atomic::Ordering;
 
@@ -356,7 +354,10 @@ mod tests {
 
         let h1 = position_hash(&g1);
         let h2 = position_hash(&g2);
-        assert_ne!(h1, h2, "different cheese positions should produce different hashes");
+        assert_ne!(
+            h1, h2,
+            "different cheese positions should produce different hashes"
+        );
     }
 
     #[test]

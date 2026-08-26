@@ -274,20 +274,18 @@ fn rust_mcgs_search(
                 &mut rng,
             )
         }
-        None => {
-            py.allow_threads(|| {
-                let mut tree = MCGSTree::new(&game_state);
-                run_search(
-                    &mut tree,
-                    &game_state,
-                    &SmartUniformBackend,
-                    &config,
-                    simulations,
-                    batch_size,
-                    &mut rng,
-                )
-            })
-        }
+        None => py.allow_threads(|| {
+            let mut tree = MCGSTree::new(&game_state);
+            run_search(
+                &mut tree,
+                &game_state,
+                &SmartUniformBackend,
+                &config,
+                simulations,
+                batch_size,
+                &mut rng,
+            )
+        }),
     };
 
     match result {

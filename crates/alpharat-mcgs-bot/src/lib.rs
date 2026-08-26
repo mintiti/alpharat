@@ -85,9 +85,10 @@ impl McgsBot {
             let encoder = FlatEncoder::new(state.width(), state.height());
             let provider = ExecutionProvider::try_from(self.device.as_str())
                 .unwrap_or_else(|e| panic!("invalid device: {e}"));
-            let onnx: Box<dyn Backend> =
-                Box::new(OnnxBackend::with_provider(&self.model, encoder, provider)
-                    .unwrap_or_else(|e| panic!("failed to load ONNX model '{}': {e}", self.model)));
+            let onnx: Box<dyn Backend> = Box::new(
+                OnnxBackend::with_provider(&self.model, encoder, provider)
+                    .unwrap_or_else(|e| panic!("failed to load ONNX model '{}': {e}", self.model)),
+            );
             if self.cache_size > 0 {
                 return Box::new(CachedBackend::new(onnx, self.cache_size as usize));
             }
@@ -126,9 +127,8 @@ impl McgsBot {
             {
                 let tree = self.tree.as_mut().expect("tree not initialized");
                 let sim = self.sim.as_ref().expect("sim not initialized");
-                let visits = tree.observe(|view| {
-                    view.with_root(|root| root.stats().total_edge_visits)
-                });
+                let visits =
+                    tree.observe(|view| view.with_root(|root| root.stats().total_edge_visits));
                 if visits >= min_sims && ctx.should_stop() {
                     break;
                 }
@@ -153,15 +153,17 @@ impl McgsBot {
             let now = Instant::now();
             let (total, current_best, best_direction) = {
                 let tree = self.tree.as_ref().expect("tree not initialized");
-                tree.observe(|view| view.with_root(|root| {
-                    let best = if is_player1 {
-                        best_p1_outcome(root)
-                    } else {
-                        best_p2_outcome(root)
-                    };
-                    let dir = Direction::try_from(best.action).unwrap_or(Direction::Stay);
-                    (root.stats().total_edge_visits, best.index, dir)
-                }))
+                tree.observe(|view| {
+                    view.with_root(|root| {
+                        let best = if is_player1 {
+                            best_p1_outcome(root)
+                        } else {
+                            best_p2_outcome(root)
+                        };
+                        let dir = Direction::try_from(best.action).unwrap_or(Direction::Stay);
+                        (root.stats().total_edge_visits, best.index, dir)
+                    })
+                })
             };
 
             let best_changed = last_info_best != Some(current_best);
@@ -184,9 +186,7 @@ impl McgsBot {
         let now = Instant::now();
         let total = {
             let tree = self.tree.as_ref().expect("tree not initialized");
-            tree.observe(|view| {
-                view.with_root(|root| root.stats().total_edge_visits)
-            })
+            tree.observe(|view| view.with_root(|root| root.stats().total_edge_visits))
         };
         let nps = compute_nps(total, nps_start, now);
         self.send_info(ctx, total, nps);
@@ -248,8 +248,7 @@ impl McgsBot {
                     } else {
                         best_p2_outcome(root)
                     };
-                    Direction::try_from(best.action)
-                        .expect("invalid direction from outcome_action")
+                    Direction::try_from(best.action).expect("invalid direction from outcome_action")
                 } else {
                     // Stochastic: sample from visit-proportional distribution.
                     let Some(policy) = normalize_visit_policy(root.action_visits(player)) else {

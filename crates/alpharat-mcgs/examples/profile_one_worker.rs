@@ -61,7 +61,11 @@ fn print_phase(label: &str, duration: Duration, runs: u32, total: Duration) {
 fn main() {
     let runs: u32 = std::env::args()
         .nth(1)
-        .map(|value| value.parse().expect("iteration count must be a positive integer"))
+        .map(|value| {
+            value
+                .parse()
+                .expect("iteration count must be a positive integer")
+        })
         .unwrap_or(10);
     assert!(runs > 0, "iteration count must be positive");
 
