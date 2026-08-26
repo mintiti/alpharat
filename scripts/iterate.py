@@ -32,6 +32,9 @@ import argparse
 import json
 import logging
 import sys
+import time
+from dataclasses import asdict
+from datetime import UTC, datetime
 from pathlib import Path
 
 from pydantic import Field
@@ -63,6 +66,8 @@ class IterateSamplingParams(StrictBaseModel):
 
     workers: int = 4
     cache_size: int = 0
+    mux_max_batch_size: int = 256
+    tensorrt_opt_batch: int | None = None
 
 
 class ShardingParams(StrictBaseModel):
@@ -105,7 +110,7 @@ def run_sampling_phase(
     checkpoint_path: Path | None,
     experiments_dir: Path,
     device: str,
-) -> Path:
+) -> tuple[Path, dict[str, object]]:
     """Run the sampling phase using the Rust self-play pipeline.
 
     Args:
@@ -116,7 +121,7 @@ def run_sampling_phase(
         device: Resolved ONNX execution provider (cpu, cuda, coreml, tensorrt).
 
     Returns:
-        Path to the created batch directory.
+        Created batch directory and serializable sampling metrics.
     """
     from alpharat.data.rust_sampling import run_rust_sampling
     from alpharat.mcts.config import RustMCTSConfig
@@ -133,7 +138,7 @@ def run_sampling_phase(
             force_k=config.mcts.force_k,
         )
 
-    batch_dir, _metrics = run_rust_sampling(
+    batch_dir, metrics = run_rust_sampling(
         game=config.game,
         mcts=rust_mcts,
         num_games=config.iteration.games,
@@ -143,8 +148,18 @@ def run_sampling_phase(
         experiments_dir=experiments_dir,
         device=device,
         cache_size=config.sampling.cache_size,
+        mux_max_batch_size=config.sampling.mux_max_batch_size,
+        tensorrt_opt_batch=config.sampling.tensorrt_opt_batch,
     )
-    return batch_dir
+    return batch_dir, asdict(metrics)
+
+
+def _write_timing_record(path: Path, record: dict[str, object]) -> None:
+    """Atomically persist the optional phase-timing record."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(f".{path.name}.tmp")
+    temporary.write_text(json.dumps(record, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    temporary.replace(path)
 
 
 def run_sharding_phase(
@@ -415,6 +430,14 @@ def main() -> None:
         default="auto",
         help="Device for inference (auto, cpu, cuda, coreml, mps, tensorrt)",
     )
+    parser.add_argument(
+        "--timing-output",
+        type=Path,
+        default=None,
+        help=(
+            "Optional JSON record of sample/shard/train/benchmark wall times and sampling telemetry"
+        ),
+    )
     args = parser.parse_args()
 
     config_dir, config_name = split_config_path(args.config)
@@ -457,10 +480,37 @@ def main() -> None:
     max_iterations = args.iterations if args.iterations > 0 else float("inf")
 
     iteration = start_iteration
+    timing_output: Path | None = args.timing_output
+    timing_record: dict[str, object] | None = None
+    timing_iterations: list[dict[str, object]] | None = None
+    if timing_output is not None:
+        timing_iterations = []
+        timing_record = {
+            "protocol_version": 1,
+            "started_at": datetime.now(UTC).isoformat(),
+            "config": str(Path(args.config).resolve()),
+            "prefix": prefix,
+            "sampling_device": sampling_device,
+            "training_device": training_device,
+            "start_checkpoint": str(current_checkpoint) if current_checkpoint else None,
+            "iterations": timing_iterations,
+        }
+        _write_timing_record(timing_output, timing_record)
 
     try:
         while iteration < max_iterations:
             iter_name = f"{prefix}_iter{iteration}"
+            iteration_started = time.perf_counter()
+            phase_timings: dict[str, object] = {}
+            iteration_timing: dict[str, object] = {
+                "iteration": iteration,
+                "name": iter_name,
+                "started_at": datetime.now(UTC).isoformat(),
+                "phases": phase_timings,
+            }
+            if timing_record is not None and timing_iterations is not None and timing_output:
+                timing_iterations.append(iteration_timing)
+                _write_timing_record(timing_output, timing_record)
 
             logger.info("")
             logger.info("=" * 60)
@@ -477,31 +527,47 @@ def main() -> None:
             else:
                 logger.info("Using uniform priors (no checkpoint)")
 
-            run_sampling_phase(
+            phase_started = time.perf_counter()
+            batch_dir, sampling_metrics = run_sampling_phase(
                 config,
                 batch_group,
                 current_checkpoint,
                 experiments_dir,
                 sampling_device,
             )
+            phase_timings["sampling"] = {
+                "wall_seconds": time.perf_counter() - phase_started,
+                "artifact": str(batch_dir),
+                "metrics": sampling_metrics,
+            }
+            if timing_record is not None and timing_output:
+                _write_timing_record(timing_output, timing_record)
 
             # --- Phase 2: Sharding ---
             shard_group = f"{iter_name}_shards"
             logger.info("")
             logger.info("Phase 2: Sharding")
             logger.info("-" * 40)
+            phase_started = time.perf_counter()
             shard_id = run_sharding_phase(
                 config,
                 shard_group,
                 batch_group,
                 experiments_dir,
             )
+            phase_timings["sharding"] = {
+                "wall_seconds": time.perf_counter() - phase_started,
+                "artifact": shard_id,
+            }
+            if timing_record is not None and timing_output:
+                _write_timing_record(timing_output, timing_record)
 
             # --- Phase 3: Training ---
             run_name = iter_name
             logger.info("")
             logger.info(f"Phase 3: Training ({config.iteration.epochs} epochs)")
             logger.info("-" * 40)
+            phase_started = time.perf_counter()
             checkpoint_path = run_training_phase(
                 config,
                 run_name,
@@ -510,6 +576,12 @@ def main() -> None:
                 training_device,
                 resume_from=current_checkpoint,
             )
+            phase_timings["training"] = {
+                "wall_seconds": time.perf_counter() - phase_started,
+                "artifact": str(checkpoint_path),
+            }
+            if timing_record is not None and timing_output:
+                _write_timing_record(timing_output, timing_record)
 
             logger.info(f"Checkpoint: {checkpoint_path}")
 
@@ -519,6 +591,7 @@ def main() -> None:
                 logger.info("")
                 logger.info("Phase 4: Benchmark")
                 logger.info("-" * 40)
+                phase_started = time.perf_counter()
                 run_benchmark_phase(
                     config,
                     benchmark_name,
@@ -527,6 +600,15 @@ def main() -> None:
                     experiments_dir,
                     training_device,
                 )
+                phase_timings["benchmark"] = {
+                    "wall_seconds": time.perf_counter() - phase_started,
+                    "artifact": benchmark_name,
+                }
+
+            iteration_timing["wall_seconds"] = time.perf_counter() - iteration_started
+            iteration_timing["completed_at"] = datetime.now(UTC).isoformat()
+            if timing_record is not None and timing_output:
+                _write_timing_record(timing_output, timing_record)
 
             # Update state for next iteration
             current_checkpoint = checkpoint_path

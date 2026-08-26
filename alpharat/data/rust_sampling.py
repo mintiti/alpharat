@@ -65,6 +65,11 @@ class RustSamplingMetrics:
     total_collisions: int
     cache_hits: int
     cache_misses: int
+    inference_batches: int
+    inference_positions: int
+    inference_nn_seconds: float
+    inference_wait_seconds: float
+    inference_batch_histogram: tuple[tuple[int, int], ...]
 
     @property
     def games_per_second(self) -> float:
@@ -114,6 +119,25 @@ class RustSamplingMetrics:
         total = self.cache_hits + self.cache_misses
         return self.cache_hits / total if total > 0 else 0.0
 
+    @property
+    def inference_avg_batch_size(self) -> float:
+        if self.inference_batches == 0:
+            return 0.0
+        return self.inference_positions / self.inference_batches
+
+    def inference_batch_percentile(self, percentile: float) -> int:
+        """Return a nearest-rank percentile from the exact achieved-batch histogram."""
+        if not self.inference_batch_histogram:
+            return 0
+        total = sum(count for _, count in self.inference_batch_histogram)
+        rank = max(1, int(total * percentile + 0.999999))
+        cumulative = 0
+        for batch, count in self.inference_batch_histogram:
+            cumulative += count
+            if cumulative >= rank:
+                return batch
+        return self.inference_batch_histogram[-1][0]
+
 
 def _ensure_onnx(checkpoint_path: str) -> str | None:
     """Return path to ONNX model, auto-exporting from .pt if needed.
@@ -143,6 +167,7 @@ def run_rust_sampling(
     num_threads: int = 4,
     max_games_per_bundle: int = 32,
     mux_max_batch_size: int = 256,
+    tensorrt_opt_batch: int | None = None,
     checkpoint: str | None = None,
     device: str = "auto",
     cache_size: int = 0,
@@ -162,6 +187,7 @@ def run_rust_sampling(
         num_threads: Worker threads for Rust self-play.
         max_games_per_bundle: Max games per NPZ bundle file.
         mux_max_batch_size: Max batch size for ONNX mux backend.
+        tensorrt_opt_batch: TensorRT dynamic-profile optimization point. Defaults to max batch.
         checkpoint: Path to .pt checkpoint for NN-guided sampling.
         device: Execution provider — "auto", "cpu", "coreml", "mps", "cuda", "tensorrt".
         cache_size: Thread-local NN eval cache capacity (0 = disabled).
@@ -238,6 +264,7 @@ def run_rust_sampling(
         "max_games_per_bundle": max_games_per_bundle,
         "onnx_model_path": onnx_path,
         "mux_max_batch_size": mux_max_batch_size,
+        "tensorrt_opt_batch": tensorrt_opt_batch,
         "device": device,
         "cache_size": cache_size,
     }
@@ -273,6 +300,13 @@ def run_rust_sampling(
         total_collisions=stats.total_collisions,
         cache_hits=stats.cache_hits,
         cache_misses=stats.cache_misses,
+        inference_batches=stats.inference_batches,
+        inference_positions=stats.inference_positions,
+        inference_nn_seconds=stats.inference_nn_seconds,
+        inference_wait_seconds=stats.inference_wait_seconds,
+        inference_batch_histogram=tuple(
+            (int(batch), int(count)) for batch, count in stats.inference_batch_histogram
+        ),
     )
 
     logger.info(
@@ -291,6 +325,16 @@ def run_rust_sampling(
             metrics.cache_hits,
             metrics.cache_misses,
             metrics.cache_hit_rate * 100,
+        )
+    if metrics.inference_batches > 0:
+        logger.info(
+            "Inference batches: %d calls, avg %.1f positions, p50=%d, p90=%d, range=%d..%d",
+            metrics.inference_batches,
+            metrics.inference_avg_batch_size,
+            metrics.inference_batch_percentile(0.5),
+            metrics.inference_batch_percentile(0.9),
+            metrics.inference_batch_histogram[0][0],
+            metrics.inference_batch_histogram[-1][0],
         )
 
     return batch_dir, metrics
