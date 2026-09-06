@@ -293,6 +293,7 @@ mod tests {
             total_nn_evals: 0,
             total_terminals: 0,
             total_collisions: 0,
+            total_tt_stop_hits: 0,
         }
     }
 

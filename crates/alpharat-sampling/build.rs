@@ -1,4 +1,6 @@
 fn main() {
+    #[cfg(feature = "inference-trace")]
+    build_nvtx();
     // When the tensorrt feature is active:
     // 1. Compile the C++ TRT shim (optimization profiles, session management)
     // 2. Link libcudart (raw CUDA FFI) and TRT-RTX shared libs
@@ -170,4 +172,18 @@ fn link_cudart() {
     // 3. Fallback: try system default paths
     println!("cargo:rustc-link-search=native=/usr/local/cuda/lib64");
     println!("cargo:rustc-link-lib=dylib=cudart");
+}
+
+#[cfg(feature = "inference-trace")]
+fn build_nvtx() {
+    println!("cargo:rerun-if-env-changed=NVTX_INCLUDE_DIR");
+    println!("cargo:rerun-if-changed=cpp/inference_nvtx.cpp");
+    let include = std::env::var("NVTX_INCLUDE_DIR")
+        .expect("inference-trace requires NVTX_INCLUDE_DIR containing nvtx3/nvToolsExt.h");
+    cc::Build::new()
+        .cpp(true)
+        .std("c++17")
+        .file("cpp/inference_nvtx.cpp")
+        .include(include)
+        .compile("inference_nvtx");
 }

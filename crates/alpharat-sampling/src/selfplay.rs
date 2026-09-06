@@ -129,6 +129,8 @@ pub struct GameRecord {
     pub total_terminals: u64,
     /// Total collision descents (wasted — no backup).
     pub total_collisions: u64,
+    /// MCGS productive stops at an existing transposition (zero for MCTS).
+    pub total_tt_stop_hits: u64,
 }
 
 /// Aggregate stats computed from a set of GameRecords.
@@ -151,6 +153,8 @@ pub struct SelfPlayStats {
     pub total_terminals: u64,
     /// Total collision descents (wasted — no backup).
     pub total_collisions: u64,
+    /// MCGS productive stops at an existing transposition (zero for MCTS).
+    pub total_tt_stop_hits: u64,
     /// NN cache hits (positions served from cache, skipping backend).
     pub cache_hits: u64,
     /// NN cache misses (positions forwarded to backend).
@@ -181,6 +185,7 @@ impl SelfPlayStats {
             total_nn_evals: 0,
             total_terminals: 0,
             total_collisions: 0,
+            total_tt_stop_hits: 0,
             cache_hits: 0,
             cache_misses: 0,
         }
@@ -195,6 +200,7 @@ impl SelfPlayStats {
         self.total_nn_evals += game.total_nn_evals;
         self.total_terminals += game.total_terminals;
         self.total_collisions += game.total_collisions;
+        self.total_tt_stop_hits += game.total_tt_stop_hits;
         self.total_cheese_collected += game.final_p1_score + game.final_p2_score;
         self.total_cheese_available += game.cheese_available as u32;
 
@@ -299,10 +305,12 @@ impl SelfPlayStats {
     }
 
     /// Fraction of total descents that were collisions.
-    /// Denominator includes collisions (nn_evals + terminals + collisions).
+    /// Denominator includes NN evaluations, terminals, MCGS TT stops, and collisions.
     pub fn collision_fraction(&self) -> f64 {
-        let total_descents =
-            self.total_nn_evals + self.total_terminals + self.total_collisions;
+        let total_descents = self.total_nn_evals
+            + self.total_terminals
+            + self.total_tt_stop_hits
+            + self.total_collisions;
         if total_descents > 0 {
             self.total_collisions as f64 / total_descents as f64
         } else {
@@ -383,11 +391,7 @@ fn mix_seed(mut value: u64) -> u64 {
 }
 
 fn indexed_seed(master_seed: u64, game_index: usize, domain: u64) -> u64 {
-    mix_seed(
-        master_seed
-            ^ domain
-            ^ (game_index as u64).wrapping_mul(0x9e37_79b9_7f4a_7c15),
-    )
+    mix_seed(master_seed ^ domain ^ (game_index as u64).wrapping_mul(0x9e37_79b9_7f4a_7c15))
 }
 
 #[cfg(any(feature = "python", test))]
@@ -542,11 +546,131 @@ fn record_position(
     }
 }
 
-/// Play a single game to completion, returning a GameRecord.
+/// Private dispatch keeps the recording and game-worker lifecycle shared.
+trait GameSearch {
+    type Config: Sync;
+    type Tree;
+    fn tree(game: &GameState) -> Self::Tree;
+    fn search(
+        tree: &mut Self::Tree,
+        game: &GameState,
+        backend: &dyn Backend,
+        search: &Self::Config,
+        config: &SelfPlayConfig,
+        rng: &mut impl rand::Rng,
+    ) -> Result<(SearchResult, u32), BackendError>;
+    fn advance(tree: &mut Self::Tree, game: &GameState, a1: u8, a2: u8);
+}
+struct MctsSearch;
+impl GameSearch for MctsSearch {
+    type Config = SearchConfig;
+    type Tree = MCTSTree;
+    fn tree(game: &GameState) -> Self::Tree {
+        MCTSTree::new(game)
+    }
+    fn search(
+        tree: &mut Self::Tree,
+        game: &GameState,
+        backend: &dyn Backend,
+        search: &Self::Config,
+        config: &SelfPlayConfig,
+        rng: &mut impl rand::Rng,
+    ) -> Result<(SearchResult, u32), BackendError> {
+        run_search(
+            tree,
+            game,
+            backend,
+            search,
+            config.n_sims,
+            config.batch_size,
+            rng,
+        )
+        .map(|r| (r, 0))
+    }
+    fn advance(tree: &mut Self::Tree, game: &GameState, a1: u8, a2: u8) {
+        if !tree.advance_root(a1, a2) {
+            tree.reinit(game);
+        }
+    }
+}
+struct McgsSearch;
+impl GameSearch for McgsSearch {
+    type Config = alpharat_mcgs::SearchConfig;
+    type Tree = alpharat_mcgs::MCGSTree;
+    fn tree(game: &GameState) -> Self::Tree {
+        alpharat_mcgs::MCGSTree::new(game)
+    }
+    fn search(
+        tree: &mut Self::Tree,
+        game: &GameState,
+        backend: &dyn Backend,
+        search: &Self::Config,
+        config: &SelfPlayConfig,
+        rng: &mut impl rand::Rng,
+    ) -> Result<(SearchResult, u32), BackendError> {
+        let r = alpharat_mcgs::run_search(
+            tree,
+            game,
+            backend,
+            search,
+            config.n_sims,
+            config.batch_size,
+            rng,
+        )?;
+        Ok((
+            SearchResult {
+                policy_p1: r.policy_p1,
+                policy_p2: r.policy_p2,
+                value_p1: r.value_p1,
+                value_p2: r.value_p2,
+                visit_counts_p1: r.visit_counts_p1,
+                visit_counts_p2: r.visit_counts_p2,
+                prior_p1: r.prior_p1,
+                prior_p2: r.prior_p2,
+                q_values_p1: r.q_values_p1,
+                q_values_p2: r.q_values_p2,
+                total_visits: r.total_visits,
+                nn_evals: r.nn_evals,
+                terminals: r.terminals,
+                collisions: r.collisions,
+            },
+            r.tt_stop_hits,
+        ))
+    }
+    fn advance(tree: &mut Self::Tree, game: &GameState, a1: u8, a2: u8) {
+        tree.advance_root(game, a1, a2);
+        tree.evict_expired();
+    }
+}
+
+/// Play one game with the existing MCTS search policy.
 pub fn play_game(
-    mut game: GameState,
+    game: GameState,
     backend: &dyn Backend,
     search_config: &SearchConfig,
+    config: &SelfPlayConfig,
+    rng: &mut impl rand::Rng,
+    game_index: u32,
+) -> Result<GameRecord, BackendError> {
+    play_game_with::<MctsSearch>(game, backend, search_config, config, rng, game_index)
+}
+
+/// Play one game with sequential MCGS and root reuse.
+pub fn play_mcgs_game(
+    game: GameState,
+    backend: &dyn Backend,
+    search_config: &alpharat_mcgs::SearchConfig,
+    config: &SelfPlayConfig,
+    rng: &mut impl rand::Rng,
+    game_index: u32,
+) -> Result<GameRecord, BackendError> {
+    play_game_with::<McgsSearch>(game, backend, search_config, config, rng, game_index)
+}
+
+fn play_game_with<S: GameSearch>(
+    mut game: GameState,
+    backend: &dyn Backend,
+    search_config: &S::Config,
     config: &SelfPlayConfig,
     rng: &mut impl rand::Rng,
     game_index: u32,
@@ -558,23 +682,18 @@ pub fn play_game(
     let initial_cheese = build_cheese_mask(&game);
     let cheese_available = game.cheese.remaining_cheese();
 
-    let mut tree = MCTSTree::new(&game);
+    let mut tree = S::tree(&game);
     let mut positions = Vec::with_capacity(game.max_turns as usize);
     let mut total_simulations: u64 = 0;
     let mut total_nn_evals: u64 = 0;
     let mut total_terminals: u64 = 0;
     let mut total_collisions: u64 = 0;
+    let mut total_tt_stop_hits: u64 = 0;
 
     while !game.check_game_over() {
-        let result = run_search(
-            &mut tree,
-            &game,
-            backend,
-            search_config,
-            config.n_sims,
-            config.batch_size,
-            rng,
-        )?;
+        let (result, tt_stop_hits) =
+            S::search(&mut tree, &game, backend, search_config, config, rng)?;
+        total_tt_stop_hits += u64::from(tt_stop_hits);
         total_simulations += result.total_visits as u64;
         total_nn_evals += result.nn_evals as u64;
         total_terminals += result.terminals as u64;
@@ -591,9 +710,7 @@ pub fn play_game(
 
         // Tree reuse: advance root to the child matching the played actions.
         // Falls back to fresh tree if the action pair wasn't explored.
-        if !tree.advance_root(a1, a2) {
-            tree.reinit(&game);
-        }
+        S::advance(&mut tree, &game, a1, a2);
     }
 
     let final_p1 = game.player1.score;
@@ -625,6 +742,7 @@ pub fn play_game(
         total_nn_evals,
         total_terminals,
         total_collisions,
+        total_tt_stop_hits,
     })
 }
 
@@ -637,10 +755,10 @@ pub fn play_game(
 /// Each call claims games via `next_game`, plays them, updates progress counters,
 /// and passes completed records to `on_record`. Only the record destination differs
 /// between callers (vec push vs channel send).
-fn game_worker_loop<F>(
+fn game_worker_loop<S: GameSearch, F>(
     games: &[GameState],
     backend: &dyn Backend,
-    search_config: &SearchConfig,
+    search_config: &S::Config,
     config: &SelfPlayConfig,
     next_game: &AtomicU32,
     progress: Option<&SelfPlayProgress>,
@@ -658,7 +776,7 @@ where
         }
         let record = if let Some(master_seed) = config.seed {
             let mut rng = SmallRng::seed_from_u64(search_seed(master_seed, idx));
-            play_game(
+            play_game_with::<S>(
                 games[idx].clone(),
                 backend,
                 search_config,
@@ -667,7 +785,7 @@ where
                 idx as u32,
             )?
         } else {
-            play_game(
+            play_game_with::<S>(
                 games[idx].clone(),
                 backend,
                 search_config,
@@ -701,10 +819,10 @@ where
 /// master seed, each game uses an index-derived RNG independent of the worker
 /// that claims it.
 /// Results are sorted by `game_index` before returning.
-pub fn run_self_play(
+fn run_self_play_with<S: GameSearch>(
     games: &[GameState],
     backend: &dyn Backend,
-    search_config: &SearchConfig,
+    search_config: &S::Config,
     config: &SelfPlayConfig,
     progress: Option<&SelfPlayProgress>,
 ) -> Result<SelfPlayResult, BackendError> {
@@ -716,7 +834,7 @@ pub fn run_self_play(
             .map(|_| {
                 s.spawn(|| {
                     let mut local = Vec::new();
-                    game_worker_loop(
+                    game_worker_loop::<S, _>(
                         games,
                         backend,
                         search_config,
@@ -765,10 +883,10 @@ pub struct SelfPlayToDiskResult {
 /// Game threads play games and send records through a channel. A dedicated
 /// writer thread accumulates records and flushes bundles when full.
 /// The channel is unbounded — game threads never block on I/O.
-pub fn run_self_play_to_disk(
+fn run_self_play_to_disk_with<S: GameSearch>(
     games: &[GameState],
     backend: &dyn Backend,
-    search_config: &SearchConfig,
+    search_config: &S::Config,
     config: &SelfPlayConfig,
     output_dir: &Path,
     max_games_per_bundle: usize,
@@ -813,7 +931,7 @@ pub fn run_self_play_to_disk(
             .map(|_| {
                 let tx = tx.clone();
                 s.spawn(move || {
-                    game_worker_loop(
+                    game_worker_loop::<S, _>(
                         games,
                         backend,
                         search_config,
@@ -858,12 +976,76 @@ pub fn run_self_play_to_disk(
 // Tests
 // ---------------------------------------------------------------------------
 
+/// Run independent MCTS games with the existing sampler contract.
+pub fn run_self_play(
+    games: &[GameState],
+    backend: &dyn Backend,
+    search_config: &SearchConfig,
+    config: &SelfPlayConfig,
+    progress: Option<&SelfPlayProgress>,
+) -> Result<SelfPlayResult, BackendError> {
+    run_self_play_with::<MctsSearch>(games, backend, search_config, config, progress)
+}
+
+/// Run independent MCGS games; each game owns one sequential search tree.
+pub fn run_mcgs_self_play(
+    games: &[GameState],
+    backend: &dyn Backend,
+    search_config: &alpharat_mcgs::SearchConfig,
+    config: &SelfPlayConfig,
+    progress: Option<&SelfPlayProgress>,
+) -> Result<SelfPlayResult, BackendError> {
+    run_self_play_with::<McgsSearch>(games, backend, search_config, config, progress)
+}
+
+/// Stream independent MCTS games through the existing bundle writer.
+pub fn run_self_play_to_disk(
+    games: &[GameState],
+    backend: &dyn Backend,
+    search_config: &SearchConfig,
+    config: &SelfPlayConfig,
+    output_dir: &Path,
+    max_games_per_bundle: usize,
+    progress: Option<&SelfPlayProgress>,
+) -> Result<SelfPlayToDiskResult, SelfPlayError> {
+    run_self_play_to_disk_with::<MctsSearch>(
+        games,
+        backend,
+        search_config,
+        config,
+        output_dir,
+        max_games_per_bundle,
+        progress,
+    )
+}
+
+/// Stream independent MCGS games through the same recording/writer path.
+pub fn run_mcgs_self_play_to_disk(
+    games: &[GameState],
+    backend: &dyn Backend,
+    search_config: &alpharat_mcgs::SearchConfig,
+    config: &SelfPlayConfig,
+    output_dir: &Path,
+    max_games_per_bundle: usize,
+    progress: Option<&SelfPlayProgress>,
+) -> Result<SelfPlayToDiskResult, SelfPlayError> {
+    run_self_play_to_disk_with::<McgsSearch>(
+        games,
+        backend,
+        search_config,
+        config,
+        output_dir,
+        max_games_per_bundle,
+        progress,
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use alpharat_mcts::SmartUniformBackend;
-    use pyrat::MudMap;
     use pyrat::GameBuilder;
+    use pyrat::MudMap;
     use std::collections::HashMap;
 
     const BACKEND: SmartUniformBackend = SmartUniformBackend;
@@ -949,14 +1131,8 @@ mod tests {
     #[test]
     fn build_maze_array_walls() {
         let mut walls = HashMap::new();
-        walls.insert(
-            Coordinates::new(2, 2),
-            vec![Coordinates::new(2, 3)],
-        );
-        walls.insert(
-            Coordinates::new(2, 3),
-            vec![Coordinates::new(2, 2)],
-        );
+        walls.insert(Coordinates::new(2, 2), vec![Coordinates::new(2, 3)]);
+        walls.insert(Coordinates::new(2, 3), vec![Coordinates::new(2, 2)]);
         let game = GameBuilder::new(5, 5)
             .with_custom_maze(walls, MudMap::new())
             .with_custom_positions(Coordinates::new(0, 0), Coordinates::new(4, 4))
@@ -969,19 +1145,31 @@ mod tests {
 
         // Wall between (2,2) and (2,3): UP from (2,2) blocked
         let idx_22 = (2 * 5 + 2) * 4;
-        assert_eq!(maze[idx_22 + 0], -1, "UP from (2,2) should be blocked by wall");
+        assert_eq!(
+            maze[idx_22 + 0],
+            -1,
+            "UP from (2,2) should be blocked by wall"
+        );
         assert_eq!(maze[idx_22 + 1], 1, "RIGHT from (2,2) should be open");
 
         // DOWN from (2,3) should also be blocked
         let idx_23 = (3 * 5 + 2) * 4;
-        assert_eq!(maze[idx_23 + 2], -1, "DOWN from (2,3) should be blocked by wall");
+        assert_eq!(
+            maze[idx_23 + 2],
+            -1,
+            "DOWN from (2,3) should be blocked by wall"
+        );
     }
 
     // ---- build_cheese_mask ----
 
     #[test]
     fn build_cheese_mask_positions() {
-        let cheese = [Coordinates::new(0, 0), Coordinates::new(2, 3), Coordinates::new(4, 4)];
+        let cheese = [
+            Coordinates::new(0, 0),
+            Coordinates::new(2, 3),
+            Coordinates::new(4, 4),
+        ];
         let game = open_5x5(Coordinates::new(1, 1), Coordinates::new(3, 3), &cheese);
         let mask = build_cheese_mask(&game);
         assert_eq!(mask.len(), 25);
@@ -1003,15 +1191,26 @@ mod tests {
     fn play_game_completes() {
         let game = short_game();
         let search = SearchConfig::default();
-        let sp = SelfPlayConfig { n_sims: 16, batch_size: 8, num_threads: 1, seed: None };
+        let sp = SelfPlayConfig {
+            n_sims: 16,
+            batch_size: 8,
+            num_threads: 1,
+            seed: None,
+        };
         let mut rng = SmallRng::seed_from_u64(42);
         let record = play_game(game, &BACKEND, &search, &sp, &mut rng, 0).unwrap();
 
-        assert!(!record.positions.is_empty(), "should have at least one position");
+        assert!(
+            !record.positions.is_empty(),
+            "should have at least one position"
+        );
         assert!(record.positions.len() <= 5, "max 5 turns");
         assert!(record.final_p1_score >= 0.0);
         assert!(record.final_p2_score >= 0.0);
-        assert!(matches!(record.result, GameOutcome::P1Win | GameOutcome::P2Win | GameOutcome::Draw));
+        assert!(matches!(
+            record.result,
+            GameOutcome::P1Win | GameOutcome::P2Win | GameOutcome::Draw
+        ));
         assert_eq!(record.width, 5);
         assert_eq!(record.height, 5);
         assert_eq!(record.game_index, 0);
@@ -1021,7 +1220,12 @@ mod tests {
     fn play_game_position_fields() {
         let game = short_game();
         let search = SearchConfig::default();
-        let sp = SelfPlayConfig { n_sims: 16, batch_size: 8, num_threads: 1, seed: None };
+        let sp = SelfPlayConfig {
+            n_sims: 16,
+            batch_size: 8,
+            num_threads: 1,
+            seed: None,
+        };
         let mut rng = SmallRng::seed_from_u64(42);
         let record = play_game(game, &BACKEND, &search, &sp, &mut rng, 0).unwrap();
 
@@ -1043,7 +1247,12 @@ mod tests {
     fn play_game_simulations_tracked() {
         let game = short_game();
         let search = SearchConfig::default();
-        let sp = SelfPlayConfig { n_sims: 32, batch_size: 8, num_threads: 1, seed: None };
+        let sp = SelfPlayConfig {
+            n_sims: 32,
+            batch_size: 8,
+            num_threads: 1,
+            seed: None,
+        };
         let mut rng = SmallRng::seed_from_u64(42);
         let record = play_game(game, &BACKEND, &search, &sp, &mut rng, 0).unwrap();
 
@@ -1063,7 +1272,12 @@ mod tests {
     fn play_game_maze_and_cheese_recorded() {
         let game = standard_game();
         let search = SearchConfig::default();
-        let sp = SelfPlayConfig { n_sims: 8, batch_size: 8, num_threads: 1, seed: None };
+        let sp = SelfPlayConfig {
+            n_sims: 8,
+            batch_size: 8,
+            num_threads: 1,
+            seed: None,
+        };
         let mut rng = SmallRng::seed_from_u64(42);
         let record = play_game(game, &BACKEND, &search, &sp, &mut rng, 0).unwrap();
 
@@ -1078,7 +1292,12 @@ mod tests {
     fn run_self_play_game_count() {
         let games: Vec<GameState> = (0..10).map(|_| short_game()).collect();
         let search = SearchConfig::default();
-        let sp = SelfPlayConfig { n_sims: 8, batch_size: 8, num_threads: 2, seed: None };
+        let sp = SelfPlayConfig {
+            n_sims: 8,
+            batch_size: 8,
+            num_threads: 2,
+            seed: None,
+        };
 
         let result = run_self_play(&games, &BACKEND, &search, &sp, None).unwrap();
 
@@ -1090,13 +1309,21 @@ mod tests {
     fn run_self_play_game_index_order() {
         let games: Vec<GameState> = (0..8).map(|_| short_game()).collect();
         let search = SearchConfig::default();
-        let sp = SelfPlayConfig { n_sims: 8, batch_size: 8, num_threads: 4, seed: None };
+        let sp = SelfPlayConfig {
+            n_sims: 8,
+            batch_size: 8,
+            num_threads: 4,
+            seed: None,
+        };
 
         let result = run_self_play(&games, &BACKEND, &search, &sp, None).unwrap();
 
         // Results should be sorted by game_index
         for (i, record) in result.games.iter().enumerate() {
-            assert_eq!(record.game_index, i as u32, "game_index mismatch at position {i}");
+            assert_eq!(
+                record.game_index, i as u32,
+                "game_index mismatch at position {i}"
+            );
         }
     }
 
@@ -1144,7 +1371,12 @@ mod tests {
     fn run_self_play_progress() {
         let games: Vec<GameState> = (0..4).map(|_| short_game()).collect();
         let search = SearchConfig::default();
-        let sp = SelfPlayConfig { n_sims: 8, batch_size: 8, num_threads: 2, seed: None };
+        let sp = SelfPlayConfig {
+            n_sims: 8,
+            batch_size: 8,
+            num_threads: 2,
+            seed: None,
+        };
         let progress = SelfPlayProgress::new();
 
         let result = run_self_play(&games, &BACKEND, &search, &sp, Some(&progress)).unwrap();
@@ -1172,7 +1404,7 @@ mod tests {
                 max_turns: 10,
                 maze: vec![],
                 initial_cheese: vec![],
-                positions: vec![],     // 0 turns for this one
+                positions: vec![], // 0 turns for this one
                 final_p1_score: 3.0,
                 final_p2_score: 2.0,
                 result: GameOutcome::P1Win,
@@ -1183,6 +1415,7 @@ mod tests {
                 total_nn_evals: 0,
                 total_terminals: 0,
                 total_collisions: 0,
+                total_tt_stop_hits: 0,
             },
             GameRecord {
                 width: 5,
@@ -1243,6 +1476,7 @@ mod tests {
                 total_nn_evals: 0,
                 total_terminals: 0,
                 total_collisions: 0,
+                total_tt_stop_hits: 0,
             },
             GameRecord {
                 width: 5,
@@ -1250,28 +1484,26 @@ mod tests {
                 max_turns: 10,
                 maze: vec![],
                 initial_cheese: vec![],
-                positions: vec![
-                    PositionRecord {
-                        p1_pos: [0, 0],
-                        p2_pos: [4, 4],
-                        p1_score: 0.0,
-                        p2_score: 0.0,
-                        p1_mud: 0,
-                        p2_mud: 0,
-                        turn: 0,
-                        cheese_mask: vec![],
-                        value_p1: 0.0,
-                        value_p2: 0.0,
-                        visit_counts_p1: [0.0; 5],
-                        visit_counts_p2: [0.0; 5],
-                        prior_p1: [0.0; 5],
-                        prior_p2: [0.0; 5],
-                        policy_p1: [0.0; 5],
-                        policy_p2: [0.0; 5],
-                        action_p1: 0,
-                        action_p2: 0,
-                    },
-                ],
+                positions: vec![PositionRecord {
+                    p1_pos: [0, 0],
+                    p2_pos: [4, 4],
+                    p1_score: 0.0,
+                    p2_score: 0.0,
+                    p1_mud: 0,
+                    p2_mud: 0,
+                    turn: 0,
+                    cheese_mask: vec![],
+                    value_p1: 0.0,
+                    value_p2: 0.0,
+                    visit_counts_p1: [0.0; 5],
+                    visit_counts_p2: [0.0; 5],
+                    prior_p1: [0.0; 5],
+                    prior_p2: [0.0; 5],
+                    policy_p1: [0.0; 5],
+                    policy_p2: [0.0; 5],
+                    action_p1: 0,
+                    action_p2: 0,
+                }],
                 final_p1_score: 1.0,
                 final_p2_score: 4.0,
                 result: GameOutcome::P2Win,
@@ -1282,6 +1514,7 @@ mod tests {
                 total_nn_evals: 0,
                 total_terminals: 0,
                 total_collisions: 0,
+                total_tt_stop_hits: 0,
             },
         ];
 
@@ -1342,7 +1575,7 @@ mod tests {
         // 3x3 grid, cheese at (1,1). P1 moves to (1,1) and collects it.
         let positions = vec![
             pos_record([0, 0], [2, 2], &[(1, 1)]),
-            pos_record([1, 1], [2, 2], &[]),       // cheese gone, P1 is there
+            pos_record([1, 1], [2, 2], &[]), // cheese gone, P1 is there
         ];
         // Build a 3x3 game with no cheese left (final state).
         let game = GameBuilder::new(3, 3)
@@ -1362,7 +1595,7 @@ mod tests {
     fn cheese_outcomes_p2_collects() {
         let positions = vec![
             pos_record([0, 0], [2, 2], &[(2, 2)]),
-            pos_record([0, 0], [2, 2], &[]),       // cheese gone, P2 was already there
+            pos_record([0, 0], [2, 2], &[]), // cheese gone, P2 was already there
         ];
         let game = GameBuilder::new(3, 3)
             .with_open_maze()
@@ -1382,7 +1615,7 @@ mod tests {
         // Both players land on the same cheese cell.
         let positions = vec![
             pos_record([0, 0], [2, 2], &[(1, 1)]),
-            pos_record([1, 1], [1, 1], &[]),       // both at (1,1)
+            pos_record([1, 1], [1, 1], &[]), // both at (1,1)
         ];
         let game = GameBuilder::new(3, 3)
             .with_open_maze()
@@ -1400,9 +1633,7 @@ mod tests {
     #[test]
     fn cheese_outcomes_uncollected() {
         // Cheese at (1,1) never collected — still present in final state.
-        let positions = vec![
-            pos_record([0, 0], [2, 2], &[(1, 1)]),
-        ];
+        let positions = vec![pos_record([0, 0], [2, 2], &[(1, 1)])];
         let game = GameBuilder::new(3, 3)
             .with_open_maze()
             .with_custom_positions(Coordinates::new(0, 0), Coordinates::new(2, 2))
@@ -1462,8 +1693,8 @@ mod tests {
         // Turn 2: P2 collects (2,2)
         let positions = vec![
             pos_record([1, 0], [1, 2], &[(0, 0), (2, 2)]),
-            pos_record([0, 0], [1, 2], &[(2, 2)]),        // P1 at (0,0), cheese gone
-            pos_record([0, 0], [2, 2], &[]),               // P2 at (2,2), cheese gone
+            pos_record([0, 0], [1, 2], &[(2, 2)]), // P1 at (0,0), cheese gone
+            pos_record([0, 0], [2, 2], &[]),       // P2 at (2,2), cheese gone
         ];
         let game = GameBuilder::new(3, 3)
             .with_open_maze()
@@ -1474,17 +1705,15 @@ mod tests {
             .create(None)
             .unwrap();
         let outcomes = compute_cheese_outcomes(&positions, &game, 3, 3);
-        assert_eq!(outcomes[0 * 3 + 0], CheeseOutcome::P1Win as u8);   // (0,0)
-        assert_eq!(outcomes[2 * 3 + 2], CheeseOutcome::P2Win as u8);   // (2,2)
+        assert_eq!(outcomes[0 * 3 + 0], CheeseOutcome::P1Win as u8); // (0,0)
+        assert_eq!(outcomes[2 * 3 + 2], CheeseOutcome::P2Win as u8); // (2,2)
     }
 
     #[test]
     fn cheese_outcomes_last_turn_uses_final_state() {
         // Only one position, cheese collected on that move → uses final game state.
         // P1 starts at (0,0), moves to (1,0) where cheese is.
-        let positions = vec![
-            pos_record([0, 0], [2, 2], &[(1, 0)]),
-        ];
+        let positions = vec![pos_record([0, 0], [2, 2], &[(1, 0)])];
         // Final state: P1 at (1,0), no cheese left.
         let game = GameBuilder::new(3, 3)
             .with_open_maze()
@@ -1502,7 +1731,12 @@ mod tests {
     fn play_game_cheese_outcomes_populated() {
         let game = standard_game(); // 5x5, 3 cheese
         let search = SearchConfig::default();
-        let sp = SelfPlayConfig { n_sims: 16, batch_size: 8, num_threads: 1, seed: None };
+        let sp = SelfPlayConfig {
+            n_sims: 16,
+            batch_size: 8,
+            num_threads: 1,
+            seed: None,
+        };
         let mut rng = SmallRng::seed_from_u64(42);
         let record = play_game(game, &BACKEND, &search, &sp, &mut rng, 0).unwrap();
 
@@ -1553,7 +1787,11 @@ mod tests {
 
         // DOWN from (2,3) → (2,2) should also be mud cost
         let idx_23 = (3 * 5 + 2) * 4;
-        assert_eq!(maze[idx_23 + 2], 3, "DOWN from (2,3) through mud should be 3");
+        assert_eq!(
+            maze[idx_23 + 2],
+            3,
+            "DOWN from (2,3) through mud should be 3"
+        );
     }
 
     #[test]
@@ -1562,7 +1800,12 @@ mod tests {
         // forcing the reinit fallback path in play_game.
         let game = short_game();
         let search = SearchConfig::default();
-        let sp = SelfPlayConfig { n_sims: 1, batch_size: 1, num_threads: 1, seed: None };
+        let sp = SelfPlayConfig {
+            n_sims: 1,
+            batch_size: 1,
+            num_threads: 1,
+            seed: None,
+        };
         let mut rng = SmallRng::seed_from_u64(42);
         let record = play_game(game, &BACKEND, &search, &sp, &mut rng, 0).unwrap();
 
@@ -1575,7 +1818,12 @@ mod tests {
     fn play_game_result_matches_scores() {
         let game = standard_game();
         let search = SearchConfig::default();
-        let sp = SelfPlayConfig { n_sims: 16, batch_size: 8, num_threads: 1, seed: None };
+        let sp = SelfPlayConfig {
+            n_sims: 16,
+            batch_size: 8,
+            num_threads: 1,
+            seed: None,
+        };
         let mut rng = SmallRng::seed_from_u64(42);
         let record = play_game(game, &BACKEND, &search, &sp, &mut rng, 0).unwrap();
 
@@ -1592,7 +1840,12 @@ mod tests {
     fn run_self_play_zero_games() {
         let games: Vec<GameState> = vec![];
         let search = SearchConfig::default();
-        let sp = SelfPlayConfig { n_sims: 8, batch_size: 8, num_threads: 2, seed: None };
+        let sp = SelfPlayConfig {
+            n_sims: 8,
+            batch_size: 8,
+            num_threads: 2,
+            seed: None,
+        };
 
         let result = run_self_play(&games, &BACKEND, &search, &sp, None).unwrap();
 
@@ -1606,7 +1859,12 @@ mod tests {
     fn run_self_play_more_threads_than_games() {
         let games: Vec<GameState> = (0..2).map(|_| short_game()).collect();
         let search = SearchConfig::default();
-        let sp = SelfPlayConfig { n_sims: 8, batch_size: 8, num_threads: 8, seed: None };
+        let sp = SelfPlayConfig {
+            n_sims: 8,
+            batch_size: 8,
+            num_threads: 8,
+            seed: None,
+        };
 
         let result = run_self_play(&games, &BACKEND, &search, &sp, None).unwrap();
 
@@ -1627,10 +1885,14 @@ mod tests {
 
         let games: Vec<GameState> = (0..4).map(|_| short_game()).collect();
         let search = SearchConfig::default();
-        let sp = SelfPlayConfig { n_sims: 8, batch_size: 8, num_threads: 2, seed: None };
+        let sp = SelfPlayConfig {
+            n_sims: 8,
+            batch_size: 8,
+            num_threads: 2,
+            seed: None,
+        };
 
-        let result =
-            run_self_play_to_disk(&games, &BACKEND, &search, &sp, &dir, 2, None).unwrap();
+        let result = run_self_play_to_disk(&games, &BACKEND, &search, &sp, &dir, 2, None).unwrap();
 
         assert_eq!(result.stats.total_games, 4);
         // 4 games with max_per_bundle=2 → 2 bundle files
@@ -1650,7 +1912,12 @@ mod tests {
 
         let games: Vec<GameState> = (0..4).map(|_| short_game()).collect();
         let search = SearchConfig::default();
-        let sp = SelfPlayConfig { n_sims: 8, batch_size: 8, num_threads: 2, seed: None };
+        let sp = SelfPlayConfig {
+            n_sims: 8,
+            batch_size: 8,
+            num_threads: 2,
+            seed: None,
+        };
 
         let disk_result =
             run_self_play_to_disk(&games, &BACKEND, &search, &sp, &dir, 100, None).unwrap();
@@ -1675,7 +1942,12 @@ mod tests {
 
         let games: Vec<GameState> = vec![];
         let search = SearchConfig::default();
-        let sp = SelfPlayConfig { n_sims: 8, batch_size: 8, num_threads: 2, seed: None };
+        let sp = SelfPlayConfig {
+            n_sims: 8,
+            batch_size: 8,
+            num_threads: 2,
+            seed: None,
+        };
 
         let result =
             run_self_play_to_disk(&games, &BACKEND, &search, &sp, &dir, 100, None).unwrap();
@@ -1696,7 +1968,12 @@ mod tests {
 
         let games: Vec<GameState> = (0..4).map(|_| short_game()).collect();
         let search = SearchConfig::default();
-        let sp = SelfPlayConfig { n_sims: 8, batch_size: 8, num_threads: 2, seed: None };
+        let sp = SelfPlayConfig {
+            n_sims: 8,
+            batch_size: 8,
+            num_threads: 2,
+            seed: None,
+        };
 
         let result =
             run_self_play_to_disk(&games, &BACKEND, &search, &sp, &dir, 100, None).unwrap();
@@ -1718,28 +1995,26 @@ mod tests {
                 max_turns: 10,
                 maze: vec![],
                 initial_cheese: vec![],
-                positions: vec![
-                    PositionRecord {
-                        p1_pos: [0, 0],
-                        p2_pos: [4, 4],
-                        p1_score: 0.0,
-                        p2_score: 0.0,
-                        p1_mud: 0,
-                        p2_mud: 0,
-                        turn: 0,
-                        cheese_mask: vec![],
-                        value_p1: 0.0,
-                        value_p2: 0.0,
-                        visit_counts_p1: [0.0; 5],
-                        visit_counts_p2: [0.0; 5],
-                        prior_p1: [0.0; 5],
-                        prior_p2: [0.0; 5],
-                        policy_p1: [0.0; 5],
-                        policy_p2: [0.0; 5],
-                        action_p1: 0,
-                        action_p2: 0,
-                    },
-                ],
+                positions: vec![PositionRecord {
+                    p1_pos: [0, 0],
+                    p2_pos: [4, 4],
+                    p1_score: 0.0,
+                    p2_score: 0.0,
+                    p1_mud: 0,
+                    p2_mud: 0,
+                    turn: 0,
+                    cheese_mask: vec![],
+                    value_p1: 0.0,
+                    value_p2: 0.0,
+                    visit_counts_p1: [0.0; 5],
+                    visit_counts_p2: [0.0; 5],
+                    prior_p1: [0.0; 5],
+                    prior_p2: [0.0; 5],
+                    policy_p1: [0.0; 5],
+                    policy_p2: [0.0; 5],
+                    action_p1: 0,
+                    action_p2: 0,
+                }],
                 final_p1_score: 3.0,
                 final_p2_score: 2.0,
                 result: GameOutcome::P1Win,
@@ -1750,6 +2025,7 @@ mod tests {
                 total_nn_evals: 0,
                 total_terminals: 0,
                 total_collisions: 0,
+                total_tt_stop_hits: 0,
             },
             GameRecord {
                 width: 5,
@@ -1809,6 +2085,7 @@ mod tests {
                 total_nn_evals: 0,
                 total_terminals: 0,
                 total_collisions: 0,
+                total_tt_stop_hits: 0,
             },
         ];
 
@@ -1829,7 +2106,118 @@ mod tests {
         assert_eq!(batch.min_turns, incremental.min_turns);
         assert_eq!(batch.max_turns, incremental.max_turns);
         assert!(
-            (batch.total_cheese_collected - incremental.total_cheese_collected).abs() < f32::EPSILON
+            (batch.total_cheese_collected - incremental.total_cheese_collected).abs()
+                < f32::EPSILON
         );
+    }
+}
+
+#[cfg(test)]
+mod mcgs_tests {
+    use super::*;
+    use alpharat_mcgs::{MCGSTree, SmartUniformBackend};
+    use pyrat::GameBuilder;
+    fn game() -> GameState {
+        GameBuilder::new(5, 5)
+            .with_open_maze()
+            .with_custom_positions(Coordinates::new(0, 0), Coordinates::new(4, 4))
+            .with_custom_cheese(vec![
+                Coordinates::new(1, 0),
+                Coordinates::new(2, 2),
+                Coordinates::new(4, 3),
+            ])
+            .with_max_turns(20)
+            .build()
+            .create(None)
+            .unwrap()
+    }
+    fn config(workers: u32) -> SelfPlayConfig {
+        SelfPlayConfig {
+            n_sims: 64,
+            batch_size: 8,
+            num_threads: workers,
+            seed: Some(906),
+        }
+    }
+
+    #[test]
+    fn collision_fraction_includes_productive_transposition_stops() {
+        let mut stats = SelfPlayStats::new();
+        stats.total_nn_evals = 40;
+        stats.total_terminals = 10;
+        stats.total_tt_stop_hits = 30;
+        stats.total_collisions = 20;
+        assert_eq!(stats.collision_fraction(), 0.2);
+    }
+
+    #[test]
+    fn mcgs_sampler_first_position_matches_native_search_and_records_transpositions() {
+        let game = game();
+        let search = alpharat_mcgs::SearchConfig::default();
+        let mut tree = MCGSTree::new(&game);
+        let mut native_rng = SmallRng::seed_from_u64(17);
+        let expected = alpharat_mcgs::run_search(
+            &mut tree,
+            &game,
+            &SmartUniformBackend,
+            &search,
+            64,
+            8,
+            &mut native_rng,
+        )
+        .unwrap();
+        let a1 = sample_action(&expected.policy_p1, &mut native_rng);
+        let a2 = sample_action(&expected.policy_p2, &mut native_rng);
+        let record = play_mcgs_game(
+            game,
+            &SmartUniformBackend,
+            &search,
+            &config(1),
+            &mut SmallRng::seed_from_u64(17),
+            0,
+        )
+        .unwrap();
+        let p = &record.positions[0];
+        assert_eq!(p.policy_p1, expected.policy_p1);
+        assert_eq!(p.policy_p2, expected.policy_p2);
+        assert_eq!(p.visit_counts_p1, expected.visit_counts_p1);
+        assert_eq!((p.action_p1, p.action_p2), (a1, a2));
+        assert!(record.total_tt_stop_hits > 0);
+        assert!(
+            record.total_nn_evals + record.total_terminals + record.total_tt_stop_hits
+                <= record.positions.len() as u64 * 64
+        );
+    }
+    #[test]
+    fn mcgs_game_stream_is_stable_across_independent_worker_counts() {
+        let games = vec![game(); 4];
+        let search = alpharat_mcgs::SearchConfig::default();
+        let a =
+            run_mcgs_self_play(&games, &SmartUniformBackend, &search, &config(1), None).unwrap();
+        let b =
+            run_mcgs_self_play(&games, &SmartUniformBackend, &search, &config(3), None).unwrap();
+        assert_eq!(a.stats.total_nn_evals, b.stats.total_nn_evals);
+        assert_eq!(a.stats.total_tt_stop_hits, b.stats.total_tt_stop_hits);
+        for (a, b) in a.games.iter().zip(&b.games) {
+            assert_eq!(a.game_index, b.game_index);
+            assert_eq!(format!("{:?}", a.positions), format!("{:?}", b.positions));
+        }
+    }
+    #[test]
+    fn mcgs_backend_failure_propagates() {
+        struct Failing;
+        impl Backend for Failing {
+            fn evaluate(&self, _: &GameState) -> Result<alpharat_mcts::EvalResult, BackendError> {
+                Err(BackendError::msg("mcgs test failure"))
+            }
+        }
+        let r = run_mcgs_self_play(
+            &[game()],
+            &Failing,
+            &alpharat_mcgs::SearchConfig::default(),
+            &config(1),
+            None,
+        );
+        assert!(r.unwrap_err().to_string().contains("mcgs test failure"));
     }
 }

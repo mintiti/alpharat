@@ -1,3 +1,4 @@
+use crate::inference_trace as trace;
 use alpharat_mcts::{Backend, BackendError, EvalResult};
 use pyrat::GameState;
 use std::collections::VecDeque;
@@ -115,6 +116,9 @@ impl MuxStats {
 
 /// A single evaluate_batch call from a game thread, waiting for results.
 struct BatchRequest {
+    trace_id: u64,
+    queued_ns: u64,
+    dequeued_ns: u64,
     // SAFETY: Calling thread blocks on rx.recv() until the worker calls
     // tx.send(), which happens after the worker is done reading these
     // pointers. GameStates are guaranteed alive for the duration of access.
@@ -152,8 +156,9 @@ impl BatchQueue {
     }
 
     /// Push a request and wake the worker.
-    fn push(&self, request: BatchRequest) {
+    fn push(&self, mut request: BatchRequest) {
         let mut inner = self.inner.lock().unwrap();
+        request.queued_ns = trace::stamp();
         inner.queue.push_back(request);
         self.condvar.notify_one();
     }
@@ -176,7 +181,8 @@ impl BatchQueue {
         let mut total_positions = 0;
 
         // Always take the first request (even if it alone exceeds max).
-        if let Some(req) = inner.queue.pop_front() {
+        if let Some(mut req) = inner.queue.pop_front() {
+            req.dequeued_ns = trace::stamp();
             total_positions += req.games.len();
             batch.push(req);
         }
@@ -186,7 +192,8 @@ impl BatchQueue {
             if total_positions + front.games.len() > max_positions {
                 break;
             }
-            let req = inner.queue.pop_front().unwrap();
+            let mut req = inner.queue.pop_front().unwrap();
+            req.dequeued_ns = trace::stamp();
             total_positions += req.games.len();
             batch.push(req);
         }
@@ -274,11 +281,17 @@ impl Backend for MuxBackend {
 
         let (tx, rx) = mpsc::sync_channel(1);
         let request = BatchRequest {
+            trace_id: trace::request_id(),
+            queued_ns: 0,
+            dequeued_ns: 0,
             games: games.iter().map(|g| *g as *const GameState).collect(),
             tx,
         };
 
-        self.queue.push(request);
+        {
+            let _trace = trace::range(c"queue.enqueue", request.trace_id);
+            self.queue.push(request);
+        }
         // Outer expect: worker dropping the channel = bug (programming error).
         // Inner Result: propagates backend errors from the worker.
         rx.recv()
@@ -295,6 +308,15 @@ fn worker_loop(queue: &BatchQueue, inner: &dyn Backend, max_batch_size: usize, s
         };
         let wait_ns = wait_start.elapsed().as_nanos() as u64;
         stats.wait_time_ns.fetch_add(wait_ns, Ordering::Relaxed);
+
+        let batch_id = trace::id();
+        let _batch_trace = trace::batch(batch_id);
+        for request in &requests {
+            trace::link(
+                request.trace_id, batch_id, request.games.len(),
+                request.queued_ns, request.dequeued_ns,
+            );
+        }
 
         // Merge all game states into one flat slice.
         // SAFETY: Pointers are valid — calling threads are blocked on rx.recv()
@@ -324,6 +346,7 @@ fn worker_loop(queue: &BatchQueue, inner: &dyn Backend, max_batch_size: usize, s
                     let n = req.games.len();
                     let results = all_results[offset..offset + n].to_vec();
                     offset += n;
+                    let _trace = trace::range(c"result.scatter", req.trace_id);
                     let _ = req.tx.send(Ok(results));
                 }
             }

@@ -22,7 +22,7 @@ pub use encoder::ObservationEncoder;
 pub use flat_encoder::FlatEncoder;
 pub use recording::{write_bundle, BundleWriter};
 pub use selfplay::{
-    play_game, run_self_play, run_self_play_to_disk, CheeseOutcome, GameRecord, PositionRecord,
+    play_game, play_mcgs_game, run_mcgs_self_play, run_mcgs_self_play_to_disk, run_self_play, run_self_play_to_disk, CheeseOutcome, GameRecord, PositionRecord,
     SelfPlayConfig, SelfPlayError, SelfPlayProgress, SelfPlayResult, SelfPlayStats,
     SelfPlayToDiskResult,
 };
@@ -35,3 +35,5 @@ pub use backends::tensorrt::{
     load_trt_libs, TensorrtBackend, TensorrtConfig, TrtHostIoMode, TrtStats, TrtStatsSnapshot,
     TrtTimingInfo,
 };
+
+pub mod inference_trace;
