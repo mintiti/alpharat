@@ -7,3 +7,6 @@ pub mod production;
 pub mod runner;
 #[cfg(feature = "mcgs-profile")]
 pub mod search;
+
+#[cfg(feature = "inference")]
+pub mod inference;
