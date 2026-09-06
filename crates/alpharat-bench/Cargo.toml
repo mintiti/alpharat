@@ -29,6 +29,7 @@ alpharat-eval-core = { path = "../alpharat-eval-core" }
 alpharat-sampling = { path = "../alpharat-sampling", optional = true, default-features = false }
 pyrat = { package = "pyrat-rust", git = "https://github.com/mintiti/pyrat-rust", branch = "main", default-features = false }
 csv = "1"
+thread_local = "1"
 libc = "0.2"
 rand = { version = "0.8", features = ["small_rng"] }
 serde = { version = "1", features = ["derive"] }
@@ -43,6 +44,8 @@ tempfile = "3"
 [features]
 default = []
 mcgs-profile = ["alpharat-mcgs/bench-internals"]
+inference = ["dep:alpharat-sampling"]
+inference-trace = ["inference", "alpharat-sampling/inference-trace"]
 onnx = ["dep:alpharat-sampling", "alpharat-sampling/onnx"]
 onnx-cuda = ["onnx", "alpharat-sampling/onnx-cuda"]
 onnx-coreml = ["onnx", "alpharat-sampling/onnx-coreml"]
