@@ -17,6 +17,21 @@ fn main() {
 
     track_build_inputs(repo_root);
     emit_build_identity();
+    let mut features = env::vars()
+        .filter(|(k, _)| k.starts_with("CARGO_FEATURE_"))
+        .map(|(k, _)| k)
+        .collect::<Vec<_>>();
+    features.sort();
+    emit_env("ALPHARAT_INFER_FEATURES", &features.join(","));
+    let flags = env::var("CARGO_ENCODED_RUSTFLAGS").unwrap_or_default();
+    emit_env("ALPHARAT_INFER_RUSTFLAGS", &flags.replace('\x1f', " "));
+    // sha256sum is only a provenance helper; unavailable remains explicit.
+    let lock = command_output("sha256sum", [repo_root.join("Cargo.lock")])
+        .ok()
+        .and_then(|s| s.split_whitespace().next().map(str::to_owned))
+        .unwrap_or_else(|| "unavailable".into());
+    emit_env("ALPHARAT_INFER_LOCK_SHA256", &lock);
+    println!("cargo:rerun-if-env-changed=CARGO_ENCODED_RUSTFLAGS");
 
     let provenance = capture_source(repo_root);
     let out_dir = PathBuf::from(env::var_os("OUT_DIR").expect("Cargo must provide OUT_DIR"));
