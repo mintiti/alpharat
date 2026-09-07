@@ -26,6 +26,10 @@ apparatus; they say nothing about TensorRT performance. The example executes the
 same backend twice in AB then BA order. Comparable builds need a clean Git tree
 or a reconstructable tracked patch. New untracked source files make the build
 non-reproducible; stage intentional additions or commit them before building.
+`--describe` exposes `source_state` and `source_reason`; comparison preflight
+rejects a known non-reproducible build before launching workers. A successful
+`report` command can still describe an ineligible comparison: inspect its
+`comparison_error` and require a non-null `comparison` before claiming a rate gain.
 
 The TensorRT example is
 [examples/inference/tensorrt.json](../crates/alpharat-bench/examples/inference/tensorrt.json).
@@ -58,6 +62,45 @@ callers supply it. Eager mux combines callers' requests into one worker's actual
 batches. The tool records callers, requested sizes, merged batches and physical
 contexts separately.
 
+## Opt-in TensorRT execution controls
+
+TensorRT backend objects in a plan accept two independent booleans, both false
+when omitted. They preserve the one-context session and real request sizes, and
+are also available on Rust `TensorrtConfig`.
+
+| Plan field | Effect | Required comparison axis |
+|------------|--------|--------------------------|
+| `pad_to_max` | Execute every nonempty batch at `max_batch`, initializing unused input rows to zero. | `batch_shape` |
+| `cuda_graph` | Request the SDK's built-in whole-graph capture policy for the execution context. | `cuda_graph` |
+
+Padding requires pinned host I/O; incompatible plans fail validation before GPU
+setup. Returned results, NN evaluation counters and mux histograms always count
+real rows. The recorded warmup sizes are requested batch sizes; with padding,
+the physical execution shape stays at `max_batch`. Padding performs extra device
+work; real-row rates do not represent device FLOPs.
+
+Padding also requires a model whose rows are independent at inference time.
+Qualify the actual model and profile before timing it: changing batch shape can
+change floating-point results even for a row-independent network. The GPU check
+example covers growing/shrinking batches, encoded input, empty/oversize/error
+recovery, real-row counters and concurrent callers:
+
+```sh
+cargo build --release -p alpharat-bench --features inference,tensorrt --example check_trt_padding
+target/release/examples/check_trt_padding MODEL.onnx CORPUS.json CACHE_DIR OUTPUT.json padding
+```
+
+The optional mode is `padding`, `graphs` (on padded execution), `graphs-exact`,
+or `combined` (padding and graphs against ordinary execution). An optional final
+maximum batch argument accepts 1–128 and defaults to 128. Every pair uses the same serialized
+engine. The example retains output deltas and enforces a 1e-4 absolute regression
+screen. This is a numerical check, not evidence about playing strength.
+
+Graph capture is a requested runtime policy. TensorRT may delay capture or fall
+back to ordinary execution; inspect a separate timeline to establish graph use.
+The optimization campaign selected TensorRT-RTX 1.5.0.114 for its comparisons.
+These fields do not change Python sampler defaults or select a runtime upgrade.
+
 ## Workload contract
 
 Plans use `alpharat.inference.plan`, schema version 1. Unknown fields and
@@ -87,8 +130,16 @@ is measured, not prescribed.
 Warmup evaluates every requested shape, including reachable merged shapes for
 the configured caller count and mux bound. It requires both the pass count and
 minimum duration, with a hard maximum. Warmup is outside the measurement.
-Self-play warms sizes 1 through its search batch bound. Search uses the current
-production SearchConfig defaults; its exact source identity is part of the run.
+Self-play warms sizes 1 through its search batch bound. Legacy plans omit
+engine/search and retain MCTS defaults. Set self-play config `engine` to `mcgs`
+and provide all `search` parameters for MCGS: c_puct, fpu_reduction, force_k,
+noise_epsilon, noise_concentration, collision_limit_min, collision_limit_max,
+collision_scaling_start, collision_scaling_end and collision_scaling_power.
+The adapter uses sequential MCGS per game with root reuse and expired-entry
+eviction; `workers` counts independent games, not workers sharing one search DAG.
+The same native worker and bundle-writing loop serves both engines. MCGS reports
+`tt_stop_hits` separately from NN evaluations, terminals and collisions.
+Engine or search-policy changes make self-play comparisons incompatible.
 
 Native self-play completes the declared independent games, search simulations
 and output bundles. Its wall time includes search, inference and bundle output.
@@ -177,8 +228,8 @@ target/release/alpharat-infer report --run target/inference-runs/a --format json
 ```
 
 Separate runs pair by repetition index and are explicitly labeled as
-non-interleaved. Allowed axes are host_io, profile, source, build, runtime,
-hardware, topology and requests. Model and corpus changes are always rejected.
+non-interleaved. Allowed axes are host_io, profile, batch_shape, cuda_graph, source, build,
+runtime, hardware, topology and requests. Model and corpus changes are always rejected.
 An undeclared difference, diagnostic mode, incomplete/failed attempt, missing
 repetition, within-arm identity drift, or non-reconstructable source rejects
 the comparison. Changing self-play's game/search configuration is not a

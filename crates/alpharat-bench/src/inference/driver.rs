@@ -158,6 +158,8 @@ fn build(request: &TrialRequest, width: u8, height: u8) -> Result<Built> {
             host_io,
             opt_batch,
             max_batch,
+            pad_to_max,
+            cuda_graph,
             cache_dir,
         } => {
             #[cfg(feature = "tensorrt")]
@@ -176,6 +178,8 @@ fn build(request: &TrialRequest, width: u8, height: u8) -> Result<Built> {
                     alpharat_sampling::TensorrtConfig {
                         opt_batch: Some(*opt_batch),
                         max_batch: *max_batch,
+                        pad_to_max: *pad_to_max,
+                        cuda_graph: *cuda_graph,
                         cache_dir: Some(cache_dir.clone()),
                         host_io: if host_io == "pinned" {
                             alpharat_sampling::TrtHostIoMode::Pinned
@@ -191,7 +195,9 @@ fn build(request: &TrialRequest, width: u8, height: u8) -> Result<Built> {
             }
             #[cfg(not(feature = "tensorrt"))]
             {
-                let _ = (host_io, opt_batch, max_batch, cache_dir, width, height);
+                let _ = (
+                    host_io, opt_batch, max_batch, pad_to_max, cuda_graph, cache_dir, width, height,
+                );
                 return Err("TensorRT support is not compiled".into());
             }
         }
