@@ -100,16 +100,22 @@ fn compatible(
                 host_io: ah,
                 opt_batch: ao,
                 max_batch: am,
+                pad_to_max: ap,
+                cuda_graph: ag,
                 ..
             },
             BackendSpec::TensorRt {
                 host_io: bh,
                 opt_batch: bo,
                 max_batch: bm,
+                pad_to_max: bp,
+                cuda_graph: bg,
                 ..
             },
         ) => {
             require(ah == bh, "host_io", vary)?;
+            require(ap == bp, "batch_shape", vary)?;
+            require(ag == bg, "cuda_graph", vary)?;
             require((ao, am) == (bo, bm), "profile", vary)?;
             if x.engine_sha256 != y.engine_sha256
                 && !["profile", "runtime", "source", "build", "hardware"]
@@ -179,7 +185,16 @@ fn paired(
         );
     }
     let allowed = [
-        "host_io", "profile", "source", "build", "runtime", "hardware", "topology", "requests",
+        "host_io",
+        "profile",
+        "source",
+        "build",
+        "runtime",
+        "hardware",
+        "topology",
+        "requests",
+        "batch_shape",
+        "cuda_graph",
     ];
     if vary.iter().any(|s| !allowed.contains(&s.as_str())) {
         return Err("unknown comparison axis".into());
@@ -453,6 +468,47 @@ mod tests {
             artifacts: BTreeMap::new(),
         }
     }
+    #[test]
+    fn tensor_rt_execution_modes_require_declared_comparison_axes() {
+        let mut plan: Plan =
+            serde_json::from_str(include_str!("../../examples/inference/cpu.json")).unwrap();
+        plan.variants[0].backend = BackendSpec::TensorRt {
+            host_io: "pinned".into(),
+            opt_batch: 128,
+            max_batch: 128,
+            pad_to_max: false,
+            cuda_graph: false,
+            cache_dir: "cache".into(),
+        };
+        let base = &plan.variants[0];
+        let result = result();
+        let case = &plan.cases[0];
+        for axis in ["batch_shape", "cuda_graph"] {
+            let mut candidate = base.clone();
+            if let BackendSpec::TensorRt {
+                pad_to_max,
+                cuda_graph,
+                ..
+            } = &mut candidate.backend
+            {
+                *pad_to_max = axis == "batch_shape";
+                *cuda_graph = axis == "cuda_graph";
+            }
+            assert!(compatible(
+                (&result, case, base, &plan),
+                (&result, case, &candidate, &plan),
+                &BTreeSet::new()
+            )
+            .is_err());
+            assert!(compatible(
+                (&result, case, base, &plan),
+                (&result, case, &candidate, &plan),
+                &BTreeSet::from([axis.into()])
+            )
+            .is_ok());
+        }
+    }
+
     #[test]
     fn compatibility_checks_diagnostics_inputs_and_declared_axes() {
         let plan: Plan =

@@ -93,6 +93,10 @@ pub enum BackendSpec {
         host_io: String,
         opt_batch: usize,
         max_batch: usize,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        pad_to_max: bool,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        cuda_graph: bool,
         cache_dir: PathBuf,
     },
 }
@@ -415,11 +419,13 @@ impl Plan {
                 host_io,
                 opt_batch,
                 max_batch,
+                pad_to_max,
                 ..
             } = &v.backend
             {
                 if self.model.is_none()
                     || !["pinned", "pageable"].contains(&host_io.as_str())
+                    || (*pad_to_max && host_io != "pinned")
                     || *opt_batch == 0
                     || opt_batch > max_batch
                     || *max_batch > 4096
@@ -486,8 +492,16 @@ impl Plan {
                 );
             }
             let allowed = [
-                "host_io", "profile", "source", "build", "runtime", "hardware", "topology",
+                "host_io",
+                "profile",
+                "source",
+                "build",
+                "runtime",
+                "hardware",
+                "topology",
                 "requests",
+                "batch_shape",
+                "cuda_graph",
             ];
             if c.vary.iter().any(|x| !allowed.contains(&x.as_str())) {
                 return Err("unknown comparison axis".into());
@@ -520,6 +534,23 @@ mod tests {
         }
         assert!(valid_id("direct-b32_c4"));
     }
+    #[test]
+    fn old_tensor_rt_plans_keep_exact_non_graph_execution() {
+        let text = r#"{"kind":"tensorrt","host_io":"pinned","opt_batch":128,"max_batch":128,"cache_dir":"cache"}"#;
+        let backend: BackendSpec = serde_json::from_str(text).unwrap();
+        assert!(matches!(
+            backend,
+            BackendSpec::TensorRt {
+                pad_to_max: false,
+                cuda_graph: false,
+                ..
+            }
+        ));
+        let serialized = serde_json::to_value(backend).unwrap();
+        assert!(serialized.get("pad_to_max").is_none());
+        assert!(serialized.get("cuda_graph").is_none());
+    }
+
     #[test]
     fn unknown_configuration_is_rejected() {
         assert!(serde_json::from_str::<Topology>(r#"{"kind":"direct","lanes":4}"#).is_err());

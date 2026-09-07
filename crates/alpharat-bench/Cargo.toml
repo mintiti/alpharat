@@ -55,3 +55,7 @@ tensorrt = ["dep:alpharat-sampling", "alpharat-sampling/tensorrt"]
 name = "alpharat-infer"
 path = "src/infer.rs"
 required-features = ["inference"]
+
+[[example]]
+name = "check_trt_padding"
+required-features = ["inference", "tensorrt"]
