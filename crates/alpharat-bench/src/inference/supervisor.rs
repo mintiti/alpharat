@@ -245,6 +245,13 @@ fn capabilities(
         {
             return Err("variant executable does not support this inference protocol".into());
         }
+        if plan.comparison.is_some() && info["source_state"] == "non_reproducible" {
+            return Err(format!(
+                "variant {} lacks reconstructable source provenance: {}",
+                v.id, info["source_reason"]
+            )
+            .into());
+        }
         if info["worker_handshake"] != true {
             return Err("variant lacks verified worker ownership protocol".into());
         }

@@ -277,3 +277,53 @@ fn mcgs_selfplay_roundtrip_preserves_explicit_search_and_tt_accounting() {
     assert_ne!(plan.cases, mcts_plan.cases);
     ok(&["report", "--run", out.to_str().unwrap()]);
 }
+
+#[cfg(unix)]
+#[test]
+fn comparison_rejects_known_bad_provenance_before_worker_launch() {
+    use alpharat_bench::inference::model::Comparison;
+    use std::os::unix::fs::PermissionsExt;
+    let temp = tempfile::tempdir().unwrap();
+    let path = fixture(temp.path());
+    let fake = temp.path().join("unreconstructable");
+    let marker = temp.path().join("worker-was-launched");
+    fs::write(&fake,format!(r#"#!/bin/sh
+if [ "$1" = "--describe" ]; then
+  echo '{{"format":"alpharat.inference.capabilities","schema_version":1,"worker_handshake":true,"tensorrt":false,"timeline":false,"source_state":"non_reproducible","source_reason":"untracked check program"}}'
+else
+  touch '{}'
+  exit 99
+fi
+"#,marker.display())).unwrap();
+    fs::set_permissions(&fake, fs::Permissions::from_mode(0o755)).unwrap();
+    let mut plan: Plan = artifact::read_json(&path).unwrap();
+    plan.cases.truncate(1);
+    plan.variants[0].executable = fake;
+    let mut candidate = plan.variants[0].clone();
+    candidate.id = "candidate".into();
+    plan.variants.push(candidate);
+    plan.comparison = Some(Comparison {
+        baseline: plan.variants[0].id.clone(),
+        candidate: "candidate".into(),
+        vary: Default::default(),
+        order: vec!["AB".into()],
+    });
+    artifact::write_json(&path, &plan).unwrap();
+    let checked = cli(&["check", "--plan", path.to_str().unwrap()]);
+    assert!(!checked.status.success());
+    assert!(String::from_utf8_lossy(&checked.stderr).contains("reconstructable source provenance"));
+    let out = temp.path().join("run");
+    assert!(!cli(&[
+        "run",
+        "--plan",
+        path.to_str().unwrap(),
+        "--out",
+        out.to_str().unwrap()
+    ])
+    .status
+    .success());
+    let record = artifact::load_run(&out).unwrap();
+    assert_eq!(record.status, Status::Unsupported);
+    assert!(record.attempts.iter().all(|a| a.status == Status::NotRun));
+    assert!(!marker.exists());
+}
