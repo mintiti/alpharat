@@ -10,7 +10,7 @@ mod inner {
     use std::fs;
     use std::path::{Path, PathBuf};
     use std::sync::atomic::{AtomicU64, Ordering};
-    use std::sync::{Arc, Mutex, MutexGuard};
+    use std::sync::{Arc, Mutex, MutexGuard, TryLockError};
     use std::time::Instant;
 
     // -----------------------------------------------------------------------
@@ -190,6 +190,16 @@ mod inner {
         pub pad_to_max: bool,
         /// Request TensorRT-managed whole-graph capture (the runtime may fall back).
         pub cuda_graph: bool,
+        /// Optional strictly increasing fixed execution sizes, ending at max_batch.
+        /// Each size owns a context; calls stay serialized and use the smallest fit.
+        /// Requires pad_to_max and a row-independent model.
+        pub execution_sizes: Vec<usize>,
+        /// Independent groups of contexts, each with private streams and buffers.
+        /// More than one requires concurrent callers to supply useful work.
+        pub execution_lanes: usize,
+        /// Serialize GPU submission/completion across lanes while allowing CPU
+        /// encoding and result parsing to overlap another lane's device work.
+        pub serialize_device: bool,
         /// Directory for cached serialized engines. `None` disables caching.
         pub cache_dir: Option<PathBuf>,
         /// Host I/O lifetime. Pinned is the measured RTX 5090 production default.
@@ -206,6 +216,9 @@ mod inner {
                 max_batch: 256,
                 pad_to_max: false,
                 cuda_graph: false,
+                execution_sizes: Vec::new(),
+                execution_lanes: 1,
+                serialize_device: false,
                 cache_dir: None,
                 host_io: TrtHostIoMode::Pinned,
                 profile_stages: false,
@@ -943,6 +956,7 @@ mod inner {
         input_name: CString,
         last_batch: Option<usize>,
         pad_to_max: bool,
+        execution_size: Option<usize>,
         buffers: GpuBuffers,
         pinned: Option<PinnedHostBuffers>,
         completion: Option<CudaEvent>,
@@ -951,7 +965,7 @@ mod inner {
         health: SessionHealth,
     }
 
-    // SAFETY: all session access is serialized by `TensorrtBackend::session`.
+    // SAFETY: all session access is serialized by `TensorrtBackend::sessions`.
     unsafe impl Send for TrtSession {}
 
     impl Drop for TrtSession {
@@ -1058,6 +1072,7 @@ mod inner {
                 input_name,
                 last_batch: None,
                 pad_to_max: false,
+                execution_size: None,
                 buffers,
                 pinned,
                 completion,
@@ -1335,7 +1350,10 @@ mod inner {
         ) -> Result<TrtTimingInfo, BackendError> {
             self.validate_input(batch.input_elements, batch)?;
             let execution = if self.pad_to_max {
-                self.layout.capacity
+                match self.execution_size {
+                    Some(n) => self.layout.batch(n)?,
+                    None => self.layout.capacity,
+                }
             } else {
                 batch
             };
@@ -1475,12 +1493,15 @@ mod inner {
     /// optimized engine for the current GPU, and runs inference directly on
     /// the GPU. Engines are cached to disk for fast subsequent startups.
     ///
-    /// Thread safety: the one TensorRT execution context, stream, and reusable
-    /// host/device buffers are serialized behind a mutex (the same topology as
-    /// the pre-experiment backend and the measured production coordinate).
+    /// Thread safety: execution contexts, streams, and reusable host/device
+    /// buffers are serialized within each lane. Optional fixed-size contexts
+    /// retain their shapes across calls; explicitly configured lanes may overlap.
     pub struct TensorrtBackend<E: ObservationEncoder> {
         engine_sha256: String,
-        session: Mutex<TrtSession>,
+        sessions: Vec<Mutex<Vec<TrtSession>>>,
+        next_lane: AtomicU64,
+        device_gate: Option<Mutex<()>>,
+        execution_sizes: Vec<usize>,
         encoder: E,
         layout: TensorLayout,
         host_io: TrtHostIoMode,
@@ -1519,6 +1540,19 @@ mod inner {
                     "TensorRT padding requires pinned host I/O",
                 ));
             }
+            if !config.execution_sizes.is_empty()
+                && (!config.pad_to_max
+                    || config.execution_sizes.first() == Some(&0)
+                    || config.execution_sizes.last() != Some(&config.max_batch)
+                    || config.execution_sizes.windows(2).any(|w| w[0] >= w[1]))
+            {
+                return Err(BackendError::msg("TensorRT execution_sizes requires padding and strictly increasing positive sizes ending at max_batch"));
+            }
+            if !(1..=8).contains(&config.execution_lanes) {
+                return Err(BackendError::msg(
+                    "TensorRT execution_lanes must be in 1..=8",
+                ));
+            }
             load_trt_libs()?;
             let onnx_path = model_path.as_ref();
 
@@ -1554,32 +1588,42 @@ mod inner {
             };
 
             let engine_sha256 = format!("{:x}", Sha256::digest(&engine_data));
-            let mut session = TrtSession::new(
-                &engine_data,
-                layout,
-                config.host_io,
-                config.profile_stages,
-                config.cuda_graph,
-            )?;
-            session.pad_to_max = config.pad_to_max;
+            let sizes: Vec<Option<usize>> = if config.execution_sizes.is_empty() {
+                vec![None]
+            } else {
+                config.execution_sizes.iter().copied().map(Some).collect()
+            };
+            let mut sessions = Vec::with_capacity(config.execution_lanes);
+            let mut pinned_bytes = 0;
+            for _ in 0..config.execution_lanes {
+                let mut lane = Vec::with_capacity(sizes.len());
+                for &size in &sizes {
+                    let mut session = TrtSession::new(
+                        &engine_data,
+                        layout,
+                        config.host_io,
+                        config.profile_stages,
+                        config.cuda_graph,
+                    )?;
+                    session.pad_to_max = config.pad_to_max;
+                    session.execution_size = size;
+                    pinned_bytes += session.pinned_bytes();
+                    lane.push(session);
+                }
+                sessions.push(Mutex::new(lane));
+            }
             eprintln!(
-                "[TensorRT] Pad execution to max batch: {}; requested whole-graph capture: {}",
-                config.pad_to_max, config.cuda_graph
-            );
-            let pinned_bytes = session.pinned_bytes();
-            eprintln!(
-                "[TensorRT] Profile: MIN=1, OPT={}, MAX={}; one execution context; host I/O: {}; pinned bytes: {}; stage profiling: {}",
-                opt_batch,
-                config.max_batch,
-                config.host_io,
-                pinned_bytes,
-                config.profile_stages,
+                "[TensorRT] OPT={opt_batch} MAX={}; lanes={}; contexts={}; sizes={:?}; pad={}; graphs={}; pinned_bytes={pinned_bytes}",
+                config.max_batch, sessions.len(), sessions.len()*sizes.len(), config.execution_sizes, config.pad_to_max, config.cuda_graph,
             );
             let stats = Arc::new(TrtStats::new(config.host_io, pinned_bytes));
 
             Ok(Self {
                 engine_sha256,
-                session: Mutex::new(session),
+                sessions,
+                next_lane: AtomicU64::new(0),
+                device_gate: config.serialize_device.then(|| Mutex::new(())),
+                execution_sizes: config.execution_sizes,
                 encoder,
                 layout,
                 host_io: config.host_io,
@@ -1597,9 +1641,53 @@ mod inner {
             &self.stats
         }
 
-        fn lock_session(&self) -> Result<MutexGuard<'_, TrtSession>, BackendError> {
+        /// Number of physically created execution contexts, including fixed sizes.
+        pub fn physical_contexts(&self) -> usize {
+            self.sessions.len() * self.execution_sizes.len().max(1)
+        }
+
+        fn execution_slot(&self, n: usize) -> usize {
+            // The caller validates n against max_batch before acquiring sessions.
+            self.execution_sizes
+                .iter()
+                .position(|size| n <= *size)
+                .unwrap_or(0)
+        }
+
+        fn lock_device(&self) -> Result<Option<MutexGuard<'_, ()>>, BackendError> {
+            self.device_gate
+                .as_ref()
+                .map(|gate| {
+                    let _trace = trace::range(c"device.lock_wait", trace::request_id());
+                    gate.lock().map_err(|_| {
+                        BackendError::msg("TensorRT device gate poisoned after a panic")
+                    })
+                })
+                .transpose()
+        }
+
+        fn lock_sessions(&self) -> Result<MutexGuard<'_, Vec<TrtSession>>, BackendError> {
             let _trace = trace::range(c"session.lock_wait", trace::request_id());
-            self.session.lock().map_err(|_| {
+            let lane_count = self.sessions.len();
+            let start = if lane_count == 1 {
+                0
+            } else {
+                self.next_lane.fetch_add(1, Ordering::Relaxed) as usize % lane_count
+            };
+            if lane_count > 1 {
+                for offset in 0..lane_count {
+                    match self.sessions[(start + offset) % lane_count].try_lock() {
+                        Ok(guard) => return Ok(guard),
+                        Err(TryLockError::WouldBlock) => {}
+                        Err(TryLockError::Poisoned(_)) => {
+                            return Err(BackendError::msg(
+                                "TensorRT lane lock poisoned after a panic",
+                            ))
+                        }
+                    }
+                }
+            }
+            self.sessions[start].lock().map_err(|_| {
                 BackendError::msg(
                     "TensorRT session lock poisoned after a panic; the session will not be reused",
                 )
@@ -1684,13 +1772,16 @@ mod inner {
             }
             let call_start = Instant::now();
             let batch = self.layout.batch(n)?;
-            let mut session = self.lock_session()?;
+            let mut sessions = self.lock_sessions()?;
+            let session = &mut sessions[self.execution_slot(n)];
             session.validate_input(encoded.len(), batch)?;
 
             let (results, mut timing) = match self.host_io {
                 TrtHostIoMode::Pageable => {
-                    let ((pp1, pp2, v1, v2), mut timing) =
-                        session.infer_pageable(encoded, batch, true)?;
+                    let ((pp1, pp2, v1, v2), mut timing) = {
+                        let _device = self.lock_device()?;
+                        session.infer_pageable(encoded, batch, true)?
+                    };
                     let parse_start = Instant::now();
                     let results = parse_eval_results(&pp1, &pp2, &v1, &v2, n)?;
                     timing.parse_us = parse_start.elapsed().as_secs_f64() * 1_000_000.0;
@@ -1700,7 +1791,10 @@ mod inner {
                     let stage_start = Instant::now();
                     session.pinned_input_mut(batch)?.copy_from_slice(encoded);
                     let input_stage_us = stage_start.elapsed().as_secs_f64() * 1_000_000.0;
-                    let mut timing = session.infer_pinned_prepared(batch, true)?;
+                    let mut timing = {
+                        let _device = self.lock_device()?;
+                        session.infer_pinned_prepared(batch, true)?
+                    };
                     timing.input_stage_us = input_stage_us;
                     let parse_start = Instant::now();
                     let (pp1, pp2, v1, v2) = session.pinned_output_slices(batch)?;
@@ -1742,9 +1836,12 @@ mod inner {
                     let encode_us = elapsed_us(encode_start);
                     drop(encode_trace);
 
-                    let mut session = self.lock_session()?;
-                    let ((pp1, pp2, v1, v2), mut timing) =
-                        session.infer_pageable(&buf, batch, self.profile_stages)?;
+                    let mut sessions = self.lock_sessions()?;
+                    let session = &mut sessions[self.execution_slot(n)];
+                    let ((pp1, pp2, v1, v2), mut timing) = {
+                        let _device = self.lock_device()?;
+                        session.infer_pageable(&buf, batch, self.profile_stages)?
+                    };
                     timing.input_stage_us = input_stage_us;
                     timing.encode_us = encode_us;
                     let _parse_trace = trace::range(c"parse", trace::request_id());
@@ -1754,7 +1851,8 @@ mod inner {
                     (results, timing)
                 }
                 TrtHostIoMode::Pinned => {
-                    let mut session = self.lock_session()?;
+                    let mut sessions = self.lock_sessions()?;
+                    let session = &mut sessions[self.execution_slot(n)];
                     let encode_trace = trace::range(c"encode", trace::request_id());
                     let encode_start = self.profile_stages.then(Instant::now);
                     {
@@ -1765,7 +1863,10 @@ mod inner {
                     }
                     let encode_us = elapsed_us(encode_start);
                     drop(encode_trace);
-                    let mut timing = session.infer_pinned_prepared(batch, self.profile_stages)?;
+                    let mut timing = {
+                        let _device = self.lock_device()?;
+                        session.infer_pinned_prepared(batch, self.profile_stages)?
+                    };
                     timing.encode_us = encode_us;
                     let _parse_trace = trace::range(c"parse", trace::request_id());
                     let parse_start = self.profile_stages.then(Instant::now);
@@ -1822,6 +1923,42 @@ mod inner {
             .expect("invalid optimization point should fail");
 
             assert!(error.to_string().contains("opt_batch must be in 1..=128"));
+        }
+
+        #[test]
+        fn invalid_execution_sizes_are_rejected_before_runtime_load() {
+            for sizes in [
+                vec![0, 128],
+                vec![64, 32, 128],
+                vec![32, 64],
+                vec![32, 32, 128],
+            ] {
+                let error = TensorrtBackend::new(
+                    "missing.onnx",
+                    FlatEncoder::new(7, 7),
+                    TensorrtConfig {
+                        max_batch: 128,
+                        pad_to_max: true,
+                        execution_sizes: sizes,
+                        ..TensorrtConfig::default()
+                    },
+                )
+                .err()
+                .expect("invalid sizes must fail");
+                assert!(error.to_string().contains("execution_sizes"));
+            }
+            let error = TensorrtBackend::new(
+                "missing.onnx",
+                FlatEncoder::new(7, 7),
+                TensorrtConfig {
+                    max_batch: 128,
+                    execution_sizes: vec![32, 128],
+                    ..TensorrtConfig::default()
+                },
+            )
+            .err()
+            .expect("fixed sizes require padding");
+            assert!(error.to_string().contains("execution_sizes"));
         }
 
         #[test]

@@ -38,9 +38,7 @@ fn compatible(
     {
         return Err("model or corpus identity differs".into());
     }
-    if x.physical_contexts != y.physical_contexts {
-        return Err("physical context counts differ".into());
-    }
+    require(x.physical_contexts == y.physical_contexts, "contexts", vary)?;
     require(
         (
             x.source_revision.as_str(),
@@ -102,6 +100,9 @@ fn compatible(
                 max_batch: am,
                 pad_to_max: ap,
                 cuda_graph: ag,
+                execution_sizes: aes,
+                execution_lanes: al,
+                serialize_device: asd,
                 ..
             },
             BackendSpec::TensorRt {
@@ -110,12 +111,16 @@ fn compatible(
                 max_batch: bm,
                 pad_to_max: bp,
                 cuda_graph: bg,
+                execution_sizes: bes,
+                execution_lanes: bl,
+                serialize_device: bsd,
                 ..
             },
         ) => {
             require(ah == bh, "host_io", vary)?;
-            require(ap == bp, "batch_shape", vary)?;
+            require((ap, aes) == (bp, bes), "batch_shape", vary)?;
             require(ag == bg, "cuda_graph", vary)?;
+            require((al, asd) == (bl, bsd), "topology", vary)?;
             require((ao, am) == (bo, bm), "profile", vary)?;
             if x.engine_sha256 != y.engine_sha256
                 && !["profile", "runtime", "source", "build", "hardware"]
@@ -133,9 +138,12 @@ fn compatible(
             require(a == b, "requests", vary)?
         }
         (Case::Selfplay { config: a, .. }, Case::Selfplay { config: b, .. }) => {
-            if a != b {
+            let mut normalized = a.clone();
+            normalized.workers = b.workers;
+            if &normalized != b {
                 return Err("self-play game/search configuration differs".into());
             }
+            require(a.workers == b.workers, "workers", vary)?;
         }
         _ => return Err("driver kinds differ".into()),
     }
@@ -195,6 +203,8 @@ fn paired(
         "requests",
         "batch_shape",
         "cuda_graph",
+        "contexts",
+        "workers",
     ];
     if vary.iter().any(|s| !allowed.contains(&s.as_str())) {
         return Err("unknown comparison axis".into());
@@ -469,6 +479,47 @@ mod tests {
         }
     }
     #[test]
+    fn worker_count_axis_never_allows_changed_search_effort() {
+        let plan: Plan =
+            serde_json::from_str(include_str!("../../examples/inference/cpu.json")).unwrap();
+        let base = plan
+            .cases
+            .iter()
+            .find(|c| matches!(c, Case::Selfplay { .. }))
+            .unwrap();
+        let mut candidate = base.clone();
+        if let Case::Selfplay { config, .. } = &mut candidate {
+            config.workers += 1;
+        }
+        let r = result();
+        let a = (&r, base, &plan.variants[0], &plan);
+        assert!(compatible(
+            a,
+            (&r, &candidate, &plan.variants[0], &plan),
+            &BTreeSet::new()
+        )
+        .is_err());
+        let axes = BTreeSet::from(["workers".into()]);
+        assert!(compatible(a, (&r, &candidate, &plan.variants[0], &plan), &axes).is_ok());
+        if let Case::Selfplay { config, .. } = &mut candidate {
+            config.simulations += 1;
+        }
+        assert!(compatible(a, (&r, &candidate, &plan.variants[0], &plan), &axes).is_err());
+    }
+
+    #[test]
+    fn changed_physical_resources_require_an_explicit_context_axis() {
+        let plan: Plan =
+            serde_json::from_str(include_str!("../../examples/inference/cpu.json")).unwrap();
+        let a = result();
+        let mut b = result();
+        b.identity.physical_contexts = 2;
+        let parts = |r| (r, &plan.cases[0], &plan.variants[0], &plan);
+        assert!(compatible(parts(&a), parts(&b), &BTreeSet::new()).is_err());
+        assert!(compatible(parts(&a), parts(&b), &BTreeSet::from(["contexts".into()])).is_ok());
+    }
+
+    #[test]
     fn tensor_rt_execution_modes_require_declared_comparison_axes() {
         let mut plan: Plan =
             serde_json::from_str(include_str!("../../examples/inference/cpu.json")).unwrap();
@@ -478,6 +529,9 @@ mod tests {
             max_batch: 128,
             pad_to_max: false,
             cuda_graph: false,
+            execution_sizes: Vec::new(),
+            execution_lanes: 1,
+            serialize_device: false,
             cache_dir: "cache".into(),
         };
         let base = &plan.variants[0];
