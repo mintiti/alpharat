@@ -51,19 +51,30 @@ fn delta(a: &[EvalResult], b: &[EvalResult]) -> f32 {
 fn main() -> Result<()> {
     let args = std::env::args().collect::<Vec<_>>();
     assert!(
-        (5..=7).contains(&args.len()),
-        "model corpus cache output [padding|graphs|graphs-exact|combined] [max_batch]"
+        (5..=9).contains(&args.len()),
+        "model corpus cache output [mode] [max_batch] [lanes] [sizes_csv]"
     );
     let mode = args.get(5).map_or("padding", String::as_str);
     let (baseline_execution, candidate_execution) = match mode {
         "padding" => (Execution::EXACT, Execution::PADDED),
         "graphs" => (Execution::PADDED, Execution::GRAPHS),
         "graphs-exact" => (Execution::EXACT, Execution::EXACT_GRAPHS),
-        "combined" => (Execution::EXACT, Execution::GRAPHS),
+        "combined" | "buckets" | "buckets64" | "lanes" | "bucket-lanes" | "pipeline" => {
+            (Execution::EXACT, Execution::GRAPHS)
+        }
         _ => return Err(format!("unknown execution check mode: {mode}").into()),
     };
     let max_batch = args.get(6).map_or(Ok(128), |s| s.parse::<usize>())?;
     assert!((1..=128).contains(&max_batch));
+    let lane_count = args.get(7).map_or(Ok(2), |s| s.parse::<usize>())?;
+    assert!((1..=8).contains(&lane_count));
+    let custom_sizes: Option<Vec<usize>> = args
+        .get(8)
+        .map(|s| s.split(',').map(str::parse).collect())
+        .transpose()?;
+    if ["buckets", "buckets64", "bucket-lanes", "pipeline"].contains(&mode) && max_batch != 128 {
+        return Err("bucket check modes require max_batch 128".into());
+    }
     let corpus: Corpus = serde_json::from_slice(&fs::read(&args[2])?)?;
     let width = corpus.positions[0].width;
     let height = corpus.positions[0].height;
@@ -101,6 +112,25 @@ fn main() -> Result<()> {
                 pad_to_max: execution.pad_to_max,
                 profile_stages: profile,
                 cuda_graph: execution.cuda_graph,
+                execution_sizes: if execution.cuda_graph && custom_sizes.is_some() {
+                    custom_sizes.clone().unwrap()
+                } else if execution.cuda_graph
+                    && ["buckets", "bucket-lanes", "pipeline"].contains(&mode)
+                {
+                    vec![32, 64, max_batch]
+                } else if execution.cuda_graph && mode == "buckets64" {
+                    vec![64, max_batch]
+                } else {
+                    Vec::new()
+                },
+                execution_lanes: if execution.cuda_graph
+                    && ["lanes", "bucket-lanes", "pipeline"].contains(&mode)
+                {
+                    lane_count
+                } else {
+                    1
+                },
+                serialize_device: execution.cuda_graph && mode == "pipeline",
                 ..TensorrtConfig::default()
             },
         )
@@ -187,7 +217,7 @@ fn main() -> Result<()> {
         worst = worst.max(*d);
         rows.push(json!({"path":"concurrent","worker":worker,"calls":12,"max_abs_delta":d}));
     }
-    let result = json!({"model":args[1],"corpus":args[2],"baseline_execution":baseline_execution,"candidate_execution":candidate_execution,"max_batch":max_batch,"mode":mode,"engine_sha256":control.engine_sha256(),
+    let result = json!({"model":args[1],"corpus":args[2],"baseline_execution":baseline_execution,"candidate_execution":candidate_execution,"max_batch":max_batch,"requested_lane_count":lane_count,"custom_execution_sizes":custom_sizes,"mode":mode,"engine_sha256":control.engine_sha256(),
         "states":games.len(),"guard":0.0001,"max_abs_delta":worst,"passed":worst<=0.0001,
         "checked_empty_oversize_recovery":true,"checked_stats_real_rows":true,"concurrent_calls":48,"comparisons":rows});
     fs::write(&args[4], serde_json::to_vec_pretty(&result)?)?;

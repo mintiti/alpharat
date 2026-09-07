@@ -97,8 +97,20 @@ pub enum BackendSpec {
         pad_to_max: bool,
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         cuda_graph: bool,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        execution_sizes: Vec<usize>,
+        #[serde(default = "one", skip_serializing_if = "is_one")]
+        execution_lanes: usize,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        serialize_device: bool,
         cache_dir: PathBuf,
     },
+}
+fn one() -> usize {
+    1
+}
+fn is_one(n: &usize) -> bool {
+    *n == 1
 }
 impl BackendSpec {
     pub fn max_batch(&self) -> usize {
@@ -420,12 +432,20 @@ impl Plan {
                 opt_batch,
                 max_batch,
                 pad_to_max,
+                execution_sizes,
+                execution_lanes,
                 ..
             } = &v.backend
             {
                 if self.model.is_none()
                     || !["pinned", "pageable"].contains(&host_io.as_str())
                     || (*pad_to_max && host_io != "pinned")
+                    || (!execution_sizes.is_empty()
+                        && (!*pad_to_max
+                            || execution_sizes.first() == Some(&0)
+                            || execution_sizes.last() != Some(max_batch)
+                            || execution_sizes.windows(2).any(|w| w[0] >= w[1])))
+                    || !(1..=8).contains(execution_lanes)
                     || *opt_batch == 0
                     || opt_batch > max_batch
                     || *max_batch > 4096
@@ -502,6 +522,8 @@ impl Plan {
                 "requests",
                 "batch_shape",
                 "cuda_graph",
+                "contexts",
+                "workers",
             ];
             if c.vary.iter().any(|x| !allowed.contains(&x.as_str())) {
                 return Err("unknown comparison axis".into());

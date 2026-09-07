@@ -205,7 +205,7 @@ impl BatchQueue {
     fn close(&self) {
         let mut inner = self.inner.lock().unwrap();
         inner.closed = true;
-        self.condvar.notify_one();
+        self.condvar.notify_all();
     }
 }
 
@@ -223,26 +223,33 @@ pub struct MuxBackend {
     queue: Arc<BatchQueue>,
     stats: Arc<MuxStats>,
     max_batch_size: usize,
-    worker: Option<thread::JoinHandle<()>>,
+    workers: Vec<thread::JoinHandle<()>>,
 }
 
 impl MuxBackend {
     pub fn new(inner: impl Backend + 'static, config: MuxConfig) -> Self {
+        Self::with_workers(inner, config, 1)
+    }
+
+    /// Drain one shared queue with explicitly supplied concurrent backend workers.
+    /// Each request is owned by exactly one worker through result delivery.
+    pub fn with_workers(inner: impl Backend + 'static, config: MuxConfig, count: usize) -> Self {
+        assert!((1..=8).contains(&count), "mux workers must be in 1..=8");
         let queue = Arc::new(BatchQueue::new());
         let stats = Arc::new(MuxStats::new(config.max_batch_size));
-        let worker_queue = queue.clone();
-        let worker_stats = stats.clone();
+        let inner = Arc::new(inner);
         let max_batch_size = config.max_batch_size;
-
-        let worker = thread::spawn(move || {
-            worker_loop(&worker_queue, &inner, max_batch_size, &worker_stats);
-        });
-
+        let workers = (0..count)
+            .map(|_| {
+                let (queue, stats, inner) = (queue.clone(), stats.clone(), inner.clone());
+                thread::spawn(move || worker_loop(&queue, &*inner, max_batch_size, &stats))
+            })
+            .collect();
         Self {
             queue,
             stats,
             max_batch_size,
-            worker: Some(worker),
+            workers,
         }
     }
 
@@ -255,7 +262,7 @@ impl MuxBackend {
 impl Drop for MuxBackend {
     fn drop(&mut self) {
         self.queue.close();
-        if let Some(handle) = self.worker.take() {
+        for handle in self.workers.drain(..) {
             // Don't double-panic if the worker panicked — just log it.
             let _ = handle.join();
         }
@@ -313,8 +320,11 @@ fn worker_loop(queue: &BatchQueue, inner: &dyn Backend, max_batch_size: usize, s
         let _batch_trace = trace::batch(batch_id);
         for request in &requests {
             trace::link(
-                request.trace_id, batch_id, request.games.len(),
-                request.queued_ns, request.dequeued_ns,
+                request.trace_id,
+                batch_id,
+                request.games.len(),
+                request.queued_ns,
+                request.dequeued_ns,
             );
         }
 
@@ -328,7 +338,17 @@ fn worker_loop(queue: &BatchQueue, inner: &dyn Backend, max_batch_size: usize, s
 
         let n_positions = all_games.len() as u64;
         let nn_start = Instant::now();
-        let batch_result = inner.evaluate_batch(&all_games);
+        let batch_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            inner.evaluate_batch(&all_games)
+        }))
+        .unwrap_or_else(|_| Err(BackendError::msg("mux backend panicked")))
+        .and_then(|results| {
+            if results.len() == all_games.len() {
+                Ok(results)
+            } else {
+                Err(BackendError::msg("mux backend returned wrong result count"))
+            }
+        });
         let nn_ns = nn_start.elapsed().as_nanos() as u64;
 
         stats.total_batches.fetch_add(1, Ordering::Relaxed);
@@ -465,6 +485,104 @@ mod tests {
         assert_eq!(snapshot.total_batches, 3);
         assert_eq!(snapshot.total_positions, 64);
         assert_eq!(snapshot.batch_histogram, vec![(16, 2), (32, 1)]);
+    }
+
+    #[test]
+    fn two_mux_workers_overlap_and_preserve_request_results() {
+        struct Overlap {
+            entered: Mutex<usize>,
+            changed: Condvar,
+        }
+        impl Backend for Overlap {
+            fn evaluate(&self, game: &GameState) -> Result<EvalResult, BackendError> {
+                Ok(self.evaluate_batch(&[game])?.remove(0))
+            }
+            fn evaluate_batch(
+                &self,
+                games: &[&GameState],
+            ) -> Result<Vec<EvalResult>, BackendError> {
+                let mut entered = self.entered.lock().unwrap();
+                *entered += 1;
+                self.changed.notify_all();
+                let (entered, timeout) = self
+                    .changed
+                    .wait_timeout_while(entered, std::time::Duration::from_secs(2), |n| *n < 2)
+                    .unwrap();
+                assert!(
+                    !timeout.timed_out() && *entered >= 2,
+                    "two backend calls must overlap"
+                );
+                SmartUniformBackend.evaluate_batch(games)
+            }
+        }
+        let mux = MuxBackend::with_workers(
+            Overlap {
+                entered: Mutex::new(0),
+                changed: Condvar::new(),
+            },
+            MuxConfig { max_batch_size: 1 },
+            2,
+        );
+        let games = [
+            open_5x5(Coordinates::new(2, 2), Coordinates::new(0, 0)),
+            open_5x5(Coordinates::new(0, 0), Coordinates::new(4, 4)),
+        ];
+        std::thread::scope(|scope| {
+            let handles: Vec<_> = games
+                .iter()
+                .map(|game| {
+                    let mux = &mux;
+                    scope.spawn(move || {
+                        let actual = mux.evaluate(game).unwrap();
+                        let expected = SmartUniformBackend.evaluate(game).unwrap();
+                        assert_eq!(actual.policy_p1, expected.policy_p1);
+                        assert_eq!(actual.policy_p2, expected.policy_p2);
+                    })
+                })
+                .collect();
+            for handle in handles {
+                handle.join().unwrap();
+            }
+        });
+        assert_eq!(mux.stats().snapshot().total_positions, 2);
+        drop(mux); // Both idle workers must be woken and joined.
+    }
+
+    #[test]
+    fn lane_backend_panic_and_bad_cardinality_do_not_strand_requests() {
+        struct Faults(AtomicUsize);
+        impl Backend for Faults {
+            fn evaluate(&self, game: &GameState) -> Result<EvalResult, BackendError> {
+                Ok(self.evaluate_batch(&[game])?.remove(0))
+            }
+            fn evaluate_batch(
+                &self,
+                games: &[&GameState],
+            ) -> Result<Vec<EvalResult>, BackendError> {
+                match self.0.fetch_add(1, Ordering::SeqCst) {
+                    0 => panic!("injected backend panic"),
+                    1 => Ok(Vec::new()),
+                    _ => SmartUniformBackend.evaluate_batch(games),
+                }
+            }
+        }
+        let mux = MuxBackend::with_workers(
+            Faults(AtomicUsize::new(0)),
+            MuxConfig { max_batch_size: 1 },
+            2,
+        );
+        let game = open_5x5(Coordinates::new(0, 0), Coordinates::new(4, 4));
+        assert!(mux
+            .evaluate(&game)
+            .unwrap_err()
+            .to_string()
+            .contains("panicked"));
+        assert!(mux
+            .evaluate(&game)
+            .unwrap_err()
+            .to_string()
+            .contains("result count"));
+        assert!(mux.evaluate(&game).is_ok());
     }
 
     #[test]

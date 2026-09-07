@@ -414,6 +414,7 @@ fn create_tensorrt_backend(
         profile_stages,
         pad_to_max: false,
         cuda_graph: false,
+        ..TensorrtConfig::default()
     };
     let trt = TensorrtBackend::new(model_path, encoder, config).map_err(SelfPlayError::Backend)?;
     let tensorrt = Arc::clone(trt.stats());
