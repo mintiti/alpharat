@@ -1,5 +1,6 @@
 #[cfg(feature = "tensorrt")]
 mod inner {
+    use crate::inference_trace as trace;
     use crate::encoder::ObservationEncoder;
     use alpharat_mcts::{Backend, BackendError, EvalResult};
     use pyrat::GameState;
@@ -1117,6 +1118,10 @@ mod inner {
             kind: i32,
             op: &str,
         ) -> Result<(), BackendError> {
+            let _trace = trace::range(
+                if kind == CUDA_MEMCPY_H2D { c"h2d.submit" } else { c"d2h.submit" },
+                trace::request_id(),
+            );
             cuda_check(unsafe { cudaMemcpy(dst, src, count, kind) }, op)
         }
 
@@ -1128,6 +1133,10 @@ mod inner {
             kind: i32,
             op: &str,
         ) -> Result<(), BackendError> {
+            let _trace = trace::range(
+                if kind == CUDA_MEMCPY_H2D { c"h2d.submit" } else { c"d2h.submit" },
+                trace::request_id(),
+            );
             cuda_check(
                 unsafe { cudaMemcpyAsync(dst, src, count, kind, self.stream) },
                 op,
@@ -1181,7 +1190,10 @@ mod inner {
                 )?;
             }
 
-            let rc = unsafe { trt_enqueue_v3(self.handle, self.stream) };
+            let rc = {
+                let _trace = trace::range(c"enqueue", trace::request_id());
+                unsafe { trt_enqueue_v3(self.handle, self.stream) }
+            };
             if rc != 0 {
                 return Err(BackendError::msg(format!(
                     "TRT enqueue_v3 failed (rc={rc})"
@@ -1195,6 +1207,7 @@ mod inner {
                     .infer_end
                     .synchronize("cudaEventSynchronize(inference)")?;
             } else {
+                let _trace = trace::range(c"completion.wait", trace::request_id());
                 cuda_check(
                     unsafe { cudaStreamSynchronize(self.stream) },
                     "cudaStreamSynchronize",
@@ -1336,7 +1349,10 @@ mod inner {
                     .record(self.stream, "cudaEventRecord(inference start)")?;
             }
 
-            let rc = unsafe { trt_enqueue_v3(self.handle, self.stream) };
+            let rc = {
+                let _trace = trace::range(c"enqueue", trace::request_id());
+                unsafe { trt_enqueue_v3(self.handle, self.stream) }
+            };
             if rc != 0 {
                 return Err(BackendError::msg(format!(
                     "TRT enqueue_v3 failed (rc={rc})"
@@ -1385,7 +1401,10 @@ mod inner {
                     .record(self.stream, "cudaEventRecord(D2H end)")?;
             }
             completion.record(self.stream, "cudaEventRecord(completion)")?;
-            completion.synchronize("cudaEventSynchronize(completion)")?;
+            {
+                let _trace = trace::range(c"completion.wait", trace::request_id());
+                completion.synchronize("cudaEventSynchronize(completion)")?;
+            }
 
             let mut timing = if let Some(events) = events {
                 events.timing()?
@@ -1427,6 +1446,7 @@ mod inner {
     /// host/device buffers are serialized behind a mutex (the same topology as
     /// the pre-experiment backend and the measured production coordinate).
     pub struct TensorrtBackend<E: ObservationEncoder> {
+        engine_sha256: String,
         session: Mutex<TrtSession>,
         encoder: E,
         layout: TensorLayout,
@@ -1495,6 +1515,7 @@ mod inner {
                 }
             };
 
+            let engine_sha256 = format!("{:x}", Sha256::digest(&engine_data));
             let session =
                 TrtSession::new(&engine_data, layout, config.host_io, config.profile_stages)?;
             let pinned_bytes = session.pinned_bytes();
@@ -1509,6 +1530,7 @@ mod inner {
             let stats = Arc::new(TrtStats::new(config.host_io, pinned_bytes));
 
             Ok(Self {
+                engine_sha256,
                 session: Mutex::new(session),
                 encoder,
                 layout,
@@ -1518,11 +1540,17 @@ mod inner {
             })
         }
 
+        /// SHA-256 of the serialized engine actually loaded by this instance.
+        pub fn engine_sha256(&self) -> &str {
+            &self.engine_sha256
+        }
+
         pub fn stats(&self) -> &Arc<TrtStats> {
             &self.stats
         }
 
         fn lock_session(&self) -> Result<MutexGuard<'_, TrtSession>, BackendError> {
+            let _trace = trace::range(c"session.lock_wait", trace::request_id());
             self.session.lock().map_err(|_| {
                 BackendError::msg(
                     "TensorRT session lock poisoned after a panic; the session will not be reused",
@@ -1658,17 +1686,20 @@ mod inner {
                     let allocation_start = self.profile_stages.then(Instant::now);
                     let mut buf = vec![0.0f32; batch.input_elements];
                     let input_stage_us = elapsed_us(allocation_start);
+                    let encode_trace = trace::range(c"encode", trace::request_id());
                     let encode_start = self.profile_stages.then(Instant::now);
                     for (i, game) in games.iter().enumerate() {
                         self.encoder.encode_into(game, &mut buf, i * obs_dim);
                     }
                     let encode_us = elapsed_us(encode_start);
+                    drop(encode_trace);
 
                     let mut session = self.lock_session()?;
                     let ((pp1, pp2, v1, v2), mut timing) =
                         session.infer_pageable(&buf, batch, self.profile_stages)?;
                     timing.input_stage_us = input_stage_us;
                     timing.encode_us = encode_us;
+                    let _parse_trace = trace::range(c"parse", trace::request_id());
                     let parse_start = self.profile_stages.then(Instant::now);
                     let results = parse_eval_results(&pp1, &pp2, &v1, &v2, n)?;
                     timing.parse_us = elapsed_us(parse_start);
@@ -1676,6 +1707,7 @@ mod inner {
                 }
                 TrtHostIoMode::Pinned => {
                     let mut session = self.lock_session()?;
+                    let encode_trace = trace::range(c"encode", trace::request_id());
                     let encode_start = self.profile_stages.then(Instant::now);
                     {
                         let input = session.pinned_input_mut(batch)?;
@@ -1684,8 +1716,10 @@ mod inner {
                         }
                     }
                     let encode_us = elapsed_us(encode_start);
+                    drop(encode_trace);
                     let mut timing = session.infer_pinned_prepared(batch, self.profile_stages)?;
                     timing.encode_us = encode_us;
+                    let _parse_trace = trace::range(c"parse", trace::request_id());
                     let parse_start = self.profile_stages.then(Instant::now);
                     let (pp1, pp2, v1, v2) = session.pinned_output_slices(batch)?;
                     let results = parse_eval_results(pp1, pp2, v1, v2, n)?;
