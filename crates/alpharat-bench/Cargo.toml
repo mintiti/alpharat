@@ -50,3 +50,8 @@ onnx = ["dep:alpharat-sampling", "alpharat-sampling/onnx"]
 onnx-cuda = ["onnx", "alpharat-sampling/onnx-cuda"]
 onnx-coreml = ["onnx", "alpharat-sampling/onnx-coreml"]
 tensorrt = ["dep:alpharat-sampling", "alpharat-sampling/tensorrt"]
+
+[[bin]]
+name = "alpharat-infer"
+path = "src/infer.rs"
+required-features = ["inference"]
