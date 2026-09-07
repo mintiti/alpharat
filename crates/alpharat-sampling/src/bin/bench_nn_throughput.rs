@@ -474,6 +474,7 @@ fn run_trt_benchmark(
         profile_stages: true,
         pad_to_max: false,
         cuda_graph: false,
+        ..TensorrtConfig::default()
     };
     let backend = TensorrtBackend::new(model_path, encoder, config)
         .expect("failed to create TensorRT backend");
@@ -582,6 +583,7 @@ fn verify_trt_parity(
             profile_stages: true,
             pad_to_max: false,
             cuda_graph: false,
+            ..TensorrtConfig::default()
         },
     )
     .expect("failed to create TensorRT parity baseline");

@@ -124,6 +124,7 @@ pub fn identity(
     encoded_hash: &str,
     model: Option<&FileIdentity>,
     engine: Option<String>,
+    physical_contexts: usize,
     output: &Path,
 ) -> Result<Identity> {
     let patch = include_bytes!(concat!(env!("OUT_DIR"), "/alpharat-build-source.patch"));
@@ -186,7 +187,7 @@ pub fn identity(
         model_sha256: model.map(|m| m.sha256.clone()),
         corpus_sha256: corpus_hash.into(),
         encoded_sha256: encoded_hash.into(),
-        physical_contexts: usize::from(engine.is_some()),
+        physical_contexts,
         engine_sha256: engine,
     })
 }
