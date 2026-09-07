@@ -64,19 +64,24 @@ contexts separately.
 
 ## Opt-in TensorRT execution controls
 
-TensorRT backend objects in a plan accept two independent booleans, both false
-when omitted. They preserve the one-context session and real request sizes, and
-are also available on Rust `TensorrtConfig`.
+TensorRT backend objects accept the opt-in controls below, also available on Rust
+`TensorrtConfig`. Omitted booleans are false, `execution_sizes` is empty, and
+`execution_lanes` is one. Returned request sizes always count real rows.
 
 | Plan field | Effect | Required comparison axis |
 |------------|--------|--------------------------|
 | `pad_to_max` | Execute every nonempty batch at `max_batch`, initializing unused input rows to zero. | `batch_shape` |
 | `cuda_graph` | Request the SDK's built-in whole-graph capture policy for the execution context. | `cuda_graph` |
+| `execution_sizes` | Route requests to the smallest fitting fixed context, for example `[32,64,128]`. Requires padding; sizes must be positive, strictly increasing and end at `max_batch`. | `batch_shape`, and `contexts` if the count changes |
+| `execution_lanes` | Create 1–8 independently locked context groups. Eager mux uses the same number of workers to supply them. Each lane has private streams/buffers. | `topology`, `contexts` |
+| `serialize_device` | Hold a shared gate across each lane's GPU submission/completion, while CPU encoding and parsing remain outside it. With multiple lanes this tests preparation overlap without concurrent device calls. | `topology` |
 
 Padding requires pinned host I/O; incompatible plans fail validation before GPU
 setup. Returned results, NN evaluation counters and mux histograms always count
 real rows. The recorded warmup sizes are requested batch sizes; with padding,
-the physical execution shape stays at `max_batch`. Padding performs extra device
+the physical execution shape is `max_batch` or the selected fixed size. Each lane
+contains one context per fixed size, and recorded physical contexts count the full
+product. Additional contexts duplicate runtime/engine/buffer resources. Padding performs extra device
 work; real-row rates do not represent device FLOPs.
 
 Padding also requires a model whose rows are independent at inference time.
@@ -91,9 +96,13 @@ target/release/examples/check_trt_padding MODEL.onnx CORPUS.json CACHE_DIR OUTPU
 ```
 
 The optional mode is `padding`, `graphs` (on padded execution), `graphs-exact`,
-or `combined` (padding and graphs against ordinary execution). An optional final
-maximum batch argument accepts 1–128 and defaults to 128. Every pair uses the same serialized
-engine. The example retains output deltas and enforces a 1e-4 absolute regression
+or `combined` (padding and graphs against ordinary execution). Experimental checks
+also include `buckets`, `buckets64`, `lanes`, `bucket-lanes`, and `pipeline`; bucket
+modes currently use maximum 128. Arguments after the mode are `max_batch`
+(1–128, default 128), `lanes` (1–8, default 2 in lane modes), then an optional
+comma-separated list of fixed sizes. For example, `bucket-lanes 128 2 32,64,128`
+checks three sizes on two lanes. The sizes override the bucket defaults and must
+end at `max_batch`. Every pair uses the same serialized engine. The example retains output deltas and enforces a 1e-4 absolute regression
 screen. This is a numerical check, not evidence about playing strength.
 
 Graph capture is a requested runtime policy. TensorRT may delay capture or fall
@@ -229,11 +238,13 @@ target/release/alpharat-infer report --run target/inference-runs/a --format json
 
 Separate runs pair by repetition index and are explicitly labeled as
 non-interleaved. Allowed axes are host_io, profile, batch_shape, cuda_graph, source, build,
-runtime, hardware, topology and requests. Model and corpus changes are always rejected.
+runtime, hardware, topology, contexts, workers and requests. `workers` permits only
+the independent-game worker count to differ; model, corpus and every other
+game/search setting must still match.
 An undeclared difference, diagnostic mode, incomplete/failed attempt, missing
 repetition, within-arm identity drift, or non-reconstructable source rejects
-the comparison. Changing self-play's game/search configuration is not a
-compatible comparison. No speedup threshold automatically selects a winner.
+the comparison. Changing self-play search effort remains incompatible even when
+`workers` is declared. No speedup threshold automatically selects a winner.
 
 report/compare print by default; `--out FILE` exclusively creates a new report
 file. Cached report.json/report.md are conveniences: regenerating a report

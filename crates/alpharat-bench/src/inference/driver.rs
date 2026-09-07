@@ -144,6 +144,7 @@ struct Built {
     #[cfg(feature = "tensorrt")]
     trt: Option<Arc<alpharat_sampling::TrtStats>>,
     engine: Option<String>,
+    physical_contexts: usize,
 }
 fn build(request: &TrialRequest, width: u8, height: u8) -> Result<Built> {
     #[cfg(feature = "tensorrt")]
@@ -152,6 +153,10 @@ fn build(request: &TrialRequest, width: u8, height: u8) -> Result<Built> {
     let engine = None;
     #[cfg(feature = "tensorrt")]
     let mut trt = None;
+    #[cfg(feature = "tensorrt")]
+    let (mut physical_contexts, mut mux_workers) = (0, 1);
+    #[cfg(not(feature = "tensorrt"))]
+    let (physical_contexts, mux_workers) = (0, 1);
     let inner: Arc<dyn Backend> = match &request.variant.backend {
         BackendSpec::SmartUniform {} => Arc::new(SmartUniformBackend),
         BackendSpec::TensorRt {
@@ -160,6 +165,9 @@ fn build(request: &TrialRequest, width: u8, height: u8) -> Result<Built> {
             max_batch,
             pad_to_max,
             cuda_graph,
+            execution_sizes,
+            execution_lanes,
+            serialize_device,
             cache_dir,
         } => {
             #[cfg(feature = "tensorrt")]
@@ -180,6 +188,9 @@ fn build(request: &TrialRequest, width: u8, height: u8) -> Result<Built> {
                         max_batch: *max_batch,
                         pad_to_max: *pad_to_max,
                         cuda_graph: *cuda_graph,
+                        execution_sizes: execution_sizes.clone(),
+                        execution_lanes: *execution_lanes,
+                        serialize_device: *serialize_device,
                         cache_dir: Some(cache_dir.clone()),
                         host_io: if host_io == "pinned" {
                             alpharat_sampling::TrtHostIoMode::Pinned
@@ -189,6 +200,8 @@ fn build(request: &TrialRequest, width: u8, height: u8) -> Result<Built> {
                         profile_stages: request.plan.measurement.mode == Mode::Stages,
                     },
                 )?;
+                physical_contexts = backend.physical_contexts();
+                mux_workers = *execution_lanes;
                 engine = Some(backend.engine_sha256().to_owned());
                 trt = Some(backend.stats().clone());
                 Arc::new(backend)
@@ -196,7 +209,17 @@ fn build(request: &TrialRequest, width: u8, height: u8) -> Result<Built> {
             #[cfg(not(feature = "tensorrt"))]
             {
                 let _ = (
-                    host_io, opt_batch, max_batch, pad_to_max, cuda_graph, cache_dir, width, height,
+                    host_io,
+                    opt_batch,
+                    max_batch,
+                    pad_to_max,
+                    cuda_graph,
+                    execution_sizes,
+                    execution_lanes,
+                    serialize_device,
+                    cache_dir,
+                    width,
+                    height,
                 );
                 return Err("TensorRT support is not compiled".into());
             }
@@ -205,11 +228,12 @@ fn build(request: &TrialRequest, width: u8, height: u8) -> Result<Built> {
     let (backend, mux): (Arc<dyn Backend>, _) = match request.case.topology() {
         Topology::Direct {} => (inner, None),
         Topology::EagerMux { max_batch } => {
-            let mux = MuxBackend::new(
+            let mux = MuxBackend::with_workers(
                 Dyn(inner),
                 MuxConfig {
                     max_batch_size: *max_batch,
                 },
+                mux_workers,
             );
             let stats = Some(mux.stats().clone());
             (Arc::new(mux), stats)
@@ -219,6 +243,7 @@ fn build(request: &TrialRequest, width: u8, height: u8) -> Result<Built> {
         backend,
         mux,
         engine,
+        physical_contexts,
         #[cfg(feature = "tensorrt")]
         trt,
     })
@@ -468,6 +493,7 @@ pub fn execute(request: &TrialRequest, output: &Path) -> Result<TrialResult> {
         &hash(&encoded_bytes),
         request.model.as_ref(),
         built.engine.clone(),
+        built.physical_contexts,
         output,
     )?;
     if ident.executable.sha256 != request.executable.sha256 {
