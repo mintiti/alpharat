@@ -34,6 +34,7 @@ dependencies = [
  "sha2",
  "tempfile",
  "thiserror",
+ "thread_local",
  "uuid",
 ]
 
@@ -109,6 +110,7 @@ dependencies = [
 name = "alpharat-sampling"
 version = "0.1.0"
 dependencies = [
+ "alpharat-mcgs",
  "alpharat-mcts",
  "cc",
  "numpy",

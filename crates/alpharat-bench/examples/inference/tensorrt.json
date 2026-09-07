@@ -1,0 +1,110 @@
+{
+  "format": "alpharat.inference.plan",
+  "schema_version": 1,
+  "plan_id": "tensorrt-host-io",
+  "model": {
+    "path": "/replace/with/model.onnx"
+  },
+  "corpus": {
+    "path": "corpus.json"
+  },
+  "measurement": {
+    "mode": "clean",
+    "warmup": {
+      "passes": 2,
+      "min_ms": 2000,
+      "max_ms": 30000
+    },
+    "calls_per_caller": 1000,
+    "repetitions": 2,
+    "max_samples_per_thread": 10000
+  },
+  "limits": {
+    "setup_seconds": 300,
+    "trial_seconds": 120,
+    "total_seconds": 1800
+  },
+  "comparison": {
+    "baseline": "pageable",
+    "candidate": "pinned",
+    "vary": [
+      "host_io"
+    ],
+    "order": [
+      "AB",
+      "BA"
+    ]
+  },
+  "variants": [
+    {
+      "id": "pageable",
+      "executable": "../../../../target/release/alpharat-infer",
+      "backend": {
+        "kind": "tensorrt",
+        "host_io": "pageable",
+        "opt_batch": 8,
+        "max_batch": 32,
+        "cache_dir": "../../../../target/inference-engine-cache"
+      }
+    },
+    {
+      "id": "pinned",
+      "executable": "../../../../target/release/alpharat-infer",
+      "backend": {
+        "kind": "tensorrt",
+        "host_io": "pinned",
+        "opt_batch": 8,
+        "max_batch": 32,
+        "cache_dir": "../../../../target/inference-engine-cache"
+      }
+    }
+  ],
+  "cases": [
+    {
+      "driver": "capacity",
+      "key": "direct",
+      "topology": {
+        "kind": "direct"
+      },
+      "requests": {
+        "kind": "constant",
+        "batch_size": 8,
+        "callers": 2
+      }
+    },
+    {
+      "driver": "capacity",
+      "key": "mux-sequence",
+      "topology": {
+        "kind": "eager_mux",
+        "max_batch": 32
+      },
+      "requests": {
+        "kind": "sequence",
+        "batches": [
+          1,
+          8,
+          3
+        ],
+        "callers": 4,
+        "corpus_offset": 1
+      }
+    },
+    {
+      "driver": "selfplay",
+      "key": "selfplay",
+      "topology": {
+        "kind": "eager_mux",
+        "max_batch": 32
+      },
+      "config": {
+        "games": 4,
+        "workers": 2,
+        "simulations": 8,
+        "batch_size": 4,
+        "seed": 7,
+        "games_per_bundle": 2
+      }
+    }
+  ]
+}
