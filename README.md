@@ -143,6 +143,12 @@ alpharat-iterate configs/iterate.yaml --prefix sym_5x5 --device cuda
 
 Available devices: `auto` (CoreML on macOS, CUDA on Linux, else CPU), `cpu`, `cuda`, `coreml`/`mps`, `tensorrt`.
 
+### Measure inference speed
+
+Use [alpharat-infer](docs/inference-speed-tools.md) for saved production inference
+workloads, separate latency/Nsight diagnostics, and compatible throughput comparisons.
+The guide includes a CPU-only example and explicit TensorRT setup.
+
 ## The approach
 
 When both players move at once, you can't just maximize — the opponent is choosing too. Each node stores scalar value estimates (expected remaining cheese per player), and action selection uses decoupled PUCT where each player independently picks via exploration bonus. The final policy is visit-proportional.
