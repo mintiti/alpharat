@@ -412,6 +412,8 @@ fn create_tensorrt_backend(
             TrtHostIoMode::Pageable
         },
         profile_stages,
+        pad_to_max: false,
+        cuda_graph: false,
     };
     let trt = TensorrtBackend::new(model_path, encoder, config).map_err(SelfPlayError::Backend)?;
     let tensorrt = Arc::clone(trt.stats());
@@ -752,9 +754,8 @@ fn make_games(
 
     (0..n)
         .map(|game_index| {
-            let game_seed = seed.map(|master_seed| {
-                selfplay::game_creation_seed(master_seed, game_index)
-            });
+            let game_seed =
+                seed.map(|master_seed| selfplay::game_creation_seed(master_seed, game_index));
             config.create(game_seed).expect("game creation failed")
         })
         .collect()

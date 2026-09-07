@@ -1,7 +1,7 @@
 #[cfg(feature = "tensorrt")]
 mod inner {
-    use crate::inference_trace as trace;
     use crate::encoder::ObservationEncoder;
+    use crate::inference_trace as trace;
     use alpharat_mcts::{Backend, BackendError, EvalResult};
     use pyrat::GameState;
     use sha2::{Digest, Sha256};
@@ -116,7 +116,11 @@ mod inner {
 
         fn trt_free_buffer(data: *mut c_void);
 
-        fn trt_create_session(engine_data: *const c_void, engine_len: usize) -> *mut c_void;
+        fn trt_create_session(
+            engine_data: *const c_void,
+            engine_len: usize,
+            whole_graph: i32,
+        ) -> *mut c_void;
         fn trt_destroy_session(handle: *mut c_void);
 
         fn trt_set_tensor_address(handle: *mut c_void, name: *const i8, ptr: *mut c_void) -> i32;
@@ -180,6 +184,12 @@ mod inner {
         pub opt_batch: Option<usize>,
         /// Maximum batch size. GPU buffers are pre-allocated for this size.
         pub max_batch: usize,
+        /// Keep the TensorRT execution shape at max_batch, padding unused rows.
+        /// Requires a model whose rows are independent. Opt-in and pinned-only;
+        /// returned outputs and statistics count real rows.
+        pub pad_to_max: bool,
+        /// Request TensorRT-managed whole-graph capture (the runtime may fall back).
+        pub cuda_graph: bool,
         /// Directory for cached serialized engines. `None` disables caching.
         pub cache_dir: Option<PathBuf>,
         /// Host I/O lifetime. Pinned is the measured RTX 5090 production default.
@@ -194,6 +204,8 @@ mod inner {
             Self {
                 opt_batch: None,
                 max_batch: 256,
+                pad_to_max: false,
+                cuda_graph: false,
                 cache_dir: None,
                 host_io: TrtHostIoMode::Pinned,
                 profile_stages: false,
@@ -930,6 +942,7 @@ mod inner {
         stream: *mut c_void,
         input_name: CString,
         last_batch: Option<usize>,
+        pad_to_max: bool,
         buffers: GpuBuffers,
         pinned: Option<PinnedHostBuffers>,
         completion: Option<CudaEvent>,
@@ -967,9 +980,14 @@ mod inner {
             layout: TensorLayout,
             host_io: TrtHostIoMode,
             profile_stages: bool,
+            cuda_graph: bool,
         ) -> Result<Self, BackendError> {
             let handle = unsafe {
-                trt_create_session(engine_data.as_ptr().cast::<c_void>(), engine_data.len())
+                trt_create_session(
+                    engine_data.as_ptr().cast::<c_void>(),
+                    engine_data.len(),
+                    i32::from(cuda_graph),
+                )
             };
             if handle.is_null() {
                 return Err(BackendError::msg("Failed to create TensorRT session"));
@@ -1039,6 +1057,7 @@ mod inner {
                 stream,
                 input_name,
                 last_batch: None,
+                pad_to_max: false,
                 buffers,
                 pinned,
                 completion,
@@ -1073,11 +1092,7 @@ mod inner {
             self.health.ensure_healthy()
         }
 
-        fn validate_input(
-            &self,
-            input_len: usize,
-            batch: BatchLayout,
-        ) -> Result<(), BackendError> {
+        fn validate_input(&self, input_len: usize, batch: BatchLayout) -> Result<(), BackendError> {
             self.ensure_healthy()?;
             if input_len != batch.input_elements {
                 return Err(BackendError::msg(format!(
@@ -1119,7 +1134,11 @@ mod inner {
             op: &str,
         ) -> Result<(), BackendError> {
             let _trace = trace::range(
-                if kind == CUDA_MEMCPY_H2D { c"h2d.submit" } else { c"d2h.submit" },
+                if kind == CUDA_MEMCPY_H2D {
+                    c"h2d.submit"
+                } else {
+                    c"d2h.submit"
+                },
                 trace::request_id(),
             );
             cuda_check(unsafe { cudaMemcpy(dst, src, count, kind) }, op)
@@ -1134,7 +1153,11 @@ mod inner {
             op: &str,
         ) -> Result<(), BackendError> {
             let _trace = trace::range(
-                if kind == CUDA_MEMCPY_H2D { c"h2d.submit" } else { c"d2h.submit" },
+                if kind == CUDA_MEMCPY_H2D {
+                    c"h2d.submit"
+                } else {
+                    c"d2h.submit"
+                },
                 trace::request_id(),
             );
             cuda_check(
@@ -1311,7 +1334,17 @@ mod inner {
             profile_stages: bool,
         ) -> Result<TrtTimingInfo, BackendError> {
             self.validate_input(batch.input_elements, batch)?;
-            self.ensure_input_shape(batch.batch_size)?;
+            let execution = if self.pad_to_max {
+                self.layout.capacity
+            } else {
+                batch
+            };
+            // Every submitted row is initialized, including after a larger real batch.
+            // Only the real prefix is copied back and exposed to the caller below.
+            if execution.input_elements > batch.input_elements {
+                self.pinned_input_mut(execution)?[batch.input_elements..].fill(0.0);
+            }
+            self.ensure_input_shape(execution.batch_size)?;
             let total_start = profile_stages.then(Instant::now);
             let pinned = self.pinned.as_mut().ok_or_else(|| {
                 BackendError::msg("pinned inference requested on pageable session")
@@ -1336,7 +1369,7 @@ mod inner {
             self.copy_async(
                 self.buffers.d_input,
                 input_ptr,
-                batch.input_bytes,
+                execution.input_bytes,
                 CUDA_MEMCPY_H2D,
                 "pinned input H2D async",
             )?;
@@ -1481,6 +1514,11 @@ mod inner {
                     opt_batch
                 )));
             }
+            if config.pad_to_max && config.host_io != TrtHostIoMode::Pinned {
+                return Err(BackendError::msg(
+                    "TensorRT padding requires pinned host I/O",
+                ));
+            }
             load_trt_libs()?;
             let onnx_path = model_path.as_ref();
 
@@ -1516,11 +1554,21 @@ mod inner {
             };
 
             let engine_sha256 = format!("{:x}", Sha256::digest(&engine_data));
-            let session =
-                TrtSession::new(&engine_data, layout, config.host_io, config.profile_stages)?;
+            let mut session = TrtSession::new(
+                &engine_data,
+                layout,
+                config.host_io,
+                config.profile_stages,
+                config.cuda_graph,
+            )?;
+            session.pad_to_max = config.pad_to_max;
+            eprintln!(
+                "[TensorRT] Pad execution to max batch: {}; requested whole-graph capture: {}",
+                config.pad_to_max, config.cuda_graph
+            );
             let pinned_bytes = session.pinned_bytes();
             eprintln!(
-                "[TensorRT] Profile: MIN=1, OPT={}, MAX={}; one execution context; CUDA graphs: off; host I/O: {}; pinned bytes: {}; stage profiling: {}",
+                "[TensorRT] Profile: MIN=1, OPT={}, MAX={}; one execution context; host I/O: {}; pinned bytes: {}; stage profiling: {}",
                 opt_batch,
                 config.max_batch,
                 config.host_io,
@@ -1774,6 +1822,36 @@ mod inner {
             .expect("invalid optimization point should fail");
 
             assert!(error.to_string().contains("opt_batch must be in 1..=128"));
+        }
+
+        #[test]
+        fn padding_requires_pinned_io_before_runtime_load() {
+            let error = TensorrtBackend::new(
+                "not-read.onnx",
+                FlatEncoder::new(7, 7),
+                TensorrtConfig {
+                    pad_to_max: true,
+                    host_io: TrtHostIoMode::Pageable,
+                    ..TensorrtConfig::default()
+                },
+            )
+            .err()
+            .expect("pageable padding must fail explicitly");
+            assert!(error.to_string().contains("padding requires pinned"));
+        }
+
+        #[test]
+        fn padded_output_tail_is_not_exposed_or_validated_as_real_work() {
+            let output = parse_eval_results(
+                &[0.2, 0.2, 0.2, 0.2, 0.2, f32::NAN],
+                &[0.2, 0.2, 0.2, 0.2, 0.2, f32::NAN],
+                &[0.3, f32::NAN],
+                &[0.4, f32::NAN],
+                1,
+            )
+            .unwrap();
+            assert_eq!(output.len(), 1);
+            assert_eq!(output[0].value_p1, 0.3);
         }
 
         #[test]

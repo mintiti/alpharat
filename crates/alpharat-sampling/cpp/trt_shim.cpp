@@ -117,6 +117,7 @@ struct TrtSession {
     IRuntime*          runtime;
     ICudaEngine*       engine;
     IExecutionContext* context;
+    IRuntimeConfig*    runtime_config;
 };
 
 // ---------------------------------------------------------------------------
@@ -261,7 +262,7 @@ extern "C" void trt_free_buffer(void* data) {
 // Session lifecycle
 // ---------------------------------------------------------------------------
 
-extern "C" void* trt_create_session(const void* engine_data, size_t engine_len) {
+extern "C" void* trt_create_session(const void* engine_data, size_t engine_len, int whole_graph) {
     auto& logger = get_logger();
 
     auto create_runtime = resolve_create_runtime();
@@ -273,12 +274,25 @@ extern "C" void* trt_create_session(const void* engine_data, size_t engine_len) 
     ICudaEngine* engine = runtime->deserializeCudaEngine(engine_data, engine_len);
     if (!engine) { delete runtime; return nullptr; }
 
-    IExecutionContext* context = engine->createExecutionContext();
-    if (!context) { delete engine; delete runtime; return nullptr; }
+    IRuntimeConfig* runtime_config = nullptr;
+    if (whole_graph) {
+        runtime_config = engine->createRuntimeConfig();
+        if (!runtime_config || !runtime_config->setCudaGraphStrategy(CudaGraphStrategy::kWHOLE_GRAPH_CAPTURE)) {
+            delete runtime_config;
+            delete engine;
+            delete runtime;
+            return nullptr;
+        }
+    }
+    IExecutionContext* context = runtime_config
+        ? engine->createExecutionContext(runtime_config)
+        : engine->createExecutionContext();
+    if (!context) { delete runtime_config; delete engine; delete runtime; return nullptr; }
 
-    auto* session = new (std::nothrow) TrtSession{runtime, engine, context};
+    auto* session = new (std::nothrow) TrtSession{runtime, engine, context, runtime_config};
     if (!session) {
         delete context;
+        delete runtime_config;
         delete engine;
         delete runtime;
         return nullptr;
@@ -290,6 +304,7 @@ extern "C" void trt_destroy_session(void* handle) {
     if (!handle) return;
     auto* s = static_cast<TrtSession*>(handle);
     delete s->context;
+    delete s->runtime_config;
     delete s->engine;
     delete s->runtime;
     delete s;

@@ -114,7 +114,9 @@ pub fn build_description() -> serde_json::Value {
         "worker_handshake":true, "mcgs_selfplay":true,
         "tensorrt":cfg!(feature="tensorrt"), "timeline":cfg!(feature="inference-trace"),
         "rustc":env!("ALPHARAT_BUILD_RUSTC_VERSION"),
-        "source":env!("ALPHARAT_BUILD_SOURCE_REVISION")
+        "source":env!("ALPHARAT_BUILD_SOURCE_REVISION"),
+        "source_state":env!("ALPHARAT_BUILD_SOURCE_STATE"),
+        "source_reason":env!("ALPHARAT_BUILD_SOURCE_REASON")
     })
 }
 pub fn identity(
