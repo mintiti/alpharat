@@ -56,3 +56,6 @@ jobs:
 
       - name: Run tests
         run: cargo test
+
+      - name: Run CPU inference tool tests
+        run: cargo test --locked -p alpharat-bench --features inference
