@@ -140,6 +140,57 @@ fn invalid_or_unsupported_work_is_retained_without_trials() {
     assert!(out.join("capabilities/control/stderr.log").is_file());
 }
 #[test]
+fn oversized_selfplay_batch_is_an_invalid_plan_not_an_allocation_abort() {
+    use alpharat_bench::inference::model::Case;
+    use std::os::unix::process::CommandExt;
+    let temp = tempfile::tempdir().unwrap();
+    let path = fixture(temp.path());
+    let mut plan: Plan = artifact::read_json(&path).unwrap();
+    let Some(Case::Selfplay { config, .. }) = plan
+        .cases
+        .iter_mut()
+        .find(|c| matches!(c, Case::Selfplay { .. }))
+    else {
+        unreachable!()
+    };
+    config.batch_size = u32::MAX;
+    artifact::write_json(&path, &plan).unwrap();
+    // Listing 1..=u32::MAX needs 34 GB; the cap turns a regression into a prompt abort.
+    let capped = |args: &[&str]| {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_alpharat-infer"));
+        command.args(args);
+        unsafe {
+            command.pre_exec(|| {
+                let cap = libc::rlimit {
+                    rlim_cur: 1 << 30,
+                    rlim_max: 1 << 30,
+                };
+                if libc::setrlimit(libc::RLIMIT_AS, &cap) == 0 {
+                    Ok(())
+                } else {
+                    Err(std::io::Error::last_os_error())
+                }
+            });
+        }
+        let out = command.output().unwrap();
+        let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
+        assert_eq!(out.status.code(), Some(1), "{:?}: {stderr}", out.status);
+        assert!(stderr.contains("invalid self-play work"), "{stderr}");
+    };
+    capped(&["check", "--plan", path.to_str().unwrap()]);
+    let out = temp.path().join("run");
+    capped(&[
+        "run",
+        "--plan",
+        path.to_str().unwrap(),
+        "--out",
+        out.to_str().unwrap(),
+    ]);
+    let failure: serde_json::Value = artifact::read_json(&out.join("failure.json")).unwrap();
+    assert_eq!(failure["error"], "invalid self-play work");
+    assert!(!out.join("attempts").exists());
+}
+#[test]
 fn diagnostic_rerun_rejects_changed_executable() {
     let temp = tempfile::tempdir().unwrap();
     let path = fixture(temp.path());
