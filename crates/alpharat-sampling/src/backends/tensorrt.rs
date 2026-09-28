@@ -1,5 +1,6 @@
 #[cfg(feature = "tensorrt")]
 mod inner {
+    use crate::backends::lanes::{self, Lanes};
     use crate::encoder::ObservationEncoder;
     use crate::inference_trace as trace;
     use alpharat_mcts::{Backend, BackendError, EvalResult};
@@ -10,7 +11,7 @@ mod inner {
     use std::fs;
     use std::path::{Path, PathBuf};
     use std::sync::atomic::{AtomicU64, Ordering};
-    use std::sync::{Arc, Mutex, MutexGuard, TryLockError};
+    use std::sync::{Arc, Mutex, MutexGuard};
     use std::time::Instant;
 
     // -----------------------------------------------------------------------
@@ -196,6 +197,7 @@ mod inner {
         pub execution_sizes: Vec<usize>,
         /// Independent groups of contexts, each with private streams and buffers.
         /// More than one requires concurrent callers to supply useful work.
+        /// Calls rotate lanes; `evaluate_batch_on_every_lane` reaches each one.
         pub execution_lanes: usize,
         /// Serialize GPU submission/completion across lanes while allowing CPU
         /// encoding and result parsing to overlap another lane's device work.
@@ -1498,8 +1500,7 @@ mod inner {
     /// retain their shapes across calls; explicitly configured lanes may overlap.
     pub struct TensorrtBackend<E: ObservationEncoder> {
         engine_sha256: String,
-        sessions: Vec<Mutex<Vec<TrtSession>>>,
-        next_lane: AtomicU64,
+        sessions: Lanes<Vec<TrtSession>>,
         device_gate: Option<Mutex<()>>,
         execution_sizes: Vec<usize>,
         encoder: E,
@@ -1610,7 +1611,7 @@ mod inner {
                     pinned_bytes += session.pinned_bytes();
                     lane.push(session);
                 }
-                sessions.push(Mutex::new(lane));
+                sessions.push(lane);
             }
             eprintln!(
                 "[TensorRT] OPT={opt_batch} MAX={}; lanes={}; contexts={}; sizes={:?}; pad={}; graphs={}; pinned_bytes={pinned_bytes}",
@@ -1620,8 +1621,7 @@ mod inner {
 
             Ok(Self {
                 engine_sha256,
-                sessions,
-                next_lane: AtomicU64::new(0),
+                sessions: Lanes::new(sessions),
                 device_gate: config.serialize_device.then(|| Mutex::new(())),
                 execution_sizes: config.execution_sizes,
                 encoder,
@@ -1648,10 +1648,7 @@ mod inner {
 
         fn execution_slot(&self, n: usize) -> usize {
             // The caller validates n against max_batch before acquiring sessions.
-            self.execution_sizes
-                .iter()
-                .position(|size| n <= *size)
-                .unwrap_or(0)
+            lanes::execution_slot(&self.execution_sizes, n)
         }
 
         fn lock_device(&self) -> Result<Option<MutexGuard<'_, ()>>, BackendError> {
@@ -1666,32 +1663,16 @@ mod inner {
                 .transpose()
         }
 
-        fn lock_sessions(&self) -> Result<MutexGuard<'_, Vec<TrtSession>>, BackendError> {
+        /// Lock the rotating lane, or wait for `lane` when one is named.
+        fn lock_sessions(
+            &self,
+            lane: Option<usize>,
+        ) -> Result<MutexGuard<'_, Vec<TrtSession>>, BackendError> {
             let _trace = trace::range(c"session.lock_wait", trace::request_id());
-            let lane_count = self.sessions.len();
-            let start = if lane_count == 1 {
-                0
-            } else {
-                self.next_lane.fetch_add(1, Ordering::Relaxed) as usize % lane_count
-            };
-            if lane_count > 1 {
-                for offset in 0..lane_count {
-                    match self.sessions[(start + offset) % lane_count].try_lock() {
-                        Ok(guard) => return Ok(guard),
-                        Err(TryLockError::WouldBlock) => {}
-                        Err(TryLockError::Poisoned(_)) => {
-                            return Err(BackendError::msg(
-                                "TensorRT lane lock poisoned after a panic",
-                            ))
-                        }
-                    }
-                }
+            match lane {
+                Some(lane) => self.sessions.lock(lane),
+                None => self.sessions.acquire(),
             }
-            self.sessions[start].lock().map_err(|_| {
-                BackendError::msg(
-                    "TensorRT session lock poisoned after a panic; the session will not be reused",
-                )
-            })
         }
     }
 
@@ -1772,7 +1753,7 @@ mod inner {
             }
             let call_start = Instant::now();
             let batch = self.layout.batch(n)?;
-            let mut sessions = self.lock_sessions()?;
+            let mut sessions = self.lock_sessions(None)?;
             let session = &mut sessions[self.execution_slot(n)];
             session.validate_input(encoded.len(), batch)?;
 
@@ -1809,12 +1790,27 @@ mod inner {
         }
     }
 
-    impl<E: ObservationEncoder> Backend for TensorrtBackend<E> {
-        fn evaluate(&self, game: &GameState) -> Result<EvalResult, BackendError> {
-            Ok(self.evaluate_batch(&[game])?[0])
+    impl<E: ObservationEncoder> TensorrtBackend<E> {
+        /// Evaluate `games` once on each execution lane, in lane order.
+        ///
+        /// Each call waits for its lane, then runs the same locked path as
+        /// `evaluate_batch`. Ordinary calls rotate lanes, so serial calls cannot
+        /// choose where a batch shape runs; use this to warm every lane's
+        /// contexts before timing concurrent work.
+        pub fn evaluate_batch_on_every_lane(
+            &self,
+            games: &[&GameState],
+        ) -> Result<Vec<Vec<EvalResult>>, BackendError> {
+            (0..self.sessions.len())
+                .map(|lane| self.evaluate_batch_on(games, Some(lane)))
+                .collect()
         }
 
-        fn evaluate_batch(&self, games: &[&GameState]) -> Result<Vec<EvalResult>, BackendError> {
+        fn evaluate_batch_on(
+            &self,
+            games: &[&GameState],
+            lane: Option<usize>,
+        ) -> Result<Vec<EvalResult>, BackendError> {
             let n = games.len();
             if n == 0 {
                 return Ok(Vec::new());
@@ -1836,7 +1832,7 @@ mod inner {
                     let encode_us = elapsed_us(encode_start);
                     drop(encode_trace);
 
-                    let mut sessions = self.lock_sessions()?;
+                    let mut sessions = self.lock_sessions(lane)?;
                     let session = &mut sessions[self.execution_slot(n)];
                     let ((pp1, pp2, v1, v2), mut timing) = {
                         let _device = self.lock_device()?;
@@ -1851,7 +1847,7 @@ mod inner {
                     (results, timing)
                 }
                 TrtHostIoMode::Pinned => {
-                    let mut sessions = self.lock_sessions()?;
+                    let mut sessions = self.lock_sessions(lane)?;
                     let session = &mut sessions[self.execution_slot(n)];
                     let encode_trace = trace::range(c"encode", trace::request_id());
                     let encode_start = self.profile_stages.then(Instant::now);
@@ -1882,6 +1878,16 @@ mod inner {
                 self.stats.record(n, &timing);
             }
             Ok(results)
+        }
+    }
+
+    impl<E: ObservationEncoder> Backend for TensorrtBackend<E> {
+        fn evaluate(&self, game: &GameState) -> Result<EvalResult, BackendError> {
+            Ok(self.evaluate_batch(&[game])?[0])
+        }
+
+        fn evaluate_batch(&self, games: &[&GameState]) -> Result<Vec<EvalResult>, BackendError> {
+            self.evaluate_batch_on(games, None)
         }
     }
 
