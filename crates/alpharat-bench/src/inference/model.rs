@@ -438,9 +438,7 @@ impl Plan {
             {
                 return Err("invalid/duplicate case key or caller count".into());
             }
-            if c.sizes().is_empty() || c.sizes().len() > 4096 || c.sizes().contains(&0) {
-                return Err("request batches must be nonempty and positive".into());
-            }
+            // Self-play sizes() materializes 1..=batch_size, so bound it first.
             if let Case::Selfplay { config, .. } = c {
                 if (config.engine == SearchEngine::Mcgs && config.search.is_none())
                     || config.search.as_ref().is_some_and(|c| !c.validate())
@@ -457,6 +455,9 @@ impl Plan {
                 {
                     return Err("invalid self-play work".into());
                 }
+            }
+            if c.sizes().is_empty() || c.sizes().len() > 4096 || c.sizes().contains(&0) {
+                return Err("request batches must be nonempty and positive".into());
             }
             for v in &self.variants {
                 let bound = match c.topology() {
@@ -519,6 +520,32 @@ mod tests {
             assert!(!valid_id(value));
         }
         assert!(valid_id("direct-b32_c4"));
+    }
+    #[test]
+    fn selfplay_batch_bound_is_checked_before_building_its_shapes() {
+        // Oversized values stay small here; the CLI test covers u32::MAX under a memory cap.
+        let mut plan: Plan =
+            serde_json::from_str(include_str!("../../examples/inference/cpu.json")).unwrap();
+        plan.validate().unwrap();
+        let set = |plan: &mut Plan, batch_size, route| match &mut plan.cases[2] {
+            Case::Selfplay {
+                config, topology, ..
+            } => {
+                config.batch_size = batch_size;
+                *topology = route;
+            }
+            _ => unreachable!(),
+        };
+        for batch_size in [0, 4097] {
+            set(&mut plan, batch_size, Topology::Direct {});
+            let error = plan.validate().unwrap_err().to_string();
+            assert_eq!(error, "invalid self-play work", "batch_size {batch_size}");
+        }
+        set(&mut plan, 4096, Topology::Direct {});
+        plan.validate().unwrap();
+        set(&mut plan, 33, Topology::EagerMux { max_batch: 32 });
+        let error = plan.validate().unwrap_err().to_string();
+        assert_eq!(error, "request exceeds batch bound");
     }
     #[test]
     fn unknown_configuration_is_rejected() {
