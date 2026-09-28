@@ -73,7 +73,7 @@ TensorRT backend objects accept the opt-in controls below, also available on Rus
 | `pad_to_max` | Execute every nonempty batch at `max_batch`, initializing unused input rows to zero. | `batch_shape` |
 | `cuda_graph` | Request the SDK's built-in whole-graph capture policy for the execution context. | `cuda_graph` |
 | `execution_sizes` | Route requests to the smallest fitting fixed context, for example `[32,64,128]`. Requires padding; sizes must be positive, strictly increasing and end at `max_batch`. | `batch_shape`, and `contexts` if the count changes |
-| `execution_lanes` | Create 1–8 independently locked context groups. Eager mux uses the same number of workers to supply them. Each lane has private streams/buffers. | `topology`, `contexts` |
+| `execution_lanes` | Create 1–8 independently locked context groups. Eager mux uses the same number of workers to supply them. Each lane has private streams/buffers, and warmup covers every lane. | `topology`, `contexts` |
 | `serialize_device` | Hold a shared gate across each lane's GPU submission/completion, while CPU encoding and parsing remain outside it. With multiple lanes this tests preparation overlap without concurrent device calls. | `topology` |
 
 Padding requires pinned host I/O; incompatible plans fail validation before GPU
@@ -139,6 +139,10 @@ is measured, not prescribed.
 Warmup evaluates every requested shape, including reachable merged shapes for
 the configured caller count and mux bound. It requires both the pass count and
 minimum duration, with a hard maximum. Warmup is outside the measurement.
+With more than one TensorRT execution lane, each pass also evaluates every
+shape directly on every lane. Ordinary calls rotate lanes, so serial warmup
+through the topology alone can leave lane/shape pairs cold that concurrent
+callers reach during measurement.
 Self-play warms sizes 1 through its search batch bound. Legacy plans omit
 engine/search and retain MCTS defaults. Set self-play config `engine` to `mcgs`
 and provide all `search` parameters for MCGS: c_puct, fpu_reduction, force_k,

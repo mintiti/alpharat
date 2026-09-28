@@ -4,7 +4,7 @@ use alpharat_sampling::inference_trace as trace;
 use alpharat_sampling::{FlatEncoder, MuxBackend, MuxConfig, MuxStatsSnapshot, ObservationEncoder};
 use pyrat::{Coordinates, Direction, GameBuilder, GameState};
 use std::cell::RefCell;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::Path;
 use std::sync::{Arc, Barrier};
@@ -138,8 +138,13 @@ impl Backend for Dyn {
         self.0.evaluate_batch(g)
     }
 }
+/// Evaluates one batch on each of a backend's execution lanes.
+type EveryLane =
+    Box<dyn Fn(&[&GameState]) -> std::result::Result<Vec<Vec<EvalResult>>, BackendError>>;
 struct Built {
     backend: Arc<dyn Backend>,
+    /// Present when ordinary calls rotate across more than one lane.
+    every_lane: Option<EveryLane>,
     mux: Option<Arc<alpharat_sampling::MuxStats>>,
     #[cfg(feature = "tensorrt")]
     trt: Option<Arc<alpharat_sampling::TrtStats>>,
@@ -157,6 +162,10 @@ fn build(request: &TrialRequest, width: u8, height: u8) -> Result<Built> {
     let (mut physical_contexts, mut mux_workers) = (0, 1);
     #[cfg(not(feature = "tensorrt"))]
     let (physical_contexts, mux_workers) = (0, 1);
+    #[cfg(feature = "tensorrt")]
+    let mut every_lane: Option<EveryLane> = None;
+    #[cfg(not(feature = "tensorrt"))]
+    let every_lane = None;
     let inner: Arc<dyn Backend> = match &request.variant.backend {
         BackendSpec::SmartUniform {} => Arc::new(SmartUniformBackend),
         BackendSpec::TensorRt {
@@ -180,7 +189,7 @@ fn build(request: &TrialRequest, width: u8, height: u8) -> Result<Built> {
                     .create_new(true)
                     .open(&probe)?;
                 fs::remove_file(probe)?;
-                let backend = alpharat_sampling::TensorrtBackend::new(
+                let backend = Arc::new(alpharat_sampling::TensorrtBackend::new(
                     &request.model.as_ref().ok_or("model required")?.path,
                     FlatEncoder::new(width, height),
                     alpharat_sampling::TensorrtConfig {
@@ -199,12 +208,18 @@ fn build(request: &TrialRequest, width: u8, height: u8) -> Result<Built> {
                         },
                         profile_stages: request.plan.measurement.mode == Mode::Stages,
                     },
-                )?;
+                )?);
                 physical_contexts = backend.physical_contexts();
                 mux_workers = *execution_lanes;
                 engine = Some(backend.engine_sha256().to_owned());
                 trt = Some(backend.stats().clone());
-                Arc::new(backend)
+                if *execution_lanes > 1 {
+                    let lanes = backend.clone();
+                    every_lane = Some(Box::new(move |g: &[&GameState]| {
+                        lanes.evaluate_batch_on_every_lane(g)
+                    }));
+                }
+                backend
             }
             #[cfg(not(feature = "tensorrt"))]
             {
@@ -241,6 +256,7 @@ fn build(request: &TrialRequest, width: u8, height: u8) -> Result<Built> {
     };
     Ok(Built {
         backend,
+        every_lane,
         mux,
         engine,
         physical_contexts,
@@ -465,6 +481,40 @@ fn mux_difference(end: MuxStatsSnapshot, start: MuxStatsSnapshot) -> MuxObservat
             .collect(),
     }
 }
+/// Repeat warmup passes until both the pass count and minimum duration are met;
+/// returns the passes and warmed shapes. A pass evaluates every shape through
+/// the configured topology and, with several lanes, on each lane. Serial calls
+/// rotate lanes, so alone they can miss lane/shape pairs that concurrent
+/// callers reach during measurement.
+fn warm(
+    backend: &dyn Backend,
+    every_lane: Option<&EveryLane>,
+    games: &[GameState],
+    case: &Case,
+    policy: &Warmup,
+) -> Result<(usize, BTreeSet<usize>)> {
+    let began = Instant::now();
+    let shapes = case.warm_shapes();
+    let mut passes = 0;
+    loop {
+        for &n in &shapes {
+            let inputs = (0..n).map(|i| &games[i % games.len()]).collect::<Vec<_>>();
+            validate_results(&backend.evaluate_batch(&inputs)?, n)?;
+            if let Some(every_lane) = every_lane {
+                for results in every_lane(&inputs)? {
+                    validate_results(&results, n)?;
+                }
+            }
+            if millis(began.elapsed()) > policy.max_ms {
+                return Err("warmup limit exceeded".into());
+            }
+        }
+        passes += 1;
+        if passes >= policy.passes && millis(began.elapsed()) >= policy.min_ms {
+            return Ok((passes, shapes));
+        }
+    }
+}
 pub fn execute(request: &TrialRequest, output: &Path) -> Result<TrialResult> {
     request.plan.validate()?;
     verify(&request.executable)?;
@@ -487,7 +537,7 @@ pub fn execute(request: &TrialRequest, output: &Path) -> Result<TrialResult> {
         .collect::<Vec<_>>();
     // All output paths are ready before loading the backend.
     fs::create_dir(output.join("bundles"))?;
-    let built = build(request, games[0].width, games[0].height)?;
+    let mut built = build(request, games[0].width, games[0].height)?;
     let ident = identity(
         &request.corpus.sha256,
         &hash(&encoded_bytes),
@@ -507,23 +557,16 @@ pub fn execute(request: &TrialRequest, output: &Path) -> Result<TrialResult> {
     let setup_ms = millis(began.elapsed());
     stage(output, "warmup")?;
     let warm_start = Instant::now();
-    let shapes = request.case.warm_shapes();
-    let mut passes = 0;
-    loop {
-        for &n in &shapes {
-            let inputs = (0..n).map(|i| &games[i % games.len()]).collect::<Vec<_>>();
-            validate_results(&built.backend.evaluate_batch(&inputs)?, n)?;
-            if millis(warm_start.elapsed()) > request.plan.measurement.warmup.max_ms {
-                return Err("warmup limit exceeded".into());
-            }
-        }
-        passes += 1;
-        if passes >= request.plan.measurement.warmup.passes
-            && millis(warm_start.elapsed()) >= request.plan.measurement.warmup.min_ms
-        {
-            break;
-        }
-    }
+    // The lane hook holds another backend reference; release it before measurement.
+    let every_lane = built.every_lane.take();
+    let (passes, shapes) = warm(
+        built.backend.as_ref(),
+        every_lane.as_ref(),
+        &games,
+        &request.case,
+        &request.plan.measurement.warmup,
+    )?;
+    drop(every_lane);
     let warmup_ms = millis(warm_start.elapsed());
     let gpu_before = if built.engine.is_some() {
         gpu_query("uuid,utilization.gpu,memory.used,temperature.gpu,power.draw,clocks.sm")
@@ -762,6 +805,8 @@ pub fn execute(request: &TrialRequest, output: &Path) -> Result<TrialResult> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Mutex;
     fn corpus() -> Corpus {
         Corpus {
             schema_version: 1,
@@ -846,6 +891,167 @@ mod tests {
         fn evaluate(&self, _: &GameState) -> std::result::Result<EvalResult, BackendError> {
             Err(BackendError::msg("deliberate failure"))
         }
+    }
+    /// Ordinary calls rotate lanes, as TensorRT's do; the hook names each lane.
+    /// A lane's context depends only on batch size: fixed sizes record the
+    /// shape a request pads to, otherwise the exact request shape.
+    struct Rotating {
+        lanes: usize,
+        sizes: Vec<usize>,
+        next: AtomicUsize,
+        hook_calls: AtomicUsize,
+        seen: Mutex<BTreeSet<(usize, usize)>>,
+    }
+    impl Rotating {
+        fn new(lanes: usize, sizes: Vec<usize>) -> Arc<Self> {
+            Arc::new(Self {
+                lanes,
+                sizes,
+                next: AtomicUsize::new(0),
+                hook_calls: AtomicUsize::new(0),
+                seen: Mutex::new(BTreeSet::new()),
+            })
+        }
+        fn shape(&self, n: usize) -> usize {
+            self.sizes.iter().copied().find(|s| n <= *s).unwrap_or(n)
+        }
+        fn run(
+            &self,
+            lane: usize,
+            g: &[&GameState],
+        ) -> std::result::Result<Vec<EvalResult>, BackendError> {
+            let shape = self.shape(g.len());
+            self.seen.lock().unwrap().insert((lane, shape));
+            SmartUniformBackend.evaluate_batch(g)
+        }
+        fn every_lane(self: &Arc<Self>) -> EveryLane {
+            let this = self.clone();
+            Box::new(move |g: &[&GameState]| {
+                this.hook_calls.fetch_add(1, Ordering::Relaxed);
+                (0..this.lanes).map(|lane| this.run(lane, g)).collect()
+            })
+        }
+        fn contexts(&self, shapes: &BTreeSet<usize>) -> BTreeSet<(usize, usize)> {
+            (0..self.lanes)
+                .flat_map(|lane| shapes.iter().map(move |&n| (lane, self.shape(n))))
+                .collect()
+        }
+    }
+    impl Backend for Rotating {
+        fn evaluate(&self, g: &GameState) -> std::result::Result<EvalResult, BackendError> {
+            Ok(self.evaluate_batch(&[g])?[0])
+        }
+        fn evaluate_batch(
+            &self,
+            g: &[&GameState],
+        ) -> std::result::Result<Vec<EvalResult>, BackendError> {
+            self.run(self.next.fetch_add(1, Ordering::Relaxed) % self.lanes, g)
+        }
+    }
+    #[test]
+    fn warmup_reaches_every_lane_for_fixed_sizes_and_exact_shapes() {
+        let games = corpus_games(&corpus()).unwrap();
+        let policy = Warmup {
+            passes: 3,
+            min_ms: 0,
+            max_ms: 60_000,
+        };
+        let buckets = Case::Capacity {
+            key: "buckets".into(),
+            topology: Topology::Direct {},
+            requests: Requests::Sequence {
+                batches: vec![32, 64],
+                callers: 2,
+                corpus_offset: 0,
+            },
+        };
+        let exact = Case::Selfplay {
+            key: "exact".into(),
+            topology: Topology::EagerMux { max_batch: 8 },
+            config: Selfplay {
+                engine: SearchEngine::Mcts,
+                search: None,
+                games: 2,
+                workers: 2,
+                simulations: 8,
+                batch_size: 4,
+                seed: 1,
+                games_per_bundle: 1,
+            },
+        };
+        // The reported example: serial calls alone leave lane 0/64 and lane 1/32 cold.
+        let serial = Rotating::new(2, vec![32, 64]);
+        warm(serial.as_ref(), None, &games, &buckets, &policy).unwrap();
+        let cold = BTreeSet::from([(0, 32), (1, 64)]);
+        assert_eq!(*serial.seen.lock().unwrap(), cold);
+
+        for (case, lanes, sizes) in [
+            (&buckets, 2, vec![32, 64]),
+            (&exact, 2, vec![]),
+            (&exact, 3, vec![]),
+        ] {
+            let backend = Rotating::new(lanes, sizes);
+            let hook = backend.every_lane();
+            let (passes, shapes) =
+                warm(backend.as_ref(), Some(&hook), &games, case, &policy).unwrap();
+            assert_eq!((passes, &shapes), (3, &case.warm_shapes()));
+            assert_eq!(*backend.seen.lock().unwrap(), backend.contexts(&shapes));
+            // Every pass still sends each shape through the configured topology.
+            assert_eq!(backend.next.load(Ordering::Relaxed), 3 * shapes.len());
+            assert_eq!(backend.hook_calls.load(Ordering::Relaxed), 3 * shapes.len());
+        }
+    }
+    #[test]
+    fn lane_warmup_failures_stop_before_measurement() {
+        fn uniform(g: &[&GameState]) -> Vec<EvalResult> {
+            SmartUniformBackend.evaluate_batch(g).unwrap()
+        }
+        let games = corpus_games(&corpus()).unwrap();
+        let case = Case::Capacity {
+            key: "pairs".into(),
+            topology: Topology::Direct {},
+            requests: Requests::Constant {
+                batch_size: 2,
+                callers: 1,
+            },
+        };
+        let run = |hook: EveryLane, max_ms| {
+            let policy = Warmup {
+                passes: 1,
+                min_ms: 0,
+                max_ms,
+            };
+            let backend: &dyn Backend = &SmartUniformBackend;
+            let error = warm(backend, Some(&hook), &games, &case, &policy).unwrap_err();
+            error.to_string()
+        };
+        let failed = run(
+            Box::new(|_: &[&GameState]| Err(BackendError::msg("lane 1 failed"))),
+            60_000,
+        );
+        assert_eq!(failed, "lane 1 failed");
+        let short = run(
+            Box::new(|g: &[&GameState]| Ok(vec![uniform(g), uniform(&g[..1])])),
+            60_000,
+        );
+        assert_eq!(short, "backend returned wrong output count");
+        let nonfinite = run(
+            Box::new(|g: &[&GameState]| {
+                let mut bad = uniform(g);
+                bad[1].value_p2 = f32::NAN;
+                Ok(vec![uniform(g), bad])
+            }),
+            60_000,
+        );
+        assert_eq!(nonfinite, "backend returned nonfinite outputs");
+        let slow = run(
+            Box::new(|g: &[&GameState]| {
+                std::thread::sleep(Duration::from_millis(20));
+                Ok(vec![uniform(g)])
+            }),
+            5,
+        );
+        assert_eq!(slow, "warmup limit exceeded");
     }
     #[test]
     fn concurrent_failure_releases_completion_barrier() {
